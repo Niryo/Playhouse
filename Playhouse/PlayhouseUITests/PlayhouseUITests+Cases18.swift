@@ -65,11 +65,11 @@ extension PlayhouseUITests {
             scrollTranscript(by: fine, until: { isVisible(target) && topInViewport(target) < 160 && topInViewport(target) >= 0 }, limit: 20, settle: 0.2)
         }
         XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 2 of 120 messages" }, timeout: 20), "Reopening should render only the latest turn.")
-        // A short scroll reveals the first older batch; long upward scrolls then each land on the
-        // oldest rendered message and reveal the batch above it.
+        // A short scroll reveals the first older messages; long upward scrolls then each land on
+        // the oldest rendered message and reveal the messages above it.
         scrollView.scroll(byDeltaX: 0, deltaY: 200)
-        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 42 of 120 messages" }, timeout: 10), "An upward scroll should reveal the first older batch.")
-        XCTAssertTrue(revealWholeTranscript(step: 40_000), "Scrolling up should reveal every earlier batch.")
+        XCTAssertTrue(waitUntil({ scrollView.value as? String != "Showing latest 2 of 120 messages" }, timeout: 10), "An upward scroll should reveal the first older messages.")
+        XCTAssertTrue(revealWholeTranscript(step: 40_000, timeout: 90), "Scrolling up should reveal every earlier message.")
         XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
         scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
         XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstAssistant) }, timeout: 5), "The top of the revealed history should show its first messages.")
@@ -227,7 +227,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Real unsent draft restored after reopening past the history page")
         element("back-to-board-button").click()
     }
-    // case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
+    // case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store ahead of the reader, while loaded messages still remain above the rendered ones, until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again. A Claude conversation that never chose a model resolves it from its stored turns, in CLI/XPC reads and in the reopened composer’s picker: the newest assistant message that names a model, not an older turn’s model or the provider-wide remembered selection.
     func test_conversation_history_pages_claude_transcript_from_store() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let executable = dataDirectory.appendingPathComponent("claude-fixture-long-history")
@@ -369,17 +369,28 @@ extension PlayhouseUITests {
         func scrollTowardFirstTurn() {
             scrollView.scroll(byDeltaX: 0, deltaY: 40_000)
         }
-        scrollUp(until: { scrollView.value as? String == "Showing latest \(latestWindow + 40) of \(total) messages" })
-        XCTAssertEqual(scrollView.value as? String, "Showing latest \(latestWindow + 40) of \(total) messages", "Scrolling up reveals an older batch already loaded.")
+        func renderedCount() -> Int {
+            (scrollView.value as? String ?? "").split(separator: " ").compactMap { Int($0) }.first ?? 0
+        }
+        func olderPageWasRead(after readCount: Int) -> Bool {
+            ((try? historyReads()) ?? []).dropFirst(readCount).contains {
+                $0["beforeMessageProvided"] as? String == "true" && $0["returnedMessageCount"] as? String == "\(total - 80)"
+                    && $0["earlierMessageCount"] as? String == "0" && $0["hydratedImageMessageCount"] as? String == "1"
+            }
+        }
         let readsBeforeOlderPage = try historyReads().count
-        scrollUp(until: { scrollView.value as? String == "Showing latest \(latestWindow + 80) of \(total) messages" })
-        XCTAssertEqual(scrollView.value as? String, "Showing latest \(latestWindow + 80) of \(total) messages", "The next batch loads the older page from the store.")
-        XCTAssertTrue(try historyReads().dropFirst(readsBeforeOlderPage).contains {
-            $0["beforeMessageProvided"] as? String == "true" && $0["returnedMessageCount"] as? String == "\(total - 80)"
-                && $0["earlierMessageCount"] as? String == "0" && $0["hydratedImageMessageCount"] as? String == "1"
-        }, "Scrolling past the loaded messages reads the older page, with its image, from the store.")
+        scrollView.scroll(byDeltaX: 0, deltaY: 200)
+        XCTAssertTrue(waitUntil({ renderedCount() > latestWindow }, timeout: 10), "Scrolling up reveals older messages already loaded.")
+        XCTAssertFalse(olderPageWasRead(after: readsBeforeOlderPage), "The older page is not read while most of the loaded page is still unrevealed above the reader.")
+        // The older page is read while loaded messages remain above the rendered window, so
+        // the reader does not arrive at the oldest loaded message and wait there for it.
+        scrollUp(until: { olderPageWasRead(after: readsBeforeOlderPage) })
+        XCTAssertTrue(olderPageWasRead(after: readsBeforeOlderPage), "Scrolling toward the oldest loaded message reads the older page, with its image, from the store.")
+        XCTAssertLessThan(renderedCount(), 80, "The older page is read before the reader runs out of loaded messages; rendered=\(renderedCount()).")
         attachScreenshot(named: "Older Claude page read from the store while scrolling up")
-        scrollUp(until: { scrollView.value as? String == "Showing latest \(total) of \(total) messages" })
+        scrollUp(until: { renderedCount() > 80 })
+        XCTAssertGreaterThan(renderedCount(), 80, "Scrolling on reveals the messages of the older page.")
+        revealWholeTranscript(step: 40_000, timeout: 90)
         XCTAssertEqual(scrollView.value as? String, "Showing latest \(total) of \(total) messages")
         scrollTowardFirstTurn()
         scrollUp(until: { isVisible(oldest) })
@@ -425,6 +436,39 @@ extension PlayhouseUITests {
         XCTAssertEqual(grownOrdinary.count, 97)
         XCTAssertEqual(Array(grownOrdinary[..<95]) as NSArray, messages as NSArray, "A later turn does not change earlier messages.")
         XCTAssertEqual(try readPages(matching: grown).map { $0["earlierMessageCount"] as? Int ?? -1 }, [0, grownTotal - 80, grownTotal - 40])
+
+        // A conversation that never chose a model resolves it from its stored turns: the newest
+        // assistant message that names one, read without loading the whole conversation.
+        returnToBoard()
+        let modelTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude history model", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let modelTaskID = try XCTUnwrap(modelTask["id"] as? String)
+        for _ in 0..<3 { _ = try runCLI(["conversation", "send", modelTaskID, "--message", "Say hello."]) }
+        let modelKey = modelTaskID.uppercased()
+        let modelTurnIDs = try conversationRows("SELECT id FROM conversation_turns WHERE task_id = '\(modelKey)' ORDER BY seq").compactMap { $0[0] }
+        XCTAssertGreaterThanOrEqual(modelTurnIDs.count, 3)
+        // The oldest turn ran on one model, the later ones on another, and the newest turn
+        // predates recording a model at all.
+        try conversationExecute("""
+            UPDATE conversation_messages SET payload = json_set(payload, '$.modelID', 'claude-history-newer')
+                WHERE task_id = '\(modelKey)' AND json_extract(payload, '$.role') = 'assistant';
+            UPDATE conversation_messages SET payload = json_set(payload, '$.modelID', 'claude-history-older')
+                WHERE task_id = '\(modelKey)' AND turn_id = '\(try XCTUnwrap(modelTurnIDs.first))' AND json_extract(payload, '$.role') = 'assistant';
+            UPDATE conversation_messages SET payload = json_remove(payload, '$.modelID')
+                WHERE task_id = '\(modelKey)' AND turn_id = '\(try XCTUnwrap(modelTurnIDs.last))';
+            """)
+        // The provider-wide remembered selection moves elsewhere; the conversation keeps its own.
+        _ = try runCLI(["conversation", "model", taskID, "set", "claude-preference-choice"])
+        for _ in 0..<2 {
+            XCTAssertEqual((try runCLI(["conversation", "model", modelTaskID])["result"] as? [String: Any])?["modelID"] as? String, "claude-history-newer",
+                           "The model comes from the newest stored assistant message that names one, not the oldest turn or the remembered selection.")
+        }
+        openTask(named: "Claude history model")
+        let historyModelPicker = element("model-picker-menu")
+        XCTAssertTrue(waitUntil({ historyModelPicker.exists && historyModelPicker.label.contains("claude-history-newer") }, timeout: 10),
+                      "Opening the conversation shows the model its stored turns last ran on.")
+        attachElementScreenshot(historyModelPicker, named: "Model resolved from the conversation's stored turns")
     }
     // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows, each with an arrow that opens it, outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     func test_conversation_shows_subagent_delegation() throws {

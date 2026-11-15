@@ -159,7 +159,7 @@ struct TaskConversationView: View {
     // conversation starts the window at the latest user turn.
     @State var oldestRenderedMessageID: String?
     /// An older page of history is being read to reveal above the window.
-    @State var isRevealingOlderConversationMessages = false
+    @State var isLoadingEarlierConversationMessages = false
     /// Messages older than `messages` that the daemon still holds. History is
     /// read a page at a time, and the next page loads once the reader scrolls
     /// past the oldest message already here.
@@ -409,7 +409,13 @@ struct TaskConversationView: View {
         return messages.filter { !completedProgressIDs.contains($0.id) }
     }
 
-    static let olderConversationMessageBatchSize = 40
+    /// Messages a conversation that established no window keeps rendered while it follows.
+    static let followedConversationMessageCount = 40
+    /// Older messages revealed at a time as the reader nears the oldest rendered one. Each is
+    /// rendered to be measured, so a few at a time keep scrolling up from stalling on a batch.
+    static let olderConversationMessageBatchSize = 2
+    /// Loaded messages left above the rendered window when the next older page is read.
+    static let olderConversationMessagePrefetchCount = 20
     /// Messages read per history request: the newest page on open, then one
     /// more page each time the rendered window reaches the oldest loaded one.
     static let historyPageSize = 80
@@ -436,7 +442,7 @@ struct TaskConversationView: View {
         let allMessages = conversationMessages
         guard let oldestRenderedMessageID,
               let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
-            return Array(allMessages.suffix(Self.olderConversationMessageBatchSize))
+            return Array(allMessages.suffix(Self.followedConversationMessageCount))
         }
         return Array(allMessages[startIndex...])
     }
@@ -448,7 +454,7 @@ struct TaskConversationView: View {
         let allMessages = conversationMessages
         guard let oldestRenderedMessageID,
               let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
-            return allMessages.count > Self.olderConversationMessageBatchSize
+            return allMessages.count > Self.followedConversationMessageCount
         }
         return startIndex > allMessages.startIndex
     }

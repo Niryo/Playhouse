@@ -196,7 +196,7 @@ class BridgeTestCases12:
         assistant = next(item for item in reloaded["messages"] if item.get("role") == "assistant")
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
-    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward loads earlier messages automatically in 40-message batches, starting from a reader already at the top of the rendered messages; each batch is revealed as the reader nears the oldest rendered message, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every batch, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     def test_conversation_loads_newest_messages_before_older_history(self):
         task_id = self.create_task(title="Long conversation history")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -327,7 +327,7 @@ class BridgeTestCases12:
         reread = self.assert_success(self.call_cli("task", "get", task_id)[0])
         self.assertTrue(reread["hasUnsentDraft"])
         self.assertEqual(reread["savedPrompt"], "Keep this draft.")
-    # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
+    # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store ahead of the reader, while loaded messages still remain above the rendered ones, until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again. A Claude conversation that never chose a model resolves it from its stored turns, in CLI/XPC reads and in the reopened composer’s picker: the newest assistant message that names a model, not an older turn’s model or the provider-wide remembered selection.
     def test_conversation_history_pages_claude_transcript_from_store(self):
         claude = self.data_directory / "claude-fixture-long-history"
         copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
@@ -436,6 +436,40 @@ class BridgeTestCases12:
         pages = read_pages(grown)
         total = len(grown["messages"])
         self.assertEqual([page["earlierMessageCount"] for page in pages], [0, total - 80, total - 40])
+
+        # A conversation that never chose a model resolves it from its stored turns: the newest
+        # assistant message that names one, read without loading the whole conversation.
+        model_task_id = self.create_task("Claude history model", roots=[self.primary])["id"]
+        self.assert_success(self.call_cli("conversation", "provider", model_task_id, "set", "claude")[0])
+        for _ in range(3):
+            self.assert_success(self.call_cli("conversation", "send", model_task_id, "--message", "Say hello.", extra_environment=fixtures)[0])
+        model_key = model_task_id.upper()
+        with sqlite3.connect(database, timeout=30) as connection:
+            turn_ids = [row[0] for row in connection.execute(
+                "SELECT id FROM conversation_turns WHERE task_id = ? ORDER BY seq", (model_key,)
+            )]
+            self.assertGreaterEqual(len(turn_ids), 3)
+            # The oldest turn ran on one model, the later ones on another, and the newest turn
+            # predates recording a model at all.
+            connection.execute(
+                "UPDATE conversation_messages SET payload = json_set(payload, '$.modelID', 'claude-history-newer') "
+                "WHERE task_id = ? AND json_extract(payload, '$.role') = 'assistant'", (model_key,)
+            )
+            connection.execute(
+                "UPDATE conversation_messages SET payload = json_set(payload, '$.modelID', 'claude-history-older') "
+                "WHERE task_id = ? AND turn_id = ? AND json_extract(payload, '$.role') = 'assistant'", (model_key, turn_ids[0])
+            )
+            connection.execute(
+                "UPDATE conversation_messages SET payload = json_remove(payload, '$.modelID') WHERE task_id = ? AND turn_id = ?",
+                (model_key, turn_ids[-1])
+            )
+        # The provider-wide remembered selection moves elsewhere; the conversation keeps its own.
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "claude-preference-choice")[0])
+        for _ in range(2):
+            self.assertEqual(
+                self.assert_success(self.call_cli("conversation", "model", model_task_id)[0])["modelID"], "claude-history-newer",
+                "The model comes from the newest stored assistant message that names one, not the oldest turn or the remembered selection.",
+            )
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows, each with an arrow that opens it, outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]

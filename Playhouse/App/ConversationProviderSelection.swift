@@ -90,7 +90,9 @@ extension ConversationManager {
     }
 
     func latestTranscriptModelID(taskID: UUID, provider: ConversationProvider) -> String? {
-        guard let transcript = try? transcripts.read(taskID, turns: .all, includeImages: false) else { return nil }
+        // Opening a conversation asks this on the main thread, so it reads the segments and
+        // then only as many messages as it takes to find a model, never the whole transcript.
+        guard let transcript = try? transcripts.readState(taskID) else { return nil }
         if provider == .codex {
             for segment in transcript.segments.reversed() where segment.provider == .codex {
                 for turnID in segment.codexTurnIDs.reversed() {
@@ -99,10 +101,8 @@ extension ConversationManager {
             }
             return nil
         }
-        return transcript.turns.reversed().lazy
-            .filter { turn in transcript.segments.first(where: { $0.id == turn.segmentID })?.provider == provider }
-            .flatMap { $0.messages.reversed() }
-            .first(where: { $0.role == .assistant && $0.modelID != nil })?.modelID
+        let segmentIDs = Set(transcript.segments.filter { $0.provider == provider }.map(\.id))
+        return try? transcripts.latestAssistantModelID(taskID, segmentIDs: segmentIDs)
     }
 
     /// A remembered model the provider no longer offers keeps running behind the

@@ -129,11 +129,16 @@ extension PlayhouseUITests {
         composer.click()
         composer.typeText(prompt)
         element("send-message-button").click()
+        // A row far from the viewport stops rendering as the transcript scrolls, so one that
+        // exists can be gone by the time its frame is read; a snapshot reads it without failing.
+        func frame(_ candidate: XCUIElement) -> CGRect? {
+            candidate.exists ? (try? candidate.snapshot())?.frame : nil
+        }
         func isInView(_ candidate: XCUIElement) -> Bool {
-            candidate.exists && scrollView.frame.insetBy(dx: 0, dy: -2).contains(candidate.frame)
+            frame(candidate).map { scrollView.frame.insetBy(dx: 0, dy: -2).contains($0) } ?? false
         }
         func isOutOfView(_ candidate: XCUIElement) -> Bool {
-            !candidate.exists || !scrollView.frame.intersects(candidate.frame)
+            frame(candidate).map { !scrollView.frame.intersects($0) } ?? true
         }
 
         // At the bottom when the reply starts, the transcript follows it past its question.
@@ -526,7 +531,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward loads earlier messages automatically in 40-message batches, starting from a reader already at the top of the rendered messages; each batch is revealed as the reader nears the oldest rendered message, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every batch, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -598,14 +603,17 @@ extension PlayhouseUITests {
         let intermediate = element("user-message-item_long_history_user_21")
         let firstLoadedUser = element("user-message-item_long_history_user_40")
         // Wheel scrolling keeps the gesture deterministic: a swipe carries
-        // momentum past the newly revealed batch.
+        // momentum past the newly revealed messages.
+        func renderedCount() -> Int {
+            (scrollView.value as? String ?? "").split(separator: " ").compactMap { Int($0) }.first ?? 0
+        }
         func isVisible(_ candidate: XCUIElement) -> Bool {
             candidate.exists && scrollView.frame.intersects(candidate.frame)
         }
         func scrollTranscript(by delta: CGFloat, until condition: () -> Bool, limit: Int = 40, settle: TimeInterval = 0) {
             for _ in 0..<limit where !condition() {
                 scrollView.scroll(byDeltaX: 0, deltaY: delta)
-                // Revealing a batch and restoring its anchor is asynchronous;
+                // Revealing messages and restoring their anchor is asynchronous;
                 // scrolling again before it lands would move past the anchor.
                 if settle > 0 { _ = waitUntil(condition, timeout: settle) }
             }
@@ -614,32 +622,36 @@ extension PlayhouseUITests {
         XCTAssertFalse(intermediate.exists, "The first message in the excluded prior page should not be rendered before scrolling.")
         attachScreenshot(named: "Reopened on the latest question")
         scrollView.scroll(byDeltaX: 0, deltaY: 200)
-        XCTAssertTrue(waitUntil({
-            scrollView.value as? String == "Showing latest 42 of 120 messages"
-        }, timeout: 10), "An upward scroll should reveal an older batch when the reader is already at the top of the rendered messages.")
-        XCTAssertFalse(isVisible(oldest), "The first older batch should not yet reach the oldest message.")
-        XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "Revealing the first older batch should keep the message the reader was on in view instead of jumping.")
-        XCTAssertLessThanOrEqual(abs(latestQuestion.frame.minY - scrollView.frame.minY), 150, "The message that was at the top should stay at the top when the older batch is inserted above it.")
-        attachScreenshot(named: "Older batch revealed above the latest question")
+        XCTAssertTrue(waitUntil({ renderedCount() > 2 }, timeout: 10), "An upward scroll should reveal older messages when the reader is already at the top of the rendered messages.")
+        XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "Revealing older messages should keep the message the reader was on in view instead of jumping.")
+        // Older messages are revealed a few at a time and only while the reader is near the
+        // oldest rendered one, so a short scroll reveals a short stretch of them. The question
+        // moves down by no more than the scroll itself.
+        XCTAssertLessThanOrEqual(abs(latestQuestion.frame.minY - scrollView.frame.minY), 350, "The message that was at the top should stay where the scroll left it when older messages are inserted above it.")
+        XCTAssertLessThan(renderedCount(), 80, "A short scroll should not reveal the history far above the reader; rendered=\(renderedCount()).")
+        XCTAssertFalse(isVisible(oldest), "The first older messages should not yet reach the oldest message.")
+        attachScreenshot(named: "Older messages revealed above the latest question")
 
-        scrollTranscript(by: 400, until: { scrollView.value as? String == "Showing latest 82 of 120 messages" }, limit: 30, settle: 1)
-        XCTAssertEqual(scrollView.value as? String, "Showing latest 82 of 120 messages", "Scrolling toward the top should automatically load the next older batch.")
-        // The batch is revealed once the reader is within a viewport of the oldest rendered
-        // message, and the rows on screen stay where they are, so that message is still at most
-        // a viewport and one scroll step above the top. Had the viewport not held its place, the
-        // 40 messages inserted above would have carried it many viewports further down.
-        XCTAssertTrue(firstLoadedUser.waitToExist(timeout: 5), "The message that was the oldest rendered one should stay rendered just above the viewport.")
-        let distanceAboveTop = scrollView.frame.minY - firstLoadedUser.frame.minY
-        XCTAssertGreaterThanOrEqual(distanceAboveTop, -150, "Automatic pagination should not push the reader's position down; distance=\(distanceAboveTop).")
-        XCTAssertLessThanOrEqual(distanceAboveTop, scrollView.frame.height + 450, "Automatic pagination should keep the reader where they were; distance=\(distanceAboveTop).")
-        XCTAssertFalse(isVisible(oldest), "The second batch should still leave the oldest page out of view.")
-        scrollTranscript(by: 400, until: { scrollView.value as? String == "Showing latest 120 of 120 messages" }, limit: 30, settle: 1)
+        scrollTranscript(by: 400, until: { isVisible(firstLoadedUser) }, limit: 80, settle: 0.3)
+        XCTAssertTrue(waitUntil({ isVisible(firstLoadedUser) }, timeout: 5), "Scrolling toward the top should keep revealing older messages to scroll into.")
+        // Messages keep being revealed above the reader while one they can see stays where it
+        // is. Had the viewport not held its place, each insertion would have carried the reader
+        // into older messages, revealing more, until the whole history had rendered.
+        XCTAssertTrue(waitUntil({ renderedCount() > 42 }, timeout: 5), "The messages above the one the reader reached should be rendered ahead of them; rendered=\(renderedCount()).")
+        let restingTop = firstLoadedUser.frame.minY
+        let restingCount = renderedCount()
+        XCTAssertFalse(waitUntil({ abs(firstLoadedUser.frame.minY - restingTop) > 20 }, timeout: 2), "Revealing older messages should not move the message the reader is on.")
+        XCTAssertGreaterThanOrEqual(renderedCount(), restingCount, "Revealed messages stay rendered.")
+        XCTAssertLessThan(renderedCount(), 120, "Automatic pagination should stop while the reader rests away from the top; rendered=\(renderedCount()).")
+        XCTAssertFalse(isVisible(oldest), "The oldest page should still be out of view.")
+        attachScreenshot(named: "Older messages keep revealing above the reader")
+        scrollTranscript(by: 1500, until: { scrollView.value as? String == "Showing latest 120 of 120 messages" }, limit: 80, settle: 0.5)
         XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
         scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top should bring the oldest message into view.")
         let firstAssistant = element("assistant-message-item_long_history_assistant_1")
         XCTAssertTrue(waitUntil({ isVisible(firstAssistant) }, timeout: 5))
-        XCTAssertLessThan(oldest.frame.minY, firstAssistant.frame.minY, "Older messages should retain chronological order after batches are inserted.")
+        XCTAssertLessThan(oldest.frame.minY, firstAssistant.frame.minY, "Older messages should retain chronological order after they are inserted.")
         let lastOlderAssistant = element("assistant-message-item_long_history_assistant_59")
         // Step by less than the overlap between adjacent rows so a large scroll cannot
         // jump past the position where the last older answer and latest turn are both visible.
@@ -668,13 +680,11 @@ extension PlayhouseUITests {
         attachScreenshot(named: "In-place reload reopens on the latest question")
         XCTAssertFalse(oldest.exists, "An in-place reload should not keep older messages rendered.")
         scrollView.scroll(byDeltaX: 0, deltaY: 200)
-        XCTAssertTrue(waitUntil({
-            scrollView.value as? String == "Showing latest 42 of 120 messages"
-        }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
+        XCTAssertTrue(waitUntil({ renderedCount() > 2 }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
         // Long upward scrolls, as dragging the scroller's knob to the top does, each land on the
-        // oldest rendered message and reveal the batch above it, including the page still in the
-        // store, until the first messages are reached.
-        XCTAssertTrue(revealWholeTranscript(step: 40_000), "Scrolling on to the top of the history should reveal every batch above the window.")
+        // oldest rendered message and reveal the messages above it, including the page still in
+        // the store, until the first messages are reached.
+        XCTAssertTrue(revealWholeTranscript(step: 40_000, timeout: 90), "Scrolling on to the top of the history should reveal every message above the window.")
         XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
         scrollTranscript(by: 40_000, until: { isVisible(oldest) }, limit: 5, settle: 1)
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling on to the top of the history should land on its first messages.")

@@ -19,31 +19,33 @@ extension TaskConversationView {
         )
     }
 
-    /// Reveals the next older batch above the rendered window. The scroll controller keeps the
-    /// row the reader is on where it is while the batch lays out above it, so this only decides
-    /// which messages render. It runs as the reader nears the oldest rendered message, so they
-    /// keep scrolling into messages that are already there.
+    /// Reveals the next few older messages above the rendered window. The scroll controller
+    /// keeps the row the reader is on where it is while they lay out above it, so this only
+    /// decides which messages render. It runs as the reader nears the oldest rendered message,
+    /// so they keep scrolling into messages that are already there.
     func revealOlderConversationMessages() {
-        guard hasLoadedConversation, !isLoadingHistory,
-              hasOlderConversationMessages, !isRevealingOlderConversationMessages else { return }
+        guard hasLoadedConversation, !isLoadingHistory, hasOlderConversationMessages else { return }
         let allMessages = conversationMessages
         guard let currentTopID = renderedConversationMessages.first?.id,
               let currentStartIndex = allMessages.firstIndex(where: { $0.id == currentTopID }) else { return }
-        let batchSize = Self.olderConversationMessageBatchSize
-        // The loaded messages cannot fill the batch, so read the next older page from the
-        // daemon first.
-        if currentStartIndex < batchSize, earlierStoredMessageCount > 0 {
-            isRevealingOlderConversationMessages = true
+        // The next older page is read from the daemon while loaded messages remain above the
+        // reader, so they do not reach the oldest one and wait for it.
+        if currentStartIndex < Self.olderConversationMessagePrefetchCount, earlierStoredMessageCount > 0,
+           !isLoadingEarlierConversationMessages {
+            isLoadingEarlierConversationMessages = true
+            let oldestLoadedID = allMessages.first?.id
             Task { @MainActor in
                 let loaded = await loadEarlierConversationMessages()
-                isRevealingOlderConversationMessages = false
-                if loaded { revealOlderConversationMessages() }
+                isLoadingEarlierConversationMessages = false
+                // A reader who reached the oldest loaded message meanwhile is waiting there.
+                if loaded, renderedConversationMessages.first?.id == oldestLoadedID {
+                    revealOlderConversationMessages()
+                }
             }
-            return
         }
         guard currentStartIndex > 0 else { return }
-        oldestRenderedMessageID = allMessages[max(0, currentStartIndex - batchSize)].id
-        // A batch shorter than the viewport leaves the reader still at the top.
+        oldestRenderedMessageID = allMessages[max(0, currentStartIndex - Self.olderConversationMessageBatchSize)].id
+        // Messages shorter than the viewport leave the reader still near the top.
         transcriptScroll.didRevealOlderRows()
     }
 
