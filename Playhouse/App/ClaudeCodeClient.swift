@@ -128,6 +128,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     var requestedCompactionTriggers: [String: ContextCompactionTrigger] = [:]
     var startingSessionIDs = Set<String>()
     var interruptedThreadIDs = Set<String>()
+    /// The staged stopping outcome of each session's running turn, as its owner exposes it.
+    var stoppingOutcomeProbes: [String: ProviderStoppingOutcomeProbe] = [:]
     /// The process and turn identity each conversation last ran under, so a
     /// failure recorded after the runner is torn down still names its own turn.
     var lastTurnDiagnosticsByThread: [String: [String: String]] = [:]
@@ -484,6 +486,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
                 .filter { $0.key != "isTurnActive" }
             runner.finishTurnCleanup()
+            stoppingOutcomeProbes.removeValue(forKey: sessionID)
             interruptedThreadIDs.formUnion(runner.wasInterrupted ? [sessionID] : [])
             activityDurationsByThread[sessionID] = runner.activityDurations
             lastFinishedThreadID = sessionID
@@ -592,6 +595,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
                 .filter { $0.key != "isTurnActive" }
             runner.finishTurnCleanup()
+            stoppingOutcomeProbes.removeValue(forKey: sessionID)
             interruptedThreadIDs.formUnion(runner.wasInterrupted ? [sessionID] : [])
             activityDurationsByThread[sessionID] = runner.activityDurations
             lastFinishedThreadID = sessionID
@@ -681,6 +685,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     /// Every client this process has created through `sharedPrimaryClient`.
     static var allSharedPrimaryClients: [ClaudeCodeClient] { Array(sharedPrimaryClients.values) }
+
+    func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String) {
+        stoppingOutcomeProbes[threadID] = probe
+    }
 
     func canInterruptActiveTurn(threadID: String) -> Bool {
         runners[threadID]?.canInterrupt == true

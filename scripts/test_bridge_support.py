@@ -28,7 +28,7 @@ import zlib
 from pathlib import Path
 
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "Playhouse/BridgeTests/BridgeTestContracts.json"
-MAX_OUTCOME_CONTINUATIONS = 5
+OUTCOME_RECOVERY_PROMPTS = 1
 arguments = None
 
 

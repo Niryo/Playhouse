@@ -230,6 +230,17 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     let dataDirectoryOverride: String?
     /// The data directory this client serves (debug/test isolation); nil in production.
     var runtimeScope: String? { dataDirectoryOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } }
+    /// Commands each thread's turns started and that have not been accounted for yet, by
+    /// thread and item ID (`CodexBackgroundJobs.swift`).
+    var commandJobs: [String: [String: CodexCommandJob]] = [:]
+    /// Threads Playhouse holds active with no turn running, waiting for their background jobs.
+    /// Threads with a turn running, straight from `turn/started` and `turn/completed`.
+    var runningTurnThreadIDs = Set<String>()
+    var backgroundWaitThreadIDs = Set<String>()
+    var backgroundWaitStopRequests = Set<String>()
+    /// The app-server's last `thread/status/changed` per thread. `idle` only says no turn
+    /// is running: a thread's background terminals keep running while it is idle.
+    var threadStatuses: [String: String] = [:]
     var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     var completedTurns: [String: Result<Void, Error>] = [:]
     final class PendingCompaction {
@@ -456,7 +467,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func canInterruptActiveTurn(threadID: String) -> Bool {
-        activeTurnID(for: threadID) != nil
+        activeTurnID(for: threadID) != nil || backgroundWaitThreadIDs.contains(threadID)
     }
 
     func markTurnStarting(threadID: String) {

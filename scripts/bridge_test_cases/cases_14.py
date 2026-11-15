@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases14:
-    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
+    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, waiting-response, and keep-working instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason.
     def test_claude_outcome_reminder_rejects_user_questions(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-outcome-reminder-question"
@@ -48,11 +48,11 @@ class BridgeTestCases14:
                          "Questions from private Claude reminders must not be emitted as user input.")
         turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
         nudges = [turn for turn in turns if "Playhouse internal outcome nudge:" in turn.get("userText", "")]
-        self.assertEqual(len(nudges), 1, "Rejecting the question fails the private turn, so Playhouse stops driving instead of spending every nudge.")
+        self.assertEqual(len(nudges), 1, "Rejecting the question fails the private turn, so Playhouse stops driving the task.")
         self.assertTrue(all("task outcome command" in turn["userText"] for turn in nudges))
         rejections = Path(str(executable) + ".private-reminder-question-rejection").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(rejections), 1)
-        self.assertTrue(all(all(outcome in message for outcome in ("completed", "in-progress", "waiting-response")) for message in rejections))
+        self.assertTrue(all(all(outcome in message for outcome in ("completed", "waiting-response", "keep working in this turn")) for message in rejections))
         history, _ = self.call_cli(
             "conversation", "history", task_id,
             extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
@@ -521,6 +521,101 @@ class BridgeTestCases14:
             any("previous request finished without reporting" in (t.get("userText") or "") for t in recorded),
             "An outcome reported in the woken turn must not trigger private outcome reminders.",
         )
+    # case-contract: test_claude_stopping_outcome_decides_over_background_work | A Claude turn that reports completed and then leaves a background shell running, a dev server, settles in Review as soon as Claude's result arrives, without waiting for a notification that never comes and without a recovery prompt. A completed outcome reported while a background agent is still running does not settle the turn: the task stays In Progress while the agent runs, and when the woken parent turn then does more work and ends without a new report, the earlier outcome is treated as stale, so the task does not reach Review; Playhouse sends exactly one recovery prompt and the outcome reported in it places the task in Waiting Response. When Claude Code starts the woken turn for a finished background shell and then stays silent, with no outcome reported and no queued follow-up, Playhouse's backstop ends the wait and the same single recovery prompt decides the task's column instead of leaving it In Progress. The UI shows each task in the matching column and the recovery prompt in the transcript.
+    def test_claude_stopping_outcome_decides_over_background_work(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-stopping-outcome"
+        copy_file(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {
+            "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable),
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS": "2",
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS": "3",
+        }
+        nudge_marker = "playhouse internal outcome nudge:"
+
+        def create(title):
+            created, _ = self.call_cli(
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
+            )
+            return self.assert_success(created)["id"]
+
+        def status(task_id):
+            return self.assert_success(self.call_cli("task", "get", task_id)[0])["status"]
+
+        def nudges():
+            turns = json.loads(Path(f"{executable}.history").read_text(encoding="utf-8"))["turns"]
+            return [turn for turn in turns if nudge_marker in (turn.get("userText") or "").lower()]
+
+        server_id = create("Claude dev server")
+        server_command = ("conversation", "send", server_id, "--message", "Please leave-dev-server-running.")
+        server = self.start_cli(*server_command, extra_environment=env)
+        try:
+            server_response, _ = self.finish_cli(server, server_command, timeout=30)
+        finally:
+            if server.poll() is None:
+                server.communicate(timeout=30)
+        self.assert_success(server_response)
+        self.assertTrue(Path(f"{executable}.dev-server-result-sent").exists())
+        self.assertEqual(status(server_id), "Review", "A reported outcome settles the task even with a shell left running.")
+        self.assertEqual(len(nudges()), 0, "A reported stopping outcome needs no recovery prompt.")
+
+        early_id = create("Claude early report")
+        pause = Path(f"{executable}.early-report-pause")
+        ready = Path(f"{executable}.early-report-ready")
+        release = Path(f"{executable}.early-report-release")
+        pause.write_text("Pause while the background agent runs.\n", encoding="utf-8")
+        early_command = ("conversation", "send", early_id, "--message", "Please report-early-then-continue.")
+        early = self.start_cli(*early_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and early.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should pause after its early outcome and result.")
+            # Give a premature settle time to end the send before asserting it is open.
+            time.sleep(0.5)
+            self.assertIsNone(early.poll(), "A running background agent keeps the turn open even after an outcome report.")
+            self.assertEqual(status(early_id), "In Progress", "The early outcome must not move the task while the agent runs.")
+            release.write_text("Finish the background agent.\n", encoding="utf-8")
+            early_response, _ = self.finish_cli(early, early_command, timeout=60)
+        finally:
+            release.write_text("Release after failure.\n", encoding="utf-8")
+            if early.poll() is None:
+                early.communicate(timeout=30)
+        self.assert_success(early_response)
+        pause.unlink(missing_ok=True)
+        self.assertEqual(
+            status(early_id), "Waiting Response",
+            "The stale completed report must not reach Review; the recovery prompt's outcome decides.",
+        )
+        self.assertEqual(len(nudges()), 1, "The woken turn that ended unreported earns exactly one recovery prompt.")
+        self.assertIn("This is the only recovery prompt", nudges()[0]["userText"])
+        early_history = self.assert_success(self.call_cli("conversation", "history", early_id, extra_environment=env)[0])
+        self.assertTrue(any("MORE WORK FOUND" in (m["text"] or "") for m in early_history["messages"] if m["role"] == "assistant"))
+
+        silent_id = create("Claude silent wake")
+        woken = Path(f"{executable}.consumed-wake-woken")
+        silent_command = ("conversation", "send", silent_id, "--message", "Park a shell and then consumed wake notification.")
+        silent = self.start_cli(*silent_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 20
+            while not woken.exists() and silent.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(woken.exists(), "The fixture should start the woken turn and then stay silent.")
+            self.assertEqual(status(silent_id), "In Progress", "The silent wake is still waited for within its grace.")
+            silent_response, _ = self.finish_cli(silent, silent_command, timeout=120)
+        finally:
+            if silent.poll() is None:
+                silent.communicate(timeout=30)
+        self.assert_success(silent_response)
+        self.assertEqual(
+            status(silent_id), "Waiting Response",
+            "A lost wake ends in the column the recovery prompt's outcome names, not In Progress forever.",
+        )
+        self.assertEqual(len(nudges()), 2, "The lost wake earns exactly one recovery prompt of its own.")
     # case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send.
     def test_claude_steers_turn_parked_on_background_work(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"

@@ -105,7 +105,7 @@ extension PlayhouseCLI {
       playhouse task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       playhouse task progress custom <task-id> --label <label> [--detail <text>]
       playhouse task progress clear <task-id>
-      playhouse task outcome <task-id> <completed|in-progress|waiting-response>
+      playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>]
       playhouse task rename <task-id> --title <title>
       playhouse schedule list
       playhouse schedule set <task-id> --prompt <text> --once <ISO8601> [--image <path>...] [--mode default|plan] [--model <id>]

@@ -43,8 +43,8 @@ parser.add_argument("--legacy-store-seeder", required=True, type=Path)
 parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "Playhouse/BridgeTests/BridgeTestContracts.json"
-# Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
-MAX_OUTCOME_CONTINUATIONS = 5
+# A turn that ends unsettled with nothing running earns exactly one private recovery prompt.
+OUTCOME_RECOVERY_PROMPTS = 1
 
 
 

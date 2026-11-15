@@ -249,6 +249,8 @@ extension CodexAppServerClient {
         resumedThreadParameters.removeAll()
         activeThreadID = nil
         contextlessTurnIDs.removeAll()
+        runningTurnThreadIDs.removeAll()
+        threadStatuses.removeAll()
 
         for continuation in pendingRequests.values {
             continuation.resume(throwing: error)

@@ -2,86 +2,118 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases07:
-    # case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies appear in the conversation history as Playhouse-sent messages and their replies. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
-    def test_task_outcome_in_progress_drives_continuations_until_blocked(self):
-        task_id = self.create_task("Continue in progress", roots=[self.primary])["id"]
+    # case-contract: test_task_stopping_outcomes_and_single_recovery_prompt | A turn has three stopping outcomes and none for unfinished work. A blocked report needs a reason and settles the task in Blocked with that reason; a blocked report without one, or with one longer than 500 characters, is rejected, as is a reason on any other outcome; a legacy in-progress report is answered with guidance, records nothing, withdraws an outcome staged earlier in the turn, and leaves the task In Progress. A turn that ends with no stopping outcome and nothing running gets exactly one private recovery prompt, during which the task stays In Progress; a completed report in that turn settles the task in Review, and a recovery turn that also ends unsettled leaves the task Blocked with a missing-outcome reason and no further prompts. The recovery prompt and its reply appear in the conversation history as a Playhouse-sent message and its reply. The user taking the work back ends Playhouse's private driving: stopping the recovery turn keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of a recovery prompt.
+    def test_task_stopping_outcomes_and_single_recovery_prompt(self):
+        recovery_marker = "ended without reporting a task outcome"
+
+        def recovery_turns(executable):
+            turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            return [turn for turn in turns if recovery_marker in (turn.get("userMessage") or "")]
+
+        task_id = self.create_task("Recovers once", roots=[self.primary])["id"]
         process, executable, active, release = self.start_progress_fixture_turn(
-            task_id, "codex-fixture-in-progress-continuation-hold-release"
+            task_id, "codex-fixture-outcome-recovery-hold-release"
         )
         try:
-            reported = self.assert_success(self.call_cli("task", "outcome", task_id, "in-progress")[0])
-            self.assertEqual(reported["outcome"], "in-progress")
-            self.assertEqual(reported["taskStatus"], "In Progress", "The outcome is staged until the turn completes.")
-            release.write_text("Release the in-progress turn.\n", encoding="utf-8")
-            self.wait_for_marker(active, False, "The in-progress turn should finish before its continuation.")
-            self.wait_for_marker(active, True, "Playhouse should send a continuation turn after an in-progress report.")
+            # A legacy in-progress report withdraws an outcome staged earlier in the turn: the
+            # recovery prompt below is only sent because nothing is left staged.
+            staged = self.assert_success(self.call_cli("task", "outcome", task_id, "waiting-response")[0])
+            self.assertEqual(staged["recorded"], True)
+            legacy = self.assert_success(self.call_cli("task", "outcome", task_id, "in-progress")[0])
+            self.assertEqual(legacy["recorded"], False, "in-progress is no longer an outcome, so nothing is staged for it.")
+            self.assertEqual(legacy["taskStatus"], "In Progress")
+            self.assertIn("no longer a turn outcome", legacy["message"])
+            self.assertIn("blocked --reason", legacy["message"])
+            unexplained, _ = self.call_cli("task", "outcome", task_id, "blocked", expected_status=2)
+            self.assertIn("--reason", unexplained["error"]["message"])
+            overlong, _ = self.call_cli("task", "outcome", task_id, "blocked", "--reason", "x" * 501, expected_status=2)
+            self.assertIn("1 to 500 characters", overlong["error"]["message"])
+            misplaced, _ = self.call_cli("task", "outcome", task_id, "completed", "--reason", "Not a blocker.", expected_status=2)
+            self.assertIn("Only a blocked outcome takes --reason", misplaced["error"]["message"])
+            release.write_text("Release the unsettled turn.\n", encoding="utf-8")
+            self.wait_for_marker(active, False, "The first turn should end without a stopping outcome.")
+            self.wait_for_marker(active, True, "Playhouse should send one recovery prompt for a turn that ended unsettled.")
             self.assertEqual(
                 self.assert_success(self.call_cli("task", "get", task_id)[0])["status"],
                 "In Progress",
-                "The task stays In Progress while Playhouse drives the continuation.",
+                "The task stays In Progress while the recovery turn is running.",
             )
-            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", task_id, "completed")[0])["outcome"], "completed")
-            release.write_text("Release the continuation turn.\n", encoding="utf-8")
+            completed = self.assert_success(self.call_cli("task", "outcome", task_id, "completed")[0])
+            self.assertEqual(completed["outcome"], "completed")
+            self.assertEqual(completed["recorded"], True)
+            self.assertEqual(completed["taskStatus"], "In Progress", "The outcome is staged until the turn completes.")
+            release.write_text("Release the recovery turn.\n", encoding="utf-8")
             stdout, stderr = process.communicate(timeout=30)
-            self.assertEqual(process.returncode, 0, f"Continuation fixture conversation failed: {stdout}; {stderr}")
+            self.assertEqual(process.returncode, 0, f"Recovery fixture conversation failed: {stdout}; {stderr}")
             self.assertEqual(
                 self.assert_success(self.call_cli("task", "get", task_id)[0])["status"],
                 "Review",
-                "A completed report during a continuation stops the loop at Review.",
+                "A completed report during the recovery turn settles the task in Review.",
             )
         finally:
             if process.poll() is None:
-                release.write_text("Release the continuation turn.\n", encoding="utf-8")
+                release.write_text("Release the recovery turn.\n", encoding="utf-8")
                 process.communicate(timeout=30)
-        continuations = [
-            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
-            if "You reported `in-progress`" in (turn.get("userMessage") or "")
-        ]
-        self.assertEqual(len(continuations), 1, "One in-progress report earns exactly one continuation turn.")
-        self.assertIn(f"of {MAX_OUTCOME_CONTINUATIONS}", continuations[0]["userMessage"])
+        self.assertEqual(len(recovery_turns(executable)), 1, "An unsettled turn earns exactly one recovery prompt.")
+        self.assertIn("This is the only recovery prompt", recovery_turns(executable)[0]["userMessage"])
 
-        capped_id = self.create_task("Never settles", roots=[self.primary])["id"]
-        capped, capped_executable, capped_active, capped_release = self.start_progress_fixture_turn(
-            capped_id, "codex-fixture-in-progress-cap-hold-release"
+        blocked_id = self.create_task("Blocked with a reason", roots=[self.primary])["id"]
+        blocked, blocked_executable, _, blocked_release = self.start_progress_fixture_turn(
+            blocked_id, "codex-fixture-outcome-blocked-hold-release"
         )
         try:
-            for index in range(MAX_OUTCOME_CONTINUATIONS + 1):
-                self.assertEqual(
-                    self.assert_success(self.call_cli("task", "get", capped_id)[0])["status"],
-                    "In Progress",
-                    "Every continuation keeps the task In Progress until the limit is reached.",
-                )
-                self.assertEqual(self.assert_success(self.call_cli("task", "outcome", capped_id, "in-progress")[0])["outcome"], "in-progress")
-                capped_release.write_text(f"Release turn {index + 1}.\n", encoding="utf-8")
-                if index < MAX_OUTCOME_CONTINUATIONS:
-                    self.wait_for_marker(capped_active, False, "The fixture should finish the current continuation turn.")
-                    self.wait_for_marker(capped_active, True, "Playhouse should send the next continuation turn.")
-            capped_stdout, capped_stderr = capped.communicate(timeout=60)
-            self.assertEqual(capped.returncode, 0, f"Capped continuation conversation failed: {capped_stdout}; {capped_stderr}")
-            capped_record = self.assert_success(self.call_cli("task", "get", capped_id)[0])
-            self.assertEqual(capped_record["status"], "Blocked", "Running out of continuations is Blocked, not Waiting Response.")
-            self.assertIn("continuation turns", capped_record.get("statusMessage") or "")
+            reported = self.assert_success(self.call_cli(
+                "task", "outcome", blocked_id, "blocked", "--reason", "The signing certificate expired."
+            )[0])
+            self.assertEqual(reported["outcome"], "blocked")
+            self.assertEqual(reported["taskStatus"], "In Progress", "A blocked outcome is staged until the turn completes.")
+            blocked_release.write_text("Release the blocked turn.\n", encoding="utf-8")
+            blocked_stdout, blocked_stderr = blocked.communicate(timeout=30)
+            self.assertEqual(blocked.returncode, 0, f"Blocked fixture conversation failed: {blocked_stdout}; {blocked_stderr}")
         finally:
-            if capped.poll() is None:
-                capped_release.write_text("Release the capped turn.\n", encoding="utf-8")
-                capped.communicate(timeout=60)
-        capped_turns = json.loads(Path(str(capped_executable) + ".history").read_text(encoding="utf-8"))["turns"]
-        self.assertEqual(
-            len([turn for turn in capped_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
-            MAX_OUTCOME_CONTINUATIONS,
-            "Playhouse stops driving the work after the continuation limit.",
-        )
-        # Stopping a private continuation is the user taking the work back, not a
-        # Playhouse failure, so the Stop's own paused state must survive.
-        stop_id = self.create_task("Stopped mid continuation", roots=[self.primary])["id"]
-        stopped, stop_executable, stop_active, stop_release = self.start_progress_fixture_turn(
-            stop_id, "codex-fixture-in-progress-stop-hold-release"
+            if blocked.poll() is None:
+                blocked_release.write_text("Release the blocked turn.\n", encoding="utf-8")
+                blocked.communicate(timeout=30)
+        blocked_record = self.assert_success(self.call_cli("task", "get", blocked_id)[0])
+        self.assertEqual(blocked_record["status"], "Blocked")
+        self.assertEqual(blocked_record.get("statusMessage"), "The signing certificate expired.")
+        self.assertEqual(len(recovery_turns(blocked_executable)), 0, "A reported stopping outcome needs no recovery prompt.")
+
+        unanswered_id = self.create_task("Never settles", roots=[self.primary])["id"]
+        unanswered, unanswered_executable, unanswered_active, unanswered_release = self.start_progress_fixture_turn(
+            unanswered_id, "codex-fixture-outcome-unanswered-hold-release"
         )
         try:
-            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", stop_id, "in-progress")[0])["outcome"], "in-progress")
-            stop_release.write_text("Release the in-progress turn.\n", encoding="utf-8")
-            self.wait_for_marker(stop_active, False, "The in-progress turn should finish before its continuation.")
-            self.wait_for_marker(stop_active, True, "Playhouse should send a continuation turn before the Stop.")
+            unanswered_release.write_text("Release the unsettled turn.\n", encoding="utf-8")
+            self.wait_for_marker(unanswered_active, False, "The first turn should end without a stopping outcome.")
+            self.wait_for_marker(unanswered_active, True, "Playhouse should send its one recovery prompt.")
+            self.assertEqual(
+                self.assert_success(self.call_cli("task", "get", unanswered_id)[0])["status"],
+                "In Progress",
+                "A recovery turn that is running keeps the task In Progress.",
+            )
+            unanswered_release.write_text("Release the recovery turn.\n", encoding="utf-8")
+            unanswered_stdout, unanswered_stderr = unanswered.communicate(timeout=60)
+            self.assertEqual(unanswered.returncode, 0, f"Unanswered recovery conversation failed: {unanswered_stdout}; {unanswered_stderr}")
+        finally:
+            if unanswered.poll() is None:
+                unanswered_release.write_text("Release the recovery turn.\n", encoding="utf-8")
+                unanswered.communicate(timeout=60)
+        unanswered_record = self.assert_success(self.call_cli("task", "get", unanswered_id)[0])
+        self.assertEqual(unanswered_record["status"], "Blocked", "An unanswered recovery prompt is Blocked, not Waiting Response.")
+        self.assertIn("one recovery prompt went unanswered", unanswered_record.get("statusMessage") or "")
+        self.assertEqual(len(recovery_turns(unanswered_executable)), 1, "Playhouse sends no second recovery prompt.")
+
+        # Stopping the recovery turn is the user taking the work back, not a
+        # Playhouse failure, so the Stop's own paused state must survive.
+        stop_id = self.create_task("Stopped mid recovery", roots=[self.primary])["id"]
+        stopped, stop_executable, stop_active, stop_release = self.start_progress_fixture_turn(
+            stop_id, "codex-fixture-outcome-stop-hold-release"
+        )
+        try:
+            stop_release.write_text("Release the unsettled turn.\n", encoding="utf-8")
+            self.wait_for_marker(stop_active, False, "The first turn should end without a stopping outcome.")
+            self.wait_for_marker(stop_active, True, "Playhouse should send its recovery prompt before the Stop.")
             # Stop persists the paused state before the provider answers, so the
             # held fixture turn is released once that intent has landed.
             stop_results = []
@@ -98,7 +130,7 @@ class BridgeTestCases07:
                     break
                 time.sleep(0.2)
             self.assertTrue(paused, "Stop should persist the paused state before the provider acknowledges it.")
-            stop_release.write_text("Release the stopped continuation.\n", encoding="utf-8")
+            stop_release.write_text("Release the stopped recovery turn.\n", encoding="utf-8")
             stopper.join(timeout=30)
             self.assertFalse(stopper.is_alive(), "The stop request should settle once the held turn is released.")
             self.assertEqual(len(stop_results), 1)
@@ -106,26 +138,20 @@ class BridgeTestCases07:
             stopped.communicate(timeout=60)
         finally:
             if stopped.poll() is None:
-                stop_release.write_text("Release the stopped continuation.\n", encoding="utf-8")
+                stop_release.write_text("Release the stopped recovery turn.\n", encoding="utf-8")
                 stopped.communicate(timeout=60)
         stop_record = self.assert_success(self.call_cli("task", "get", stop_id)[0])
-        self.assertEqual(stop_record["status"], "Waiting Response", "A Stop during a continuation keeps the user's paused state.")
+        self.assertEqual(stop_record["status"], "Waiting Response", "A Stop during the recovery turn keeps the user's paused state.")
         self.assertIsNone(stop_record.get("statusMessage"), "A user-requested Stop must not be reported as a Playhouse failure.")
-        stop_turns = json.loads(Path(str(stop_executable) + ".history").read_text(encoding="utf-8"))["turns"]
-        self.assertEqual(
-            len([turn for turn in stop_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
-            1,
-            "Playhouse must stop driving the work once the user stops it.",
-        )
+        self.assertEqual(len(recovery_turns(stop_executable)), 1, "Playhouse must not restart the work once the user stops it.")
 
-        # A queued follow-up is also the user taking over: the loop steps aside so
-        # their message runs next instead of waiting behind private turns.
-        queued_id = self.create_task("Queued over continuation", roots=[self.primary])["id"]
+        # A queued follow-up is also the user taking over: their message runs next
+        # instead of a recovery prompt.
+        queued_id = self.create_task("Queued over recovery", roots=[self.primary])["id"]
         queued_turn, queued_executable, _, queued_release = self.start_progress_fixture_turn(
-            queued_id, "codex-fixture-in-progress-queue-hold-release"
+            queued_id, "codex-fixture-outcome-queue-hold-release"
         )
         try:
-            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", queued_id, "in-progress")[0])["outcome"], "in-progress")
             self.assert_success(self.call_cli("conversation", "queue", queued_id, "--message", "Follow-up from the user.")[0])
             deadline = time.monotonic() + 60
             while queued_turn.poll() is None and time.monotonic() < deadline:
@@ -136,39 +162,339 @@ class BridgeTestCases07:
             if queued_turn.poll() is None:
                 queued_release.write_text("Release the next turn.\n", encoding="utf-8")
                 queued_turn.communicate(timeout=60)
-        # The follow-up turn settles on its own terms; what matters here is that
-        # it ran next instead of queueing behind Playhouse's continuations.
         queued_turns = json.loads(Path(str(queued_executable) + ".history").read_text(encoding="utf-8"))["turns"]
-        self.assertEqual(
-            len([turn for turn in queued_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
-            0,
-            "A queued follow-up must take precedence over Playhouse's private continuation.",
-        )
-        self.assertTrue(
-            any("Follow-up from the user." in (turn.get("userMessage") or "") for turn in queued_turns),
-            "The queued follow-up should be the next turn the provider receives.",
+        self.assertGreaterEqual(len(queued_turns), 2)
+        self.assertIn(
+            "Follow-up from the user.", queued_turns[1].get("userMessage") or "",
+            "A queued follow-up must be the next turn the provider receives, ahead of any recovery prompt.",
         )
 
-        capped_history = self.assert_success(self.call_cli(
-            "conversation", "history", capped_id,
-            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(capped_executable)},
+        unanswered_history = self.assert_success(self.call_cli(
+            "conversation", "history", unanswered_id,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(unanswered_executable)},
         )[0])
         self.assertTrue(
-            any(message["role"] == "user" and "You reported `in-progress`" in message.get("text", "") for message in capped_history["messages"]),
-            "Continuation prompts Playhouse sent appear in conversation history.",
+            any(message["role"] == "user" and recovery_marker in message.get("text", "") for message in unanswered_history["messages"]),
+            "The recovery prompt Playhouse sent appears in conversation history.",
         )
         self.assertTrue(
-            any("Fixture internal reminder reply." in message.get("text", "") for message in capped_history["messages"]),
-            "Replies to continuations appear in conversation history.",
+            any("Fixture internal reminder reply." in message.get("text", "") for message in unanswered_history["messages"]),
+            "The reply to the recovery prompt appears in conversation history.",
         )
         self.assertFalse(
             any(
                 hidden in message.get("text", "")
-                for message in capped_history["messages"]
+                for message in unanswered_history["messages"]
                 for hidden in ("private outcome reminder hidden", "private outcome response hidden")
             ),
-            "No placeholder replaces a continuation or its reply.",
+            "No placeholder replaces the recovery prompt or its reply.",
         )
+    def start_background_fixture_turn(self, task_id, fixture_name, **extra_environment):
+        """Sends a turn to a Codex fixture that starts a required command and ends while it runs."""
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / fixture_name
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        copy_file(fixture, executable)
+        executable.chmod(0o755)
+        process = self.start_cli(
+            "conversation", "send", task_id, "--message", "Run the required UI test.",
+            extra_environment={
+                "PLAYHOUSE_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+                "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
+                "PLAYHOUSE_E2E_CODEX_BACKGROUND_RECONCILE_SECONDS": "0.2",
+                **extra_environment,
+            },
+        )
+        return process, executable
+
+    def background_fixture_state(self, executable):
+        path = Path(str(executable) + ".background-state")
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"running": {}, "started": 0, "listCalls": 0, "terminated": []}
+
+    def wait_for_background_fixture(self, executable, predicate, message, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if predicate(self.background_fixture_state(executable)):
+                    return
+            except json.JSONDecodeError:
+                pass
+            time.sleep(0.05)
+        self.fail(f"{message} State: {self.background_fixture_state(executable)}")
+
+    def release_background_fixture(self, executable, **result):
+        Path(str(executable) + ".background-release").write_text(json.dumps(result), encoding="utf-8")
+
+    def background_fixture_turns(self, executable):
+        return json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+
+    # case-contract: test_codex_background_command_holds_task_in_progress_until_its_result | A Codex turn that ends without a stopping outcome while a required command it started is still running keeps the task In Progress, with no private prompt, for as long as the command runs, across many more reconciliations of the provider's background terminals than the old five-continuation allowance. When the command ends, Playhouse delivers its real exit status and output to Codex in exactly one private results turn, and the outcome Codex reports there settles the task: Review after a passing command; after a failing command either In Progress again while the agent's rerun is running and Review once the rerun passes, or Blocked with the agent's reason. A command that disappears without a result is reported to the agent as unknown, never as successful. A command still running when Playhouse's wait ceiling passes is reported as still running in the one results turn, is neither terminated nor waited for again, and a turn that ends unsettled after it leaves the task Blocked with the missing-outcome reason. Stopping the task while it waits terminates the command, leaves the task in Waiting Response with no failure reason, and starts no further turn. A turn that reports completed while leaving a command running, as with a dev server, settles in Review at once with no wait, no termination, and no results turn.
+    def test_codex_background_command_holds_task_in_progress_until_its_result(self):
+        results_marker = "background work results"
+
+        def status(task_id):
+            return self.assert_success(self.call_cli("task", "get", task_id)[0])
+
+        passing_id = self.create_task("Waits for the UI test", roots=[self.primary])["id"]
+        passing, passing_executable = self.start_background_fixture_turn(passing_id, "codex-fixture-unique-turns-background-pass")
+        try:
+            # Far more reconciliations than the five continuation turns that used to end in Blocked.
+            self.wait_for_background_fixture(
+                passing_executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 12,
+                "Playhouse should keep reconciling the running command through the app-server.",
+            )
+            self.assertEqual(status(passing_id)["status"], "In Progress", "A required command still running keeps the task In Progress.")
+            self.assertIsNone(passing.poll(), "The send stays open while the command it waits for runs.")
+            self.assertEqual(len(self.background_fixture_turns(passing_executable)), 1, "Waiting for a command sends the model no prompts.")
+            self.release_background_fixture(passing_executable, exitCode=0, output="Executed 1 test, with 0 failures\n")
+            stdout, stderr = passing.communicate(timeout=60)
+            self.assertEqual(passing.returncode, 0, f"Background fixture conversation failed: {stdout}; {stderr}")
+        finally:
+            if passing.poll() is None:
+                self.release_background_fixture(passing_executable, exitCode=0, output="")
+                passing.communicate(timeout=60)
+        self.assertEqual(status(passing_id)["status"], "Review", "The outcome reported from the command's result settles the task.")
+        passing_turns = self.background_fixture_turns(passing_executable)
+        self.assertEqual(len(passing_turns), 2, "The command's result is delivered in exactly one private turn.")
+        delivered = passing_turns[1]["userMessage"]
+        self.assertIn(results_marker, delivered)
+        self.assertIn("scripts/test-ui-tart.sh --case fixture", delivered)
+        self.assertIn("completed, exit code 0", delivered)
+        self.assertIn("Executed 1 test, with 0 failures", delivered)
+        self.assertEqual(self.background_fixture_state(passing_executable)["terminated"], [], "A command that ends on its own is never terminated.")
+
+        retry_id = self.create_task("Fixes the failing UI test", roots=[self.primary])["id"]
+        retry, retry_executable = self.start_background_fixture_turn(retry_id, "codex-fixture-unique-turns-background-retry")
+        try:
+            self.wait_for_background_fixture(retry_executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 2, "The first run should be waited for.")
+            self.release_background_fixture(retry_executable, exitCode=1, output="XCTAssertEqual failed: fixture regression\n")
+            self.wait_for_background_fixture(
+                retry_executable, lambda state: state["started"] == 2 and len(state["running"]) == 1,
+                "The agent should rerun the command after reading its failure.",
+            )
+            self.assertEqual(status(retry_id)["status"], "In Progress", "A rerun that is running keeps the task In Progress.")
+            self.release_background_fixture(retry_executable, exitCode=0, output="Executed 1 test, with 0 failures\n")
+            retry_stdout, retry_stderr = retry.communicate(timeout=60)
+            self.assertEqual(retry.returncode, 0, f"Retry fixture conversation failed: {retry_stdout}; {retry_stderr}")
+        finally:
+            if retry.poll() is None:
+                self.release_background_fixture(retry_executable, exitCode=0, output="")
+                retry.communicate(timeout=60)
+        self.assertEqual(status(retry_id)["status"], "Review")
+        retry_turns = self.background_fixture_turns(retry_executable)
+        self.assertEqual(len(retry_turns), 3, "Each command result is delivered once: the failure, then the passing rerun.")
+        self.assertIn("failed, exit code 1", retry_turns[1]["userMessage"])
+        self.assertIn("XCTAssertEqual failed: fixture regression", retry_turns[1]["userMessage"])
+        self.assertIn("completed, exit code 0", retry_turns[2]["userMessage"])
+        self.assertNotIn("XCTAssertEqual failed", retry_turns[2]["userMessage"], "A delivered result is not delivered again.")
+
+        failing_id = self.create_task("Cannot fix the UI test", roots=[self.primary])["id"]
+        failing, failing_executable = self.start_background_fixture_turn(failing_id, "codex-fixture-unique-turns-background-fail")
+        try:
+            self.wait_for_background_fixture(failing_executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 2, "The failing run should be waited for.")
+            self.release_background_fixture(failing_executable, exitCode=1, output="XCTAssertEqual failed: fixture regression\n")
+            failing.communicate(timeout=60)
+        finally:
+            if failing.poll() is None:
+                self.release_background_fixture(failing_executable, exitCode=1, output="")
+                failing.communicate(timeout=60)
+        failing_record = status(failing_id)
+        self.assertEqual(failing_record["status"], "Blocked")
+        self.assertIn("The required UI test failed", failing_record.get("statusMessage") or "")
+        self.assertEqual(len(self.background_fixture_turns(failing_executable)), 2)
+
+        vanished_id = self.create_task("Loses the UI test", roots=[self.primary])["id"]
+        vanished, vanished_executable = self.start_background_fixture_turn(vanished_id, "codex-fixture-unique-turns-background-vanish")
+        try:
+            self.wait_for_background_fixture(vanished_executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 2, "The vanishing run should be waited for.")
+            self.release_background_fixture(vanished_executable, vanish=True)
+            vanished.communicate(timeout=60)
+        finally:
+            if vanished.poll() is None:
+                self.release_background_fixture(vanished_executable, vanish=True)
+                vanished.communicate(timeout=60)
+        vanished_turns = self.background_fixture_turns(vanished_executable)
+        self.assertEqual(len(vanished_turns), 2)
+        self.assertIn("Playhouse did not see its result", vanished_turns[1]["userMessage"])
+        self.assertNotIn("exit code 0", vanished_turns[1]["userMessage"], "A command gone from the list is not assumed to have passed.")
+        vanished_record = status(vanished_id)
+        self.assertEqual(vanished_record["status"], "Blocked")
+        self.assertIn("without a result", vanished_record.get("statusMessage") or "")
+
+        stopped_id = self.create_task("Stopped while waiting", roots=[self.primary])["id"]
+        stopped, stopped_executable = self.start_background_fixture_turn(stopped_id, "codex-fixture-unique-turns-background-stop")
+        try:
+            self.wait_for_background_fixture(stopped_executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 2, "The run should be waited for before the Stop.")
+            self.assert_success(self.call_cli("conversation", "stop", stopped_id, timeout=30)[0])
+            stopped.communicate(timeout=60)
+        finally:
+            if stopped.poll() is None:
+                self.release_background_fixture(stopped_executable, exitCode=0, output="")
+                stopped.communicate(timeout=60)
+        stopped_record = status(stopped_id)
+        self.assertEqual(stopped_record["status"], "Waiting Response", "A Stop during the wait keeps the user's paused state.")
+        self.assertIsNone(stopped_record.get("statusMessage"), "A user-requested Stop must not be reported as a failure.")
+        stopped_state = self.background_fixture_state(stopped_executable)
+        self.assertEqual(stopped_state["terminated"], ["49264"], "Stop ends the command the task was waiting for.")
+        self.assertEqual(len(self.background_fixture_turns(stopped_executable)), 1, "Nothing restarts the work after a Stop.")
+        time.sleep(1.5)
+        self.assertEqual(len(self.background_fixture_turns(stopped_executable)), 1, "Nothing restarts the work after a Stop.")
+        self.assertEqual(status(stopped_id)["status"], "Waiting Response")
+
+        server_id = self.create_task("Leaves a dev server running", roots=[self.primary])["id"]
+        server, server_executable = self.start_background_fixture_turn(server_id, "codex-fixture-unique-turns-background-server")
+        try:
+            server_stdout, server_stderr = server.communicate(timeout=30)
+            self.assertEqual(server.returncode, 0, f"Dev server fixture conversation failed: {server_stdout}; {server_stderr}")
+        finally:
+            if server.poll() is None:
+                self.release_background_fixture(server_executable, exitCode=0, output="")
+                server.communicate(timeout=60)
+        self.assertEqual(status(server_id)["status"], "Review", "A completed outcome settles the task even with a command left running.")
+        server_state = self.background_fixture_state(server_executable)
+        self.assertEqual(len(server_state["running"]), 1, "The dev server keeps running.")
+        self.assertEqual(server_state["terminated"], [])
+        self.assertEqual(len(self.background_fixture_turns(server_executable)), 1, "A settled task gets no results turn.")
+
+        outlasting_id = self.create_task("Outlasts the wait", roots=[self.primary])["id"]
+        outlasting, outlasting_executable = self.start_background_fixture_turn(
+            outlasting_id, "codex-fixture-unique-turns-background-timeout", PLAYHOUSE_E2E_BACKGROUND_JOB_WAIT_SECONDS="1.5"
+        )
+        try:
+            outlasting.communicate(timeout=60)
+        finally:
+            if outlasting.poll() is None:
+                self.release_background_fixture(outlasting_executable, exitCode=0, output="")
+                outlasting.communicate(timeout=60)
+        outlasting_turns = self.background_fixture_turns(outlasting_executable)
+        self.assertEqual(len(outlasting_turns), 2, "A command that outlasts the wait earns one prompt and is not waited for again.")
+        self.assertIn(results_marker, outlasting_turns[1]["userMessage"])
+        self.assertIn("still running. Playhouse stopped waiting for it.", outlasting_turns[1]["userMessage"])
+        self.assertIn("ran longer than Playhouse waits for a command", outlasting_turns[1]["userMessage"])
+        self.assertNotIn("exit code", outlasting_turns[1]["userMessage"], "A command still running has no result to report.")
+        outlasting_record = status(outlasting_id)
+        self.assertEqual(outlasting_record["status"], "Blocked", "An unsettled turn after the wait ran out is not left In Progress.")
+        self.assertIn("stopped without reporting a stopping outcome", outlasting_record.get("statusMessage") or "")
+        outlasting_state = self.background_fixture_state(outlasting_executable)
+        self.assertEqual(len(outlasting_state["running"]), 1, "Playhouse does not end a command it merely stopped waiting for.")
+        self.assertEqual(outlasting_state["terminated"], [])
+
+    # case-contract: test_codex_follow_up_queued_during_background_wait_runs_next | A follow-up the user queues while a task waits for a command its Codex turn left running ends the wait at once: the follow-up is the next turn the provider receives, ahead of any results or recovery prompt, and the command is neither terminated nor forgotten. When the follow-up's turn ends without a stopping outcome the task stays In Progress and Playhouse waits for the same command again, with no further prompt. When the command ends, its real exit status and output are delivered once in one private results turn, and the outcome Codex reports there settles the task in Review. The follow-up appears once in history.
+    def test_codex_follow_up_queued_during_background_wait_runs_next(self):
+        results_marker = "background work results"
+        recovery_marker = "ended without reporting a task outcome"
+        follow_up = "Also keep the fixture log."
+        task_id = self.create_task("Follow-up while waiting", roots=[self.primary])["id"]
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-unique-turns-background-queue")}
+
+        def status():
+            return self.assert_success(self.call_cli("task", "get", task_id)[0])["status"]
+
+        turn, executable = self.start_background_fixture_turn(task_id, "codex-fixture-unique-turns-background-queue")
+        try:
+            self.wait_for_background_fixture(executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 2, "The command should be waited for before the follow-up.")
+            self.assertEqual(len(self.background_fixture_turns(executable)), 1)
+            self.assert_success(self.call_cli("conversation", "queue", task_id, "--message", follow_up)[0])
+            turns = self.wait_for(
+                lambda: (lambda turns: turns if len(turns) >= 2 else None)(self.background_fixture_turns(executable)),
+                "The queued follow-up should end the wait and run as the next turn.", timeout=30)
+            self.assertIn(follow_up, turns[1]["userMessage"], "The follow-up is the next turn the provider receives.")
+            self.assertNotIn(results_marker, turns[1]["userMessage"])
+            self.assertNotIn(recovery_marker, turns[1]["userMessage"])
+            calls_after_follow_up = self.background_fixture_state(executable)["listCalls"]
+            self.wait_for_background_fixture(
+                executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= calls_after_follow_up + 3,
+                "The same command should be waited for again after the follow-up's turn.",
+            )
+            waiting_state = self.background_fixture_state(executable)
+            self.assertEqual(waiting_state["started"], 1, "The follow-up starts no second command.")
+            self.assertEqual(waiting_state["terminated"], [], "A queued follow-up does not terminate the command.")
+            self.assertEqual(status(), "In Progress", "The command still running keeps the task In Progress after the follow-up.")
+            self.assertEqual(len(self.background_fixture_turns(executable)), 2, "Waiting again sends the model no prompt.")
+            self.release_background_fixture(executable, exitCode=0, output="Executed 1 test, with 0 failures\n")
+            self.wait_for(lambda: status() == "Review", "The outcome reported from the command's result should settle the task.", timeout=60)
+        finally:
+            if turn.poll() is None:
+                self.release_background_fixture(executable, exitCode=0, output="")
+            turn.communicate(timeout=60)
+        turns = self.background_fixture_turns(executable)
+        self.assertEqual(len(turns), 3, "The command's result is delivered in exactly one private turn after the follow-up.")
+        self.assertEqual(sum(results_marker in (entry.get("userMessage") or "") for entry in turns), 1)
+        self.assertIn("completed, exit code 0", turns[2]["userMessage"])
+        self.assertIn("Executed 1 test, with 0 failures", turns[2]["userMessage"])
+        self.assertFalse(any(recovery_marker in (entry.get("userMessage") or "") for entry in turns), "No recovery prompt is sent while a command is waited for.")
+        self.assertEqual(self.background_fixture_state(executable)["terminated"], [])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertEqual(
+            sum(message["role"] == "user" and follow_up in message.get("text", "") for message in history["messages"]), 1,
+            "The follow-up appears once in history.",
+        )
+
+    # case-contract: test_codex_background_wait_survives_daemon_restart | A daemon killed while a task waits for a command its Codex turn left running does not strand the task: the next daemon finds the persisted wait, reconnects to the same app-server, keeps the task In Progress with no new prompt, and resumes reconciling the provider's background terminals. A command that ends after the restart has its real exit status and output delivered once, and the agent's rerun is waited for again. A command that ended while no daemon was connected is reported to the agent as having no result Playhouse saw, never as successful, and the agent's blocked outcome settles the task in Blocked with its reason. The user's message appears once in history across both restarts.
+    def test_codex_background_wait_survives_daemon_restart(self):
+        executable = self.install_provider_fixture("codex", "codex-fixture-unique-turns-background-retry-daemon")
+        environment = self.restart_service_environment(
+            "codex", executable,
+            PLAYHOUSE_E2E_WORKTREE_DIRECTORY=str(self.worktree_directory),
+            PLAYHOUSE_E2E_CODEX_BACKGROUND_RECONCILE_SECONDS="0.2",
+        )
+        task_id = self.create_task("Waits across a restart", roots=[self.primary], provider="codex")["id"]
+        sent = {}
+        sender = threading.Thread(target=lambda: sent.setdefault("first", self.call_cli(
+            "conversation", "send", task_id, "--message", "Run the required UI test.",
+            expected_status=69, timeout=90, extra_environment=environment)), daemon=True)
+        sender.start()
+        self.wait_for_background_fixture(executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 2, "The command should be waited for before the daemon dies.")
+        servers = lambda: [m["process"] for kind, _, m in self.agent_manifests()
+                           if kind == "codex" and m["serviceName"] == environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"]]
+        server = servers()
+        self.assertEqual(len(server), 1, "One shared app-server serves the private service.")
+
+        self.kill_daemon(environment)
+        sender.join(timeout=20)
+        self.assertFalse(sender.is_alive(), "The send fails promptly once its daemon is gone.")
+        self.assert_failure(sent["first"][0], "service_unavailable")
+        calls_before_restart = self.background_fixture_state(executable)["listCalls"]
+        # This request starts the fresh daemon, which picks the wait up before answering.
+        self.assertEqual(self.task_for(task_id, environment)["status"], "In Progress", "A wait cut off by a restart keeps the task In Progress.")
+        self.wait_for_background_fixture(
+            executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= calls_before_restart + 3,
+            "The fresh daemon should resume reconciling the running command.",
+        )
+        self.assertEqual(servers(), server, "The fresh daemon reconnects to the same app-server.")
+        self.assertEqual(self.task_for(task_id, environment)["status"], "In Progress")
+        self.assertEqual(len(self.background_fixture_turns(executable)), 1, "Resuming the wait sends the model no prompt.")
+        self.release_background_fixture(executable, exitCode=1, output="XCTAssertEqual failed: fixture regression\n")
+        self.wait_for_background_fixture(
+            executable, lambda state: state["started"] == 2 and len(state["running"]) == 1 and state["listCalls"] >= 2,
+            "The agent should rerun the command after reading the failure delivered after the restart.",
+        )
+        turns = self.background_fixture_turns(executable)
+        self.assertEqual(len(turns), 2, "The result is delivered in exactly one private turn.")
+        self.assertIn("failed, exit code 1", turns[1]["userMessage"])
+        self.assertIn("XCTAssertEqual failed: fixture regression", turns[1]["userMessage"])
+        rerun_calls = self.background_fixture_state(executable)["listCalls"]
+        self.wait_for_background_fixture(executable, lambda state: state["listCalls"] >= rerun_calls + 3, "The rerun should be waited for before the second restart.")
+        self.assertEqual(self.task_for(task_id, environment)["status"], "In Progress", "A rerun that is running keeps the task In Progress.")
+
+        # The rerun ends with no daemon connected: its completion event reaches nobody.
+        self.kill_daemon(environment)
+        self.release_background_fixture(executable, vanish=True)
+        settled = self.wait_for(
+            lambda: (lambda record: record if record["status"] == "Blocked" else None)(self.task_for(task_id, environment)),
+            "The agent's outcome for the lost result should settle the task.", timeout=60)
+        self.assertIn("without a result", settled.get("statusMessage") or "")
+        turns = self.background_fixture_turns(executable)
+        self.assertEqual(len(turns), 3, "The lost result is reported in exactly one more private turn.")
+        self.assertIn("Playhouse did not see its result", turns[2]["userMessage"])
+        self.assertNotIn("exit code 0", turns[2]["userMessage"], "A command that ended unseen is not assumed to have passed.")
+        self.assertNotIn("XCTAssertEqual failed", turns[2]["userMessage"], "A delivered result is not delivered again.")
+        self.assertEqual(self.background_fixture_state(executable)["terminated"], [])
+        texts, _ = self.history_texts(task_id, environment)
+        self.assertEqual(texts.count("Run the required UI test."), 1, "The user's message appears once across both restarts.")
+
     # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
     def test_task_progress_reports_clear_on_failed_turns_and_questions(self):
         for fixture_name, expected_reason in [

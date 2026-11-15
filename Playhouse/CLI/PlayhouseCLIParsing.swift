@@ -138,12 +138,14 @@ extension PlayhouseCLI {
                     throw CLIError.usage("Unknown task progress operation '\(action)'.")
                 }
             case "outcome":
-                guard tail.count == 2 else {
-                    throw CLIError.usage("Use: playhouse task outcome <task-id> <completed|in-progress|waiting-response>")
-                }
-                return BridgeRequest(command: "task.outcome", arguments: [
+                let usage = "Use: playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>] (blocked requires --reason)"
+                guard tail.count == 2 || tail.count == 4 else { throw CLIError.usage(usage) }
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--reason"])
+                var requestArguments: [String: BridgeValue] = [
                     "taskID": .string(tail[0]), "outcome": .string(tail[1])
-                ])
+                ]
+                if let reason = flags["--reason"]?.first { requestArguments["reason"] = .string(reason) }
+                return BridgeRequest(command: "task.outcome", arguments: requestArguments)
             case "reconcile":
                 guard tail.count == 1 else { throw CLIError.usage("Use: playhouse task reconcile <task-id>") }
                 return BridgeRequest(command: "task.reconcile", arguments: ["taskID": .string(tail[0])])

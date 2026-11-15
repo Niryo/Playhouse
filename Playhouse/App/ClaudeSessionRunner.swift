@@ -201,12 +201,23 @@ final class ClaudeSessionRunner {
     /// to deliver a finished background task. A failure settles regardless.
     var isTurnSettled: Bool {
         guard turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
-              outstandingBackgroundTaskIDs.isEmpty,
-              pendingBackgroundTaskNotificationIDs.isEmpty else { return false }
+              !isHeldByBackgroundTasks else { return false }
         if turnCompletion.resultError != nil { return true }
         return !turnCompletion.awaitingParentWake && turnCompletion.resultCount > turnCompletion.wokenTurnCount
     }
 
+
+    /// Background work the turn still owes a result for. A background shell stops holding the
+    /// turn once the agent has reported a stopping outcome: the agent has said the task's work
+    /// is over, so the shell is a server it left running, not a result it is waiting for.
+    /// A background agent always holds it, since its result wakes the parent.
+    var isHeldByBackgroundTasks: Bool {
+        let holding = outstandingBackgroundTaskIDs.union(pendingBackgroundTaskNotificationIDs)
+        guard !holding.isEmpty else { return false }
+        guard holding.isSubset(of: backgroundShellTaskIDs),
+              owner?.stoppingOutcomeProbes[sessionID]?.isStaged() == true else { return true }
+        return false
+    }
 
     func debugImportReplay(_ message: [String: Any]) async { await handle(message) } // DEBUG-IMPORT: replays a recorded session line through the live handler.
 

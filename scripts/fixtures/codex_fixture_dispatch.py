@@ -3,6 +3,7 @@
 import codex_fixture_protocol as _protocol
 import codex_fixture_history as _history
 import codex_fixture_turns as _turns
+import codex_fixture_turn_scenarios as _scenarios
 
 
 def handle_message(runtime, _session_state, message):
@@ -83,6 +84,10 @@ def handle_message(runtime, _session_state, message):
         return _protocol.interrupt_turn(runtime, _session_state, message)
     elif message.get("method") == "thread/compact/start":
         return _protocol.compact_thread(runtime, _session_state, message)
+    elif message.get("method") == "thread/backgroundTerminals/list":
+        return _scenarios.background_terminals_list(runtime, _session_state, message)
+    elif message.get("method") == "thread/backgroundTerminals/terminate":
+        return _scenarios.background_terminals_terminate(runtime, _session_state, message)
     elif message.get("method") == "thread/read":
         return _protocol.read_thread(runtime, _session_state, message)
     elif message.get("method") == "thread/turns/list":

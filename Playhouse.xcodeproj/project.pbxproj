@@ -117,6 +117,7 @@
 		B10000000000000000000051 /* CodexAccountUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000051 /* CodexAccountUsage.swift */; };
 		B10000000000000000000052 /* CodexTurnSending.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000052 /* CodexTurnSending.swift */; };
 		B10000000000000000000053 /* CodexTurnRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000053 /* CodexTurnRecovery.swift */; };
+		B100000000000000000000F1 /* CodexBackgroundJobs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000000F1 /* CodexBackgroundJobs.swift */; };
 		B10000000000000000000054 /* CodexServerTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000054 /* CodexServerTransport.swift */; };
 		B10000000000000000000055 /* CodexServerEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000055 /* CodexServerEvents.swift */; };
 		B10000000000000000000056 /* CodexSharedServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000056 /* CodexSharedServer.swift */; };
@@ -300,6 +301,7 @@
 		B20000000000000000000051 /* CodexAccountUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAccountUsage.swift; sourceTree = "<group>"; };
 		B20000000000000000000052 /* CodexTurnSending.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexTurnSending.swift; sourceTree = "<group>"; };
 		B20000000000000000000053 /* CodexTurnRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexTurnRecovery.swift; sourceTree = "<group>"; };
+		B200000000000000000000F1 /* CodexBackgroundJobs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexBackgroundJobs.swift; sourceTree = "<group>"; };
 		B20000000000000000000054 /* CodexServerTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexServerTransport.swift; sourceTree = "<group>"; };
 		B20000000000000000000055 /* CodexServerEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexServerEvents.swift; sourceTree = "<group>"; };
 		B20000000000000000000056 /* CodexSharedServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexSharedServer.swift; sourceTree = "<group>"; };
@@ -539,6 +541,7 @@
 				B20000000000000000000055 /* CodexServerEvents.swift */,
 				B20000000000000000000054 /* CodexServerTransport.swift */,
 				B20000000000000000000053 /* CodexTurnRecovery.swift */,
+				B200000000000000000000F1 /* CodexBackgroundJobs.swift */,
 				B20000000000000000000052 /* CodexTurnSending.swift */,
 				B20000000000000000000051 /* CodexAccountUsage.swift */,
 				B20000000000000000000050 /* CodexThreadLifecycle.swift */,
@@ -835,6 +838,7 @@
 				"$(SRCROOT)/Playhouse/App/CodexTaskInstructions.swift",
 				"$(SRCROOT)/Playhouse/App/CodexThreadLifecycle.swift",
 				"$(SRCROOT)/Playhouse/App/CodexTurnRecovery.swift",
+				"$(SRCROOT)/Playhouse/App/CodexBackgroundJobs.swift",
 				"$(SRCROOT)/Playhouse/App/CodexTurnSending.swift",
 				"$(SRCROOT)/Playhouse/App/ConversationCompaction.swift",
 				"$(SRCROOT)/Playhouse/App/ConversationHistory.swift",
@@ -1031,6 +1035,7 @@
 				B10000000000000000000055 /* CodexServerEvents.swift in Sources */,
 				B10000000000000000000054 /* CodexServerTransport.swift in Sources */,
 				B10000000000000000000053 /* CodexTurnRecovery.swift in Sources */,
+				B100000000000000000000F1 /* CodexBackgroundJobs.swift in Sources */,
 				B10000000000000000000052 /* CodexTurnSending.swift in Sources */,
 				B10000000000000000000051 /* CodexAccountUsage.swift in Sources */,
 				B10000000000000000000050 /* CodexThreadLifecycle.swift in Sources */,

@@ -6,7 +6,26 @@ import Darwin
 extension CodexAppServerClient {
     func handleNotification(method: String, params: [String: Any]) {
         let context = (params["threadId"] as? String).flatMap { turnContexts[$0] }
+        if method == "turn/started" || method == "turn/completed", let threadID = params["threadId"] as? String,
+           threadParents[threadID] == nil {
+            if method == "turn/started" { runningTurnThreadIDs.insert(threadID) } else { runningTurnThreadIDs.remove(threadID) }
+        }
+        if ["item/started", "item/completed", "item/commandExecution/outputDelta"].contains(method) {
+            noteCommandItem(method: method, params: params)
+        }
         switch method {
+        case "thread/status/changed":
+            // Lifecycle authority stays with turn/started and turn/completed; the status is
+            // kept to reconcile against, and to see a thread the app-server gave up on.
+            guard let threadID = params["threadId"] as? String,
+                  let status = (params["status"] as? [String: Any])?["type"] as? String else { return }
+            if threadStatuses[threadID] != status {
+                PlayhouseDiagnostics.record("codex.thread.status_changed", fields: diagnosticFields([
+                    "threadID": threadID,
+                    "status": status,
+                ]))
+            }
+            threadStatuses[threadID] = status
         case "thread/goal/updated", "thread/goal/cleared":
             guard let threadID = params["threadId"] as? String else { return }
             goalStateThreadID = threadID
