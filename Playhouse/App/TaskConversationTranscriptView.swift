@@ -155,7 +155,7 @@ extension TaskConversationView {
         .accessibilityIdentifier("empty-conversation")
     }
 
-    /// A repository task with nothing selected teaches the picker: the big + opens the
+    /// A repository task with nothing selected teaches the picker: the empty state's + opens the
     /// same Add repository hint as the header's + button.
     var showsEmptyConversationAddRepositoryPrompt: Bool {
         !isReadOnly && !task.isStandaloneChat && task.authoringPluginID == nil
@@ -163,27 +163,7 @@ extension TaskConversationView {
     }
 
     var emptyConversationAddRepositoryPrompt: some View {
-        Button(action: showRepositoryPicker) {
-            VStack(spacing: 14) {
-                Image(systemName: "plus")
-                    .font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 76, height: 76)
-                    .background(Circle().fill(Color.accentColor.opacity(0.12)))
-                    .overlay(Circle().strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
-                Text("Click here to add repositories to the context")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .buttonHoverPointer()
-        .nativeHelp("Add a repository")
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Click here to add repositories to the context")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityIdentifier("empty-conversation-add-repository-button")
+        EmptyConversationAddRepositoryButton(action: showRepositoryPicker)
     }
 
     var emptyConversationModelPrompt: some View {
@@ -587,5 +567,42 @@ extension TaskConversationView {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-composer")
+    }
+}
+
+/// The empty conversation's add-repository prompt: a small + like the header's, with its
+/// caption beside it, in a capsule that lights up on hover.
+private struct EmptyConversationAddRepositoryButton: View {
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.accentColor.opacity(isHovering ? 0.22 : 0.14)))
+                Text("Click here to add repositories to the context")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isHovering ? .primary : .secondary)
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 14)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.primary.opacity(isHovering ? 0.08 : 0.04)))
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .nativeHelp("Add a repository")
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Click here to add repositories to the context")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("empty-conversation-add-repository-button")
     }
 }

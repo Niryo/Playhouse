@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected and, in place of the send-a-message prompt, shows a big + reading Click here to add repositories to the context that opens the header's Add repository picker and keeps the typed draft; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
+    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected and, in place of the send-a-message prompt, shows a compact + button reading Click here to add repositories to the context that opens the header's Add repository picker and keeps the typed draft; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
@@ -28,17 +28,20 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("create-task-button").exists, "Direct task creation should not present a create sheet.")
         XCTAssertFalse(element("workspace-repository-search").exists, "The sheet repository search should not appear.")
         XCTAssertTrue(element("send-message-button").isEnabled, "A configured root allows a standalone message even when no repository is selected.")
-        // With no repository, the big + replaces the send-a-message prompt and opens the header's picker.
+        // With no repository, the empty state's + replaces the send-a-message prompt and opens the header's picker.
         let addRepositoryPrompt = element("empty-conversation-add-repository-button")
-        XCTAssertTrue(addRepositoryPrompt.waitToExist(timeout: 10), "A task with no repository should show the big add-repository + in its empty state.")
+        XCTAssertTrue(addRepositoryPrompt.waitToExist(timeout: 10), "A task with no repository should show the add-repository + in its empty state.")
         XCTAssertEqual(accessibleLabelOrValue(of: addRepositoryPrompt), "Click here to add repositories to the context")
         XCTAssertFalse(element("model-prompt").exists, "The add-repository prompt replaces the send-a-message prompt.")
-        attachScreenshot(named: "Empty task shows the big add-repository plus")
+        XCTAssertLessThan(addRepositoryPrompt.frame.height, 44, "The add-repository + should be a compact inline capsule.")
+        XCTAssertGreaterThan(addRepositoryPrompt.frame.width, addRepositoryPrompt.frame.height * 4, "The + should sit beside its caption, not above it.")
+        attachScreenshot(named: "Empty task shows the add-repository plus")
+        attachElementScreenshot(addRepositoryPrompt, named: "Add-repository plus close-up")
         addRepositoryPrompt.click()
-        XCTAssertTrue(repositorySearch.waitToExist(timeout: 5), "Clicking the big + should open the header's Add repository picker.")
-        attachScreenshot(named: "Big plus opens the Add repository picker")
+        XCTAssertTrue(repositorySearch.waitToExist(timeout: 5), "Clicking the empty state's + should open the header's Add repository picker.")
+        attachScreenshot(named: "Add-repository plus opens the Add repository picker")
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(waitUntil({ !repositorySearch.exists }, timeout: 5), "Escape should close the picker the big + opened.")
+        XCTAssertTrue(waitUntil({ !repositorySearch.exists }, timeout: 5), "Escape should close the picker the empty state's + opened.")
         XCTAssertEqual(composer.value as? String, "Standalone draft", "Opening the picker from the empty state keeps the typed draft.")
         let shell = try XCTUnwrap(tasksFromBoardList().first)
         XCTAssertTrue((shell["workspaceRoots"] as? [String] ?? []).isEmpty, "New Task should persist an empty pending task before repository selection.")
@@ -689,7 +692,11 @@ extension PlayhouseUITests {
         XCTAssertEqual(boardHeader.frame.height, headerFrameBeforeOpeningChat.height, "Closing chat should leave the logo header's height unchanged.")
         XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").waitToExist(timeout: 5), "Closing chat should restore the board sidebar to accessibility navigation.")
         XCTAssertTrue(app.images["Playhouse logo"].exists, "Closing chat should restore the logo to accessibility navigation.")
-        XCTAssertEqual(boardSidebar.frame, sidebarFrameBeforeOpeningChat, "Closing chat should reveal the sidebar in its original position.")
+        // The sidebar's frame keeps settling for a moment after the chat slides away.
+        XCTAssertTrue(
+            waitUntil({ boardSidebar.frame == sidebarFrameBeforeOpeningChat }, timeout: 5),
+            "Closing chat should reveal the sidebar in its original position: \(boardSidebar.frame) vs \(sidebarFrameBeforeOpeningChat)."
+        )
         // The kept width can leave room to spare, so the columns return beside the sidebar
         // rather than to their exact original x.
         XCTAssertTrue(
