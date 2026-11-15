@@ -517,7 +517,7 @@ class BridgeTestCases22:
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
         self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],
                          "Every other atom, including a Button or Link that holds children, is a leaf.")
-    # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+    # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     def test_schedule_one_time_task_fires_when_due(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-once")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -543,6 +543,28 @@ class BridgeTestCases22:
         self.assertIn(task_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A one-time schedule stays on the board.")
         self.assertEqual([task["id"] for task in self.assert_success(self.call_cli("schedule", "list")[0])["tasks"]], [task_id])
         self.assertEqual(self.fixture_user_prompts(executable), [], "Scheduling starts no turn.")
+        self.assertEqual(fresh["title"], "Scheduled once", "Scheduling keeps a task's own title.")
+
+        untitled_id = self.create_task("Untitled task", provider="claude")["id"]
+        reserved = self.assert_success(self.call_cli(
+            "schedule", "set", untitled_id, "--prompt", "Summarize the release notes.", "--once", self.schedule_iso(fire_at),
+            extra_environment=environment
+        )[0])
+        self.assertEqual(reserved["title"], "Generating title…", "Scheduling an untitled task reserves its title while it is named.")
+        def settled_title():
+            task = self.assert_success(self.call_cli("task", "get", untitled_id)[0])
+            return task if task["title"] not in ("Untitled task", "Generating title…") else None
+        named = self.wait_for(settled_title, "The scheduled task should get its generated title.")
+        self.assertEqual(named["title"], "Generated Claude title", "A one-time scheduled task is named from its prompt as a first send would.")
+        self.assertEqual(named["schedule"]["prompt"], "Summarize the release notes.")
+        self.assertEqual(named["status"], "Backlog")
+        self.assertEqual([prompt for prompt in self.fixture_user_prompts(executable) if not prompt.startswith("Write a concise task title")], [],
+                         "Naming the task starts no conversation turn.")
+        title_prompts = [prompt for prompt in self.fixture_user_prompts(executable) if prompt.startswith("Write a concise task title")]
+        self.assertEqual(len(title_prompts), 1, "The task is named by exactly one title turn.")
+        self.assertTrue(title_prompts[0].rstrip().endswith("Summarize the release notes."), "The title is generated from the scheduled prompt.")
+        self.assertNotIn("Fixture task description.", title_prompts[0], "The title isn't generated from the task's description.")
+        self.assert_success(self.call_cli("schedule", "clear", untitled_id)[0])
 
         early = self.assert_success(self.call_cli(
             "schedule", "tick", "--now", self.schedule_iso(fire_at - datetime.timedelta(minutes=10)), extra_environment=environment

@@ -20,6 +20,28 @@ extension ConversationManager {
         )
     }
 
+    /// Names a one-time scheduled task that still has a placeholder title from its scheduled
+    /// prompt, as its first send would, so it doesn't wait on the board untitled. The title is
+    /// reserved before this returns; the name is generated in the background and falls back to
+    /// the prompt's first words. Returns the reserved task, or nil when nothing needs a name.
+    func nameScheduledTask(_ taskID: UUID) async throws -> BoardTaskRecord? {
+        let task = try tasks.taskModel(taskID)
+        guard task.scheduleKind == .once, ["Untitled task", "Generating title…"].contains(task.title),
+              let prompt = task.scheduledPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty,
+              let reserved = try await tasks.renameIfTitleMatches(taskID, expectedTitle: task.title, title: "Generating title…")
+        else { return nil }
+        // A task with no repository yet still gets a name; the title turn needs no workspace.
+        let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let workspace = try (try? ConversationWorkspaceContext(roots: roots)) ?? ConversationWorkspaceContext(roots: [])
+        let titleClients = clients.helperClients(preferring: task.conversationProvider)
+        // Registered work keeps the daemon alive after the request that scheduled it returns.
+        BridgeBackgroundWork.start {
+            // Best-effort like a send's title: the helper records failures and falls back.
+            _ = try? await self.generateAndApplyTitle(taskID: taskID, prompt: prompt, workspace: workspace, clients: titleClients)
+        }
+        return reserved
+    }
+
     func generateAndApplyTitle(
         taskID: UUID,
         prompt: String,
@@ -120,13 +142,51 @@ extension ConversationManager {
     static let privateOutcomeReminderPlaceholder = PrivatePromptPlaceholder.outcomeReminder
     static let privateOutcomeReminderResponsePlaceholder = "[Playhouse private outcome response hidden]"
 
-    /// Sent when a turn ended without reporting any outcome: ask where the work
-    /// stands rather than assuming it is finished or blocked on the user.
-    static func outcomeNudgePrompt(attempt: Int) -> String {
+    /// Sent once when a turn ended with no stopping outcome and no work left running: the
+    /// agent either carries on in this turn or says why it stopped.
+    static func outcomeRecoveryPrompt() -> String {
         """
         \(privateOutcomeReminderMarker)
 
-        Your previous turn ended without reporting a task outcome, so Playhouse doesn't know where this task stands. Don't repeat or redo finished work — just report the current status with the task outcome command: `in-progress` if work remains and you need nothing from the user (keep working right away in this turn), `waiting-response` if you need the user to answer or decide, `completed` if everything is done. This is nudge \(attempt) of \(TurnOutcome.maxContinuations); after that Playhouse marks the task Blocked.
+        Your previous turn ended without reporting a task outcome and with nothing left running, so Playhouse doesn't know where this task stands. Don't repeat or redo finished work. If work remains and you need nothing from the user, continue it now, in this turn, and report the outcome when you stop. Otherwise report the stopping outcome with the task outcome command: `completed` if everything is done, `waiting-response` if you need the user to answer or decide, `blocked --reason "<why>"` if you cannot continue. This is the only recovery prompt: if this turn also ends without a stopping outcome, Playhouse marks the task Blocked.
+        """
+    }
+
+    /// Sent once the commands a turn left running have ended (or can no longer be waited
+    /// for): their real results, so the agent can carry on from them.
+    static func backgroundWorkResultsPrompt(
+        _ results: [ProviderBackgroundJobResult],
+        stillRunning: [ProviderBackgroundJob],
+        note: String?
+    ) -> String {
+        var lines: [String] = []
+        for result in results {
+            let command = String(result.job.command.prefix(300))
+            if !result.isKnown {
+                lines.append("- `\(command)`: no longer running, but Playhouse did not see its result. Check its output or rerun it before relying on it.")
+                continue
+            }
+            let exit = result.exitCode.map { "exit code \($0)" } ?? "no exit code reported"
+            lines.append("- `\(command)`: \(result.status ?? "ended"), \(exit).")
+            let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !output.isEmpty {
+                lines.append("  Output (last part):")
+                lines.append(contentsOf: String(output.suffix(2_000)).split(separator: "\n", omittingEmptySubsequences: false).map { "    \($0)" })
+            }
+        }
+        for job in stillRunning {
+            lines.append("- `\(String(job.command.prefix(300)))`: still running. Playhouse stopped waiting for it.")
+        }
+        let closing = stillRunning.isEmpty && note == nil
+            ? "Continue the work from these results in this turn: fix and rerun what failed, and keep awaiting any further command in this turn rather than ending it. Report a stopping outcome only when you stop."
+            : "Decide in this turn what the work needs: keep awaiting a command you still need within this turn, or report a stopping outcome (`completed`, `waiting-response`, or `blocked --reason \"<why>\"`). If this turn also ends without a stopping outcome, Playhouse marks the task Blocked."
+        return """
+        \(privateOutcomeReminderMarker) background work results.
+
+        Your previous turn ended without a stopping outcome while commands it started were still running, so Playhouse kept the task In Progress and waited for them outside the model.\(note.map { " " + $0 } ?? "")
+        \(lines.joined(separator: "\n"))
+
+        \(closing)
         """
     }
 
@@ -247,15 +307,6 @@ extension ConversationManager {
         2. Fix genuine failures in the task worktree. For merge conflicts, merge the base branch and resolve them. Commit your work; Playhouse pushes the task branch when you report `completed`.
         3. Treat every unresolved review comment critically: reviewers and bots can be wrong, noisy, or out of scope. Change the code only for comments that really deserve it. For every thread, fixed or not, reply with what you changed or why you left the code as it is, then resolve the thread (GraphQL `addPullRequestReviewThreadReply` and `resolveReviewThread`).
         4. If something can't be fixed from here — for example GitHub or CI is down, a check needs credentials or permissions you don't have, or the user must act (such as adding a Jira ticket to the pull request title) — don't retry in a loop. Report `waiting-response` and tell the user exactly what is blocking the pull request and what they need to do. Otherwise report `completed` when you're done; Playhouse keeps watching the pull request and sends another turn if it is still red.
-        """
-    }
-
-    /// Sent after an explicit `in-progress`: the model asked to keep going.
-    static func outcomeContinuationPrompt(attempt: Int) -> String {
-        """
-        \(privateOutcomeReminderMarker)
-
-        You reported `in-progress`, so continue the work from where your last turn left off. Don't repeat or redo finished work, and don't ask the user anything here. End this turn with a task outcome call: `in-progress` again if more work remains, `waiting-response` if you now need the user, `completed` when everything is done. This is continuation \(attempt) of \(TurnOutcome.maxContinuations); after that Playhouse marks the task Blocked.
         """
     }
 

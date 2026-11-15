@@ -321,7 +321,8 @@ def main():
     # is in progress. Anything else that arrives during a held turn is
     # deferred and handled after it, in arrival order, as before.
     _session_state.answer_while_held = {"initialize", "initialized", "thread/items/list", "thread/turns/list", "thread/read",
-                         "thread/resume", "model/list", "thread/goal/get", *ACCOUNT_METHODS}
+                         "thread/resume", "model/list", "thread/goal/get",
+                         "thread/backgroundTerminals/list", "thread/backgroundTerminals/terminate", *ACCOUNT_METHODS}
     _session_state.deferred = []
 
     def snapshot_state():

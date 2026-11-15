@@ -338,6 +338,31 @@ final class ConversationTranscriptStore {
         }
     }
 
+    /// The model of the newest assistant message that names one, among the turns of the given
+    /// segments. Turns are searched newest first, a query each, so a long conversation is not
+    /// decoded to find it.
+    func latestAssistantModelID(_ taskID: UUID, segmentIDs: Set<String>) throws -> String? {
+        guard !segmentIDs.isEmpty else { return nil }
+        return try pool.read { db in
+            let key = taskID.uuidString
+            let turns = try Row.fetchAll(db, sql: "SELECT id, segment_id FROM conversation_turns WHERE task_id = ? ORDER BY seq DESC", arguments: [key])
+            for turn in turns where segmentIDs.contains(turn["segment_id"]) {
+                let modelID = try String.fetchOne(
+                    db,
+                    sql: """
+                    SELECT json_extract(payload, '$.modelID') FROM conversation_messages
+                    WHERE task_id = ? AND turn_id = ? AND json_extract(payload, '$.role') = 'assistant'
+                        AND json_extract(payload, '$.modelID') IS NOT NULL
+                    ORDER BY position DESC LIMIT 1
+                    """,
+                    arguments: [key, turn["id"] as String]
+                )
+                if let modelID { return modelID }
+            }
+            return nil
+        }
+    }
+
     /// Subagent activities held by the given turns, in turn and activity order.
     func subagentActivities(_ taskID: UUID, turnIDs: [String]) throws -> [ConversationActivity] {
         guard !turnIDs.isEmpty else { return [] }

@@ -9,6 +9,7 @@ extension CodexAppServerClient {
             return try await owner.interruptActiveTurn(threadID: expectedThreadID)
         }
         guard let turnID = activeTurnID(for: expectedThreadID) else {
+            if await stopBackgroundWait(threadID: expectedThreadID) { return true }
             guard activeClient(forThread: expectedThreadID) == nil else { return false }
             return try await ConversationSteerMailbox.requestInterrupt(threadID: expectedThreadID)
         }
@@ -307,10 +308,20 @@ extension CodexAppServerClient {
         ]
         // Every turn of a read-only thread names its sandbox, so a resume can't widen it.
         if workspace.isReadOnly { turnParams["sandboxPolicy"] = ["type": "readOnly", "networkAccess": true] }
-        let response = try await request(method: "turn/start", params: turnParams)
+        // Before the request: the turn's first events can arrive ahead of its response, and a
+        // command they end is this turn's to read, not background work.
+        runningTurnThreadIDs.insert(threadID)
+        let response: [String: Any]
+        do {
+            response = try await request(method: "turn/start", params: turnParams)
+        } catch {
+            runningTurnThreadIDs.remove(threadID)
+            throw error
+        }
 
         guard let turn = response["turn"] as? [String: Any],
               let turnID = turn["id"] as? String else {
+            runningTurnThreadIDs.remove(threadID)
             throw ClientError.protocolFailure("Codex did not return a turn ID.")
         }
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)

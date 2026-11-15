@@ -117,13 +117,29 @@ extension BoardTaskManager {
         }
     }
 
-    func reportTurnOutcome(_ id: UUID, outcome: String) async throws -> String {
-        guard TurnOutcome(rawValue: outcome) != nil else {
+    /// Stages the stopping outcome of the task's running turn; the turn's end applies it. A
+    /// later report in the same turn replaces an earlier one, and the legacy `in-progress`
+    /// withdraws it, so the newest word the agent gave is the one that counts.
+    func reportTurnOutcome(_ id: UUID, outcome: String, reason: String? = nil) async throws -> (outcome: String, message: String?) {
+        let isLegacyInProgress = outcome == TurnOutcome.legacyInProgress
+        let parsed = TurnOutcome(rawValue: outcome)
+        guard parsed != nil || isLegacyInProgress else {
             throw BridgeCommandError(
                 code: "invalid_argument",
                 message: "Unknown turn outcome '\(outcome)'. Valid outcomes: "
                     + TurnOutcome.allCases.map(\.rawValue).joined(separator: ", ") + "."
             )
+        }
+        let trimmedReason = reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if parsed == .blocked {
+            guard !trimmedReason.isEmpty, trimmedReason.count <= TurnOutcome.maxBlockedReasonLength else {
+                throw BridgeCommandError(
+                    code: "invalid_argument",
+                    message: "A blocked outcome needs --reason with 1 to \(TurnOutcome.maxBlockedReasonLength) characters saying what blocks the work."
+                )
+            }
+        } else if !trimmedReason.isEmpty {
+            throw BridgeCommandError(code: "invalid_argument", message: "Only a blocked outcome takes --reason.")
         }
         // A chat settles its turn with `chat page close-turn` (`settleStandaloneChatTurn`);
         // it has no board status for an outcome to decide.
@@ -148,9 +164,31 @@ extension BoardTaskManager {
                     message: "Turn outcomes can only be reported while a task is In Progress."
                 )
             }
-            try Data(outcome.utf8).write(to: outcomeURL, options: .atomic)
-            return outcome
+            guard let parsed else {
+                try? FileManager.default.removeItem(at: outcomeURL)
+                PlayhouseDiagnostics.record("task.outcome.legacy_in_progress", fields: ["taskID": id.uuidString])
+                return (outcome, TurnOutcome.legacyInProgressGuidance)
+            }
+            let stored = TurnOutcome.storedReport(parsed, reason: parsed == .blocked ? trimmedReason : nil)
+            try Data(stored.utf8).write(to: outcomeURL, options: .atomic)
+            return (outcome, nil)
         }
+    }
+
+    /// Withdraws the outcome staged in the task's running turn: execution that resumed after
+    /// the report (a background result waking the agent, say) makes it stale.
+    /// It is synchronous so the withdrawal lands before any report the resumed execution makes.
+    func withdrawStagedTurnOutcome(_ id: UUID) {
+        guard let outcomeURL = try? conversationTurnOutcomeURL(id),
+              FileManager.default.fileExists(atPath: outcomeURL.path) else { return }
+        try? FileManager.default.removeItem(at: outcomeURL)
+        PlayhouseDiagnostics.record("task.outcome.withdrawn_stale", fields: ["taskID": id.uuidString])
+    }
+
+    /// Whether the task's running turn has a stopping outcome staged.
+    func hasStagedTurnOutcome(_ id: UUID) -> Bool {
+        guard let outcomeURL = try? conversationTurnOutcomeURL(id) else { return false }
+        return FileManager.default.fileExists(atPath: outcomeURL.path)
     }
 
     /// Records a standalone chat's `chat page close-turn` as its running turn's settled outcome,

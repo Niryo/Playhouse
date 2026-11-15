@@ -69,6 +69,7 @@ extension CodexAppServerClient {
         ]))
         if latest["status"] as? String == "inProgress", completedTurns[turnKey] == nil {
             context.turnID = turnID
+            runningTurnThreadIDs.insert(threadID)
             activeThreadID = threadID
             activeTurnID = turnID
             activeConversationMode = .code
@@ -197,6 +198,7 @@ extension CodexAppServerClient {
             || contextlessTurnIDs[threadID] != nil
             || (activeThreadID == threadID && activeTurnID != nil)
             || pendingUserInputs[threadID] != nil
+            || backgroundWaitThreadIDs.contains(threadID)
     }
 
     func activeTurnID(for threadID: String) -> String? {

@@ -111,6 +111,12 @@ enum WorkspaceSettings {
     static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
     static let cpuUsageColorMaxKey = "cpuUsageColorMax"
     static let defaultCPUUsageColorMax = CPUUsageHeatmap.defaultColorMax
+    /// Whether a task moving to Review or Waiting Response plays its sound; on unless turned off.
+    static let statusSoundsEnabledKey = "statusSoundsEnabled"
+
+    static func statusSoundsEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: statusSoundsEnabledKey) as? Bool ?? true
+    }
     /// Automatic context compaction settings shared by Claude and Codex task sessions.
     static let autoCompactionEnabledKey = "autoCompactionEnabled"
     static let autoCompactionThresholdKey = "autoCompactionThresholdTokens"

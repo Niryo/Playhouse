@@ -84,6 +84,13 @@ final class WorkspaceSettingsManager {
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "appearance", "value": value])
     }
 
+    var statusSoundsEnabled: Bool { WorkspaceSettings.statusSoundsEnabled(in: defaults) }
+
+    func setStatusSoundsEnabled(_ enabled: Bool) {
+        defaults.set(enabled, forKey: WorkspaceSettings.statusSoundsEnabledKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "statusSounds", "value": String(enabled)])
+    }
+
     /// The token total a task's usage dot reaches full red at. Everything below
     /// shades from green through orange toward it.
     var tokenUsageColorMax: Int {

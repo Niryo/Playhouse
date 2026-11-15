@@ -275,6 +275,11 @@ def answer_text(runtime, user_message):
         if "Saturn's rings" in user_message:
             return '{"continues":false,"title":"Saturn Rings"}'
         return '{"continues":true,"title":null}'
+    if "-background-" in mode:
+        if "background work results" in (user_message or "").lower():
+            return "I read the background test's result and reported where the task stands."
+        if "playhouse internal outcome nudge:" not in (user_message or "").lower():
+            return "I started the required UI test in the background and will wait for it."
     if "playhouse internal outcome nudge:" in (user_message or "").lower():
         return "Fixture internal reminder reply."
     if user_message == "Follow up after private recovery.":

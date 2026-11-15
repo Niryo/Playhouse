@@ -105,7 +105,7 @@ extension PlayhouseCLI {
       playhouse task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       playhouse task progress custom <task-id> --label <label> [--detail <text>]
       playhouse task progress clear <task-id>
-      playhouse task outcome <task-id> <completed|in-progress|waiting-response>
+      playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>]
       playhouse task rename <task-id> --title <title>
       playhouse schedule list
       playhouse schedule set <task-id> --prompt <text> --once <ISO8601> [--image <path>...] [--mode default|plan] [--model <id>]
@@ -178,7 +178,7 @@ extension PlayhouseCLI {
       playhouse mcp status [--task <task-id>] [--provider <claude|codex>]
       playhouse mcp authenticate --provider <claude|codex> --name <server-name> [--task <task-id>]
       playhouse mcp authenticate-wait --provider <claude|codex> --name <server-name> [--task <task-id>]
-      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
+      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>|set-status-sounds <on|off>
       playhouse settings set-auto-compaction [--enabled <true|false>] [--threshold <tokens>] [--idle-minutes <minutes>] [--minimum <tokens>]
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

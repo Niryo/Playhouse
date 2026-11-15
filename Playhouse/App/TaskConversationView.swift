@@ -80,7 +80,8 @@ struct TaskConversationView: View {
     /// `isSendDisabled`) during body evaluation only inside that scope; handlers may read it freely.
     @State var composerDraft = ComposerDraftModel()
     @State var toolCallExpansion = ToolCallExpansionState()
-    @State var transcriptVirtualizer = TranscriptVirtualizer()
+    /// Owns the transcript's scroll position; see `TranscriptScrollController`.
+    @State var transcriptScroll = TranscriptScrollController()
     var draft: String {
         get { composerDraft.text }
         nonmutating set { composerDraft.text = newValue }
@@ -157,27 +158,13 @@ struct TaskConversationView: View {
     // window that starts here and runs to the newest message; opening a
     // conversation starts the window at the latest user turn.
     @State var oldestRenderedMessageID: String?
-    @State var isRevealingOlderConversationMessages = false
-    /// The latest scroll sample. It changes every scroll frame, so it lives in a
-    /// reference outside SwiftUI state, where writing it re-renders nothing.
-    @State var lastConversationScrollSample = ConversationScrollSample()
+    /// An older page of history is being read to reveal above the window.
+    @State var isLoadingEarlierConversationMessages = false
     /// Messages older than `messages` that the daemon still holds. History is
     /// read a page at a time, and the next page loads once the reader scrolls
     /// past the oldest message already here.
     @State var earlierStoredMessageCount = 0
-    /// Set once the transcript has settled at or above the top of its rendered
-    /// window, which is what makes the next upward scroll reveal older
-    /// messages. Position has to be observed, never assumed, or a layout pass
-    /// taken before the newest turn is pinned reveals a batch on open.
-    @State var isOlderConversationRevealArmed = false
-    /// True from the start of a history load until the newest turn has been
-    /// pinned, so load-time scroll requests cannot follow the bottom past it.
-    @State var isLatestConversationTurnPinPending = true
-    @State var hasPresentedLatestConversation = false
-    /// Natural height of the newest turn, before the minimum height that keeps
-    /// it pinnable to the top of the viewport. It only decides whether a
-    /// presentation pins the turn or scrolls to its end; layout never reads it.
-    @State var latestTurnContentHeight: CGFloat = 0
+    /// The newest question the transcript has presented, which tells one just sent from it.
     @State var lastScrolledUserMessageID: String?
     @State var annotations: [ConversationAnnotation] = []
     /// Pending comments handed to the turn now running; they leave the saved draft until it ends.
@@ -422,20 +409,16 @@ struct TaskConversationView: View {
         return messages.filter { !completedProgressIDs.contains($0.id) }
     }
 
-    static let olderConversationMessageBatchSize = 40
+    /// Messages a conversation that established no window keeps rendered while it follows.
+    static let followedConversationMessageCount = 40
+    /// Older messages revealed at a time as the reader nears the oldest rendered one. Each is
+    /// rendered to be measured, so a few at a time keep scrolling up from stalling on a batch.
+    static let olderConversationMessageBatchSize = 2
+    /// Loaded messages left above the rendered window when the next older page is read.
+    static let olderConversationMessagePrefetchCount = 20
     /// Messages read per history request: the newest page on open, then one
     /// more page each time the rendered window reaches the oldest loaded one.
     static let historyPageSize = 80
-    /// How far the transcript must be dragged past the oldest rendered message
-    /// before the next older batch is revealed.
-    static let olderConversationRevealThreshold: CGFloat = 24
-    /// Corrective scroll passes after the first one, in nanoseconds. A
-    /// `LazyVStack` row that was not realized when the scroll began is placed
-    /// from an estimate, so the position has to be reapplied once it exists.
-    static let scrollSettleDelays: [UInt64] = [50_000_000]
-    /// How close to the bottom, in points, still counts as at the bottom, so
-    /// new content keeps being followed.
-    static let conversationBottomFollowThreshold: CGFloat = 16
     /// Above this many changed files the sidebar shows a notice instead of the list, which would stall layout.
     static let maxRenderedChangeCount = 1000
 
@@ -459,7 +442,7 @@ struct TaskConversationView: View {
         let allMessages = conversationMessages
         guard let oldestRenderedMessageID,
               let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
-            return Array(allMessages.suffix(Self.olderConversationMessageBatchSize))
+            return Array(allMessages.suffix(Self.followedConversationMessageCount))
         }
         return Array(allMessages[startIndex...])
     }
@@ -471,17 +454,10 @@ struct TaskConversationView: View {
         let allMessages = conversationMessages
         guard let oldestRenderedMessageID,
               let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
-            return allMessages.count > Self.olderConversationMessageBatchSize
+            return allMessages.count > Self.followedConversationMessageCount
         }
         return startIndex > allMessages.startIndex
     }
-
-    /// Reveals the next older batch, keeping the message that was at the top of
-    /// the viewport in place so the transcript does not jump under the pointer.
-    /// With a `distance` from the window top up to the viewport's top edge, as
-    /// after dragging the scroller deep into the runway, it reveals whole
-    /// batches until their estimated height reaches that far, and leaves the
-    /// offset where the reader put it.
 
     var activityDisclosureAnchorID: String? {
         if let latestUserIndex = Self.latestUserTurnStart(in: conversationMessages) {

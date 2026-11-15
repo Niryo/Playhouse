@@ -313,7 +313,7 @@ class BridgeTestCases13:
         self.assertIsNone(assistants[0].get("createdAt"), "Legacy provider history without a timestamp must stay timestamp-free.")
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
         self.assertIsNotNone(assistants[-1].get("createdAt"), "Locally observed time survives a history reload.")
-    # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation.
+    # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation. A second Codex conversation that never chose a model keeps the model its own turn ran on, in CLI/XPC reads and in the reopened composer’s picker, after the provider-wide remembered selection moves to another model.
     def test_codex_history_keeps_loaded_thread_model(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-kept-model-unique-turns-success"
@@ -364,6 +364,18 @@ class BridgeTestCases13:
         self.assertTrue(any(message.get("modelID") == "gpt-6-luna" for message in self.assert_success(
             self.call_cli("conversation", "history", task_id, extra_environment=environment)[0]
         )["messages"]), "Fresh history should preserve the switched turn's model attribution.")
+        # A conversation that never chose a model keeps the one its own turns ran on, after the
+        # provider-wide remembered selection moves to another model.
+        unselected_task_id = self.create_task(title="Codex history model")["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", unselected_task_id, "--message", "Run on the remembered model.", extra_environment=environment
+        )[0])
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-mini")[0])
+        for _ in range(2):
+            self.assertEqual(
+                self.assert_success(self.call_cli("conversation", "model", unselected_task_id)[0])["modelID"], "gpt-6-luna",
+                "The model comes from the conversation's own latest Codex turn, not the remembered selection.",
+            )
     # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -690,7 +702,7 @@ class BridgeTestCases13:
         probe = self.data_directory / "codex-question-ownership-probe"
         core = [
             'BoardTask', 'ConversationSubject', 'WorkspaceSupport', 'HoverRevealScrollers',
-            'WorkspaceChanges', 'CodexAppServerClient', 'CodexSocketConnection', 'ConversationModel',
+            'WorkspaceChanges', 'CodexAppServerClient', 'CodexBackgroundJobs', 'CodexSocketConnection', 'ConversationModel',
             'ClaudeCodeClient', 'ProviderRequestLog', 'ProcessCPUSampler', 'AgentRunHost',
             'ContextCompaction', 'AgentUsage', 'AgentUsageStore', 'ConversationTranscriptStore',
             'StandaloneChatStore', 'SkillCatalog', 'RuleCatalog', 'MentionCatalog',

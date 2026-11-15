@@ -106,7 +106,9 @@ extension PlayhouseUITests {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: announced.path) }, timeout: 30),
                       "The fixture should announce the woken turn before going quiet.")
-        XCTAssertTrue(element("pause-response-button").exists,
+        // The fixture announces within moments of the send, so give the window a beat to
+        // draw the active turn; the woken turn stays quiet for far longer than this.
+        XCTAssertTrue(waitUntil({ self.element("pause-response-button").exists }, timeout: 5),
                       "A woken turn that has only just announced itself is still the active turn.")
         attachScreenshot(named: "Slow woken turn announced itself and is still the active turn while it stays quiet")
         XCTAssertTrue(waitUntil({ self.transcriptContains("SLOW WOKEN HANDLED") }, timeout: 60),
@@ -117,6 +119,111 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["task", "get", slowTaskID])["result"] as? [String: Any])??["status"] as? String) == "Review"
         }, timeout: 60), "The slow woken turn's own completed outcome should move its task to Review.")
+    }
+    // case-contract: test_claude_stopping_outcome_decides_over_background_work | A Claude turn that reports completed and then leaves a background shell running, a dev server, settles in Review as soon as Claude's result arrives, without waiting for a notification that never comes and without a recovery prompt. A completed outcome reported while a background agent is still running does not settle the turn: the task stays In Progress while the agent runs, and when the woken parent turn then does more work and ends without a new report, the earlier outcome is treated as stale, so the task does not reach Review; Playhouse sends exactly one recovery prompt and the outcome reported in it places the task in Waiting Response. When Claude Code starts the woken turn for a finished background shell and then stays silent, with no outcome reported and no queued follow-up, Playhouse's backstop ends the wait and the same single recovery prompt decides the task's column instead of leaving it In Progress. The UI shows each task in the matching column and the recovery prompt in the transcript.
+    func test_claude_stopping_outcome_decides_over_background_work() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-stopping-outcome")
+        try copyFixtureFile(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let pause = URL(fileURLWithPath: executable.path + ".early-report-pause")
+        let ready = URL(fileURLWithPath: executable.path + ".early-report-ready")
+        let release = URL(fileURLWithPath: executable.path + ".early-report-release")
+        let woken = URL(fileURLWithPath: executable.path + ".consumed-wake-woken")
+        let serverResult = URL(fileURLWithPath: executable.path + ".dev-server-result-sent")
+        try Data().write(to: pause, options: .atomic)
+        defer {
+            try? Data("Release the early-report fixture pause.\n".utf8).write(to: release, options: .atomic)
+            try? FileManager.default.removeItem(at: pause)
+        }
+        let graceEnvironment = [
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS": "2",
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS": "3",
+        ]
+        func create(_ title: String) throws -> String {
+            let created = try XCTUnwrap(try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
+            ])["result"] as? [String: Any])
+            return try XCTUnwrap(created["id"] as? String)
+        }
+        func status(_ taskID: String) -> String? {
+            (try? self.taskRecord(id: taskID))??["status"] as? String
+        }
+        func nudges() throws -> [String] {
+            let data = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+            let history = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return ((history["turns"] as? [[String: Any]]) ?? [])
+                .compactMap { $0["userText"] as? String }
+                .filter { $0.lowercased().contains("playhouse internal outcome nudge:") }
+        }
+        func send(_ text: String) {
+            element("message-composer").click()
+            element("message-composer").typeText(text)
+            element("send-message-button").click()
+        }
+        let serverID = try create("Claude dev server")
+        let earlyID = try create("Claude early report")
+        let silentID = try create("Claude silent wake")
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: graceEnvironment)
+
+        // A reported outcome settles the turn even with a shell left running.
+        openTask(named: "Claude dev server")
+        send("Please leave-dev-server-running.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: serverResult.path) }, timeout: 20),
+                      "The fixture should report its outcome and result with the dev server still running.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20),
+                      "A reported stopping outcome ends the turn without waiting for the dev server.")
+        XCTAssertTrue(waitUntil({ status(serverID) == "Review" }, timeout: 20),
+                      "A reported outcome settles the task even with a shell left running.")
+        XCTAssertTrue(transcriptContains("DEV SERVER RUNNING"))
+        XCTAssertEqual(try nudges().count, 0, "A reported stopping outcome needs no recovery prompt.")
+        attachScreenshot(named: "Completed outcome ends the turn with the dev server still running")
+        element("back-to-board-button").click()
+        assertTaskVisible("Claude dev server", inColumn: "Review")
+
+        // An outcome reported while a background agent runs does not settle the turn.
+        openTask(named: "Claude early report")
+        send("Please report-early-then-continue.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20),
+                      "The fixture should pause after its early outcome and result.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("REPORTED EARLY") }, timeout: 10))
+        XCTAssertTrue(element("pause-response-button").exists,
+                      "A running background agent keeps the turn open even after an outcome report.")
+        XCTAssertEqual(status(earlyID), "In Progress", "The early outcome must not move the task while the agent runs.")
+        attachScreenshot(named: "Turn stays active while the background agent runs after an early outcome")
+        try Data("Finish the background agent.\n".utf8).write(to: release, options: .atomic)
+        XCTAssertTrue(waitUntil({ self.transcriptContains("MORE WORK FOUND") }, timeout: 30),
+                      "The woken parent turn's further work belongs in the conversation.")
+        XCTAssertTrue(waitUntil({ status(earlyID) == "Waiting Response" }, timeout: 60),
+                      "The stale completed report must not reach Review; the recovery prompt's outcome decides.")
+        XCTAssertEqual(try nudges().count, 1, "The woken turn that ended unreported earns exactly one recovery prompt.")
+        XCTAssertTrue(try XCTUnwrap(try nudges().first).contains("This is the only recovery prompt"))
+        _ = try assertAutomaticMessageBubble(taskID: earlyID, containing: "ended without reporting a task outcome")
+        attachScreenshot(named: "Recovery prompt after the woken turn ended without a new outcome")
+        element("back-to-board-button").click()
+        assertTaskVisible("Claude early report", inColumn: "Waiting Response")
+
+        // A silently consumed wake ends in the single recovery prompt, not In Progress forever.
+        openTask(named: "Claude silent wake")
+        send("Park a shell and then consumed wake notification.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: woken.path) }, timeout: 20),
+                      "The fixture should start the woken turn and then stay silent.")
+        XCTAssertTrue(waitUntil({ status(silentID) == "Waiting Response" }, timeout: 90),
+                      "A lost wake ends in the column the recovery prompt's outcome names, not In Progress forever.")
+        XCTAssertEqual(try nudges().count, 2, "The lost wake earns exactly one recovery prompt of its own.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20))
+        element("back-to-board-button").click()
+        assertTaskVisible("Claude silent wake", inColumn: "Waiting Response")
+        assertTaskVisible("Claude dev server", inColumn: "Review")
+        attachScreenshot(named: "Board after the Claude stopping outcomes settle")
     }
     // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
@@ -511,7 +618,7 @@ extension PlayhouseUITests {
         // The answer renders as it streams; the status moves once the turn ends.
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response"), "The answered turn should end in Waiting Response.")
     }
-    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
+    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, waiting-response, and keep-working instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason.
 
     func test_claude_outcome_reminder_rejects_user_questions() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-outcome-reminder-question")
@@ -565,12 +672,12 @@ extension PlayhouseUITests {
         let fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: fixtureTurnsData) as? [String: Any])
         let turns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
         let nudges = turns.filter { ($0["userText"] as? String)?.contains("Playhouse internal outcome nudge:") == true }
-        XCTAssertEqual(nudges.count, 1, "Rejecting the question fails the private turn, so Playhouse stops driving instead of spending every nudge.")
+        XCTAssertEqual(nudges.count, 1, "Rejecting the question fails the private turn, so Playhouse stops driving the task.")
         XCTAssertTrue(nudges.allSatisfy { ($0["userText"] as? String)?.contains("task outcome command") == true })
         let rejectionText = try String(contentsOfFile: executable.path + ".private-reminder-question-rejection", encoding: .utf8)
         let rejections = rejectionText.split(whereSeparator: \.isNewline)
         XCTAssertEqual(rejections.count, 1)
-        XCTAssertTrue(rejections.allSatisfy { $0.contains("completed") && $0.contains("in-progress") && $0.contains("waiting-response") })
+        XCTAssertTrue(rejections.allSatisfy { $0.contains("completed") && $0.contains("waiting-response") && $0.contains("keep working in this turn") })
         XCTAssertFalse(element("conversation-user-input-request").exists, "Nudge questions must not become visible answer cards.")
         XCTAssertFalse(app.staticTexts["Which color should I use?"].exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(

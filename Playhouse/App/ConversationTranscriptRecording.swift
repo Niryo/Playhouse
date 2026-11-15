@@ -455,7 +455,7 @@ extension ConversationManager {
                         threadID: request.threadID,
                         message: isStandaloneChat
                             ? "This is a Playhouse page reminder. Do not ask the user here; run the chat page close-turn command for your previous reply."
-                            : "This is a private Playhouse status nudge. Do not ask the user here; report `waiting-response` if you need an answer, `in-progress` if work remains, or `completed` if the work is finished."
+                            : "This is a private Playhouse status nudge. Do not ask the user here; report `waiting-response` if you need an answer, keep working in this turn if work remains, or report `completed` if the work is finished."
                     )
                     return
                 }

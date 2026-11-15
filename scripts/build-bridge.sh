@@ -146,6 +146,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/CodexTaskInstructions.swift"
   "${repository_root}/Playhouse/App/CodexThreadLifecycle.swift"
   "${repository_root}/Playhouse/App/CodexTurnRecovery.swift"
+  "${repository_root}/Playhouse/App/CodexBackgroundJobs.swift"
   "${repository_root}/Playhouse/App/CodexTurnSending.swift"
   "${repository_root}/Playhouse/App/ConversationCompaction.swift"
   "${repository_root}/Playhouse/App/ConversationHistory.swift"

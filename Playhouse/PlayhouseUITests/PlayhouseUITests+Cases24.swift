@@ -420,7 +420,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("message-composer").waitToExist(timeout: 10))
         XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
     }
-    // case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+    // case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     func test_schedule_one_time_task_fires_when_due() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-once")
         launchApp(defaultParent: fixture.parent.path)
@@ -465,7 +465,37 @@ extension PlayhouseUITests {
         XCTAssertEqual(schedule["kind"] as? String, "once")
         XCTAssertEqual(schedule["prompt"] as? String, "Tell me a story.")
         XCTAssertEqual(claudeFixturePrompts(), [], "Scheduling starts no turn.")
+        XCTAssertEqual(record["title"] as? String, "Scheduled once", "Scheduling keeps a task's own title.")
         attachScreenshot(named: "Board shows the scheduled task with its clock badge")
+
+        // An untitled task scheduled from the composer is named from its prompt, as a first send would.
+        let untitledID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        openTask(named: "Untitled task")
+        replaceComposerText(with: "Summarize the release notes.")
+        _ = openScheduleHint()
+        element("schedule-done-button").click()
+        XCTAssertTrue(waitUntil({ send.label == "Schedule task" }, timeout: 5))
+        send.click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
+        XCTAssertTrue(element("task-schedule-badge-\(untitledID)").waitToExist(timeout: 10))
+        let untitledCard = element("task-card-\(untitledID.uppercased())")
+        // The card button is labeled with its title; its title text truncates the visible value.
+        XCTAssertTrue(waitUntil({ untitledCard.exists && untitledCard.label == "Generated Claude title" }, timeout: 20), "The scheduled task's own card shows its generated title.")
+        let named = try XCTUnwrap(taskRecord(id: untitledID))
+        XCTAssertEqual(named["title"] as? String, "Generated Claude title")
+        XCTAssertEqual((named["schedule"] as? [String: Any])?["prompt"] as? String, "Summarize the release notes.")
+        XCTAssertEqual(named["status"] as? String, "Backlog")
+        XCTAssertEqual(claudeFixturePrompts().filter { !$0.hasPrefix("Write a concise task title") }, [], "Naming the task starts no conversation turn.")
+        let titlePrompts = claudeFixturePrompts().filter { $0.hasPrefix("Write a concise task title") }
+        XCTAssertEqual(titlePrompts.count, 1, "The task is named by exactly one title turn.")
+        XCTAssertTrue(titlePrompts.first?.hasSuffix("Summarize the release notes.") == true, "The title is generated from the scheduled prompt.")
+        XCTAssertFalse(titlePrompts.first?.contains("Fixture task description.") == true, "The title isn't generated from the task's description.")
+        attachScreenshot(named: "Board shows the scheduled task with its generated title")
+        let cardCapture = XCTAttachment(screenshot: untitledCard.screenshot())
+        cardCapture.name = "Scheduled task card with its generated title"; cardCapture.lifetime = .keepAlways; add(cardCapture)
+        _ = try runCLI(["schedule", "clear", untitledID])
 
         assertCLIError(
             try runCLI(["schedule", "set", taskID, "--prompt", "Tell me a story.", "--once", scheduleISO(Date().addingTimeInterval(-300))], expectedStatus: 2),

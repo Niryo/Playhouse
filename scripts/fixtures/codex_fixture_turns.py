@@ -139,6 +139,8 @@ def start_turn(runtime, _session_state, message):
         _session_state.saved_history["turns"] = _session_state.turns
         _session_state.history_path.write_text(runtime.json.dumps(_session_state.saved_history), encoding="utf-8")
     _session_state.preserve_no_outcome = any(marker in _session_state.mode for marker in ("nonblocking-slow", "nonblocking-restart-question", "hold-release", "question-isolation"))
+    if "-background-" in _session_state.mode:
+        return _scenarios.background_command(runtime, _session_state, message)
     if _session_state.is_outcome_reminder and "nudged-work" in _session_state.mode:
         # The nudge says to keep working when work remains, so this turn
         # streams commentary and a shell check, answers, and only then
@@ -193,7 +195,7 @@ def start_turn(runtime, _session_state, message):
         _session_state.outcome_line = next((line.strip() for line in _session_state.instructions.splitlines() if " task outcome " in line), None)
         if _session_state.outcome_line:
             _session_state.completed = runtime.subprocess.run(
-                runtime.shlex.split(_session_state.outcome_line.replace("<completed|in-progress|waiting-response>", "completed")),
+                runtime.shlex.split(_session_state.outcome_line.replace("<completed|waiting-response|blocked>", "completed")),
                 capture_output=True, text=True, timeout=60,
             )
             if _session_state.completed.returncode != 0:
@@ -216,7 +218,7 @@ def start_turn(runtime, _session_state, message):
         _session_state.outcome_line = next((line.strip() for line in _session_state.instructions.splitlines()
                              if line.strip().startswith("'") and " task outcome " in line), None)
         if _session_state.outcome_line:
-            _session_state.outcome_command = _session_state.outcome_line.replace("<completed|in-progress|waiting-response>", "waiting-response")
+            _session_state.outcome_command = _session_state.outcome_line.replace("<completed|waiting-response|blocked>", "waiting-response")
             _session_state.completed = runtime.subprocess.run(runtime.shlex.split(_session_state.outcome_command), capture_output=True, text=True, timeout=60)
             if _session_state.completed.returncode != 0:
                 raise RuntimeError(f"Fixture task outcome command failed: {_session_state.completed.stderr.strip()}")

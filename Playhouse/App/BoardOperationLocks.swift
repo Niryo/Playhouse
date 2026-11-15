@@ -152,6 +152,8 @@ extension BoardTaskManager {
         where FileManager.default.fileExists(atPath: marker.path) {
             try FileManager.default.removeItem(at: marker)
         }
+        // A wait that a daemon restart never took up again must not hand its jobs to this turn.
+        setWaitedBackgroundJobs(id, [])
     }
 
     func activateConversationTurnOutcome(_ id: UUID) throws {
@@ -168,6 +170,31 @@ extension BoardTaskManager {
     func clearConversationTurnOutcome(_ id: UUID) {
         try? FileManager.default.removeItem(at: try conversationTurnOutcomeURL(id))
         try? FileManager.default.removeItem(at: try conversationTurnActiveURL(id))
+    }
+
+    func conversationBackgroundJobsURL(_ id: UUID) throws -> URL {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation's background jobs.")
+        }
+        return conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).background")
+    }
+
+    /// The background jobs Playhouse is waiting on for the task between turns. They are kept
+    /// beside the turn's active marker, which stays in place for the wait, so a daemon that
+    /// restarts mid-wait finds the task as a cut-off turn and takes the wait up again.
+    func waitedBackgroundJobs(_ id: UUID) -> [ProviderBackgroundJob] {
+        guard let url = try? conversationBackgroundJobsURL(id), let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder().decode([ProviderBackgroundJob].self, from: data)) ?? []
+    }
+
+    func setWaitedBackgroundJobs(_ id: UUID, _ jobs: [ProviderBackgroundJob]) {
+        guard let url = try? conversationBackgroundJobsURL(id) else { return }
+        guard !jobs.isEmpty, let data = try? JSONEncoder().encode(jobs) else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
     }
 
     /// Tasks whose turn was running when the daemon running it exited: the turn's active marker

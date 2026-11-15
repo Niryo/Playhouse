@@ -233,7 +233,14 @@ final class PlayhouseBridgeRuntime {
                 result = try Self.value(["tasks": taskManager.scheduledTasks()])
             case "schedule.set":
                 let taskID = try request.requiredUUID("taskID")
-                result = try Self.value(await taskManager.setSchedule(taskID, request.scheduleRequest()))
+                let scheduled = try await taskManager.setSchedule(taskID, request.scheduleRequest())
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try await conversations.nameScheduledTask(taskID) ?? scheduled)
+            case "schedule.name":
+                // The app saves a schedule through its own model context, then names it here.
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                let taskID = try request.requiredUUID("taskID")
+                result = try Self.value(try await conversations.nameScheduledTask(taskID) ?? taskManager.get(taskID))
             case "schedule.clear":
                 result = try Self.value(await taskManager.clearSchedule(request.requiredUUID("taskID")))
             case "schedule.pause", "schedule.resume":
@@ -424,7 +431,7 @@ final class PlayhouseBridgeRuntime {
                 let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))
                 result = .object(["requiresConfirmation": .boolean(requiresConfirmation)])
             case "settings.get", "settings.set-auto-compaction", "settings.set-token-usage-color-max",
-                 "settings.set-cpu-usage-color-max", "settings.set-default-provider", "settings.set-appearance",
+                 "settings.set-cpu-usage-color-max", "settings.set-status-sounds", "settings.set-default-provider", "settings.set-appearance",
                  "settings.set-parent", "settings.clear-parent", "settings.set-last-repositories":
                 result = try settingsOperation(request, manager: settings)
             case "usage.get":

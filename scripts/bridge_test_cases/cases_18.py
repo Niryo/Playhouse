@@ -85,6 +85,34 @@ class BridgeTestCases18:
             self.assert_success(self.call_cli("settings", "get")[0])["cpuUsageColorMax"], 250,
             "A rejected maximum should leave the stored one alone.",
         )
+    # case-contract: test_settings_status_sounds_toggle_mutes_task_sounds | Task status sounds are on by default and turn off and back on through the CLI/XPC settings commands, persisting across a fresh read; an unknown value is rejected as invalid_argument without changing the stored setting. With sounds off, a task that waits for a response and then settles in Review after its turn plays no sound and records the Ping and Glass it would have played as muted; once sounds are back on, the next such task plays Ping then Glass. In the visible UI, the Workspace Settings Sounds toggle shows the stored setting and turning it off or on changes the setting the bridge reads.
+    def test_settings_status_sounds_toggle_mutes_task_sounds(self):
+        def sounds(task_id, event):
+            return [e["sound"] for e in self.diagnostic_events() if e.get("event") == event and e.get("taskID") == task_id]
+
+        def stored():
+            return self.assert_success(self.call_cli("settings", "get")[0])["statusSounds"]
+
+        self.assertIs(stored(), True, "Status sounds are on by default.")
+        self.assertIs(self.assert_success(self.call_cli("settings", "set-status-sounds", "off")[0])["statusSounds"], False)
+        self.assertIs(stored(), False, "Turning sounds off should survive a fresh read.")
+        response, _ = self.call_cli("settings", "set-status-sounds", "maybe", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertIs(stored(), False, "A rejected value should leave the stored setting alone.")
+
+        muted_id = self.create_task("Muted status sound")["id"]
+        self.complete_fixture_turn(muted_id, message="Ask me before finishing.", outcome="waiting-response", expected_status="Waiting Response")
+        self.complete_fixture_turn(muted_id)
+        self.assertEqual(sounds(muted_id, "task.status_sound.played"), [], "A muted task waiting for a response and reaching Review plays no sound.")
+        self.assertEqual(sounds(muted_id, "task.status_sound.muted"), ["Ping", "Glass"])
+
+        self.assertIs(self.assert_success(self.call_cli("settings", "set-status-sounds", "on")[0])["statusSounds"], True)
+        self.assertIs(stored(), True)
+        audible_id = self.create_task("Audible status sound")["id"]
+        self.complete_fixture_turn(audible_id, message="Ask me before finishing.", outcome="waiting-response", expected_status="Waiting Response")
+        self.complete_fixture_turn(audible_id, message="Complete this task again.")
+        self.assertEqual(sounds(audible_id, "task.status_sound.played"), ["Ping", "Glass"], "Turning sounds back on restores them.")
+        self.assertEqual(sounds(audible_id, "task.status_sound.muted"), [])
     # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, is a full page that slides in from the side over the task and fills the window, and its back button returns to the conversation. It lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     def test_skills_catalog_lists_repo_global_and_builtin_skills(self):
         manifest = self.skill_manifest

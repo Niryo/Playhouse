@@ -343,7 +343,7 @@ class BridgeTestCases09:
         self.assert_failure(done_switch, "invalid_argument")
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
-    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history shows the nudge prompts and their replies. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records the single private recovery prompt for each unreported turn; fresh history shows the nudge prompts and their replies. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     def test_claude_answer_stays_final_around_outcome_report(self):
         story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         story_answer = story + "\n\nThe story is above."
@@ -394,10 +394,10 @@ class BridgeTestCases09:
             ("final_answer", story_answer),
             ("commentary", "I'll inspect the workspace first."),
             ("final_answer", "Inspection done: the workspace is ready."),
-            *[("final_answer", "OK.")] * MAX_OUTCOME_CONTINUATIONS,
+            *[("final_answer", "OK.")] * OUTCOME_RECOVERY_PROMPTS,
             ("commentary", "Starting the checks."),
             ("commentary", "Checks are running; results will follow."),
-            *[("final_answer", "OK.")] * MAX_OUTCOME_CONTINUATIONS,
+            *[("final_answer", "OK.")] * OUTCOME_RECOVERY_PROMPTS,
         ], "A fresh history read keeps the story as one final answer and the pre-tool text as commentary.")
         self.assertTrue(any(message["role"] == "user" and "Playhouse internal outcome nudge:" in message["text"] for message in history["messages"]),
                         "Nudges Playhouse sent are shown in history.")

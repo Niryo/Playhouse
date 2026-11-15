@@ -65,6 +65,88 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
+    // case-contract: test_codex_background_wait_survives_daemon_restart | A daemon killed while a task waits for a command its Codex turn left running does not strand the task: the next daemon finds the persisted wait, reconnects to the same app-server, keeps the task In Progress with no new prompt, and resumes reconciling the provider's background terminals. A command that ends after the restart has its real exit status and output delivered once, and the agent's rerun is waited for again. A command that ended while no daemon was connected is reported to the agent as having no result Playhouse saw, never as successful, and the agent's blocked outcome settles the task in Blocked with its reason. The user's message appears once in history across both restarts.
+    func test_codex_background_wait_survives_daemon_restart() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-background-retry-daemon").path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable), "The background fixture should be installed.")
+        codexFixtureExecutable = executable
+        clearReattachMarkers(executable)
+        func backgroundState() -> [String: Any] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable + ".background-state")),
+                  let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return state
+        }
+        func running() -> Int { (backgroundState()["running"] as? [String: Any])?.count ?? 0 }
+        func count(_ key: String) -> Int { backgroundState()[key] as? Int ?? 0 }
+        func releaseCommand(_ result: [String: Any]) throws {
+            try JSONSerialization.data(withJSONObject: result).write(to: URL(fileURLWithPath: executable + ".background-release"), options: .atomic)
+        }
+        func fixtureTurns() throws -> [String] {
+            let history = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable + ".history"))) as? [String: Any]
+            )
+            return try XCTUnwrap(history["turns"] as? [[String: Any]]).map { $0["userMessage"] as? String ?? "" }
+        }
+        let environment = restartServiceEnvironment(["PLAYHOUSE_E2E_CODEX_BACKGROUND_RECONCILE_SECONDS": "0.2"])
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Waits across a restart", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        openTask(named: "Waits across a restart")
+        sendFromComposer("Run the required UI test.")
+        XCTAssertTrue(waitUntil({ running() == 1 && count("listCalls") >= 2 }, timeout: 30), "The command should be waited for before the daemon dies.")
+        let server = try XCTUnwrap(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? [String: Any])
+
+        try killDaemon(environment: environment)
+        let callsBeforeRestart = count("listCalls")
+        // The window reconnects; the fresh daemon picks the wait up.
+        XCTAssertTrue(waitUntil({ running() == 1 && count("listCalls") >= callsBeforeRestart + 3 }, timeout: 40),
+                      "The fresh daemon should resume reconciling the running command.")
+        XCTAssertEqual(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? NSDictionary, server as NSDictionary,
+                       "The fresh daemon reconnects to the same app-server.")
+        XCTAssertTrue(waitForStatus(taskID, "In Progress", environment: environment), "A wait cut off by a restart keeps the task In Progress.")
+        XCTAssertEqual(try fixtureTurns().count, 1, "Resuming the wait sends the model no prompt.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A resumed wait is not a failed turn.")
+        assertTaskVisible("Waits across a restart", inColumn: "In Progress")
+        attachScreenshot(named: "Task stays In Progress after the daemon restarts mid-wait")
+
+        try releaseCommand(["exitCode": 1, "output": "XCTAssertEqual failed: fixture regression\n"])
+        XCTAssertTrue(waitUntil({ count("started") == 2 && running() == 1 }, timeout: 30),
+                      "The agent should rerun the command after reading the failure delivered after the restart.")
+        var turns = try fixtureTurns()
+        XCTAssertEqual(turns.count, 2, "The result is delivered in exactly one private turn.")
+        XCTAssertTrue(turns[1].contains("failed, exit code 1"))
+        XCTAssertTrue(turns[1].contains("XCTAssertEqual failed: fixture regression"))
+        let rerunCalls = count("listCalls")
+        XCTAssertTrue(waitUntil({ count("listCalls") >= rerunCalls + 3 }, timeout: 30), "The rerun should be waited for before the second restart.")
+        XCTAssertTrue(waitForStatus(taskID, "In Progress", environment: environment), "A rerun that is running keeps the task In Progress.")
+        openTask(named: "Waits across a restart")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("failed, exit code 1") }, timeout: 15), "The result delivered after the restart must appear in the visible transcript.")
+        attachScreenshot(named: "Failure delivered after the restart and rerun in progress")
+
+        // The rerun ends with no daemon connected: its completion event reaches nobody.
+        try killDaemon(environment: environment)
+        try releaseCommand(["vanish": true])
+        XCTAssertTrue(waitForStatus(taskID, "Blocked", environment: environment, timeout: 60), "The agent's outcome for the lost result should settle the task.")
+        let settled = try XCTUnwrap(try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        XCTAssertTrue((settled["statusMessage"] as? String)?.contains("without a result") == true)
+        turns = try fixtureTurns()
+        XCTAssertEqual(turns.count, 3, "The lost result is reported in exactly one more private turn.")
+        XCTAssertTrue(turns[2].contains("Playhouse did not see its result"))
+        XCTAssertFalse(turns[2].contains("exit code 0"), "A command that ended unseen is not assumed to have passed.")
+        XCTAssertFalse(turns[2].contains("XCTAssertEqual failed"), "A delivered result is not delivered again.")
+        XCTAssertEqual((backgroundState()["terminated"] as? [String]) ?? [], [])
+        XCTAssertEqual(try historyTexts(taskID: taskID, environment: environment).filter { $0 == "Run the required UI test." }.count, 1,
+                       "The user's message appears once across both restarts.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("Playhouse did not see its result") }, timeout: 15), "The lost result's report must appear in the visible transcript.")
+        attachScreenshot(named: "Lost result reported after the second restart")
+        assertTaskVisible("Waits across a restart", inColumn: "Blocked")
+        let cardMessage = element("task-status-message-\(taskID)")
+        XCTAssertTrue(cardMessage.waitToExist(timeout: 10), "The Blocked card should show the agent's reason.")
+        XCTAssertTrue(accessibleLabelOrValue(of: cardMessage).contains("without a result"))
+        attachScreenshot(named: "Blocked card after the result was lost in a restart")
+    }
     // case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it.
     func test_codex_turn_reattaches_after_daemon_restart() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-reattach").path

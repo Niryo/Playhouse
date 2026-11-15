@@ -138,12 +138,14 @@ extension PlayhouseCLI {
                     throw CLIError.usage("Unknown task progress operation '\(action)'.")
                 }
             case "outcome":
-                guard tail.count == 2 else {
-                    throw CLIError.usage("Use: playhouse task outcome <task-id> <completed|in-progress|waiting-response>")
-                }
-                return BridgeRequest(command: "task.outcome", arguments: [
+                let usage = "Use: playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>] (blocked requires --reason)"
+                guard tail.count == 2 || tail.count == 4 else { throw CLIError.usage(usage) }
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--reason"])
+                var requestArguments: [String: BridgeValue] = [
                     "taskID": .string(tail[0]), "outcome": .string(tail[1])
-                ])
+                ]
+                if let reason = flags["--reason"]?.first { requestArguments["reason"] = .string(reason) }
+                return BridgeRequest(command: "task.outcome", arguments: requestArguments)
             case "reconcile":
                 guard tail.count == 1 else { throw CLIError.usage("Use: playhouse task reconcile <task-id>") }
                 return BridgeRequest(command: "task.reconcile", arguments: ["taskID": .string(tail[0])])
@@ -727,6 +729,11 @@ extension PlayhouseCLI {
                     throw CLIError.usage("Use: playhouse settings set-cpu-usage-color-max <percent>")
                 }
                 return BridgeRequest(command: "settings.set-cpu-usage-color-max", arguments: ["max": .integer(max)])
+            case "set-status-sounds":
+                guard rest.count == 2, rest[1] == "on" || rest[1] == "off" else {
+                    throw CLIError.usage("Use: playhouse settings set-status-sounds <on|off>")
+                }
+                return BridgeRequest(command: "settings.set-status-sounds", arguments: ["enabled": .boolean(rest[1] == "on")])
             case "set-auto-compaction":
                 let usage = "Use: playhouse settings set-auto-compaction [--enabled <true|false>] [--threshold <tokens>] [--idle-minutes <minutes>] [--minimum <tokens>]"
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--enabled", "--threshold", "--idle-minutes", "--minimum"])

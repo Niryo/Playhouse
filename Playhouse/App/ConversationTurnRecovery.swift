@@ -117,6 +117,18 @@ extension ConversationManager {
         Self.bumpVisibleRevision(taskID)
     }
 
+    /// Shows the provider client the stopping outcome staged for the turn it is about to run.
+    /// The client drops the probe when that turn ends.
+    func installStoppingOutcomeProbe(taskID: UUID, client: ConversationProviderClient, threadID: String) {
+        let tasks = self.tasks
+        // A chat's close-turn files its page decision, which later execution does not undo.
+        let isStandaloneChat = (try? tasks.standaloneChatModel(taskID)) != nil
+        client.setStoppingOutcomeProbe(ProviderStoppingOutcomeProbe(
+            isStaged: { tasks.hasStagedTurnOutcome(taskID) },
+            withdraw: { if !isStandaloneChat { tasks.withdrawStagedTurnOutcome(taskID) } }
+        ), threadID: threadID)
+    }
+
     /// Follows one cut-off turn in the background, holding its turn reservation as a send would,
     /// and returns once the turn is this daemon's own (true) or turned out to have no agent (false).
     func reattachTurn(taskID: UUID, client: ConversationProviderClient, threadID: String) async -> Bool {
@@ -167,6 +179,7 @@ extension ConversationManager {
     ) async throws -> Bool {
         try tasks.activateConversationTurnOutcome(taskID)
         defer { tasks.clearConversationTurnOutcome(taskID) }
+        installStoppingOutcomeProbe(taskID: taskID, client: client, threadID: threadID)
         let transcript = try transcripts.readState(taskID)
         let segment = transcript.segments.last.map { (segmentID: $0.id, handoff: String?.none) }
         // Claude records its turn locally; the reattached run carries on in the turn it started,
@@ -268,9 +281,26 @@ extension ConversationManager {
         return true
     }
 
-    /// A turn that ends unsettled is driven forward privately: `in-progress` asks for a
-    /// continuation, and a turn that reported nothing is nudged to say where it stands. Shared by
-    /// a sent turn and a turn this daemon reattached after a restart.
+    /// How long Playhouse waits, outside the model, for the commands an unsettled turn left
+    /// running before it asks the agent what the work needs. The wait is not evidence of
+    /// inactivity, so the ceiling is generous; it only bounds a command that never ends.
+    static var backgroundJobWaitCeiling: TimeInterval {
+        if let value = PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_BACKGROUND_JOB_WAIT_SECONDS"].flatMap(TimeInterval.init), value > 0 {
+            return value
+        }
+        return 2 * 60 * 60
+    }
+
+    static let missingOutcomeBlockedReason = "The agent stopped without reporting a stopping outcome, and one recovery prompt went unanswered too. Nothing is running for this task. Send a message to pick the work up again."
+    static let recoveryTurnFailedBlockedReason = "Playhouse couldn't run the private turn that would continue this work. Send a message to pick the work up again."
+
+    /// A turn that ends with no stopping outcome is settled from what the provider is
+    /// actually doing, never from a count of prompts. While commands the turn left running
+    /// are still running the task stays In Progress and Playhouse waits for them outside the
+    /// model, then hands their real results to the agent in one private turn. With nothing
+    /// running, the agent gets one recovery prompt; a turn that is still unsettled after it
+    /// leaves the task Blocked with the reason. Shared by a sent turn and a turn this daemon
+    /// reattached after a restart. A standalone chat only gets its one close-turn reminder.
     func driveUnsettledTurns(
         taskID: UUID,
         isStandaloneChat: Bool,
@@ -280,37 +310,88 @@ extension ConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void
     ) async throws {
-        // A turn that ends unsettled is driven forward privately rather
-        // than dropped on the board: `in-progress` asks for a
-        // continuation outright, and a turn that reported nothing is
-        // nudged to say where it stands.
-        var continuations = 0
+        var recoveryUsed = false
         var stoppedForUser = false
-        var continuationFailed = false
-        // A standalone chat settles a turn with its close-turn page signal. It gets one
-        // visible reminder to send that signal; a chat has nothing to continue, and a page
-        // decision still missing after the reminder falls to the background classifier.
-        let maxAttempts = isStandaloneChat ? 1 : TurnOutcome.maxContinuations
-        while continuations < maxAttempts {
+        var privateTurnFailed = false
+        defer { tasks.setWaitedBackgroundJobs(taskID, []) }
+        while true {
             // A question the model raised settles the turn on the
             // user; nudging past it would talk over them.
             guard (try? self.transcripts.readState(taskID).pendingUserInputRequest) == nil else { break }
-            // The user taking over ends Playhouse's private driving.
-            // A continuation tells the model to resume working, so
-            // without this it could undo a Stop or run ahead of a
-            // queued follow-up up to the continuation limit.
+            let threadID = try? self.tasks.conversationSubject(taskID).activeConversationID
+            // The user taking over ends Playhouse's private driving: a private turn tells
+            // the model to resume working, so without this it could undo a Stop or run
+            // ahead of a queued follow-up.
             if self.userTookOverConversation(taskID: taskID, client: operationClient) {
                 stoppedForUser = true
+                // A Stop ended the commands; a queued follow-up's own turn settles them.
+                if let threadID, operationClient.wasLastTurnInterrupted(threadID: threadID) {
+                    operationClient.forgetBackgroundJobs(threadID: threadID)
+                }
                 break
             }
-            let reported = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
-            guard reported == nil || (reported == .inProgress && !isStandaloneChat) else { break }
-            continuations += 1
-            let prompt = isStandaloneChat
-                ? Self.chatPageCloseTurnNudgePrompt(chatID: taskID)
-                : reported == .inProgress
-                    ? Self.outcomeContinuationPrompt(attempt: continuations)
-                    : Self.outcomeNudgePrompt(attempt: continuations)
+            // A stopping outcome is the agent's word that it is done with whatever it left
+            // running (a dev server, say), so nothing is waited for after it.
+            guard self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:)) == nil else {
+                if let threadID { operationClient.forgetBackgroundJobs(threadID: threadID) }
+                break
+            }
+            let prompt: String
+            if isStandaloneChat {
+                guard !recoveryUsed else { break }
+                recoveryUsed = true
+                prompt = Self.chatPageCloseTurnNudgePrompt(chatID: taskID)
+            } else {
+                var work = ProviderBackgroundWork()
+                if let threadID {
+                    work = await operationClient.takeBackgroundWork(threadID: threadID, known: tasks.waitedBackgroundJobs(taskID))
+                }
+                if work.isEmpty {
+                    guard !recoveryUsed else { break }
+                    recoveryUsed = true
+                    prompt = Self.outcomeRecoveryPrompt()
+                } else if let threadID {
+                    var results = work.finished
+                    var stillRunning: [ProviderBackgroundJob] = []
+                    var note: String?
+                    if !work.running.isEmpty {
+                        let end = await self.waitForBackgroundJobs(
+                            taskID: taskID, threadID: threadID, jobs: work.running, client: operationClient
+                        )
+                        // The user took over (the next pass sees how): a Stop ended the jobs,
+                        // and a queued follow-up's turn runs first, with the jobs still tracked.
+                        if end == .stopped { continue }
+                        let after = await operationClient.takeBackgroundWork(threadID: threadID, known: work.running)
+                        results += after.finished
+                        switch end {
+                        case .stopped:
+                            break
+                        case .finished:
+                            stillRunning = after.running
+                        case .timedOut:
+                            stillRunning = after.running
+                            note = "They ran longer than Playhouse waits for a command."
+                        case .providerLost(let reason):
+                            stillRunning = after.running
+                            note = "Playhouse lost its connection to the provider while waiting (\(reason)), so some results may be missing."
+                        }
+                        if !stillRunning.isEmpty || note != nil {
+                            // This prompt is the one recovery prompt: a command Playhouse gave
+                            // up waiting for is not waited for again.
+                            recoveryUsed = true
+                            operationClient.forgetBackgroundJobs(threadID: threadID)
+                        }
+                    }
+                    PlayhouseDiagnostics.record("conversation.background_jobs.delivering", fields: [
+                        "taskID": taskID.uuidString,
+                        "resultCount": String(results.count),
+                        "stillRunningCount": String(stillRunning.count),
+                    ])
+                    prompt = Self.backgroundWorkResultsPrompt(results, stillRunning: stillRunning, note: note)
+                } else {
+                    break
+                }
+            }
             do {
                 _ = try await self.sendReserved(
                     taskID: taskID,
@@ -337,31 +418,63 @@ extension ConversationManager {
                 if self.userTookOverConversation(taskID: taskID, client: operationClient) {
                     stoppedForUser = true
                 } else {
-                    continuationFailed = true
+                    privateTurnFailed = true
                 }
                 break
             }
         }
         let settled = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
         let waitingOnUser = (try? self.transcripts.readState(taskID).pendingUserInputRequest) != nil
-        if !isStandaloneChat, !stoppedForUser, !waitingOnUser, settled == nil || settled == .inProgress {
+        if !isStandaloneChat, !stoppedForUser, !waitingOnUser, settled == nil {
             // The work is unsettled and the user was never asked
             // anything, so Waiting Response would misreport this.
             // Blocked says Playhouse stopped driving, and the reason
             // says why.
-            let reason: String
-            if continuationFailed {
-                reason = "Playhouse couldn't run the private turn that would continue this work. Send a message to pick the work up again."
-            } else if settled == .inProgress {
-                reason = "Still working after \(TurnOutcome.maxContinuations) continuation turns. Send a message to pick the work up again."
-            } else {
-                reason = "The turn ended without reporting an outcome, and \(TurnOutcome.maxContinuations) status nudges went unanswered. Send a message to pick the work up again."
-            }
-            _ = try await self.tasks.setLifecycleStatus(taskID, to: .blocked, message: reason)
+            _ = try await self.tasks.setLifecycleStatus(
+                taskID, to: .blocked,
+                message: privateTurnFailed ? Self.recoveryTurnFailedBlockedReason : Self.missingOutcomeBlockedReason
+            )
         }
     }
 
-    /// Whether the user has taken this conversation back from Playhouse's /// continuation loop, either by stopping the turn or by queueing a follow-up.
+    /// Holds the task In Progress while the provider runs `jobs` with no turn active. The
+    /// turn's active marker and the job list stay on disk for the wait, so a daemon that
+    /// restarts meanwhile finds the task as a cut-off turn and resumes waiting.
+    func waitForBackgroundJobs(
+        taskID: UUID,
+        threadID: String,
+        jobs: [ProviderBackgroundJob],
+        client: ConversationProviderClient
+    ) async -> ProviderBackgroundWaitEnd {
+        tasks.setWaitedBackgroundJobs(taskID, jobs)
+        try? tasks.activateConversationTurnOutcome(taskID)
+        defer {
+            tasks.clearConversationTurnOutcome(taskID)
+            tasks.setWaitedBackgroundJobs(taskID, [])
+            Self.bumpVisibleRevision(taskID)
+        }
+        PlayhouseDiagnostics.record("conversation.background_jobs.waiting", fields: [
+            "taskID": taskID.uuidString,
+            "threadID": threadID,
+            "jobCount": String(jobs.count),
+        ])
+        Self.bumpVisibleRevision(taskID)
+        let end = await client.waitForBackgroundJobs(
+            threadID: threadID, timeout: Self.backgroundJobWaitCeiling,
+            shouldStop: { [weak self] in
+                guard let self else { return true }
+                return ((try? self.tasks.queuedConversationMessages(taskID: taskID)) ?? []).contains { $0.state == .queued }
+            }
+        )
+        PlayhouseDiagnostics.record("conversation.background_jobs.wait_ended", fields: [
+            "taskID": taskID.uuidString,
+            "threadID": threadID,
+            "end": String(describing: end),
+        ])
+        return end
+    }
+
+    /// Whether the user has taken this conversation back from Playhouse's private driving, either by stopping the turn or by queueing a follow-up.
     /// Only messages still waiting to be sent count: a `needsAction` row the user
     /// has to retry themselves must not suppress the loop forever.
     func userTookOverConversation(taskID: UUID, client: ConversationProviderClient) -> Bool {

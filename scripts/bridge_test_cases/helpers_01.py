@@ -431,7 +431,7 @@ class BridgeTestHelpers01:
             self.complete_fixture_turn(task["id"])
             task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         return task
-    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review", extra_environment=None, while_turn_held=None):
+    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review", extra_environment=None, while_turn_held=None, outcome="completed"):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / executable_name
         hold_marker = Path(str(executable) + ".hold-release")
@@ -464,9 +464,9 @@ class BridgeTestHelpers01:
                         held, while_turn_held = while_turn_held, None
                         held()
                     response, _ = self.call_cli(
-                        "task", "outcome", task_id, "completed", extra_environment=environment,
+                        "task", "outcome", task_id, outcome, extra_environment=environment,
                     )
-                    self.assertEqual(self.assert_success(response)["outcome"], "completed")
+                    self.assertEqual(self.assert_success(response)["outcome"], outcome)
                     outcome_count += 1
                     release.write_text("Release the completed fixture turn.\n", encoding="utf-8")
                 time.sleep(0.02)

@@ -17,27 +17,52 @@ enum PrivateOutcomeNudgeMarker {
     }
 }
 
-/// The outcome a provider reports for its own turn. Playhouse owns the mapping
-/// from an outcome to the board status, so both providers reach the same
-/// lifecycle through the same shared CLI vocabulary.
+/// The stopping outcome a provider reports when its turn is about to end. Playhouse owns
+/// the mapping from an outcome to the board status, so both providers reach the same
+/// lifecycle through the same shared CLI vocabulary. There is no outcome for "still
+/// working": a task stays In Progress for as long as its provider is executing, which
+/// Playhouse reads from the provider's runtime events, never from a report.
 enum TurnOutcome: String, CaseIterable {
     /// All requested work is finished; nothing is waiting on the user. A standalone chat's
     /// close-turn writes this too, only as its turn's settlement marker: a chat's outcome never
     /// decides a status (`settleFinishedTurn`).
     case completed
-    /// The turn ended but work remains and no user decision is needed.
-    /// Playhouse keeps the task In Progress and sends a continuation turn.
-    case inProgress = "in-progress"
     /// Work cannot continue until the user answers or decides.
     case waitingResponse = "waiting-response"
+    /// Work cannot continue and no answer from the user would unblock it; the report
+    /// carries the concrete reason.
+    case blocked
 
     static var commandChoices: String {
         allCases.map(\.rawValue).joined(separator: "|")
     }
 
-    /// How many private continuation turns Playhouse sends for one user request
-    /// before it stops driving the work and marks the task Blocked.
-    static let maxContinuations = 5
+    /// The outcome older instructions used for "the turn is ending but work remains". It is
+    /// still accepted from threads started under those instructions, but it is not a stopping
+    /// outcome: it only withdraws an outcome staged earlier in the turn.
+    static let legacyInProgress = "in-progress"
+
+    static let legacyInProgressGuidance = "in-progress is no longer a turn outcome and was not recorded. "
+        + "Keep working in this turn until the work is completed, needs the user (waiting-response), "
+        + "or is blocked (blocked --reason \"<why>\"); await required commands instead of ending the turn."
+
+    /// How long a blocked reason may be; it is shown on the task card.
+    static let maxBlockedReasonLength = 500
+
+    /// What a turn's outcome store holds: the outcome on the first line, a blocked
+    /// outcome's reason after it.
+    static func storedReport(_ outcome: TurnOutcome, reason: String?) -> String {
+        guard let reason, !reason.isEmpty else { return outcome.rawValue }
+        return outcome.rawValue + "\n" + reason
+    }
+
+    static func parseStoredReport(_ stored: String?) -> (outcome: TurnOutcome, reason: String?)? {
+        guard let stored else { return nil }
+        let parts = stored.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let first = parts.first, let outcome = TurnOutcome(rawValue: String(first)) else { return nil }
+        let reason = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        return (outcome, reason.isEmpty ? nil : reason)
+    }
 }
 
 enum CodexGoalGenerationStore {

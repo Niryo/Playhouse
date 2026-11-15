@@ -30,7 +30,7 @@ def run_cpu_attribution_server(runtime):
         instructions = threads[thread_id].get("instructions") or ""
         line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
         if line:
-            runtime.subprocess.run(runtime.shlex.split(line.replace("<completed|in-progress|waiting-response>", "completed")),
+            runtime.subprocess.run(runtime.shlex.split(line.replace("<completed|waiting-response|blocked>", "completed")),
                            capture_output=True, text=True, timeout=60)
 
     def handle(message):
@@ -182,7 +182,7 @@ def run_reattach_server(runtime):
         line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
         if not line:
             return None
-        return runtime.subprocess.Popen(runtime.shlex.split(line.replace("<completed|in-progress|waiting-response>", "waiting-response")),
+        return runtime.subprocess.Popen(runtime.shlex.split(line.replace("<completed|waiting-response|blocked>", "waiting-response")),
                                 stdout=runtime.subprocess.DEVNULL, stderr=runtime.subprocess.DEVNULL)
 
     def complete(thread_id, status="completed"):
