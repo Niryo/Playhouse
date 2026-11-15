@@ -431,7 +431,7 @@ final class PlayhouseBridgeRuntime {
                 let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))
                 result = .object(["requiresConfirmation": .boolean(requiresConfirmation)])
             case "settings.get", "settings.set-auto-compaction", "settings.set-token-usage-color-max",
-                 "settings.set-cpu-usage-color-max", "settings.set-default-provider", "settings.set-appearance",
+                 "settings.set-cpu-usage-color-max", "settings.set-status-sounds", "settings.set-default-provider", "settings.set-appearance",
                  "settings.set-parent", "settings.clear-parent", "settings.set-last-repositories":
                 result = try settingsOperation(request, manager: settings)
             case "usage.get":

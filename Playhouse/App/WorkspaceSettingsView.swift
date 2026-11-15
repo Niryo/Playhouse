@@ -9,6 +9,7 @@ struct WorkspaceSettingsView: View {
     @State private var appearance = WorkspaceSettings.preferencesStore.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
     @State private var tokenUsageColorMax = WorkspaceSettingsManager().tokenUsageColorMax
     @State private var cpuUsageColorMax = WorkspaceSettingsManager().cpuUsageColorMax
+    @State private var statusSoundsEnabled = WorkspaceSettingsManager().statusSoundsEnabled
     @State private var autoCompaction = WorkspaceSettingsManager().contextCompaction
     @FocusState private var focusedCompactionField: String?
     @State private var compactionFieldDrafts: [String: String] = [:]
@@ -41,6 +42,19 @@ struct WorkspaceSettingsView: View {
                 .accessibilityValue(appearance)
                 // The Form's first row carries its scroller reveal.
                 .hoverRevealScrollers()
+            }
+            Section("Sounds") {
+                Toggle("Play a sound when a task needs attention", isOn: Binding(
+                    get: { statusSoundsEnabled },
+                    set: { value in
+                        WorkspaceSettingsManager().setStatusSoundsEnabled(value)
+                        statusSoundsEnabled = value
+                    }
+                ))
+                .accessibilityIdentifier("status-sounds-toggle")
+                Text("Plays Glass when a task moves to Review and Ping when it moves to Waiting Response.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("Token usage") {
                 Text("A task card's dot warms from green to red as the task's token use approaches this total.")
@@ -162,6 +176,8 @@ struct WorkspaceSettingsView: View {
                 if updatedMax != tokenUsageColorMax { tokenUsageColorMax = updatedMax }
                 let updatedCPUMax = WorkspaceSettingsManager().cpuUsageColorMax
                 if updatedCPUMax != cpuUsageColorMax { cpuUsageColorMax = updatedCPUMax }
+                let updatedSounds = WorkspaceSettingsManager().statusSoundsEnabled
+                if updatedSounds != statusSoundsEnabled { statusSoundsEnabled = updatedSounds }
                 if focusedCompactionField == nil {
                     let updatedCompaction = WorkspaceSettingsManager().contextCompaction
                     if updatedCompaction != autoCompaction { autoCompaction = updatedCompaction }

@@ -13,6 +13,7 @@ extension PlayhouseBridgeRuntime {
                 "defaultProvider": .string(manager.defaultConversationProvider.rawValue),
                 "tokenUsageColorMax": .integer(manager.tokenUsageColorMax),
                 "cpuUsageColorMax": .integer(manager.cpuUsageColorMax),
+                "statusSounds": .boolean(manager.statusSoundsEnabled),
                 "autoCompaction": Self.autoCompactionValue(manager.contextCompaction)
             ])
         case "settings.set-auto-compaction":
@@ -32,6 +33,12 @@ extension PlayhouseBridgeRuntime {
         case "settings.set-cpu-usage-color-max":
             try manager.setCPUUsageColorMax(request.requiredInt("max"))
             return .object(["cpuUsageColorMax": .integer(manager.cpuUsageColorMax)])
+        case "settings.set-status-sounds":
+            guard let enabled = request.arguments["enabled"]?.bool else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Give enabled as true or false.")
+            }
+            manager.setStatusSoundsEnabled(enabled)
+            return .object(["statusSounds": .boolean(manager.statusSoundsEnabled)])
         case "settings.set-default-provider":
             try manager.setDefaultConversationProvider(request.requiredString("provider"))
             return .object(["defaultProvider": .string(manager.defaultConversationProvider.rawValue)])

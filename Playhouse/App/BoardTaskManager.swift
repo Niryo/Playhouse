@@ -224,6 +224,12 @@ final class BoardTaskManager {
         case .waitingResponse: name = "Ping"
         default: return
         }
+        guard WorkspaceSettings.statusSoundsEnabled(in: preferences) else {
+            PlayhouseDiagnostics.record("task.status_sound.muted", fields: [
+                "taskID": task.id.uuidString, "status": task.status.rawValue, "sound": name
+            ])
+            return
+        }
         let sound = NSSound(contentsOfFile: "/System/Library/Sounds/\(name).aiff", byReference: true)
         let played = sound?.play() == true
         PlayhouseDiagnostics.record(played ? "task.status_sound.played" : "task.status_sound.failed", fields: [
