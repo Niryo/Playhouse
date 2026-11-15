@@ -276,12 +276,16 @@ struct TaskConversationView: View {
         !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
     }
 
-    /// A board task that hasn't started its conversation can be scheduled, or rescheduled.
+    /// A new task can use either schedule; an existing conversation can schedule a one-time message.
     var canSchedule: Bool {
-        guard let boardTask = task as? BoardTask, !isReadOnly else { return false }
-        return boardTask.activeConversationID == nil && boardTask.pendingSubmittedPrompt == nil
-            && messages.isEmpty && !isResponding && !isEnteringGoal
-            && (boardTask.status == .backlog || boardTask.status == .blocked)
+        guard let boardTask = task as? BoardTask, !isReadOnly, !boardTask.isRecurringScheduleTemplate else { return false }
+        return true
+    }
+
+    var isExistingConversation: Bool {
+        guard let boardTask = task as? BoardTask else { return false }
+        return boardTask.activeConversationID != nil || boardTask.pendingSubmittedPrompt != nil
+            || !(boardTask.status == .backlog || boardTask.status == .blocked)
     }
 
     var isScheduleSendDisabled: Bool {
