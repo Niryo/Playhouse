@@ -77,6 +77,8 @@ struct AtomCommonModifier: ViewModifier {
     var group = false
     /// Makes the atom one accessibility element whose label joins its children's.
     var combine = false
+    /// Makes the atom one accessibility element that reads only as its label.
+    var summary = false
 
     /// False when the atom already applied its frame (a Button, inside its label).
     var frame = true
@@ -86,7 +88,7 @@ struct AtomCommonModifier: ViewModifier {
             .modifier(Applied(when: frame) { $0.atomFrame(common) })
             .modifier(OptionalHelp(text: common.help))
             .allowsHitTesting(common.passThrough != true)
-            .modifier(AtomAccessibility(common: common, group: group, combine: combine))
+            .modifier(AtomAccessibility(common: common, group: group, combine: combine, summary: summary))
             .atomHighlight(atom)
     }
 }
@@ -105,11 +107,13 @@ struct AtomAccessibility: ViewModifier {
     let common: AtomCommon
     let group: Bool
     let combine: Bool
+    var summary = false
 
     func body(content: Content) -> some View {
         content
-            .modifier(Applied(when: group && !combine) { $0.accessibilityElement(children: .contain) })
-            .modifier(Applied(when: combine) { $0.accessibilityElement(children: .combine) })
+            .modifier(Applied(when: group && !combine && !summary) { $0.accessibilityElement(children: .contain) })
+            .modifier(Applied(when: combine && !summary) { $0.accessibilityElement(children: .combine) })
+            .modifier(Applied(when: summary) { $0.accessibilityElement(children: .ignore) })
             .modifier(Applied(when: common.label != nil) { $0.accessibilityLabel(common.label ?? "") })
             .modifier(Applied(when: common.value != nil) { $0.accessibilityValue(common.value ?? "") })
             .modifier(Applied(when: common.hint != nil) { $0.accessibilityHint(common.hint ?? "") })
@@ -132,8 +136,8 @@ struct Applied<Modified: View>: ViewModifier {
 }
 
 extension View {
-    func atomCommon(_ common: AtomCommon, atom: AtomType, group: Bool = false, combine: Bool = false, frame: Bool = true) -> some View {
-        modifier(AtomCommonModifier(common: common, atom: atom, group: group, combine: combine, frame: frame))
+    func atomCommon(_ common: AtomCommon, atom: AtomType, group: Bool = false, combine: Bool = false, summary: Bool = false, frame: Bool = true) -> some View {
+        modifier(AtomCommonModifier(common: common, atom: atom, group: group, combine: combine, summary: summary, frame: frame))
     }
 
     /// The common size, fill and padding props, each applied only when set.

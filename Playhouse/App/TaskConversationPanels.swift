@@ -18,13 +18,8 @@ extension TaskConversationView {
             .accessibilityLabel("Show sidebar")
             .accessibilityIdentifier("show-task-sidebar-button")
 
-            if !changeInventory.unviewed.isEmpty {
-                Text("\(changeInventory.unviewed.count)")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Changes to review: \(changeInventory.unviewed.count)")
-                    .accessibilityIdentifier("collapsed-task-sidebar-count")
-            }
+            // Inline sidebar plugins (the built-in Changes) show their rail form here.
+            PluginInlineSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions)
             Spacer(minLength: 0)
         }
         .padding(.top, 12)
@@ -60,18 +55,13 @@ extension TaskConversationView {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
-            // Plugins lead the sidebar's sections, above Changes.
+            // Plugins lead the sidebar's sections, above the inline ones such as Changes.
             PluginSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
 
-            changesSectionHeader
-
-            if isChangesSectionCollapsed {
-                Spacer(minLength: 0)
-            } else {
-                changesSectionContent
-            }
+            // Inline plugins (the built-in Changes) render their own sections in the column.
+            PluginInlineSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions)
 
             Spacer(minLength: 0)
 
@@ -87,146 +77,6 @@ extension TaskConversationView {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-sidebar")
     }
-
-    /// The Changes section's header; collapsing hides its lists so later sidebar sections
-    /// can share the column, and the pending count stays visible while it's collapsed.
-    var changesSectionHeader: some View {
-        HStack(spacing: 6) {
-            Button {
-                toggleChangesSection()
-            } label: {
-                Image(systemName: isChangesSectionCollapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14, height: 24)
-                    // A plain button only hit-tests drawn pixels; the full frame keeps the target usable.
-                    .contentShape(Rectangle())
-            }
-            .buttonHoverPointer()
-            .buttonStyle(.plain)
-            .nativeHelp(isChangesSectionCollapsed ? "Expand changes" : "Collapse changes")
-            .accessibilityLabel(isChangesSectionCollapsed ? "Expand changes" : "Collapse changes")
-            .accessibilityValue(isChangesSectionCollapsed ? "Collapsed" : "Expanded")
-            .accessibilityIdentifier("toggle-workspace-changes-section-button")
-            Text("Changes")
-                .font(.system(size: 13, weight: .semibold))
-                .accessibilityIdentifier("workspace-changes-title")
-                .onTapGesture { toggleChangesSection() }
-            if isChangesSectionCollapsed && !changeInventory.unviewed.isEmpty {
-                Text("\(changeInventory.unviewed.count)")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Changes to review: \(changeInventory.unviewed.count)")
-                    .accessibilityIdentifier("collapsed-workspace-changes-section-count")
-            }
-            Spacer(minLength: 0)
-                .contentShape(Rectangle())
-                .onTapGesture { toggleChangesSection() }
-            Button {
-                Task { await refreshWorkspaceChanges() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(width: 24, height: 24)
-            }
-            .buttonHoverPointer()
-            .buttonStyle(.plain)
-            .nativeHelp("Refresh workspace changes")
-            .accessibilityLabel("Refresh workspace changes")
-            .accessibilityIdentifier("refresh-workspace-changes-button")
-            .disabled(!hasLoadedChanges)
-        }
-        .padding(.leading, 10)
-        .padding(.trailing, 14)
-        .padding(.vertical, 8)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("workspace-changes-section-header")
-    }
-
-    @ViewBuilder
-    var changesSectionContent: some View {
-        if let changesError {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Couldn't read Git changes", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red)
-                Text(changesError)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Retry") {
-                    Task { await refreshWorkspaceChanges() }
-                }
-                .buttonHoverPointer()
-                .nativeHelp("Retry")
-                .font(.system(size: 11, weight: .medium))
-                .accessibilityIdentifier("retry-workspace-changes-button")
-            }
-            .padding(12)
-            .accessibilityIdentifier("workspace-changes-error")
-        } else if !hasLoadedChanges {
-            ProgressView("Checking folders…")
-                .controlSize(.small)
-                .font(.system(size: 11))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityIdentifier("workspace-changes-loading")
-        } else if changeInventory.isEmpty && !changeInventory.mergingRepositories.isEmpty {
-            mergeInProgressNotice
-                .padding(15)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if changeInventory.isEmpty {
-            VStack(spacing: 8) {
-                Image(systemName: "checkmark.circle")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.secondary)
-                Text("No changes")
-                    .font(.system(size: 12, weight: .medium))
-                Text("Changes in Git repositories under this task's folders will appear here.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding(15)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityIdentifier("workspace-changes-empty")
-        } else if changeInventory.count > Self.maxRenderedChangeCount {
-            VStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.secondary)
-                Text("Too many changes to list")
-                    .font(.system(size: 12, weight: .medium))
-                Text(tooManyChangesMessage)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding(15)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // An explicit label: a combined element of these texts reads back with an empty label.
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Too many changes to list. \(tooManyChangesMessage)")
-            .accessibilityIdentifier("workspace-changes-too-many")
-        } else {
-            ScrollView {
-                // Lazy so off-screen rows stay out of the view tree; every row carries AppKit tooltip views.
-                LazyVStack(alignment: .leading, spacing: 15) {
-                    if !changeInventory.mergingRepositories.isEmpty {
-                        mergeInProgressNotice
-                            .padding(.horizontal, 14)
-                    }
-                    changeSection(title: "Viewed", entries: changeInventory.viewed)
-                    changeSection(title: "Changes", entries: changeInventory.unviewed)
-                }
-                .padding(.vertical, 12)
-                .hoverRevealScrollers()
-            }
-            .accessibilityIdentifier("workspace-changes-list")
-        }
-    }
-
-    /// A Viewed row always shows the reviewed work from the branch base; only a change made
-    /// after that review is measured from the saved snapshot.
 
     var conversationPanel: some View {
         ZStack(alignment: .leading) {

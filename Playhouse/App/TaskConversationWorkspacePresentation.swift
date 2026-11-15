@@ -113,211 +113,22 @@ extension TaskConversationView {
         }
     }
 
-    func toggleChangesSection() {
-        withAnimation(.easeInOut(duration: 0.18)) {
-            isChangesSectionCollapsed.toggle()
-        }
-    }
     func diffBaselineLabel(_ entry: WorkspaceChangeEntry) -> String {
         entry.group == .unviewed && entry.hasViewedSnapshot ? "Since last viewed" : "Since branch base"
     }
 
-    var mergeInProgressMessage: String {
-        "Changes in \(changeInventory.mergingRepositories.map(repositoryLabel).joined(separator: ", ")) are hidden until the merge is committed or aborted."
-    }
-
-    var tooManyChangesMessage: String {
-        "\(changeInventory.count) changed files is more than the \(Self.maxRenderedChangeCount) this list shows. Check for files that should be ignored, such as build output."
-    }
-
-    /// Shown in place of a repository's files while it has a merge open, since the merge stages
-    /// everything the merged branch brought in.
-    /// Composed only of plugin atoms (Plugins/Atoms).
-    var mergeInProgressNotice: some View {
-        // An explicit label: a combined element of these texts reads back with an empty label.
-        AtomPanel(props: PanelProps(spacing: 8, fillOpacity: 0, align: "center"), common: AtomCommon(fillWidth: true, padding: 0)) {
-            AtomIcon(props: IconProps(name: "arrow.triangle.merge", size: 20, color: "secondary"))
-            AtomText(props: TextProps(text: "Merge in progress", size: 12, weight: "medium"))
-            AtomText(props: TextProps(text: mergeInProgressMessage, size: 10, color: "secondary"))
-        }
-        .multilineTextAlignment(.center)
-        .accessibilitySummary("Merge in progress. \(mergeInProgressMessage)", id: "workspace-changes-merge-in-progress")
-    }
-
-    func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 7) {
-                Image(systemName: title == "Viewed" ? "checkmark.circle.fill" : "circle.dashed")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(title == "Viewed" ? .green : .secondary)
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                    .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-title" : "unviewed-changes-title")
-                Text("\(entries.count)")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                if title == "Viewed" {
-                    Image(systemName: isViewedSectionExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                } else if !entries.isEmpty {
-                    Button {
-                        Task { await markAllViewed() }
-                    } label: {
-                        Image(systemName: "checklist.checked")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 20, height: 18)
-                    }
-                    .buttonStyle(.plain)
-                    .buttonHoverPointer()
-                    .nativeHelp("Mark all as viewed")
-                    .accessibilityLabel("Mark all as viewed")
-                    .accessibilityIdentifier("mark-all-viewed-button")
-                }
-            }
-            .padding(.horizontal, 14)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if title == "Viewed" { isViewedSectionExpanded.toggle() }
-            }
-            // Without a container, the section identifier replaces the title's own.
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-section" : "unviewed-changes-section")
-
-            if title == "Viewed" && !isViewedSectionExpanded {
-                EmptyView()
-            } else if entries.isEmpty {
-                Text("No files")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 31)
-                    .padding(.vertical, 3)
-            } else {
-                let groups = repositoryGroups(entries)
-                ForEach(groups, id: \.repository) { repositoryGroup in
-                    if Set(changeInventory.unviewed.map(\.repository) + changeInventory.viewed.map(\.repository)).count > 1 {
-                        Text(repositoryLabel(repositoryGroup.repository))
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .padding(.leading, 17)
-                            .padding(.top, 4)
-                            .accessibilityIdentifier("workspace-repository-\(repositoryGroup.repository.hashValue)")
-                    }
-                    ForEach(repositoryGroup.entries) { entry in
-                        HStack(spacing: 2) {
-                            Button {
-                                openDiff(entry)
-                            } label: {
-                                HStack(spacing: 7) {
-                                Image(systemName: changeSymbol(for: entry.status))
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(changeColor(for: entry.status))
-                                    .frame(width: 12)
-                                Text(entry.path)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(entry.isUncommitted ? Color.green : Color.primary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Spacer(minLength: 0)
-                                Text(statusBadge(for: entry))
-                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(changeColor(for: entry.status))
-                            }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .contentShape(Rectangle())
-                                .background(selectedChange?.id == entry.id ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
-                            }
-                            .buttonHoverPointer()
-                            .buttonStyle(.plain)
-                            .nativeHelp("View \(entry.group.displayName) diff for \(entry.path)")
-                            .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.displayName)")
-                            // The button is one accessibility element, so the name's color is reported here.
-                            .accessibilityValue(entry.isUncommitted ? "Uncommitted, green" : "Committed, primary")
-                            .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
-                            if entry.group == .unviewed {
-                                Button {
-                                    Task { await markViewed(entry) }
-                                } label: {
-                                    Image(systemName: "checkmark.circle")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 20, height: 22)
-                                }
-                                .buttonStyle(.plain)
-                                .buttonHoverPointer()
-                                .nativeHelp("Mark as viewed")
-                                .accessibilityLabel("Mark \(entry.path) as viewed")
-                                .accessibilityIdentifier("mark-viewed-\(entry.path)")
-                            } else {
-                                Button {
-                                    Task { await markUnviewed(entry) }
-                                } label: {
-                                    Image(systemName: "arrow.uturn.backward.circle")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 20, height: 22)
-                                }
-                                .buttonStyle(.plain)
-                                .buttonHoverPointer()
-                                .nativeHelp("Mark as unviewed")
-                                .accessibilityLabel("Mark \(entry.path) as unviewed")
-                                .accessibilityIdentifier("mark-unviewed-\(entry.path)")
-                            }
-                        }
-                        .padding(.horizontal, 7)
-                    }
-                }
-            }
-        }
-    }
-
-    func repositoryGroups(_ entries: [WorkspaceChangeEntry]) -> [ChangeRepositoryGroup] {
-        Dictionary(grouping: entries, by: \.repository)
-            .keys
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-            .map { repository in
-                ChangeRepositoryGroup(repository: repository, entries: entries.filter { $0.repository == repository })
-            }
-    }
-
     func repositoryLabel(_ path: String) -> String {
-        let components = URL(fileURLWithPath: path).pathComponents
-        return components.suffix(2).joined(separator: "/")
-    }
-
-    func statusBadge(for entry: WorkspaceChangeEntry) -> String {
-        if entry.statusCode == "??" { return "U" }
-        if entry.statusCode.contains("R") { return "R" }
-        if entry.statusCode.contains("A") { return "A" }
-        if entry.statusCode.contains("D") { return "D" }
-        if entry.status == "conflict" { return "!" }
-        return "M"
+        WorkspaceChangeStyle.repositoryLabel(path)
     }
 
     func changeSymbol(for status: String) -> String {
-        switch status {
-        case "added", "untracked": "plus.square.fill"
-        case "deleted": "minus.square.fill"
-        case "renamed", "copied": "arrow.turn.up.right"
-        case "conflict": "exclamationmark.triangle.fill"
-        default: "doc.text"
-        }
+        WorkspaceChangeStyle.symbol(for: status)
     }
 
-    func changeColor(for status: String) -> Color {
-        switch status {
-        case "added", "untracked": .green
-        case "deleted", "conflict": .red
-        case "renamed", "copied": .orange
-        default: .secondary
-        }
+    func changeColor(for status: String) -> AnyShapeStyle {
+        AtomColor.style(WorkspaceChangeStyle.colorName(for: status)) ?? AnyShapeStyle(.secondary)
     }
+
     func openDiff(_ entry: WorkspaceChangeEntry) {
         selectedChange = entry
         selectedDiff = nil
@@ -355,82 +166,49 @@ extension TaskConversationView {
         }
     }
 
-    func markViewed(_ entry: WorkspaceChangeEntry) async {
-        do {
-            try await workspaceManager.markViewed(for: task.id, repository: entry.repository, path: entry.path)
-            await refreshWorkspaceChanges()
-        } catch {
-            changesError = error.localizedDescription
-        }
-    }
-
-    func markUnviewed(_ entry: WorkspaceChangeEntry) async {
-        do {
-            try await workspaceManager.markUnviewed(for: task.id, repository: entry.repository, path: entry.path)
-            await refreshWorkspaceChanges()
-        } catch {
-            changesError = error.localizedDescription
-        }
-    }
-
-    func markAllViewed() async {
-        do {
-            _ = try await workspaceManager.markAllViewed(for: task.id)
-            await refreshWorkspaceChanges()
-        } catch {
-            changesError = error.localizedDescription
-        }
-    }
-
+    /// The task's folders may have changed: tells the sidebar's inline plugins (the
+    /// Changes plugin rescans on `workspace.revision`) and refreshes the open diff.
     func refreshWorkspaceChanges() async {
-        guard !isLoadingChanges else {
-            changesNeedRefresh = true
+        workspaceRevision &+= 1
+        // Only an open diff needs the window's own rescan; the sidebar's plugins rescan on the revision.
+        guard selectedChange != nil, isDiffPresented else { return }
+        guard !isRefreshingOpenDiff else {
+            openDiffNeedsRefresh = true
             return
         }
-        isLoadingChanges = true
-        defer {
-            isLoadingChanges = false
-            hasLoadedChanges = true
-        }
+        isRefreshingOpenDiff = true
+        defer { isRefreshingOpenDiff = false }
 
         repeat {
-            changesNeedRefresh = false
+            openDiffNeedsRefresh = false
+            guard let selectedChange,
+                  let inventory = try? await workspaceManager.changes(for: task.id) else { continue }
+            guard let current = (inventory.unviewed + inventory.viewed).first(where: { $0.id == selectedChange.id }) else {
+                self.selectedChange = nil
+                selectedDiff = nil
+                diffError = "This file no longer has a Git change."
+                continue
+            }
+            self.selectedChange = current
+            guard isDiffPresented else { continue }
             do {
-                let inventory = try await workspaceManager.changes(for: task.id)
-                changeInventory = inventory
-                changesError = nil
-                if let selectedChange {
-                    if let current = (inventory.unviewed + inventory.viewed).first(where: { $0.id == selectedChange.id }) {
-                        self.selectedChange = current
-                        if isDiffPresented {
-                            do {
-                                let diff = try await workspaceManager.diff(
-                                    for: task.id,
-                                    repository: current.repository,
-                                    path: current.path,
-                                    group: current.group.rawValue
-                                )
-                                if self.selectedChange?.id == current.id {
-                                    selectedDiff = diff
-                                    diffError = nil
-                                }
-                            } catch {
-                                if self.selectedChange?.id == current.id {
-                                    selectedDiff = nil
-                                    diffError = error.localizedDescription
-                                }
-                            }
-                        }
-                    } else {
-                        self.selectedChange = nil
-                        selectedDiff = nil
-                        diffError = "This file no longer has a Git change."
-                    }
+                let diff = try await workspaceManager.diff(
+                    for: task.id,
+                    repository: current.repository,
+                    path: current.path,
+                    group: current.group.rawValue
+                )
+                if self.selectedChange?.id == current.id {
+                    selectedDiff = diff
+                    diffError = nil
                 }
             } catch {
-                changesError = error.localizedDescription
+                if self.selectedChange?.id == current.id {
+                    selectedDiff = nil
+                    diffError = error.localizedDescription
+                }
             }
-        } while changesNeedRefresh
+        } while openDiffNeedsRefresh
     }
     func showRepositoryPicker() {
         isShowingRepositoryPicker = true

@@ -91,7 +91,13 @@ extension TaskConversationView {
         let selection = composerDraft.selection
         return PluginContext.props(
             plugin: plugin, appearance: pluginAppearance, task: PluginTaskContext(task: task),
-            composer: PluginComposerContext(draft: composerDraft.text, selectionLocation: selection.location, selectionLength: selection.length)
+            composer: PluginComposerContext(draft: composerDraft.text, selectionLocation: selection.location, selectionLength: selection.length),
+            workspace: PluginWorkspaceContext(
+                revision: workspaceRevision,
+                // Closing the diff keeps `selectedChange` for its dismissal animation.
+                openDiff: isDiffPresented ? selectedChange.map { .init(repository: $0.repository, path: $0.path, group: $0.group.rawValue) } : nil,
+                sidebarCollapsed: isTaskSidebarShownCollapsed
+            )
         )
     }
 
@@ -102,7 +108,9 @@ extension TaskConversationView {
                 openConversationPlugin = nil
                 onOpenTask(id, "")
             },
-            composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) }
+            composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) },
+            openDiff: { openDiff($0) },
+            refreshWorkspace: { Task { await refreshWorkspaceChanges() } }
         )
     }
 
