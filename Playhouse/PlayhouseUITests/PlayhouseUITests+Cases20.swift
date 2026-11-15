@@ -610,7 +610,7 @@ extension PlayhouseUITests {
         let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
-    // case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation.
+    // case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation. A second Codex conversation that never chose a model keeps the model its own turn ran on, in CLI/XPC reads and in the reopened composer’s picker, after the provider-wide remembered selection moves to another model.
     func test_codex_history_keeps_loaded_thread_model() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -636,7 +636,7 @@ extension PlayhouseUITests {
         element("send-message-button").click()
         let reply = "Answers received: Blue / fixture-secret."
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 15), "The Sol turn's reply should arrive.")
-        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].waitToExist(timeout: 5), "The reply should be labeled with the model it ran on.")
         // The turn just ended with Sol still selected: reopening reuses the loaded
         // thread instead of resuming it with the hardcoded default (Luna).
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")
@@ -698,6 +698,22 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "model", taskID]))?["result"] as? [String: Any])?["modelID"] as? String == "gpt-6-luna"
         }, timeout: 10), "The selected model should remain persisted for this conversation.")
+        // A conversation that never chose a model keeps the one its own turns ran on, after the
+        // provider-wide remembered selection moves to another model.
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 30))
+        returnToBoard()
+        try createTaskFixture(title: "Codex history model", roots: [fixture.primary.path])
+        let unselectedTaskID = try self.taskID(named: "Codex history model")
+        _ = try runCLI(["conversation", "send", unselectedTaskID, "--message", "Run on the remembered model."])
+        _ = try runCLI(["conversation", "model", taskID, "set", "gpt-6-mini"])
+        for _ in 0..<2 {
+            XCTAssertEqual((try runCLI(["conversation", "model", unselectedTaskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-luna",
+                           "The model comes from the conversation's own latest Codex turn, not the remembered selection.")
+        }
+        openTask(named: "Codex history model")
+        XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Luna") }, timeout: 10),
+                      "Opening the conversation shows the model its own turns ran on.")
+        attachElementScreenshot(picker, named: "Codex model resolved from the conversation's own turns")
         attachElementScreenshot(picker, named: "The Codex conversation model picker shows Luna")
         attachScreenshot(named: "The existing Codex thread switches to Luna")
     }

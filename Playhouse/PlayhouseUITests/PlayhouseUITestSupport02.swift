@@ -859,9 +859,11 @@ extension PlayhouseUITests {
             } else {
                 // An element nearly as tall as the viewport fits only with a smaller margin.
                 let margin = min(margin, (viewport.height - frame.height) / 2)
-                if frame.minY < viewport.minY + margin {
+                // A wheel step shorter than a point moves nothing, so a shortfall that small
+                // counts as in view rather than being scrolled at forever.
+                if frame.minY < viewport.minY + margin - 1 {
                     delta = viewport.minY + margin - frame.minY
-                } else if frame.maxY > viewport.maxY - margin {
+                } else if frame.maxY > viewport.maxY - margin + 1 {
                     delta = viewport.maxY - margin - frame.maxY
                 } else {
                     return true
@@ -872,7 +874,7 @@ extension PlayhouseUITests {
         return false
     }
     @discardableResult
-    func revealWholeTranscript(timeout: TimeInterval = 20) -> Bool {
+    func revealWholeTranscript(step: CGFloat = 400, timeout: TimeInterval = 20) -> Bool {
         let scrollView = element("conversation-scroll-view")
         func renderedCounts() -> [Int] {
             (scrollView.value as? String ?? "").split(separator: " ").compactMap { Int($0) }
@@ -881,9 +883,8 @@ extension PlayhouseUITests {
         while Date() < deadline {
             let counts = renderedCounts()
             if counts.count == 2, counts[0] == counts[1] { return true }
-            scrollView.scroll(byDeltaX: 0, deltaY: 400)
-            // A revealed batch restores its anchor asynchronously; scrolling again
-            // before it lands would carry past it.
+            scrollView.scroll(byDeltaX: 0, deltaY: step)
+            // A batch that needs its page read from the store is revealed a moment later.
             _ = waitUntil({ renderedCounts() != counts }, timeout: 1)
         }
         let counts = renderedCounts()
@@ -928,10 +929,13 @@ extension PlayhouseUITests {
             return (scroller.value as? String).flatMap(Double.init)
         }
         guard position() != nil else { return (found(), false) }
+        // Reaching the top of the rendered messages reveals the batch above them, so the top of
+        // the transcript is the top once every message is rendered.
+        let revealed = revealWholeTranscript(step: 3000)
         for _ in 0..<40 where (position() ?? 0) > 0.001 {
             scrollView.scroll(byDeltaX: 0, deltaY: 3000)
         }
-        let reachedTop = (position() ?? 1) <= 0.001
+        let reachedTop = revealed && (position() ?? 1) <= 0.001
         let step = -max(100, scrollView.frame.height * 0.6)
         for _ in 0..<400 {
             // Rows near the viewport are realized a moment after a scroll lands.

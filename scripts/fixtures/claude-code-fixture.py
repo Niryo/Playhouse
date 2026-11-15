@@ -125,7 +125,7 @@ NUDGED_FINAL_ANSWER = "All checks passed and the screenshot is attached. The wor
 TINY_PNG_HEX = "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"
 # Lines each held stage of the streamed follow turn adds; the first stage alone
 # outgrows the transcript viewport.
-STREAM_FOLLOW_STAGES = (20, 8, 8, 8)
+STREAM_FOLLOW_STAGES = (20, 8, 8, 8, 8)
 STREAM_FOLLOW_FINAL = "Streamed follow reply finished."
 
 
