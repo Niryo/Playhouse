@@ -358,6 +358,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: wakeReady.path) }, timeout: 15),
                       "The fixture should pause after the last notification arrives mid-work.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("WAKE STARTED") }, timeout: 10))
+        // A fast fixture can stream its first message before the composer swaps Send for Stop.
+        XCTAssertTrue(element("pause-response-button").waitToExist(timeout: 5),
+                      "The composer should show Stop once the woken parent's turn is running.")
         // Settling on the stale earlier result would end the turn right after
         // the last notification; give that regression time to show.
         XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
@@ -535,7 +538,9 @@ extension PlayhouseUITests {
                       "The completed outcome reported inside the nudged turn should move the task to Review.")
         XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15),
                       "The nudged turn's final report should appear in the visible transcript.")
-        XCTAssertTrue(transcriptContains(staleAnswer), "The earlier turn's answer should stay in the transcript.")
+        // The transcript reloads when the turn ends; the earlier rows are briefly absent while it re-renders.
+        XCTAssertTrue(waitUntil({ self.transcriptContains(staleAnswer) }, timeout: 10),
+                      "The earlier turn's answer should stay in the transcript.")
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
         let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
         let assistant = messages.filter { $0["role"] as? String == "assistant" }.map { [($0["phase"] as? String) ?? "", ($0["text"] as? String) ?? ""] }

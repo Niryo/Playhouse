@@ -84,6 +84,12 @@
           "total": "1,600"
         }
       ],
+      "contextCompactions": [
+        "Requested with /compact · 2,900 → 900 tokens"
+      ],
+      "resumeCacheMisses": [
+        "Cache read 0 tokens · cache rewritten with 390 tokens"
+      ],
       "turns": [
         {
           "id": "turn-1",

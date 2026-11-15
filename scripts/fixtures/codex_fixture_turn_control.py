@@ -29,9 +29,12 @@ def held_release(runtime, _session_state, message):
 
 
 def held_interrupt(runtime, _session_state, message):
+    # Emit the same user item identity that thread/items/list returns for this
+    # turn; the history file can already hold turns from an earlier session.
+    _session_state.index = max(len(_session_state.serial_history().get("turns", [])), 1)
     runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
         "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID,
-        "item": {"id": "item_user_fixture_1", "type": "userMessage"},
+        "item": {"id": f"item_user_fixture_{_session_state.index}", "type": "userMessage"},
     }})
     # Report one activity before holding, so a user-initiated Stop with
     # no final answer still keeps the window's activity section mounted

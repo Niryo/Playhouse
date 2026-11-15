@@ -22,6 +22,8 @@ extension PlayhouseUITests {
         try? FileManager.default.removeItem(at: ready)
         try? FileManager.default.removeItem(at: received)
         try? FileManager.default.removeItem(at: release)
+        // Earlier cases share this fixture; its saved turns would renumber this turn's items.
+        if provider == "codex" { try? FileManager.default.removeItem(atPath: executable + ".history") }
         if provider == "codex" { codexFixtureExecutable = executable }
         else { claudeFixtureExecutable = executable }
 
@@ -96,6 +98,8 @@ extension PlayhouseUITests {
         try? FileManager.default.removeItem(at: received)
         try? FileManager.default.removeItem(at: reject)
         try? FileManager.default.removeItem(at: release)
+        // Earlier cases share this fixture; its saved turns would renumber this turn's items.
+        if provider == "codex" { try? FileManager.default.removeItem(atPath: executable + ".history") }
         if provider == "codex" { codexFixtureExecutable = executable }
         else { claudeFixtureExecutable = executable }
 
@@ -827,6 +831,19 @@ extension PlayhouseUITests {
                                        "icon": icon, "placement": placement, "presentation": presentation]
         try JSONSerialization.data(withJSONObject: manifest).write(to: folder.appendingPathComponent("plugin.json"))
         if let source { try source.write(to: folder.appendingPathComponent("index.js"), atomically: true, encoding: .utf8) }
+    }
+    /// Opens an installed plugin's submenu in the Plugins menu and clicks one of its actions.
+    func clickInstalledPluginAction(_ action: String, pluginRow: String, file: StaticString = #filePath, line: UInt = #line) {
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        let row = menu.menuItems[pluginRow]
+        XCTAssertTrue(row.waitToExist(timeout: 10), "The Plugins menu lists \(pluginRow).", file: file, line: line)
+        // The menu is still opening; a pointer aimed at the row's first frame can land on the next menu bar title.
+        XCTAssertTrue(waitForStableFrame(row), "The \(pluginRow) row should settle before it is hovered.", file: file, line: line)
+        row.hover()
+        let item = row.descendants(matching: .menuItem)[action]
+        XCTAssertTrue(waitUntil({ item.isHittable }, timeout: 5), "The \(pluginRow) submenu offers \(action).", file: file, line: line)
+        item.click()
     }
     func pluginMode() throws -> Bool {
         try XCTUnwrap((try runCLI(["plugin", "mode"])["result"] as? [String: Any])?["enabled"] as? Bool)

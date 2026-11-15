@@ -271,6 +271,15 @@ extension TaskConversationView {
         // Content arriving below leaves the offset where it was, and a shrinking
         // transcript clamps it onto the bottom, so only the reader moves it up.
         if new.offsetY < old.offsetY - 0.5 {
+            if sample.isFollowingLatest {
+                // Names the geometry when following stops, to tell a reader's scroll from a layout shift.
+                PlayhouseDiagnostics.record("conversation.follow_bottom.stopped", fields: [
+                    "oldOffsetY": String(format: "%.1f", old.offsetY), "newOffsetY": String(format: "%.1f", new.offsetY),
+                    "oldMaxOffsetY": String(format: "%.1f", old.maxOffsetY), "newMaxOffsetY": String(format: "%.1f", new.maxOffsetY),
+                    "turnPinPending": String(isLatestConversationTurnPinPending),
+                    "revealingOlder": String(isRevealingOlderConversationMessages)
+                ])
+            }
             sample.isFollowingLatest = false
             return
         }

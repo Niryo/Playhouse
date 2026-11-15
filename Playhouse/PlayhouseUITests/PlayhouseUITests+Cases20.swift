@@ -636,7 +636,7 @@ extension PlayhouseUITests {
         element("send-message-button").click()
         let reply = "Answers received: Blue / fixture-secret."
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 15), "The Sol turn's reply should arrive.")
-        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].waitToExist(timeout: 10), "The reply's header names the model that ran the turn.")
         // The turn just ended with Sol still selected: reopening reuses the loaded
         // thread instead of resuming it with the hardcoded default (Luna).
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")

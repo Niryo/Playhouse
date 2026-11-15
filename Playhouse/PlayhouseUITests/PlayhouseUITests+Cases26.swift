@@ -700,8 +700,10 @@ extension PlayhouseUITests {
         row.click()
         XCTAssertTrue(waitUntil({ (self.element("skill-editor").value as? String)?.contains("license: \"MIT\"") == true }, timeout: 5),
                       "The editor shows a CLI edit as it is on disk.")
+        // The editor is still sliding in; a click on Cancel's mid-animation frame misses it.
+        XCTAssertTrue(waitForStableFrame(element("skill-editor-cancel")), "The editor should settle before Cancel is clicked.")
         element("skill-editor-cancel").click()
-        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5))
+        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5), "Cancel closes the reopened editor.")
 
         element("new-skill-button").click()
         XCTAssertTrue(element("new-skill-name").waitToExist(timeout: 5))
