@@ -318,12 +318,19 @@ extension TaskConversationView {
             modelID: selectedModelID.isEmpty ? nil : selectedModelID
         )
         let taskID = task.id
+        let existingConversation = isExistingConversation
         isSavingSchedule = true
         Task { @MainActor in
             defer { isSavingSchedule = false }
             do {
                 _ = try await BoardTaskManager(modelContext: modelContext).setSchedule(taskID, request)
                 composerDraft.settledText = draft
+                if existingConversation {
+                    draft = ""
+                    pendingImages = []
+                    _ = try await BoardTaskManager(modelContext: modelContext).saveDraft(taskID, prompt: "", imageDataURLs: [])
+                    composerSchedule = nil
+                }
                 PlayhouseDiagnostics.record("ui.task.scheduled", fields: ["taskID": taskID.uuidString, "kind": schedule.kind.rawValue])
                 // A one-time task waits on the board, so the daemon names it now as a first send would.
                 if schedule.kind == .once {
@@ -333,7 +340,7 @@ extension TaskConversationView {
                         PlayhouseDiagnostics.record("ui.task.schedule_title.failed", fields: PlayhouseDiagnostics.errorFields(error).merging(["taskID": taskID.uuidString]) { _, new in new })
                     }
                 }
-                onBack()
+                if !existingConversation { onBack() }
             } catch {
                 errorMessage = error.localizedDescription
             }
