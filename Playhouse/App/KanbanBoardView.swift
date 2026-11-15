@@ -19,6 +19,49 @@ enum ChatSidebarLayout {
     }
 }
 
+private struct SkillsPageWindowWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat? = nil
+}
+
+extension EnvironmentValues {
+    /// The window's width, set on the standalone chat sidebar so the chat's Skills page covers
+    /// the whole window from the sidebar's leading edge instead of only the sidebar.
+    var skillsPageWindowWidth: CGFloat? {
+        get { self[SkillsPageWindowWidthKey.self] }
+        set { self[SkillsPageWindowWidthKey.self] = newValue }
+    }
+}
+
+/// Lays out a conversation's Skills page `skillsPageWindowWidth` wide when set. It reads that
+/// value itself, so a window resize re-renders only this frame rather than the whole conversation.
+struct SkillsPageWindowFrame<Content: View>: View {
+    @Environment(\.skillsPageWindowWidth) private var width
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        content.frame(width: width)
+    }
+}
+
+/// Whether a conversation's Skills page is open, so the chat sidebar stops clipping it to its
+/// own width and hides its resize edge while the page covers the window.
+struct SkillsPageShowingKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
+/// Clips the chat sidebar to its own width from its leading edge, or, while its Skills page is
+/// open, to the given wider width so the page reaches across the window.
+private struct ChatSidebarClip: Shape {
+    var width: CGFloat?
+
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(x: rect.minX, y: rect.minY, width: width ?? rect.width, height: rect.height))
+    }
+}
+
 /// The standalone chat's conversation. The board re-renders on every frame of a chat resize, and
 /// a conversation view rebuilt from it, closures and all, re-ran its whole transcript each time;
 /// compared by the chat it shows, it updates only from its own state and the chat's model. Any
@@ -158,6 +201,9 @@ struct KanbanBoardView: View {
     @State var showPluginDraftNotice = false
     @State var pluginInitialDraft: String?
     @State var isOpeningChatSidebar = false
+    /// The chat's Skills page is open and covers the whole board, laid out `boardContentWidth` wide.
+    @State var isChatSkillsPageShowing = false
+    @State var boardContentWidth: CGFloat = 0
     /// A modal, sidebar or page plugin opened from the board's sidebar.
     @State var openBoardPlugin: PluginRecord?
     @State var pluginSetupPlacement: PluginPlacement?
@@ -539,6 +585,12 @@ struct KanbanBoardView: View {
         }
         .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Measured only while the chat is open, so resizing the window without it doesn't re-run the board.
+        .background {
+            if isShowingChatSidebar {
+                Color.clear.onGeometryChange(for: CGFloat.self) { $0.size.width } action: { boardContentWidth = $0 }
+            }
+        }
         .task(id: draggedTaskID) {
             // SwiftUI reports no end for a drag that lands outside every drop target (for
             // example a card dropped back in place), and the drag session consumes the
@@ -617,12 +669,17 @@ struct KanbanBoardView: View {
                     setChatSidebarVisible(false)
                 }
                 .equatable()
+                // The chat's Skills page spans the window, not just the sidebar.
+                .environment(\.skillsPageWindowWidth, boardContentWidth > 0 ? boardContentWidth : nil)
+                .onPreferenceChange(SkillsPageShowingKey.self) { isChatSkillsPageShowing = $0 }
+                // Opening a task from the page removes the chat without a closing preference change.
+                .onDisappear { isChatSkillsPageShowing = false }
                 // While the edge moves, the chat keeps the width it was last laid out at, and the panel
                 // clips or reveals the rest; it reflows when the edge rests and when the drag ends.
                 .frame(width: chatSidebarReflowWidth ?? chatSidebarWidth)
                 .frame(width: chatSidebarWidth, alignment: .leading)
                 .background(WorkspaceTheme.windowBackground)
-                .clipped()
+                .clipShape(ChatSidebarClip(width: isChatSkillsPageShowing ? boardContentWidth : nil))
                 .task(id: chatSidebarDragWidth) {
                     // Each move restarts this wait, so the chat reflows once the edge rests.
                     guard let chatSidebarDragWidth else { return }
@@ -632,7 +689,9 @@ struct KanbanBoardView: View {
                 }
                 .frame(maxHeight: .infinity, alignment: .topLeading)
                 .overlay(alignment: .trailing) {
-                    chatSidebarResizeHandle(width: chatSidebarWidth)
+                    if !isChatSkillsPageShowing {
+                        chatSidebarResizeHandle(width: chatSidebarWidth)
+                    }
                 }
                 .transition(.move(edge: .leading).combined(with: .opacity))
                 .id(chatTask.id)

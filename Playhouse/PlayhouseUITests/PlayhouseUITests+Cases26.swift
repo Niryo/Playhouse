@@ -572,7 +572,7 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
     }
-    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, is a full page that slides in from the side over the task and fills the window, and its back button returns to the conversation. It lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, is a full page that slides in from the side over the task and fills the window, and its back button returns to the conversation. Opened from the standalone chat sidebar, it likewise covers the whole window rather than only the sidebar, and closing it keeps the chat open. It lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     func test_skills_catalog_lists_repo_global_and_builtin_skills() throws {
         let repository = try makeSkillRepository("skills-catalog-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Agents layout repository skill"),
@@ -667,6 +667,52 @@ extension PlayhouseUITests {
         element("skills-back-button").click()
         XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Back returns to the conversation.")
         XCTAssertTrue(element("message-composer").waitToExist(timeout: 5))
+
+        // From the standalone chat sidebar, the page covers the whole window, not just the sidebar.
+        returnToBoard()
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        XCTAssertTrue(element("chat-sidebar-resize-handle").waitToExist(timeout: 5))
+        // Opening the chat grows the window to fit the sidebar beside the board; let that settle first.
+        var chatWindow = app.windows.firstMatch.frame
+        XCTAssertTrue(waitUntil({
+            Thread.sleep(forTimeInterval: 0.3)
+            let settled = self.app.windows.firstMatch.frame
+            defer { chatWindow = settled }
+            return settled == chatWindow
+        }, timeout: 10), "The window should settle after the chat opens.")
+        // The visible board beside the sidebar, which the page must actually draw over rather than be clipped from.
+        let screen = try XCTUnwrap(NSScreen.main?.frame, "Could not read the screen's size.")
+        let sidebarEdge = element("chat-sidebar").frame.maxX
+        let boardStripe = CGRect(x: sidebarEdge + 20, y: chatWindow.minY + chatWindow.height * 0.3,
+                                 width: min(chatWindow.maxX, screen.width) - sidebarEdge - 40, height: chatWindow.height * 0.5)
+        XCTAssertGreaterThan(boardStripe.width, 40, "Part of the board should be visible beside the chat sidebar.")
+        XCTAssertGreaterThan(boardStripe.minX, sidebarEdge, "The sampled board lies right of the chat sidebar.")
+        func boardStripeImage() throws -> NSImage {
+            let image = XCUIScreen.main.screenshot().image
+            let cgImage = try XCTUnwrap(image.cgImage(forProposedRect: nil, context: nil, hints: nil), "Could not read the screen's pixels.")
+            let scale = CGFloat(cgImage.width) / screen.width
+            let region = CGRect(x: boardStripe.minX * scale, y: boardStripe.minY * scale,
+                                width: boardStripe.width * scale, height: boardStripe.height * scale).integral
+            return NSImage(cgImage: try XCTUnwrap(cgImage.cropping(to: region)), size: boardStripe.size)
+        }
+        let boardBefore = try boardStripeImage()
+        openSkillsPage()
+        XCTAssertTrue(waitUntil({
+            let page = self.element("skills-page").frame
+            return abs(page.minX - chatWindow.minX) < 2 && abs(page.maxX - chatWindow.maxX) < 2 && abs(page.maxY - chatWindow.maxY) < 2
+        }, timeout: 5), "The chat's Skills page spans the whole window, not only the chat sidebar.")
+        XCTAssertGreaterThan(element("skills-page").frame.height, chatWindow.height * 0.85, "The chat's Skills page fills the window.")
+        XCTAssertTrue(waitUntil({ !self.element("chat-sidebar-resize-handle").exists }, timeout: 5),
+                      "The sidebar's resize edge hides while the page covers the window.")
+        let changedBoardPixels = try XCTUnwrap(changedPixelCount(before: boardBefore, after: try boardStripeImage(), step: 4, threshold: 0.08),
+                                               "Could not compare the board's pixels.")
+        XCTAssertGreaterThan(changedBoardPixels, 20, "The page is drawn over the board beside the sidebar, not clipped to the sidebar.")
+        attachScreenshot(named: "Skills page opened from the standalone chat covers the window")
+        element("skills-back-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Back returns to the chat.")
+        XCTAssertTrue(element("chat-sidebar").exists, "Closing the page keeps the chat sidebar open.")
+        XCTAssertTrue(element("chat-sidebar-resize-handle").waitToExist(timeout: 5), "The sidebar's resize edge returns with the page closed.")
     }
     // case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md exactly as written, keeping frontmatter Playhouse does not parse, and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor modal straight on its whole SKILL.md, frontmatter included, with no structured header form, and its Preview tab shows that Markdown rendered with the frontmatter as a table; saving there writes the edited file, a description-less edit is rejected in the editor while keeping the file, and after the editor closes the page still answers clicks. A structured CLI edit rewrites the header (reading a YAML list as one field), removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill asks only for a name, a description, and instructions it can preview, and a header field given to the CLI's create is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
     func test_skills_create_update_move_and_delete_on_disk() throws {

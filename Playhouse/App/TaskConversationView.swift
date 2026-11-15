@@ -624,7 +624,7 @@ struct TaskConversationView: View {
                 .frame(minWidth: 900, minHeight: 600)
             }
         }
-        .overlay { skillsPage }
+        .overlay(alignment: .topLeading) { skillsPage }
         .task {
             // Synchronous, so the picker shows the cached model name on the
             // first frame instead of "Default" while the conversation and a
