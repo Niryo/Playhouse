@@ -275,11 +275,13 @@ extension TaskConversationView {
                         source.blockID == 0 && source.endBlockID == 0
                             ? NSRange(location: source.startOffset, length: source.endOffset - source.startOffset) : nil
                     }
-                    SelectableAnnotationText(
+                    let highlightedRanges = annotations.filter { $0.messageID == message.id }.compactMap { userMessageRange($0.source) }
+                    let chatRanges = sideChatRanges(messageID: message.id, rangeOf: userMessageRange)
+                    let fullText = SelectableAnnotationText(
                         text: visibleText,
-                        highlightedRanges: annotations.filter { $0.messageID == message.id }.compactMap { userMessageRange($0.source) },
+                        highlightedRanges: highlightedRanges,
                         mentionRanges: mentions.map(\.range),
-                        chatRanges: sideChatRanges(messageID: message.id, rangeOf: userMessageRange),
+                        chatRanges: chatRanges,
                         onHighlightClick: { range, bounds in
                             reopenHighlight(range, bounds: bounds, messageID: message.id, anchorID: 0, rangeOf: userMessageRange)
                         },
@@ -292,6 +294,26 @@ extension TaskConversationView {
                         }
                     )
                         .fixedSize(horizontal: false, vertical: true)
+                    Group {
+                        // The preview cannot draw comments or side chats, so a message carrying
+                        // either always shows the selectable text that does.
+                        if isPlayhouseSent && highlightedRanges.isEmpty && chatRanges.isEmpty {
+                            CollapsibleAutomaticMessageText(
+                                text: visibleText,
+                                messageID: message.id,
+                                isExpanded: Binding(
+                                    get: { expandedAutomaticMessageTexts.contains(message.text) },
+                                    set: { expanded in
+                                        if expanded { expandedAutomaticMessageTexts.insert(message.text) }
+                                        else { expandedAutomaticMessageTexts.remove(message.text) }
+                                    }
+                                ),
+                                fullText: fullText
+                            )
+                        } else {
+                            fullText
+                        }
+                    }
                         // Anchored on the text like assistant blocks; as a ZStack sibling of the
                         // bubble the hint's popover ignored clicks on its controls.
                         .overlay(alignment: .topLeading) {
@@ -941,5 +963,83 @@ extension TaskConversationView {
         }
         flushParagraph()
         return blocks
+    }
+}
+
+/// An automatic message's text (a Playhouse nudge, a provider's own notice), which can carry
+/// long context or handoff text. It shows the first lines, ending in an ellipsis, until the
+/// reader expands it; a message that fits the preview shows in full with no control. Only the
+/// presentation is shortened: the message keeps its whole text in history and in the bubble's
+/// accessibility label.
+struct CollapsibleAutomaticMessageText<FullText: View>: View {
+    static var previewLineLimit: Int { 8 }
+
+    let text: String
+    let messageID: String
+    @Binding var isExpanded: Bool
+    let fullText: FullText
+    @State private var previewHeight: CGFloat?
+    @State private var wholeHeight: CGFloat?
+
+    /// Unknown until both layouts are measured; the preview shows meanwhile, so a long
+    /// message never flashes at full height.
+    private var isTruncated: Bool? {
+        guard let previewHeight, let wholeHeight else { return nil }
+        return wholeHeight > previewHeight + 1
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Group {
+                if isExpanded || isTruncated == false {
+                    fullText
+                } else {
+                    styledText
+                        .lineLimit(Self.previewLineLimit)
+                        .truncationMode(.tail)
+                        // The selectable text's container inset, so a short message keeps its height.
+                        .padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("automatic-message-preview-\(messageID)")
+                }
+            }
+            .background(alignment: .topLeading) {
+                // Both layouts at the shown width; only their heights matter.
+                ZStack(alignment: .topLeading) {
+                    styledText
+                        .lineLimit(Self.previewLineLimit)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { previewHeight = $0 }
+                    styledText
+                        .fixedSize(horizontal: false, vertical: true)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { wholeHeight = $0 }
+                }
+                .hidden()
+                .accessibilityHidden(true)
+            }
+            if isTruncated == true {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    Label(isExpanded ? "Show less" : "Show more", systemImage: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .nativeHelp(isExpanded ? "Show only the start of this automatic message" : "Show the whole automatic message")
+                .accessibilityLabel(isExpanded ? "Collapse automatic message" : "Expand automatic message to show all text")
+                .accessibilityValue(isExpanded ? "expanded" : "collapsed")
+                .accessibilityIdentifier("automatic-message-toggle-\(messageID)")
+            }
+        }
+    }
+
+    private var styledText: some View {
+        Text(text)
+            .font(.system(size: 16))
+            .lineSpacing(4)
+            .foregroundStyle(Color(nsColor: .secondaryLabelColor))
     }
 }

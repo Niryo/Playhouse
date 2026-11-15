@@ -821,3 +821,41 @@ class BridgeTestCases17:
         finished = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
         self.assertIsNone(finished["cpuPercent"], "A finished turn is no longer running.")
         self.assertEqual(finished["reason"], "not_running")
+    # case-contract: test_claude_long_automatic_notice_is_compact | A Claude Code synthetic notice longer than the automatic message preview stays whole: the streamed steered message and fresh CLI/XPC history carry every line of it under the Claude Code notice marker, between the turn's answer and Claude's reply, and a short notice is recorded unchanged too. In the transcript the long notice renders as an automatic message from Claude Code collapsed to an eight-line preview ending in an ellipsis, with a Show more control whose accessibility label names expanding the automatic message; expanding the streamed notice while its turn still runs reveals all of its text and survives the reload that gives it its history id and the reload after a later turn, and collapsing restores the preview. A short notice shows in full with no control or preview, the user's own prompts never get one, the bubble's accessibility label keeps the full text, and reopening the task shows the long notice collapsed again. The preview is Playhouse-owned presentation shared by every automatic message whatever the provider, and only Claude Code injects a synthetic message inside a turn, so Claude is the representative provider.
+    def test_claude_long_automatic_notice_is_compact(self):
+        environment = self.install_claude_fixture("claude-fixture-long-notice")
+        task_id = self.create_task("Long handoff notice", provider="claude")["id"]
+        # Matches LONG_HANDOFF_NOTICE in scripts/fixtures/claude-code-fixture.py.
+        long_notice = "\n".join(
+            [f"Handoff context line {index:02d}: the previous session summarized this part of the task in detail." for index in range(1, 25)]
+            + ["Handoff context ends here."]
+        )
+        short_notice = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+        answer, reply = "The handoff is ready.", "Continuing after the handoff notice."
+
+        def notice_turn(prompt, notice):
+            sent, events = self.call_cli("conversation", "send", task_id, "--message", prompt, extra_environment=environment)
+            self.assert_success(sent)
+            self.assertEqual([event["payload"].get("message") for event in events if event["type"] == "steered_message"],
+                             ["Claude Code automatic notice:\n" + notice], "The notice streams once, whole, as a user-side message.")
+            self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [answer, reply])
+            self.assertEqual(self.wait_for_task_status(task_id, {"Review"})["status"], "Review")
+
+        def turn_messages(history, prompt):
+            turn = next(message["turnID"] for message in history["messages"] if message["role"] == "user" and message["text"] == prompt)
+            return [(message["role"], message.get("phase"), message["text"]) for message in history["messages"] if message.get("turnID") == turn]
+
+        long_prompt, short_prompt = "Hand off with a long Claude Code notice.", "Hand off with a short Claude Code notice."
+        notice_turn(long_prompt, long_notice)
+        notice_turn(short_prompt, short_notice)
+        # A fresh read after the later turn is the reload the transcript applies.
+        history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        for prompt, notice in ((long_prompt, long_notice), (short_prompt, short_notice)):
+            self.assertEqual(turn_messages(history, prompt), [
+                ("user", None, prompt),
+                ("assistant", "final_answer", answer),
+                ("user", None, "Claude Code automatic notice:\n" + notice),
+                ("assistant", "final_answer", reply),
+            ], "History keeps the notice whole between the answer and the reply.")
+        recorded = next(message["text"] for message in history["messages"] if "Handoff context ends here." in message["text"])
+        self.assertEqual(len(recorded.splitlines()), 26, "Only the presentation is shortened: all 25 notice lines stay in history.")

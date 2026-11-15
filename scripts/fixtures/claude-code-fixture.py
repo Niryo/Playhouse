@@ -99,6 +99,15 @@ CHAT_NOTICE_PROMPT = "Name the largest moon of Saturn."
 CHAT_NOTICE_ANSWER = "Titan is the largest moon of Saturn."
 CHAT_NOTICE_REPLY = "I already answered above."
 NO_VISIBLE_OUTPUT_NOTICE = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+# A task turn after which Claude Code adds its own notice: a long handoff, or the short one above.
+LONG_NOTICE_PROMPT = "Hand off with a long Claude Code notice."
+SHORT_NOTICE_PROMPT = "Hand off with a short Claude Code notice."
+NOTICE_HANDOFF_ANSWER = "The handoff is ready."
+NOTICE_HANDOFF_REPLY = "Continuing after the handoff notice."
+LONG_HANDOFF_NOTICE = "\n".join(
+    [f"Handoff context line {index:02d}: the previous session summarized this part of the task in detail." for index in range(1, 25)]
+    + ["Handoff context ends here."]
+)
 # A chat turn that forgets close-turn; Playhouse's one visible nudge then gets it run.
 CHAT_SKIPPED_CLOSE_TURN_PROMPT = "Plan a weekend hiking trip."
 CHAT_SKIPPED_CLOSE_TURN_ANSWER = "Pick a loop trail under 15 km and start early."

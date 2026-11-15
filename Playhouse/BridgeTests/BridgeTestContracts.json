@@ -902,5 +902,9 @@
   {
     "id": "test_claude_compaction_shows_one_row",
     "expectation": "A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event."
+  },
+  {
+    "id": "test_claude_long_automatic_notice_is_compact",
+    "expectation": "A Claude Code synthetic notice longer than the automatic message preview stays whole: the streamed steered message and fresh CLI/XPC history carry every line of it under the Claude Code notice marker, between the turn's answer and Claude's reply, and a short notice is recorded unchanged too. In the transcript the long notice renders as an automatic message from Claude Code collapsed to an eight-line preview ending in an ellipsis, with a Show more control whose accessibility label names expanding the automatic message; expanding the streamed notice while its turn still runs reveals all of its text and survives the reload that gives it its history id and the reload after a later turn, and collapsing restores the preview. A short notice shows in full with no control or preview, the user's own prompts never get one, the bubble's accessibility label keeps the full text, and reopening the task shows the long notice collapsed again. The preview is Playhouse-owned presentation shared by every automatic message whatever the provider, and only Claude Code injects a synthetic message inside a turn, so Claude is the representative provider."
   }
 ]

@@ -184,6 +184,9 @@ struct TaskConversationView: View {
     @State var responseStartedAt: Date?
     @State var completedResponseDuration: Int?
     @State var collapsedProgressTurnIDs = Set<String>()
+    /// Automatic messages the reader expanded past their preview, by their full text: a
+    /// streamed message gets a new id once history reloads, and its text stays the same.
+    @State var expandedAutomaticMessageTexts = Set<String>()
     @State var selectedSubagent: ConversationActivity?
     @State var subagentHistory: ConversationHistory?
     @State var isLoadingSubagent = false
