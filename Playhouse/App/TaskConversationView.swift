@@ -18,6 +18,13 @@ struct TaskConversationView: View {
         let image: NSImage
     }
 
+    /// A steer the window shows before the provider has confirmed it.
+    struct PendingLocalSteer: Identifiable {
+        let id = UUID().uuidString
+        let text: String
+        let imageDataURLs: [String]
+    }
+
     /// An outlined pencil with a wide body, drawn on a 24-point grid. The SF Symbol pencil
     /// stays a thin stick at small sizes, which does not read as an edit button.
     struct EditPencilShape: Shape {
@@ -232,12 +239,29 @@ struct TaskConversationView: View {
     @State var isPreparingSubmittedMessage = false
     @State var conflictResolutionAttempt = 0
     @State var hasPausedResponse = false
+    /// The user stopped the response. The window shows the stop at once and keeps showing it
+    /// while the provider winds the turn down (or finishes launching it, only to stop it), so
+    /// until that turn is really over its activity doesn't bring the Stop button back.
     @State var isPausingResponse = false
+    @State var interruptsInFlight = 0
+    /// Identifies this window's newest send. An older send still unwinding after a stop leaves
+    /// the composer state to the newer one.
+    @State var sendGeneration = 0
+    @State var sendsInFlight = 0
+    /// Sends of this window still saving their prompt, before the daemon has them.
+    @State var sendsAwaitingDispatch = 0
     @State var queuedMessages: [QueuedConversationMessage] = []
     /// A `.dispatching` follow-up is claimed for delivery: either reserved for a
     /// steer, or sent as its own turn and kept in the store until that whole turn
     /// ends. Only the others are still waiting for the user.
-    var waitingFollowUps: [QueuedConversationMessage] { queuedMessages.filter { $0.state != .dispatching } }
+    var waitingFollowUps: [QueuedConversationMessage] {
+        queuedMessages.filter { $0.state != .dispatching && !steeringQueuedMessageIDs.contains($0.id) }
+    }
+    /// Steers shown in the transcript that the provider hasn't confirmed yet. They are
+    /// delivered in the background, one at a time and in order.
+    @State var pendingLocalSteers: [PendingLocalSteer] = []
+    @State var steeringQueuedMessageIDs: Set<UUID> = []
+    @State var steerDeliveryTail: Task<Void, Never>?
     @State var isSubmittingLiveMessage = false
     @State var userInputRequest: ConversationUserInputRequest?
     // The live snapshot can still carry a request this window just answered.
@@ -273,7 +297,7 @@ struct TaskConversationView: View {
     @FocusState var isComposerFocused: Bool
 
     var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isStopLandingOnOwnSend || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
     }
 
     /// A board task that hasn't started its conversation can be scheduled, or rescheduled.
@@ -298,11 +322,6 @@ struct TaskConversationView: View {
     var conversationRuntime: ConversationRuntimeModel {
         guard let runtimeModel else { preconditionFailure("The conversation runtime model is not in the environment.") }
         return runtimeModel
-    }
-
-    var canPauseResponse: Bool {
-        guard let threadID = task.activeConversationID else { return false }
-        return conversationRuntime.canInterruptActiveTurn(threadID: threadID)
     }
 
     var provider: ConversationProvider { task.conversationProvider }
@@ -336,10 +355,6 @@ struct TaskConversationView: View {
     var startImplementingUnavailableReason: String? {
         guard !task.isStandaloneChat else { return nil }
         return PlanImplementationHandoff.unavailableReason(workspaceRootPaths: task.workspaceRootPaths)
-    }
-
-    var isConversationTurnActive: Bool {
-        conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "")
     }
 
     var archivedFollowUpHint: String {
@@ -688,6 +703,15 @@ struct TaskConversationView: View {
             if !isTurnActive, !isReadOnly {
                 refreshQueuedMessages()
             }
+            // A stop already shows. The stopped turn winding down, or starting late only to
+            // be stopped, changes nothing until it is over.
+            if isPausingResponse {
+                settleLocalStopIfDone()
+                return
+            }
+            // A send made right after a stop owns the responding state while the stopped
+            // turn's send is still unwinding.
+            if sendsInFlight > 1 { return }
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
                 && (task.status == .inProgress || task.status == .waitingResponse)
             guard let taskThreadID = task.activeConversationID else {
@@ -707,7 +731,8 @@ struct TaskConversationView: View {
             // The daemon clears the submitted prompt after the turn ends, which can be after
             // this window saw it end. A turn parked on a question is not over, even while the
             // runtime snapshot lags, so leave the answer flow to settle it.
-            if cleared, isResponding, !providerTurnIsActive,
+            if cleared { settleLocalStopIfDone() }
+            if cleared, isResponding, !providerTurnIsActive, sendsInFlight == 0,
                userInputRequest == nil, providerPendingUserInputRequest == nil,
                !conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "") {
                 isResponding = false

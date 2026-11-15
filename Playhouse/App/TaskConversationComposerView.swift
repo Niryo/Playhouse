@@ -6,11 +6,13 @@ extension TaskConversationView {
     var composerModel: ComposerModel {
         let reason = startImplementingUnavailableReason
         let primary: ComposerModel.Primary
-        if isDisplayingActiveResponse
+        // Stop works from the moment a message is sent: a turn that is still launching is
+        // stopped before it starts. Once clicked it gives way to Continue at once.
+        if !isPausingResponse, isDisplayingActiveResponse
             || (providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
-            primary = .init(kind: "stop", disabled: isPausingResponse || !canPauseResponse, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
+            primary = .init(kind: "stop", disabled: false, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
         } else if hasPausedResponse {
-            primary = .init(kind: "continue", disabled: false, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
+            primary = .init(kind: "continue", disabled: isStopLandingOnOwnSend, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
         } else if composerSchedule != nil, canSchedule {
             primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task", label: "Schedule task", value: composerSchedule?.summary() ?? "", testID: "send-message-button")
         } else {
@@ -140,7 +142,8 @@ extension TaskConversationView {
                 }
             },
             steer: {
-                if isResponding, isConversationTurnActive {
+                // A turn that is still launching takes the steer as soon as it starts.
+                if isResponding {
                     steerCurrentTurn()
                 }
             },
