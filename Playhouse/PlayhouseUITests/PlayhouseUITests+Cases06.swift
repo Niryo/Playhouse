@@ -183,7 +183,7 @@ extension PlayhouseUITests {
         assertTaskVisible("Manual review menu", inColumn: "Review")
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies. Completed and waiting-response outcomes start Glass and Ping respectively when their turns settle.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome and with nothing left running receives exactly one private recovery prompt that offers only the stopping outcomes; a completed report during it moves the task to Review, a waiting-response report during it leaves the task in Waiting Response, and no report by its end marks the task Blocked with the missing-outcome reason rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work; they offer no outcome for unfinished work and tell the agent to keep awaiting a required command within the turn. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A recovery prompt Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those prompts also retains the latest ordinary-turn diff while showing their replies. Completed and waiting-response outcomes start Glass and Ping respectively when their turns settle.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -303,12 +303,12 @@ extension PlayhouseUITests {
         omittedProcess.standardError = omittedStderr.pipe
         try omittedProcess.run()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The no-outcome turn should resume the existing fixture thread.")
-        for nudgeIndex in 0...Self.maxOutcomeContinuations {
-            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The fallback status should be deferred until every private nudge finishes.")
+        for nudgeIndex in 0...Self.outcomeRecoveryPrompts {
+            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The fallback status should be deferred until the recovery prompt finishes.")
             try "Release turn \(nudgeIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-            if nudgeIndex < Self.maxOutcomeContinuations {
+            if nudgeIndex < Self.outcomeRecoveryPrompts {
                 XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should finish the current unreported turn.")
-                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "Playhouse should send the next private status nudge.")
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "Playhouse should send its one private recovery prompt.")
             }
         }
         omittedProcess.waitUntilExit()
@@ -317,8 +317,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(omittedProcess.terminationStatus, 0, "The no-outcome fixture conversation should finish successfully: \(omittedOutput) \(omittedError)")
 
         let finished = try XCTUnwrap(taskRecord(id: taskID))
-        XCTAssertEqual(finished["status"] as? String, "Blocked", "Unanswered nudges never asked the user anything, so the task is Blocked rather than Waiting Response.")
-        XCTAssertTrue((finished["statusMessage"] as? String)?.contains("nudges went unanswered") == true, "The Blocked reason should say the nudges went unanswered.")
+        XCTAssertEqual(finished["status"] as? String, "Blocked", "An unanswered recovery prompt never asked the user anything, so the task is Blocked rather than Waiting Response.")
+        XCTAssertTrue((finished["statusMessage"] as? String)?.contains("one recovery prompt went unanswered") == true, "The Blocked reason should say the recovery prompt went unanswered.")
         assertTaskVisible("Progress reports", inColumn: "Blocked")
         assertCLIError(try runCLI(["task", "progress", "publish", taskID, "--type", "testing"], expectedStatus: 1), code: "invalid_transition")
         assertCLIError(try runCLI(["task", "outcome", taskID, "completed"], expectedStatus: 1), code: "invalid_transition")
@@ -392,11 +392,11 @@ extension PlayhouseUITests {
         let turnData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let turn = try XCTUnwrap(try JSONSerialization.jsonObject(with: turnData) as? [String: Any])
         let hiddenTurns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
-        XCTAssertEqual(hiddenTurns.count, 12, "The omitted outcome should exhaust every nudge; reported outcomes should stop after one nudge.")
+        XCTAssertEqual(hiddenTurns.count, 8, "Each missing-outcome send earns exactly one recovery prompt.")
         let nudgeTurns = hiddenTurns.filter { ($0["userMessage"] as? String)?.contains("ended without reporting a task outcome") == true }
-        XCTAssertEqual(nudgeTurns.count, Self.maxOutcomeContinuations + 2, "Only the missing-outcome sends should receive private status nudges.")
+        XCTAssertEqual(nudgeTurns.count, Self.outcomeRecoveryPrompts + 2, "Each missing-outcome send should receive exactly one private recovery prompt.")
         XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("task outcome") == true }, "Each nudge should explicitly direct the agent to report an outcome.")
-        XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("`in-progress`") == true }, "A nudge must offer in-progress alongside completed and waiting-response.")
+        XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("in-progress") == false && ($0["userMessage"] as? String)?.contains("blocked --reason") == true && ($0["userMessage"] as? String)?.contains("This is the only recovery prompt") == true }, "The recovery prompt offers only stopping outcomes.")
         let visibleHistory = try runCLI(["conversation", "history", taskID])
         let visibleMessages = try XCTUnwrap((visibleHistory["result"] as? [String: Any])?["messages"] as? [[String: Any]])
         XCTAssertTrue(visibleMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String)?.contains("ended without reporting a task outcome") == true }, "The nudge Playhouse sent must appear in conversation history.")
@@ -410,18 +410,21 @@ extension PlayhouseUITests {
         XCTAssertTrue(instructions.contains("CLI/XPC 3/8"))
         XCTAssertTrue(instructions.contains("under 80 characters"))
         XCTAssertTrue(instructions.contains("task outcome"))
-        XCTAssertTrue(instructions.contains("<completed|in-progress|waiting-response>"))
-        XCTAssertTrue(instructions.contains("Never end a turn mid-work without an outcome"))
+        XCTAssertTrue(instructions.contains("<completed|waiting-response|blocked>"))
+        XCTAssertTrue(instructions.contains("There is no outcome for unfinished work"))
+        XCTAssertTrue(instructions.contains("keep awaiting or polling that same command session in this turn"))
+        XCTAssertFalse(instructions.contains("in-progress"))
+        XCTAssertTrue(instructions.contains("sends one private recovery prompt"))
         XCTAssertTrue(instructions.contains("waiting-response"))
         XCTAssertTrue(instructions.contains("final CLI action"))
-        XCTAssertTrue(instructions.contains("before you write your final reply, make exactly one definitive outcome call"))
+        XCTAssertTrue(instructions.contains("before you write your final reply, make exactly one stopping outcome call"))
         XCTAssertTrue(instructions.contains("Write your user-visible final reply after the outcome call returns"))
         XCTAssertTrue(instructions.contains("never end a turn on a tool call"))
         XCTAssertTrue(instructions.contains("previous response had no visible output but you already answered in this turn, do not repeat the answer"))
         XCTAssertEqual(turn["threadStartCount"] as? Int, 1, "The follow-up should reuse the thread created with progress instructions.")
         XCTAssertGreaterThanOrEqual(turn["threadResumeCount"] as? Int ?? 0, 1)
         let turns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
-        XCTAssertEqual(turns.count, 12)
+        XCTAssertEqual(turns.count, 8)
         XCTAssertTrue(turns.allSatisfy { $0["developerInstructions"] == nil || $0["developerInstructions"] is NSNull }, "Thread-scoped task instructions should not be repeated in turn requests.")
         let resumeInstructions = try XCTUnwrap(turn["threadResumeDeveloperInstructions"] as? [Any])
         XCTAssertFalse(resumeInstructions.isEmpty, "Resumed task threads should receive updated task instructions.")
@@ -475,7 +478,7 @@ extension PlayhouseUITests {
             composer.typeText("Echo the outcome command for \(echoedTaskID).")
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The echoed-outcome turn should hold the fixture turn open.")
-            let heldTurns = turnIndex == 0 ? Self.maxOutcomeContinuations + 1 : 1
+            let heldTurns = turnIndex == 0 ? Self.outcomeRecoveryPrompts + 1 : 1
             for heldTurnIndex in 0..<heldTurns {
                 try "Release echoed turn \(heldTurnIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
                 if heldTurnIndex < heldTurns - 1 {
@@ -499,259 +502,507 @@ extension PlayhouseUITests {
         relaunchApp()
         assertTaskVisible("Progress reports", inColumn: "Review")
     }
-    // case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies appear in the conversation history as Playhouse-sent messages and their replies. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
-    func test_task_outcome_in_progress_drives_continuations_until_blocked() throws {
-        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-continuation-hold-release")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+    // case-contract: test_task_stopping_outcomes_and_single_recovery_prompt | A turn has three stopping outcomes and none for unfinished work. A blocked report needs a reason and settles the task in Blocked with that reason; a blocked report without one, or with one longer than 500 characters, is rejected, as is a reason on any other outcome; a legacy in-progress report is answered with guidance, records nothing, withdraws an outcome staged earlier in the turn, and leaves the task In Progress. A turn that ends with no stopping outcome and nothing running gets exactly one private recovery prompt, during which the task stays In Progress; a completed report in that turn settles the task in Review, and a recovery turn that also ends unsettled leaves the task Blocked with a missing-outcome reason and no further prompts. The recovery prompt and its reply appear in the conversation history as a Playhouse-sent message and its reply. The user taking the work back ends Playhouse's private driving: stopping the recovery turn keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of a recovery prompt.
+    func test_task_stopping_outcomes_and_single_recovery_prompt() throws {
+        let recoveryMarker = "ended without reporting a task outcome"
+        func fixtureExecutable(_ name: String) -> URL {
+            let executable = WorkspaceFixture.root.appendingPathComponent(name)
+            XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path), "\(name) should be installed.")
+            return executable
+        }
+        func fixtureTurns(_ executable: URL) throws -> [[String: Any]] {
+            let history = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+            )
+            return try XCTUnwrap(history["turns"] as? [[String: Any]])
+        }
+        func recoveryTurns(_ executable: URL) throws -> [[String: Any]] {
+            try fixtureTurns(executable).filter { ($0["userMessage"] as? String)?.contains(recoveryMarker) == true }
+        }
+        func exists(_ marker: URL) -> Bool { FileManager.default.fileExists(atPath: marker.path) }
+        func release(_ marker: URL, _ text: String) { try? (text + "\n").write(to: marker, atomically: true, encoding: .utf8) }
+
+        let executable = fixtureExecutable("codex-fixture-outcome-recovery-hold-release")
         // The app reads each opened conversation through this fixture.
         codexFixtureExecutable = executable.path
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Continue in progress", roots: [fixture.primary.path])
-        let taskID = try taskID(named: "Continue in progress")
-        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
-        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
-        try? FileManager.default.removeItem(at: activeMarker)
-        try? FileManager.default.removeItem(at: releaseMarker)
-        var environment = ProcessInfo.processInfo.environment
-        environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
-        environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
-        environment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
-        environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
-        environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
-        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = executable.path
-
-        let process = Process()
-        process.executableURL = cliURL
-        process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
-        process.environment = environment
-        let stdout = DrainingPipe()
-        let stderr = DrainingPipe()
-        process.standardOutput = stdout.pipe
-        process.standardError = stderr.pipe
-        try process.run()
+        try createTaskFixture(title: "Recovers once", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Recovers once")
+        let turn = try startProgressFixtureTurn(taskID: taskID, executable: executable)
         defer {
-            if process.isRunning {
-                try? "Release the turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-                process.waitUntilExit()
+            if turn.process.isRunning {
+                release(turn.releaseMarker, "Release the turn.")
+                turn.process.waitUntilExit()
             }
-            try? FileManager.default.removeItem(at: activeMarker)
-            try? FileManager.default.removeItem(at: releaseMarker)
         }
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The fixture should hold the first turn open.")
-        let reported = try XCTUnwrap(try runCLI(["task", "outcome", taskID, "in-progress"])["result"] as? [String: Any])
-        XCTAssertEqual(reported["outcome"] as? String, "in-progress")
-        XCTAssertEqual(reported["taskStatus"] as? String, "In Progress", "The outcome is staged until the turn completes.")
-        try "Release the in-progress turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The in-progress turn should finish before its continuation.")
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "Playhouse should send a continuation turn after an in-progress report.")
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The task stays In Progress while Playhouse drives the continuation.")
-        assertTaskVisible("Continue in progress", inColumn: "In Progress")
-        XCTAssertEqual((try runCLI(["task", "outcome", taskID, "completed"])["result"] as? [String: Any])?["outcome"] as? String, "completed")
-        try "Release the continuation turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-        process.waitUntilExit()
-        let output = stdout.drainedText()
-        let errorOutput = stderr.drainedText()
-        XCTAssertEqual(process.terminationStatus, 0, "The continuation conversation should finish successfully: \(output) \(errorOutput)")
-        assertTaskVisible("Continue in progress", inColumn: "Review")
-        let continuationHistory = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
-        )
-        let continuationTurns = try XCTUnwrap(continuationHistory["turns"] as? [[String: Any]])
-            .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }
-        XCTAssertEqual(continuationTurns.count, 1, "One in-progress report earns exactly one continuation turn.")
-        XCTAssertTrue(
-            (continuationTurns[0]["userMessage"] as? String)?.contains("of \(Self.maxOutcomeContinuations)") == true,
-            "The continuation prompt should name the remaining budget."
-        )
-        openTask(named: "Continue in progress")
-        XCTAssertTrue(transcriptContains("You reported"), "Continuation prompts Playhouse sent must appear in the visible transcript.")
-        try assertAutomaticMessageBubble(taskID: taskID, containing: "You reported")
-        attachScreenshot(named: "Playhouse continuation prompt shown as an automatic message")
-        for hidden in ["Playhouse private outcome reminder hidden", "Playhouse private outcome response hidden"] {
-            XCTAssertEqual(
-                app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", hidden)).count, 0,
-                "No placeholder replaces a continuation or its reply."
-            )
-        }
-        element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+        XCTAssertTrue(waitUntil({ exists(turn.activeMarker) }, timeout: 15), "The fixture should hold the first turn open.")
+        // A legacy in-progress report withdraws an outcome staged earlier in the turn: the
+        // recovery prompt below is only sent because nothing is left staged.
+        let staged = try XCTUnwrap(try runCLI(["task", "outcome", taskID, "waiting-response"])["result"] as? [String: Any])
+        XCTAssertEqual(staged["recorded"] as? Bool, true)
+        let legacy = try XCTUnwrap(try runCLI(["task", "outcome", taskID, "in-progress"])["result"] as? [String: Any])
+        XCTAssertEqual(legacy["recorded"] as? Bool, false, "in-progress is no longer an outcome, so nothing is staged for it.")
+        XCTAssertEqual(legacy["taskStatus"] as? String, "In Progress")
+        XCTAssertTrue((legacy["message"] as? String)?.contains("no longer a turn outcome") == true)
+        XCTAssertTrue((legacy["message"] as? String)?.contains("blocked --reason") == true)
+        let unexplained = try runCLI(["task", "outcome", taskID, "blocked"], expectedStatus: 2)
+        XCTAssertTrue(((unexplained["error"] as? [String: Any])?["message"] as? String)?.contains("--reason") == true)
+        let overlong = try runCLI(["task", "outcome", taskID, "blocked", "--reason", String(repeating: "x", count: 501)], expectedStatus: 2)
+        XCTAssertTrue(((overlong["error"] as? [String: Any])?["message"] as? String)?.contains("1 to 500 characters") == true)
+        let misplaced = try runCLI(["task", "outcome", taskID, "completed", "--reason", "Not a blocker."], expectedStatus: 2)
+        XCTAssertTrue(((misplaced["error"] as? [String: Any])?["message"] as? String)?.contains("Only a blocked outcome takes --reason") == true)
+        release(turn.releaseMarker, "Release the unsettled turn.")
+        XCTAssertTrue(waitUntil({ !exists(turn.activeMarker) }, timeout: 15), "The first turn should end without a stopping outcome.")
+        XCTAssertTrue(waitUntil({ exists(turn.activeMarker) }, timeout: 15), "Playhouse should send one recovery prompt for a turn that ended unsettled.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The task stays In Progress while the recovery turn is running.")
+        assertTaskVisible("Recovers once", inColumn: "In Progress")
+        attachScreenshot(named: "Task stays In Progress while its recovery turn runs")
+        let completed = try XCTUnwrap(try runCLI(["task", "outcome", taskID, "completed"])["result"] as? [String: Any])
+        XCTAssertEqual(completed["outcome"] as? String, "completed")
+        XCTAssertEqual(completed["recorded"] as? Bool, true)
+        XCTAssertEqual(completed["taskStatus"] as? String, "In Progress", "The outcome is staged until the turn completes.")
+        release(turn.releaseMarker, "Release the recovery turn.")
+        turn.process.waitUntilExit()
+        XCTAssertEqual(turn.process.terminationStatus, 0, "The recovery conversation should finish successfully.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "A completed report during the recovery turn settles the task in Review.")
+        assertTaskVisible("Recovers once", inColumn: "Review")
+        XCTAssertEqual(try recoveryTurns(executable).count, 1, "An unsettled turn earns exactly one recovery prompt.")
+        XCTAssertTrue((try recoveryTurns(executable)[0]["userMessage"] as? String)?.contains("This is the only recovery prompt") == true)
 
-        // Every turn reports in-progress, so Playhouse runs out of continuations.
+        try createTaskFixture(title: "Blocked with a reason", roots: [fixture.primary.path])
+        let blockedID = try self.taskID(named: "Blocked with a reason")
+        let blockedExecutable = fixtureExecutable("codex-fixture-outcome-blocked-hold-release")
+        codexFixtureExecutable = blockedExecutable.path
+        let blocked = try startProgressFixtureTurn(taskID: blockedID, executable: blockedExecutable)
+        defer {
+            if blocked.process.isRunning {
+                release(blocked.releaseMarker, "Release the blocked turn.")
+                blocked.process.waitUntilExit()
+            }
+        }
+        XCTAssertTrue(waitUntil({ exists(blocked.activeMarker) }, timeout: 15), "The blocked fixture should hold its turn open.")
+        let reported = try XCTUnwrap(
+            try runCLI(["task", "outcome", blockedID, "blocked", "--reason", "The signing certificate expired."])["result"] as? [String: Any]
+        )
+        XCTAssertEqual(reported["outcome"] as? String, "blocked")
+        XCTAssertEqual(reported["taskStatus"] as? String, "In Progress", "A blocked outcome is staged until the turn completes.")
+        release(blocked.releaseMarker, "Release the blocked turn.")
+        blocked.process.waitUntilExit()
+        XCTAssertEqual(blocked.process.terminationStatus, 0, "The blocked conversation should finish successfully.")
+        let blockedRecord = try XCTUnwrap(taskRecord(id: blockedID))
+        XCTAssertEqual(blockedRecord["status"] as? String, "Blocked")
+        XCTAssertEqual(blockedRecord["statusMessage"] as? String, "The signing certificate expired.")
+        XCTAssertEqual(try recoveryTurns(blockedExecutable).count, 0, "A reported stopping outcome needs no recovery prompt.")
+        assertTaskVisible("Blocked with a reason", inColumn: "Blocked")
+        let blockedCardMessage = element("task-status-message-\(blockedID)")
+        XCTAssertTrue(blockedCardMessage.waitToExist(timeout: 10), "The Blocked card should show the agent's reason.")
+        XCTAssertTrue(accessibleLabelOrValue(of: blockedCardMessage).contains("The signing certificate expired."))
+        attachScreenshot(named: "Blocked card shows the reason the agent reported")
+
         try createTaskFixture(title: "Never settles", roots: [fixture.primary.path])
-        let cappedID = try self.taskID(named: "Never settles")
-        let cappedExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-cap-hold-release")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: cappedExecutable.path))
-        codexFixtureExecutable = cappedExecutable.path
-        let cappedActive = URL(fileURLWithPath: cappedExecutable.path + ".turn-active")
-        let cappedRelease = URL(fileURLWithPath: cappedExecutable.path + ".turn-release")
-        try? FileManager.default.removeItem(at: cappedActive)
-        try? FileManager.default.removeItem(at: cappedRelease)
-        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = cappedExecutable.path
-        let cappedProcess = Process()
-        cappedProcess.executableURL = cliURL
-        cappedProcess.arguments = ["conversation", "send", cappedID, "--message", "Work on this task."]
-        cappedProcess.environment = environment
-        let cappedStdout = DrainingPipe()
-        let cappedStderr = DrainingPipe()
-        cappedProcess.standardOutput = cappedStdout.pipe
-        cappedProcess.standardError = cappedStderr.pipe
-        try cappedProcess.run()
+        let unansweredID = try self.taskID(named: "Never settles")
+        let unansweredExecutable = fixtureExecutable("codex-fixture-outcome-unanswered-hold-release")
+        codexFixtureExecutable = unansweredExecutable.path
+        let unanswered = try startProgressFixtureTurn(taskID: unansweredID, executable: unansweredExecutable)
         defer {
-            if cappedProcess.isRunning {
-                try? "Release the capped turn.\n".write(to: cappedRelease, atomically: true, encoding: .utf8)
-                cappedProcess.waitUntilExit()
-            }
-            try? FileManager.default.removeItem(at: cappedActive)
-            try? FileManager.default.removeItem(at: cappedRelease)
-        }
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "The capped fixture should hold its first turn open.")
-        for index in 0...Self.maxOutcomeContinuations {
-            XCTAssertEqual(
-                try taskRecord(id: cappedID)?["status"] as? String, "In Progress",
-                "Every continuation keeps the task In Progress until the limit is reached."
-            )
-            XCTAssertEqual(
-                (try runCLI(["task", "outcome", cappedID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String,
-                "in-progress"
-            )
-            try "Release turn \(index + 1).\n".write(to: cappedRelease, atomically: true, encoding: .utf8)
-            if index < Self.maxOutcomeContinuations {
-                XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "The fixture should finish the current continuation turn.")
-                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "Playhouse should send the next continuation turn.")
+            if unanswered.process.isRunning {
+                release(unanswered.releaseMarker, "Release the recovery turn.")
+                unanswered.process.waitUntilExit()
             }
         }
-        cappedProcess.waitUntilExit()
-        let cappedOutput = cappedStdout.drainedText()
-        let cappedError = cappedStderr.drainedText()
-        XCTAssertEqual(cappedProcess.terminationStatus, 0, "The capped continuation conversation should finish successfully: \(cappedOutput) \(cappedError)")
-        let cappedRecord = try XCTUnwrap(taskRecord(id: cappedID))
-        XCTAssertEqual(cappedRecord["status"] as? String, "Blocked", "Running out of continuations is Blocked, not Waiting Response.")
-        XCTAssertTrue(
-            (cappedRecord["statusMessage"] as? String)?.contains("continuation turns") == true,
-            "The Blocked reason should name the continuation limit."
-        )
+        XCTAssertTrue(waitUntil({ exists(unanswered.activeMarker) }, timeout: 15), "The unanswered fixture should hold its first turn open.")
+        release(unanswered.releaseMarker, "Release the unsettled turn.")
+        XCTAssertTrue(waitUntil({ !exists(unanswered.activeMarker) }, timeout: 15), "The first turn should end without a stopping outcome.")
+        XCTAssertTrue(waitUntil({ exists(unanswered.activeMarker) }, timeout: 15), "Playhouse should send its one recovery prompt.")
+        XCTAssertEqual(try taskRecord(id: unansweredID)?["status"] as? String, "In Progress", "A recovery turn that is running keeps the task In Progress.")
+        release(unanswered.releaseMarker, "Release the recovery turn.")
+        unanswered.process.waitUntilExit()
+        XCTAssertEqual(unanswered.process.terminationStatus, 0, "The unanswered recovery conversation should finish successfully.")
+        let unansweredRecord = try XCTUnwrap(taskRecord(id: unansweredID))
+        XCTAssertEqual(unansweredRecord["status"] as? String, "Blocked", "An unanswered recovery prompt is Blocked, not Waiting Response.")
+        XCTAssertTrue((unansweredRecord["statusMessage"] as? String)?.contains("one recovery prompt went unanswered") == true)
+        XCTAssertEqual(try recoveryTurns(unansweredExecutable).count, 1, "Playhouse sends no second recovery prompt.")
         assertTaskVisible("Never settles", inColumn: "Blocked")
-        let cappedHistory = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: cappedExecutable.path + ".history"))) as? [String: Any]
-        )
-        XCTAssertEqual(
-            try XCTUnwrap(cappedHistory["turns"] as? [[String: Any]])
-                .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count,
-            Self.maxOutcomeContinuations,
-            "Playhouse stops driving the work after the continuation limit."
-        )
+        let unansweredCardMessage = element("task-status-message-\(unansweredID)")
+        XCTAssertTrue(unansweredCardMessage.waitToExist(timeout: 10), "The Blocked card should explain the missing outcome.")
+        XCTAssertTrue(accessibleLabelOrValue(of: unansweredCardMessage).contains("one recovery prompt went unanswered"))
+        attachScreenshot(named: "Blocked card explains the missing stopping outcome")
 
-        // Stopping a private continuation is the user taking the work back.
-        try createTaskFixture(title: "Stopped mid continuation", roots: [fixture.primary.path])
-        let stopID = try self.taskID(named: "Stopped mid continuation")
-        let stopExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-stop-hold-release")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: stopExecutable.path))
+        // Stopping the recovery turn is the user taking the work back.
+        try createTaskFixture(title: "Stopped mid recovery", roots: [fixture.primary.path])
+        let stopID = try self.taskID(named: "Stopped mid recovery")
+        let stopExecutable = fixtureExecutable("codex-fixture-outcome-stop-hold-release")
         codexFixtureExecutable = stopExecutable.path
-        let stopActive = URL(fileURLWithPath: stopExecutable.path + ".turn-active")
-        let stopRelease = URL(fileURLWithPath: stopExecutable.path + ".turn-release")
-        try? FileManager.default.removeItem(at: stopActive)
-        try? FileManager.default.removeItem(at: stopRelease)
-        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = stopExecutable.path
-        let stopProcess = Process()
-        stopProcess.executableURL = cliURL
-        stopProcess.arguments = ["conversation", "send", stopID, "--message", "Work on this task."]
-        stopProcess.environment = environment
-        stopProcess.standardOutput = DrainingPipe().pipe
-        stopProcess.standardError = DrainingPipe().pipe
-        try stopProcess.run()
+        let stopped = try startProgressFixtureTurn(taskID: stopID, executable: stopExecutable)
         defer {
-            if stopProcess.isRunning {
-                try? "Release the stopped continuation.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
-                stopProcess.waitUntilExit()
+            if stopped.process.isRunning {
+                release(stopped.releaseMarker, "Release the stopped recovery turn.")
+                stopped.process.waitUntilExit()
             }
-            try? FileManager.default.removeItem(at: stopActive)
-            try? FileManager.default.removeItem(at: stopRelease)
         }
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "The stop fixture should hold its first turn open.")
-        XCTAssertEqual((try runCLI(["task", "outcome", stopID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String, "in-progress")
-        try "Release the in-progress turn.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "The in-progress turn should finish before its continuation.")
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "Playhouse should send a continuation turn before the Stop.")
+        XCTAssertTrue(waitUntil({ exists(stopped.activeMarker) }, timeout: 15), "The stop fixture should hold its first turn open.")
+        release(stopped.releaseMarker, "Release the unsettled turn.")
+        XCTAssertTrue(waitUntil({ !exists(stopped.activeMarker) }, timeout: 15), "The first turn should end without a stopping outcome.")
+        XCTAssertTrue(waitUntil({ exists(stopped.activeMarker) }, timeout: 15), "Playhouse should send its recovery prompt before the Stop.")
         // Stop persists the paused state before the provider answers, and the
         // held fixture turn only replies once released, so the Stop has to run
         // alongside the release rather than before it.
         let stopper = try startCLIProcess(["conversation", "stop", stopID])
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 20),
                       "Stop should persist the paused state before the provider acknowledges it.")
-        try "Release the stopped continuation.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+        release(stopped.releaseMarker, "Release the stopped recovery turn.")
         _ = try finishCLIProcess(stopper)
-        stopProcess.waitUntilExit()
+        stopped.process.waitUntilExit()
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 30),
-                      "A Stop during a continuation keeps the user's paused state.")
+                      "A Stop during the recovery turn keeps the user's paused state.")
         XCTAssertNil(try taskRecord(id: stopID)?["statusMessage"] as? String,
                      "A user-requested Stop must not be reported as a Playhouse failure.")
-        assertTaskVisible("Stopped mid continuation", inColumn: "Waiting Response")
-        let stopHistory = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: stopExecutable.path + ".history"))) as? [String: Any]
-        )
-        XCTAssertEqual(
-            try XCTUnwrap(stopHistory["turns"] as? [[String: Any]])
-                .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count,
-            1,
-            "Playhouse must stop driving the work once the user stops it."
-        )
+        assertTaskVisible("Stopped mid recovery", inColumn: "Waiting Response")
+        XCTAssertEqual(try recoveryTurns(stopExecutable).count, 1, "Playhouse must not restart the work once the user stops it.")
 
         // A queued follow-up is the other way the user takes over.
-        try createTaskFixture(title: "Queued over continuation", roots: [fixture.primary.path])
-        let queuedID = try self.taskID(named: "Queued over continuation")
-        let queuedExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-queue-hold-release")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: queuedExecutable.path))
+        try createTaskFixture(title: "Queued over recovery", roots: [fixture.primary.path])
+        let queuedID = try self.taskID(named: "Queued over recovery")
+        let queuedExecutable = fixtureExecutable("codex-fixture-outcome-queue-hold-release")
         codexFixtureExecutable = queuedExecutable.path
-        let queuedActive = URL(fileURLWithPath: queuedExecutable.path + ".turn-active")
-        let queuedRelease = URL(fileURLWithPath: queuedExecutable.path + ".turn-release")
-        try? FileManager.default.removeItem(at: queuedActive)
-        try? FileManager.default.removeItem(at: queuedRelease)
-        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = queuedExecutable.path
-        let queuedProcess = Process()
-        queuedProcess.executableURL = cliURL
-        queuedProcess.arguments = ["conversation", "send", queuedID, "--message", "Work on this task."]
-        queuedProcess.environment = environment
-        queuedProcess.standardOutput = DrainingPipe().pipe
-        queuedProcess.standardError = DrainingPipe().pipe
-        try queuedProcess.run()
+        let queued = try startProgressFixtureTurn(taskID: queuedID, executable: queuedExecutable)
         defer {
-            if queuedProcess.isRunning {
-                try? "Release the next turn.\n".write(to: queuedRelease, atomically: true, encoding: .utf8)
-                queuedProcess.waitUntilExit()
+            if queued.process.isRunning {
+                release(queued.releaseMarker, "Release the next turn.")
+                queued.process.waitUntilExit()
             }
-            try? FileManager.default.removeItem(at: queuedActive)
-            try? FileManager.default.removeItem(at: queuedRelease)
         }
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: queuedActive.path) }, timeout: 15), "The queue fixture should hold its first turn open.")
-        XCTAssertEqual((try runCLI(["task", "outcome", queuedID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String, "in-progress")
+        XCTAssertTrue(waitUntil({ exists(queued.activeMarker) }, timeout: 15), "The queue fixture should hold its first turn open.")
         _ = try runCLI(["conversation", "queue", queuedID, "--message", "Follow-up from the user."])
         XCTAssertTrue(waitUntil({
-            try? "Release the next turn.\n".write(to: queuedRelease, atomically: true, encoding: .utf8)
-            return !queuedProcess.isRunning
-        }, timeout: 60), "The queued follow-up should run instead of further continuations.")
-        queuedProcess.waitUntilExit()
-        // The follow-up turn settles on its own terms; what matters here is that
-        // it ran next instead of queueing behind Playhouse's continuations.
-        let queuedHistory = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: queuedExecutable.path + ".history"))) as? [String: Any]
-        )
-        let queuedTurns = try XCTUnwrap(queuedHistory["turns"] as? [[String: Any]])
-        XCTAssertEqual(
-            queuedTurns.filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count, 0,
-            "A queued follow-up must take precedence over Playhouse's private continuation."
-        )
+            release(queued.releaseMarker, "Release the next turn.")
+            return !queued.process.isRunning
+        }, timeout: 60), "The queued follow-up should run instead of a recovery prompt.")
+        queued.process.waitUntilExit()
+        let queuedTurns = try fixtureTurns(queuedExecutable)
+        XCTAssertGreaterThanOrEqual(queuedTurns.count, 2)
         XCTAssertTrue(
-            queuedTurns.contains { ($0["userMessage"] as? String)?.contains("Follow-up from the user.") == true },
-            "The queued follow-up should be the next turn the provider receives."
+            (queuedTurns[1]["userMessage"] as? String)?.contains("Follow-up from the user.") == true,
+            "A queued follow-up must be the next turn the provider receives, ahead of any recovery prompt."
         )
-        // This task's thread lives in the queue fixture; the app must read it there.
+
+        // The recovery prompt and its reply stay visible in the conversation they ran in.
+        codexFixtureExecutable = unansweredExecutable.path
         relaunchApp()
-        openTask(named: "Queued over continuation")
-        XCTAssertTrue(transcriptMessage("Follow-up from the user.").waitToExist(timeout: 15),
-                      "The queued follow-up should be visible in the conversation it ran in.")
-        XCTAssertEqual(
-            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
-            "No private continuation prompt should be visible ahead of the user's follow-up."
+        assertTaskVisible("Never settles", inColumn: "Blocked")
+        openTask(named: "Never settles")
+        XCTAssertTrue(transcriptContains(recoveryMarker), "The recovery prompt Playhouse sent must appear in the visible transcript.")
+        try assertAutomaticMessageBubble(taskID: unansweredID, containing: recoveryMarker)
+        XCTAssertTrue(transcriptContains("Fixture internal reminder reply."), "The reply to the recovery prompt must appear in the visible transcript.")
+        attachScreenshot(named: "Recovery prompt shown as an automatic message")
+        for hidden in ["Playhouse private outcome reminder hidden", "Playhouse private outcome response hidden"] {
+            XCTAssertEqual(
+                app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", hidden)).count, 0,
+                "No placeholder replaces the recovery prompt or its reply."
+            )
+        }
+    }
+    // case-contract: test_codex_background_command_holds_task_in_progress_until_its_result | A Codex turn that ends without a stopping outcome while a required command it started is still running keeps the task In Progress, with no private prompt, for as long as the command runs, across many more reconciliations of the provider's background terminals than the old five-continuation allowance. When the command ends, Playhouse delivers its real exit status and output to Codex in exactly one private results turn, and the outcome Codex reports there settles the task: Review after a passing command; after a failing command either In Progress again while the agent's rerun is running and Review once the rerun passes, or Blocked with the agent's reason. A command that disappears without a result is reported to the agent as unknown, never as successful. A command still running when Playhouse's wait ceiling passes is reported as still running in the one results turn, is neither terminated nor waited for again, and a turn that ends unsettled after it leaves the task Blocked with the missing-outcome reason. Stopping the task while it waits terminates the command, leaves the task in Waiting Response with no failure reason, and starts no further turn. A turn that reports completed while leaving a command running, as with a dev server, settles in Review at once with no wait, no termination, and no results turn.
+    func test_codex_background_command_holds_task_in_progress_until_its_result() throws {
+        let resultsMarker = "background work results"
+        func fixtureExecutable(_ name: String) -> URL {
+            let executable = WorkspaceFixture.root.appendingPathComponent(name)
+            XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path), "\(name) should be installed.")
+            for suffix in [".background-state", ".background-release", ".history"] {
+                try? FileManager.default.removeItem(atPath: executable.path + suffix)
+            }
+            return executable
+        }
+        func backgroundState(_ executable: URL) -> [String: Any] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".background-state")),
+                  let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return ["running": [String: Any](), "started": 0, "listCalls": 0, "terminated": [String]()]
+            }
+            return state
+        }
+        func running(_ state: [String: Any]) -> Int { (state["running"] as? [String: Any])?.count ?? 0 }
+        func count(_ state: [String: Any], _ key: String) -> Int { state[key] as? Int ?? 0 }
+        func releaseCommand(_ executable: URL, _ result: [String: Any]) throws {
+            try JSONSerialization.data(withJSONObject: result)
+                .write(to: URL(fileURLWithPath: executable.path + ".background-release"), options: .atomic)
+        }
+        func fixtureTurns(_ executable: URL) throws -> [String] {
+            let history = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+            )
+            return try XCTUnwrap(history["turns"] as? [[String: Any]]).map { $0["userMessage"] as? String ?? "" }
+        }
+        func startTurn(_ taskID: String, _ executable: URL, _ extraEnvironment: [String: String] = [:]) throws -> RunningCLIProcess {
+            codexFixtureExecutable = executable.path
+            return try startCLIProcess(
+                ["conversation", "send", taskID, "--message", "Run the required UI test."],
+                extraEnvironment: [
+                    "PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path,
+                    "PLAYHOUSE_E2E_CODEX_BACKGROUND_RECONCILE_SECONDS": "0.2"
+                ].merging(extraEnvironment) { _, new in new }
+            )
+        }
+        func status(_ taskID: String) throws -> String? { try taskRecord(id: taskID)?["status"] as? String }
+
+        let passingExecutable = fixtureExecutable("codex-fixture-unique-turns-background-pass")
+        codexFixtureExecutable = passingExecutable.path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Waits for the UI test", roots: [fixture.primary.path])
+        let passingID = try taskID(named: "Waits for the UI test")
+        let passing = try startTurn(passingID, passingExecutable)
+        defer {
+            if passing.process.isRunning {
+                try? releaseCommand(passingExecutable, ["exitCode": 0, "output": ""])
+                passing.process.waitUntilExit()
+            }
+        }
+        // Far more reconciliations than the five continuation turns that used to end in Blocked.
+        XCTAssertTrue(waitUntil({ running(backgroundState(passingExecutable)) == 1 && count(backgroundState(passingExecutable), "listCalls") >= 12 }, timeout: 30),
+                      "Playhouse should keep reconciling the running command through the app-server.")
+        XCTAssertEqual(try status(passingID), "In Progress", "A required command still running keeps the task In Progress.")
+        XCTAssertTrue(passing.process.isRunning, "The send stays open while the command it waits for runs.")
+        XCTAssertEqual(try fixtureTurns(passingExecutable).count, 1, "Waiting for a command sends the model no prompts.")
+        assertTaskVisible("Waits for the UI test", inColumn: "In Progress")
+        attachScreenshot(named: "Task stays In Progress while its background command runs")
+        try releaseCommand(passingExecutable, ["exitCode": 0, "output": "Executed 1 test, with 0 failures\n"])
+        _ = try finishCLIProcess(passing)
+        XCTAssertEqual(try status(passingID), "Review", "The outcome reported from the command's result settles the task.")
+        assertTaskVisible("Waits for the UI test", inColumn: "Review")
+        let passingTurns = try fixtureTurns(passingExecutable)
+        XCTAssertEqual(passingTurns.count, 2, "The command's result is delivered in exactly one private turn.")
+        for expected in [resultsMarker, "scripts/test-ui-tart.sh --case fixture", "completed, exit code 0", "Executed 1 test, with 0 failures"] {
+            XCTAssertTrue(passingTurns[1].contains(expected), "The results turn should carry \(expected).")
+        }
+        XCTAssertEqual((backgroundState(passingExecutable)["terminated"] as? [String]) ?? [], [], "A command that ends on its own is never terminated.")
+        openTask(named: "Waits for the UI test")
+        XCTAssertTrue(transcriptContains("completed, exit code 0"), "The delivered result must appear in the visible transcript.")
+        try assertAutomaticMessageBubble(taskID: passingID, containing: "completed, exit code 0")
+        attachScreenshot(named: "Background command result delivered as an automatic message")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+
+        try createTaskFixture(title: "Fixes the failing UI test", roots: [fixture.primary.path])
+        let retryID = try self.taskID(named: "Fixes the failing UI test")
+        let retryExecutable = fixtureExecutable("codex-fixture-unique-turns-background-retry")
+        let retry = try startTurn(retryID, retryExecutable)
+        defer {
+            if retry.process.isRunning {
+                try? releaseCommand(retryExecutable, ["exitCode": 0, "output": ""])
+                retry.process.waitUntilExit()
+            }
+        }
+        XCTAssertTrue(waitUntil({ running(backgroundState(retryExecutable)) == 1 && count(backgroundState(retryExecutable), "listCalls") >= 2 }, timeout: 30),
+                      "The first run should be waited for.")
+        try releaseCommand(retryExecutable, ["exitCode": 1, "output": "XCTAssertEqual failed: fixture regression\n"])
+        XCTAssertTrue(waitUntil({ count(backgroundState(retryExecutable), "started") == 2 && running(backgroundState(retryExecutable)) == 1 }, timeout: 30),
+                      "The agent should rerun the command after reading its failure.")
+        XCTAssertEqual(try status(retryID), "In Progress", "A rerun that is running keeps the task In Progress.")
+        try releaseCommand(retryExecutable, ["exitCode": 0, "output": "Executed 1 test, with 0 failures\n"])
+        _ = try finishCLIProcess(retry)
+        XCTAssertEqual(try status(retryID), "Review")
+        assertTaskVisible("Fixes the failing UI test", inColumn: "Review")
+        let retryTurns = try fixtureTurns(retryExecutable)
+        XCTAssertEqual(retryTurns.count, 3, "Each command result is delivered once: the failure, then the passing rerun.")
+        XCTAssertTrue(retryTurns[1].contains("failed, exit code 1"))
+        XCTAssertTrue(retryTurns[1].contains("XCTAssertEqual failed: fixture regression"))
+        XCTAssertTrue(retryTurns[2].contains("completed, exit code 0"))
+        XCTAssertFalse(retryTurns[2].contains("XCTAssertEqual failed"), "A delivered result is not delivered again.")
+
+        try createTaskFixture(title: "Cannot fix the UI test", roots: [fixture.primary.path])
+        let failingID = try self.taskID(named: "Cannot fix the UI test")
+        let failingExecutable = fixtureExecutable("codex-fixture-unique-turns-background-fail")
+        let failing = try startTurn(failingID, failingExecutable)
+        defer {
+            if failing.process.isRunning {
+                try? releaseCommand(failingExecutable, ["exitCode": 1, "output": ""])
+                failing.process.waitUntilExit()
+            }
+        }
+        XCTAssertTrue(waitUntil({ running(backgroundState(failingExecutable)) == 1 && count(backgroundState(failingExecutable), "listCalls") >= 2 }, timeout: 30),
+                      "The failing run should be waited for.")
+        try releaseCommand(failingExecutable, ["exitCode": 1, "output": "XCTAssertEqual failed: fixture regression\n"])
+        _ = try finishCLIProcess(failing, expectedStatus: nil)
+        let failingRecord = try XCTUnwrap(taskRecord(id: failingID))
+        XCTAssertEqual(failingRecord["status"] as? String, "Blocked")
+        XCTAssertTrue((failingRecord["statusMessage"] as? String)?.contains("The required UI test failed") == true)
+        XCTAssertEqual(try fixtureTurns(failingExecutable).count, 2)
+        assertTaskVisible("Cannot fix the UI test", inColumn: "Blocked")
+        let failingCardMessage = element("task-status-message-\(failingID)")
+        XCTAssertTrue(failingCardMessage.waitToExist(timeout: 10), "The Blocked card should show the agent's reason.")
+        XCTAssertTrue(accessibleLabelOrValue(of: failingCardMessage).contains("The required UI test failed"))
+        attachScreenshot(named: "Failed background command ends in Blocked with the agent's reason")
+
+        try createTaskFixture(title: "Loses the UI test", roots: [fixture.primary.path])
+        let vanishedID = try self.taskID(named: "Loses the UI test")
+        let vanishedExecutable = fixtureExecutable("codex-fixture-unique-turns-background-vanish")
+        let vanished = try startTurn(vanishedID, vanishedExecutable)
+        defer {
+            if vanished.process.isRunning {
+                try? releaseCommand(vanishedExecutable, ["vanish": true])
+                vanished.process.waitUntilExit()
+            }
+        }
+        XCTAssertTrue(waitUntil({ running(backgroundState(vanishedExecutable)) == 1 && count(backgroundState(vanishedExecutable), "listCalls") >= 2 }, timeout: 30),
+                      "The vanishing run should be waited for.")
+        try releaseCommand(vanishedExecutable, ["vanish": true])
+        _ = try finishCLIProcess(vanished, expectedStatus: nil)
+        let vanishedTurns = try fixtureTurns(vanishedExecutable)
+        XCTAssertEqual(vanishedTurns.count, 2)
+        XCTAssertTrue(vanishedTurns[1].contains("Playhouse did not see its result"))
+        XCTAssertFalse(vanishedTurns[1].contains("exit code 0"), "A command gone from the list is not assumed to have passed.")
+        let vanishedRecord = try XCTUnwrap(taskRecord(id: vanishedID))
+        XCTAssertEqual(vanishedRecord["status"] as? String, "Blocked")
+        XCTAssertTrue((vanishedRecord["statusMessage"] as? String)?.contains("without a result") == true)
+        assertTaskVisible("Loses the UI test", inColumn: "Blocked")
+
+        try createTaskFixture(title: "Stopped while waiting", roots: [fixture.primary.path])
+        let stoppedID = try self.taskID(named: "Stopped while waiting")
+        let stoppedExecutable = fixtureExecutable("codex-fixture-unique-turns-background-stop")
+        let stopped = try startTurn(stoppedID, stoppedExecutable)
+        defer {
+            if stopped.process.isRunning {
+                try? releaseCommand(stoppedExecutable, ["exitCode": 0, "output": ""])
+                stopped.process.waitUntilExit()
+            }
+        }
+        XCTAssertTrue(waitUntil({ running(backgroundState(stoppedExecutable)) == 1 && count(backgroundState(stoppedExecutable), "listCalls") >= 2 }, timeout: 30),
+                      "The run should be waited for before the Stop.")
+        _ = try runCLI(["conversation", "stop", stoppedID])
+        _ = try finishCLIProcess(stopped, expectedStatus: nil)
+        XCTAssertEqual(try status(stoppedID), "Waiting Response", "A Stop during the wait keeps the user's paused state.")
+        XCTAssertNil(try taskRecord(id: stoppedID)?["statusMessage"] as? String, "A user-requested Stop must not be reported as a failure.")
+        XCTAssertEqual(backgroundState(stoppedExecutable)["terminated"] as? [String], ["49264"], "Stop ends the command the task was waiting for.")
+        XCTAssertEqual(try fixtureTurns(stoppedExecutable).count, 1, "Nothing restarts the work after a Stop.")
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertEqual(try fixtureTurns(stoppedExecutable).count, 1, "Nothing restarts the work after a Stop.")
+        XCTAssertEqual(try status(stoppedID), "Waiting Response")
+        assertTaskVisible("Stopped while waiting", inColumn: "Waiting Response")
+
+        try createTaskFixture(title: "Leaves a dev server running", roots: [fixture.primary.path])
+        let serverID = try self.taskID(named: "Leaves a dev server running")
+        let serverExecutable = fixtureExecutable("codex-fixture-unique-turns-background-server")
+        let server = try startTurn(serverID, serverExecutable)
+        defer {
+            if server.process.isRunning {
+                try? releaseCommand(serverExecutable, ["exitCode": 0, "output": ""])
+                server.process.waitUntilExit()
+            }
+        }
+        _ = try finishCLIProcess(server)
+        XCTAssertEqual(try status(serverID), "Review", "A completed outcome settles the task even with a command left running.")
+        let serverState = backgroundState(serverExecutable)
+        XCTAssertEqual(running(serverState), 1, "The dev server keeps running.")
+        XCTAssertEqual((serverState["terminated"] as? [String]) ?? [], [])
+        XCTAssertEqual(try fixtureTurns(serverExecutable).count, 1, "A settled task gets no results turn.")
+        assertTaskVisible("Leaves a dev server running", inColumn: "Review")
+
+        try createTaskFixture(title: "Outlasts the wait", roots: [fixture.primary.path])
+        let outlastingID = try self.taskID(named: "Outlasts the wait")
+        let outlastingExecutable = fixtureExecutable("codex-fixture-unique-turns-background-timeout")
+        let outlasting = try startTurn(outlastingID, outlastingExecutable, ["PLAYHOUSE_E2E_BACKGROUND_JOB_WAIT_SECONDS": "1.5"])
+        defer {
+            if outlasting.process.isRunning {
+                try? releaseCommand(outlastingExecutable, ["exitCode": 0, "output": ""])
+                outlasting.process.waitUntilExit()
+            }
+        }
+        _ = try finishCLIProcess(outlasting, expectedStatus: nil)
+        let outlastingTurns = try fixtureTurns(outlastingExecutable)
+        XCTAssertEqual(outlastingTurns.count, 2, "A command that outlasts the wait earns one prompt and is not waited for again.")
+        for expected in [resultsMarker, "still running. Playhouse stopped waiting for it.", "ran longer than Playhouse waits for a command"] {
+            XCTAssertTrue(outlastingTurns[1].contains(expected), "The results turn should carry \(expected).")
+        }
+        XCTAssertFalse(outlastingTurns[1].contains("exit code"), "A command still running has no result to report.")
+        let outlastingRecord = try XCTUnwrap(taskRecord(id: outlastingID))
+        XCTAssertEqual(outlastingRecord["status"] as? String, "Blocked", "An unsettled turn after the wait ran out is not left In Progress.")
+        XCTAssertTrue((outlastingRecord["statusMessage"] as? String)?.contains("stopped without reporting a stopping outcome") == true)
+        let outlastingState = backgroundState(outlastingExecutable)
+        XCTAssertEqual(running(outlastingState), 1, "Playhouse does not end a command it merely stopped waiting for.")
+        XCTAssertEqual((outlastingState["terminated"] as? [String]) ?? [], [])
+        assertTaskVisible("Outlasts the wait", inColumn: "Blocked")
+        let outlastingCardMessage = element("task-status-message-\(outlastingID)")
+        XCTAssertTrue(outlastingCardMessage.waitToExist(timeout: 10), "The Blocked card should say no outcome was reported.")
+        XCTAssertTrue(accessibleLabelOrValue(of: outlastingCardMessage).contains("stopped without reporting a stopping outcome"))
+        attachScreenshot(named: "Board after background command outcomes settle")
+    }
+    // case-contract: test_codex_follow_up_queued_during_background_wait_runs_next | A follow-up the user queues while a task waits for a command its Codex turn left running ends the wait at once: the follow-up is the next turn the provider receives, ahead of any results or recovery prompt, and the command is neither terminated nor forgotten. When the follow-up's turn ends without a stopping outcome the task stays In Progress and Playhouse waits for the same command again, with no further prompt. When the command ends, its real exit status and output are delivered once in one private results turn, and the outcome Codex reports there settles the task in Review. The follow-up appears once in history.
+    func test_codex_follow_up_queued_during_background_wait_runs_next() throws {
+        let resultsMarker = "background work results"
+        let recoveryMarker = "ended without reporting a task outcome"
+        let followUp = "Also keep the fixture log."
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-background-queue")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path), "The background queue fixture should be installed.")
+        for suffix in [".background-state", ".background-release", ".history"] {
+            try? FileManager.default.removeItem(atPath: executable.path + suffix)
+        }
+        func backgroundState() -> [String: Any] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".background-state")),
+                  let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return state
+        }
+        func running() -> Int { (backgroundState()["running"] as? [String: Any])?.count ?? 0 }
+        func count(_ key: String) -> Int { backgroundState()[key] as? Int ?? 0 }
+        func releaseCommand(_ result: [String: Any]) throws {
+            try JSONSerialization.data(withJSONObject: result)
+                .write(to: URL(fileURLWithPath: executable.path + ".background-release"), options: .atomic)
+        }
+        func fixtureTurns() -> [String] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).map { $0["userMessage"] as? String ?? "" }
+        }
+
+        codexFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Follow-up while waiting", roots: [fixture.primary.path])
+        let taskID = try self.taskID(named: "Follow-up while waiting")
+        let turn = try startCLIProcess(
+            ["conversation", "send", taskID, "--message", "Run the required UI test."],
+            extraEnvironment: [
+                "PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path,
+                "PLAYHOUSE_E2E_CODEX_BACKGROUND_RECONCILE_SECONDS": "0.2"
+            ]
         )
+        defer {
+            if turn.process.isRunning {
+                try? releaseCommand(["exitCode": 0, "output": ""])
+                turn.process.waitUntilExit()
+            }
+        }
+        XCTAssertTrue(waitUntil({ running() == 1 && count("listCalls") >= 2 }, timeout: 30), "The command should be waited for before the follow-up.")
+        XCTAssertEqual(fixtureTurns().count, 1)
+        _ = try runCLI(["conversation", "queue", taskID, "--message", followUp])
+        XCTAssertTrue(waitUntil({ fixtureTurns().count >= 2 }, timeout: 30), "The queued follow-up should end the wait and run as the next turn.")
+        var turns = fixtureTurns()
+        XCTAssertTrue(turns[1].contains(followUp), "The follow-up is the next turn the provider receives.")
+        XCTAssertFalse(turns[1].contains(resultsMarker))
+        XCTAssertFalse(turns[1].contains(recoveryMarker))
+        let callsAfterFollowUp = count("listCalls")
+        XCTAssertTrue(waitUntil({ running() == 1 && count("listCalls") >= callsAfterFollowUp + 3 }, timeout: 30),
+                      "The same command should be waited for again after the follow-up's turn.")
+        XCTAssertEqual(count("started"), 1, "The follow-up starts no second command.")
+        XCTAssertEqual((backgroundState()["terminated"] as? [String]) ?? [], [], "A queued follow-up does not terminate the command.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The command still running keeps the task In Progress after the follow-up.")
+        XCTAssertEqual(fixtureTurns().count, 2, "Waiting again sends the model no prompt.")
+        assertTaskVisible("Follow-up while waiting", inColumn: "In Progress")
+        openTask(named: "Follow-up while waiting")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(followUp) }, timeout: 15), "The follow-up must appear in the visible transcript.")
+        attachScreenshot(named: "Follow-up answered while the command is still waited for")
+
+        try releaseCommand(["exitCode": 0, "output": "Executed 1 test, with 0 failures\n"])
+        XCTAssertTrue(waitForStatus(taskID, "Review", timeout: 60), "The outcome reported from the command's result should settle the task.")
+        turn.process.waitUntilExit()
+        turns = fixtureTurns()
+        XCTAssertEqual(turns.count, 3, "The command's result is delivered in exactly one private turn after the follow-up.")
+        XCTAssertEqual(turns.filter { $0.contains(resultsMarker) }.count, 1)
+        XCTAssertTrue(turns[2].contains("completed, exit code 0"))
+        XCTAssertTrue(turns[2].contains("Executed 1 test, with 0 failures"))
+        XCTAssertFalse(turns.contains { $0.contains(recoveryMarker) }, "No recovery prompt is sent while a command is waited for.")
+        XCTAssertEqual((backgroundState()["terminated"] as? [String]) ?? [], [])
+        XCTAssertEqual(try historyTexts(taskID: taskID).filter { $0.contains(followUp) }.count, 1, "The follow-up appears once in history.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("completed, exit code 0") }, timeout: 15), "The delivered result must appear in the visible transcript.")
+        attachScreenshot(named: "Command result delivered once after the follow-up")
+        assertTaskVisible("Follow-up while waiting", inColumn: "Review")
+        attachScreenshot(named: "Review card after the follow-up and the command result")
     }
 }

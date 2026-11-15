@@ -690,7 +690,7 @@ class BridgeTestCases13:
         probe = self.data_directory / "codex-question-ownership-probe"
         core = [
             'BoardTask', 'ConversationSubject', 'WorkspaceSupport', 'HoverRevealScrollers',
-            'WorkspaceChanges', 'CodexAppServerClient', 'CodexSocketConnection', 'ConversationModel',
+            'WorkspaceChanges', 'CodexAppServerClient', 'CodexBackgroundJobs', 'CodexSocketConnection', 'ConversationModel',
             'ClaudeCodeClient', 'ProviderRequestLog', 'ProcessCPUSampler', 'AgentRunHost',
             'ContextCompaction', 'AgentUsage', 'AgentUsageStore', 'ConversationTranscriptStore',
             'StandaloneChatStore', 'SkillCatalog', 'RuleCatalog', 'MentionCatalog',

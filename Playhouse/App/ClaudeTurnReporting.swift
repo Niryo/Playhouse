@@ -379,10 +379,12 @@ extension ClaudeSessionRunner {
     /// Claude Code announced with `system init` and then never spoke in is
     /// covered too, on its own longer grace, so a turn whose expected woken
     /// result never arrives still settles rather than staying active forever.
+    /// Ending the provider turn here claims nothing about the work: the task
+    /// then settles on the outcome the agent reported, and a turn that ended
+    /// without one gets the owner's single recovery prompt, not Review.
     func scheduleParentWakeBackstopIfNeeded() {
         guard turnCompletion.awaitingParentWake, turnCompletion.resultError == nil,
-              turnCompletion.resultReceived,
-              outstandingBackgroundTaskIDs.isEmpty, pendingBackgroundTaskNotificationIDs.isEmpty else { return }
+              turnCompletion.resultReceived, !isHeldByBackgroundTasks else { return }
         parentWakeBackstopGeneration += 1
         let generation = parentWakeBackstopGeneration
         // A wake whose woken turn already announced itself gets the long grace:
@@ -412,6 +414,9 @@ extension ClaudeSessionRunner {
     func noteParentResponseStarted() {
         guard turnCompletion.resultReceived, turnCompletion.resultError == nil else { return }
         turnCompletion.resultReceived = false
+        // A stopping outcome reported before that result described the work as it stood then.
+        // The parent is working again, so it must report where this newer work ends.
+        owner?.stoppingOutcomeProbes[sessionID]?.withdraw()
     }
 
     func completeTurnIfSettled() {

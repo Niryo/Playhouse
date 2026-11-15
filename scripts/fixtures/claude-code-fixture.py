@@ -186,7 +186,7 @@ def report_command(instructions, marker, replacement=None):
         command = line.strip()
         # Command lines start with the quoted CLI path; prose may mention the same words.
         if command.startswith("'") and marker in command:
-            return command.replace("<completed|in-progress|waiting-response>", replacement) if replacement else command
+            return command.replace("<completed|waiting-response|blocked>", replacement) if replacement else command
     return None
 
 

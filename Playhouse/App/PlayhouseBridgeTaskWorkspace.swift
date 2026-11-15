@@ -119,8 +119,16 @@ extension PlayhouseBridgeRuntime {
             return try Self.value(try await taskManager.clearProgressReport(request.requiredUUID("taskID")))
         case "task.outcome":
             let taskID = try request.requiredUUID("taskID")
-            let outcome = try await taskManager.reportTurnOutcome(taskID, outcome: request.requiredString("outcome"))
-            return .object(["outcome": .string(outcome), "taskStatus": .string(try taskManager.conversationSubject(taskID).status.rawValue)])
+            let report = try await taskManager.reportTurnOutcome(
+                taskID, outcome: request.requiredString("outcome"), reason: request.arguments["reason"]?.string
+            )
+            var result: [String: BridgeValue] = [
+                "outcome": .string(report.outcome),
+                "taskStatus": .string(try taskManager.conversationSubject(taskID).status.rawValue),
+                "recorded": .boolean(report.message == nil),
+            ]
+            if let message = report.message { result["message"] = .string(message) }
+            return .object(result)
         default:
             throw BridgeCommandError(code: "unsupported_command", message: "Unsupported task workspace command: \(request.command).")
         }

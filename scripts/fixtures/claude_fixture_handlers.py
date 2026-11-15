@@ -518,6 +518,72 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.run_tool("toolu_checks_first", "Read", {"file_path": runtime.os.path.join(runtime.os.getcwd(), "README.md")})
         runtime.text("msg_checks_last", runtime.UNANSWERED_LAST)
         runtime.run_tool("toolu_checks_last", "Read", {"file_path": runtime.os.path.join(runtime.os.getcwd(), "README.md")})
+    elif "leave-dev-server-running" in user_text.lower():
+        # A shell the agent deliberately leaves running: the stopping outcome
+        # is reported before the result and no notification ever follows, so
+        # only that outcome can settle the turn.
+        tool_id = "toolu_dev_server"
+        task_id = "bgshell-dev-server-1"
+        runtime.assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "npm run dev", "description": "Dev server", "run_in_background": True,
+        }}])
+        runtime.write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        runtime.write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Dev server"},
+        ]})
+        runtime.write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Dev server", "task_type": "local_bash"})
+        runtime.text("msg_dev_server_started", "DEV SERVER RUNNING")
+        outcome = runtime.report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome,
+                             "output": runtime.run_tool("toolu_dev_server_outcome", "Bash", {"command": outcome}, outcome)})
+        runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        runtime.background_result_sent = True
+        runtime.complete_command(runtime.current_command_uuid)
+        runtime.Path(str(runtime.sys.argv[0]) + ".dev-server-result-sent").write_text(
+            "The outcome and the result are out while the dev server runs.\n", encoding="utf-8"
+        )
+    elif "report-early-then-continue" in user_text.lower():
+        # An outcome reported before a background agent finished is stale once
+        # the woken parent turn does more work: that turn ends without a new
+        # report, so the earlier `completed` must not send the task to Review.
+        tool_id = "toolu_early_report_agent"
+        task_id = "bgagent-early-report-1"
+        runtime.assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
+            "subagent_type": "Explore", "description": "Late check", "prompt": "check something",
+            "run_in_background": True,
+        }}])
+        runtime.write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False},
+        ]}})
+        runtime.write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
+             "subagent_type": "Explore", "description": "Late check"},
+        ]})
+        runtime.write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Late check", "subagent_type": "Explore",
+               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
+        runtime.text("msg_early_report_started", "REPORTED EARLY")
+        outcome = runtime.report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome,
+                             "output": runtime.run_tool("toolu_early_report_outcome", "Bash", {"command": outcome}, outcome)})
+        runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        runtime.background_result_sent = True
+        runtime.complete_command(runtime.current_command_uuid)
+        runtime.wait_for_release("early-report", "The early outcome and the result are out while the agent runs.")
+        runtime.write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        runtime.write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "", "summary": "The late check found more work."})
+        runtime.write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        runtime.parent_request_started("msg_early_report_woken", woken=True)
+        runtime.text("msg_early_report_woken", "MORE WORK FOUND")
+        runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     elif "background agents wake" in user_text.lower():
         # Mirrors the real CLI waking the parent for a background agent's
         # notification after the parent already sent its result. The last
@@ -656,11 +722,9 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         ]})
         runtime.write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
                "tool_use_id": tool_id, "description": "Consumed wake shell", "task_type": "local_bash"})
+        # No outcome here: the turn is waiting for the shell, and a reported
+        # stopping outcome would settle it before the wake this models.
         runtime.text("msg_consumed_wake_started", "WAKE SHELL STARTED")
-        outcome = runtime.report_command(instructions, " task outcome ", "completed")
-        if outcome:
-            commands.append({"command": outcome,
-                             "output": runtime.run_tool("toolu_consumed_wake_outcome", "Bash", {"command": outcome}, outcome)})
         runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
         runtime.background_result_sent = True
         runtime.complete_command(runtime.current_command_uuid)

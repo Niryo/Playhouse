@@ -81,7 +81,8 @@ codex_fixtures=(
   title-success title-failure title-success-wait title-archive-ui hold
   hold-interrupt hold-reject-interrupt reattach
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted unique-turns-progress-hold-release
-  in-progress-continuation-hold-release in-progress-cap-hold-release in-progress-stop-hold-release in-progress-queue-hold-release
+  outcome-recovery-hold-release outcome-blocked-hold-release outcome-unanswered-hold-release outcome-stop-hold-release outcome-queue-hold-release
+  unique-turns-background-pass unique-turns-background-retry unique-turns-background-fail unique-turns-background-vanish unique-turns-background-stop unique-turns-background-server unique-turns-background-timeout unique-turns-background-retry-daemon unique-turns-background-queue
   progress-question progress-user-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question restart-question-no-secret unassociated-restart-question
   status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success long-history-lazy-success long-history-with-prompt-success markdown steer-queue-serial-success-wait draft-serial-success-wait
 )

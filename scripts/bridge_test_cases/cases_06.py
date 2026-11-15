@@ -471,7 +471,7 @@ class BridgeTestCases06:
         self.assertEqual([event["sound"] for event in sounds[initial_sound_count:]], ["Ping", "Ping", "Glass"])
         done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
         self.assertEqual(done["status"], "Done")
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies. Completed and waiting-response outcomes start Glass and Ping respectively when their turns settle.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome and with nothing left running receives exactly one private recovery prompt that offers only the stopping outcomes; a completed report during it moves the task to Review, a waiting-response report during it leaves the task in Waiting Response, and no report by its end marks the task Blocked with the missing-outcome reason rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work; they offer no outcome for unfinished work and tell the agent to keep awaiting a required command within the turn. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A recovery prompt Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those prompts also retains the latest ordinary-turn diff while showing their replies. Completed and waiting-response outcomes start Glass and Ping respectively when their turns settle.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -584,10 +584,10 @@ class BridgeTestCases06:
                 while not active_marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertTrue(active_marker.exists(), "The no-outcome fixture turn should become active.")
-                for nudge_index in range(MAX_OUTCOME_CONTINUATIONS + 1):
-                    self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress", "The fallback status should be deferred until every nudge finishes.")
+                for nudge_index in range(OUTCOME_RECOVERY_PROMPTS + 1):
+                    self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress", "The fallback status should be deferred until the recovery prompt finishes.")
                     release_marker.write_text(f"Release turn {nudge_index + 1}.\n", encoding="utf-8")
-                    if nudge_index < MAX_OUTCOME_CONTINUATIONS:
+                    if nudge_index < OUTCOME_RECOVERY_PROMPTS:
                         deadline = time.monotonic() + 10
                         while active_marker.exists() and time.monotonic() < deadline:
                             time.sleep(0.02)
@@ -595,12 +595,12 @@ class BridgeTestCases06:
                         deadline = time.monotonic() + 10
                         while not active_marker.exists() and time.monotonic() < deadline:
                             time.sleep(0.02)
-                        self.assertTrue(active_marker.exists(), "Playhouse should send the next private status nudge.")
+                        self.assertTrue(active_marker.exists(), "Playhouse should send its one private recovery prompt.")
                 omitted_stdout, omitted_stderr = omitted_follow_up.communicate(timeout=30)
                 self.assertEqual(omitted_follow_up.returncode, 0, f"No-outcome fixture conversation failed: {omitted_stdout}; {omitted_stderr}")
                 omitted_record = self.assert_success(self.call_cli("task", "get", task_id)[0])
-                self.assertEqual(omitted_record["status"], "Blocked", "Unanswered nudges never asked the user anything, so the task is Blocked rather than Waiting Response.")
-                self.assertIn("nudges went unanswered", omitted_record.get("statusMessage") or "")
+                self.assertEqual(omitted_record["status"], "Blocked", "An unanswered recovery prompt never asked the user anything, so the task is Blocked rather than Waiting Response.")
+                self.assertIn("one recovery prompt went unanswered", omitted_record.get("statusMessage") or "")
                 visible_history, _ = self.call_cli(
                     "conversation", "history", task_id,
                     extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
@@ -684,7 +684,7 @@ class BridgeTestCases06:
                     while not active_marker.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
                     self.assertTrue(active_marker.exists(), "The echoed-outcome fixture turn should become active.")
-                    held_turns = MAX_OUTCOME_CONTINUATIONS + 1 if expected_status == "Blocked" else 1
+                    held_turns = OUTCOME_RECOVERY_PROMPTS + 1 if expected_status == "Blocked" else 1
                     for held_turn_index in range(held_turns):
                         release_marker.write_text(f"Release echoed turn {held_turn_index + 1}.\n", encoding="utf-8")
                         if held_turn_index < held_turns - 1:
@@ -717,11 +717,11 @@ class BridgeTestCases06:
             turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
             self.assertEqual(turn_data["threadStartCount"], 1)
             self.assertGreaterEqual(turn_data["threadResumeCount"], 1)
-            self.assertEqual(len(turn_data["turns"]), 19)
+            self.assertEqual(len(turn_data["turns"]), 11)
             nudge_turns = [turn for turn in turn_data["turns"] if "ended without reporting a task outcome" in turn.get("userMessage", "")]
-            self.assertEqual(len(nudge_turns), 2 * MAX_OUTCOME_CONTINUATIONS + 2, "Only the missing-outcome sends should receive private status nudges.")
-            self.assertTrue(all("task outcome" in turn["userMessage"] and f"of {MAX_OUTCOME_CONTINUATIONS}" in turn["userMessage"] for turn in nudge_turns), "Each hidden request should explicitly direct the agent to report an outcome.")
-            self.assertTrue(all("`in-progress`" in turn["userMessage"] for turn in nudge_turns), "A nudge must offer in-progress alongside completed and waiting-response.")
+            self.assertEqual(len(nudge_turns), 2 * OUTCOME_RECOVERY_PROMPTS + 2, "Each missing-outcome send should receive exactly one private recovery prompt.")
+            self.assertTrue(all("task outcome" in turn["userMessage"] and "This is the only recovery prompt" in turn["userMessage"] for turn in nudge_turns), "Each hidden request should explicitly direct the agent to report an outcome.")
+            self.assertTrue(all("in-progress" not in turn["userMessage"] and "blocked --reason" in turn["userMessage"] for turn in nudge_turns), "The recovery prompt offers only stopping outcomes.")
             self.assertTrue(all(turn["developerInstructions"] is None for turn in turn_data["turns"]), "Thread-scoped task instructions should not be repeated in turn requests.")
             instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)
@@ -732,13 +732,15 @@ class BridgeTestCases06:
             self.assertIn("CLI/XPC 3/8", instructions)
             self.assertIn("under 80 characters", instructions)
             self.assertIn("task outcome", instructions)
-            self.assertIn("<completed|in-progress|waiting-response>", instructions)
-            self.assertIn("Never end a turn mid-work without an outcome", instructions)
-            self.assertIn("privately nudges you to report your current status", instructions)
-            self.assertIn("before you write your final reply, make exactly one definitive outcome call", instructions)
+            self.assertIn("<completed|waiting-response|blocked>", instructions)
+            self.assertIn("There is no outcome for unfinished work", instructions)
+            self.assertIn("keep awaiting or polling that same command session in this turn", instructions)
+            self.assertNotIn("in-progress", instructions)
+            self.assertIn("sends one private recovery prompt", instructions)
+            self.assertIn("before you write your final reply, make exactly one stopping outcome call", instructions)
             self.assertIn("Write your user-visible final reply after the outcome call returns", instructions)
             self.assertIn("never end a turn on a tool call", instructions)
-            self.assertIn("The outcome call must be your final CLI action for the turn.", instructions)
+            self.assertIn("The outcome call must be your final CLI action for the turn, made only after every command you still need has finished.", instructions)
             self.assertIn("previous response had no visible output but you already answered in this turn, do not repeat the answer", instructions)
             self.assertIn("waiting-response", instructions)
             self.assertIn("final CLI action", instructions)

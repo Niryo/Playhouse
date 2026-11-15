@@ -22,8 +22,8 @@ import Vision
 
 final class PlayhouseUITests: XCTestCase {
     static var suiteAbortReason: String?
-    /// Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
-    static let maxOutcomeContinuations = 5
+    /// A turn that ends unsettled with nothing running earns exactly one private recovery prompt.
+    static let outcomeRecoveryPrompts = 1
 
     var app: XCUIApplication!
     var fixture: WorkspaceFixture!

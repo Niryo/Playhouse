@@ -22,7 +22,9 @@ extension ConversationManager {
         }
         phase = "worktree-finalization"
         phase = "review-status-persistence"
-        let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? recording.leakedOutcome
+        // Only a stopping outcome counts; the legacy `in-progress` parses to none.
+        let report = TurnOutcome.parseStoredReport(try await tasks.finishConversationTurnOutcome(taskID) ?? recording.leakedOutcome)
+        let reportedOutcome = report?.outcome.rawValue
         lastReportedTurnOutcomeByTaskID[taskID] = reportedOutcome
         // A chat's settled turn (its close-turn) only stops the recovery loop: a chat has no
         // board status for an outcome to decide.
@@ -52,10 +54,6 @@ extension ConversationManager {
             // no worktree to sync or review, and every outcome leaves it Done.
         } else if let outcome = statusOutcome.flatMap(TurnOutcome.init(rawValue:)) {
             switch outcome {
-            case .inProgress:
-                // `in-progress` settles on no status: the task stays In
-                // Progress while the caller drives the next continuation turn.
-                break
             case .completed:
                 // A reviewed task must hold no local-only pull request changes:
                 // sync them first, and block instead of resting partially pushed.
@@ -83,6 +81,10 @@ extension ConversationManager {
                 }
             case .waitingResponse:
                 _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+            case .blocked:
+                _ = try await tasks.setLifecycleStatus(
+                    taskID, to: .blocked, message: report?.reason ?? "The agent reported the work as blocked without giving a reason."
+                )
             }
         } else if !deferMissingOutcomeStatus {
             _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
@@ -478,6 +480,7 @@ extension ConversationManager {
             }
             phase = "\(provider.rawValue)-turn"
             try tasks.activateConversationTurnOutcome(taskID)
+            installStoppingOutcomeProbe(taskID: taskID, client: client, threadID: threadID)
             try await client.sendMessage(
                 ConversationHandoff.prompt(
                     normalizedText,

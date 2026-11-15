@@ -86,7 +86,7 @@ def auto_compaction(runtime, _session_state, message):
     _session_state.outcome_line = next((line.strip() for line in _session_state.instructions.splitlines()
                          if line.strip().startswith("'") and " task outcome " in line), None)
     if _session_state.outcome_line:
-        _session_state.outcome_command = _session_state.outcome_line.replace("<completed|in-progress|waiting-response>", "waiting-response")
+        _session_state.outcome_command = _session_state.outcome_line.replace("<completed|waiting-response|blocked>", "waiting-response")
         _session_state.completed = runtime.subprocess.run(runtime.shlex.split(_session_state.outcome_command), capture_output=True, text=True, timeout=60)
         if _session_state.completed.returncode != 0:
             raise RuntimeError(f"Fixture task outcome command failed: {_session_state.completed.stderr.strip()}")
@@ -516,3 +516,138 @@ def default_turn(runtime, _session_state, message):
             },
         }})
     runtime.question_request(901)
+
+
+BACKGROUND_COMMAND = "scripts/test-ui-tart.sh --case fixture"
+
+
+def background_state(runtime):
+    """What the fixture's background terminals are doing, kept on disk so a test can read it."""
+    path = runtime.Path(str(runtime.sys.argv[0]) + ".background-state")
+    if path.is_file():
+        return runtime.json.loads(path.read_text(encoding="utf-8"))
+    return {"running": {}, "started": 0, "listCalls": 0, "terminated": []}
+
+
+def save_background_state(runtime, state):
+    runtime.Path(str(runtime.sys.argv[0]) + ".background-state").write_text(runtime.json.dumps(state), encoding="utf-8")
+
+
+def _start_background_command(runtime, state):
+    state["started"] += 1
+    item = {
+        "id": f"item_fixture_background_test_{state['started']}", "type": "commandExecution",
+        "command": BACKGROUND_COMMAND, "cwd": runtime.workspace_cwd(),
+        "processId": str(49263 + state["started"]), "status": "inProgress",
+    }
+    runtime.write({"jsonrpc": "2.0", "method": "item/started", "params": {
+        "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID, "item": item,
+    }})
+    state["running"][item["id"]] = {"item": item, "turnId": runtime.TURN_ID}
+
+
+def _report_background_outcome(runtime, _session_state, outcome, reason=None):
+    saved = _session_state.serial_history()
+    instructions = (
+        _session_state.turn_history.get("developerInstructions")
+        or saved.get("threadStartDeveloperInstructions")
+        or ((saved.get("threadResumeDeveloperInstructions") or [None])[-1])
+        or ""
+    )
+    line = next((line.strip() for line in instructions.splitlines()
+                 if line.strip().startswith("'") and " task outcome " in line), None)
+    if not line:
+        raise RuntimeError("The background fixture found no task outcome command in its instructions.")
+    command = runtime.shlex.split(line.replace("<completed|waiting-response|blocked>", outcome))
+    if reason:
+        command += ["--reason", reason]
+    completed = runtime.subprocess.run(command, capture_output=True, text=True, timeout=60)
+    if completed.returncode != 0:
+        raise RuntimeError(f"Fixture task outcome command failed: {completed.stderr.strip()}")
+
+
+def background_command(runtime, _session_state, message):
+    """A turn that starts a required command and ends while it still runs, as Codex does with
+    a unified-exec session; the command's result reaches the model only in a later turn."""
+    state = background_state(runtime)
+    text = _session_state.turn_message or ""
+    runtime.write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": runtime.TURN_ID, "status": "inProgress"}}})
+    runtime.write({"jsonrpc": "2.0", "method": "turn/started", "params": {
+        "threadId": runtime.THREAD_ID, "turn": {"id": runtime.TURN_ID, "status": "inProgress"},
+    }})
+    if not _session_state.is_outcome_reminder and "-background-queue" in _session_state.mode and state["started"] >= 1:
+        # A follow-up from the user while the command runs: answered without touching the
+        # command or reporting an outcome.
+        pass
+    elif not _session_state.is_outcome_reminder:
+        _start_background_command(runtime, state)
+        if "-background-server" in _session_state.mode:
+            # A dev server is left running on purpose: the agent says it is done.
+            _report_background_outcome(runtime, _session_state, "completed")
+    elif "background work results" in text.lower():
+        if "-background-timeout" in _session_state.mode:
+            # Told the command outlasted the wait, the agent again ends its turn unsettled.
+            pass
+        elif "exit code 0" in text:
+            _report_background_outcome(runtime, _session_state, "completed")
+        elif "exit code" in text and "-background-retry" in _session_state.mode and state["started"] < 2:
+            # The test failed: fix it and run it again, still without an outcome.
+            _start_background_command(runtime, state)
+        elif "exit code" in text:
+            _report_background_outcome(
+                runtime, _session_state, "blocked",
+                reason="The required UI test failed and the fixture cannot repair it: " + text.split("exit code", 1)[1].strip()[:120],
+            )
+        else:
+            _report_background_outcome(
+                runtime, _session_state, "blocked",
+                reason="The required UI test stopped without a result Playhouse could read.",
+            )
+    else:
+        _report_background_outcome(runtime, _session_state, "waiting-response")
+    save_background_state(runtime, state)
+    runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+        "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID,
+        "item": {"id": f"item_background_answer_{runtime.TURN_ID}", "type": "agentMessage", "phase": "final_answer",
+                 "text": runtime.answer_text(_session_state.turn_message)},
+    }})
+    runtime.write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+        "threadId": runtime.THREAD_ID, "turn": {"id": runtime.TURN_ID, "status": "completed"},
+    }})
+
+
+def background_terminals_list(runtime, _session_state, message):
+    """`thread/backgroundTerminals/list`: the commands still alive. A release file ends them,
+    with their `item/completed` unless it says they vanish with no result."""
+    state = background_state(runtime)
+    state["listCalls"] += 1
+    release = runtime.Path(str(runtime.sys.argv[0]) + ".background-release")
+    if release.is_file() and state["running"]:
+        spec = runtime.json.loads(release.read_text(encoding="utf-8"))
+        release.unlink(missing_ok=True)
+        for job in state["running"].values():
+            if spec.get("vanish"):
+                continue
+            exit_code = spec.get("exitCode", 0)
+            runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                "threadId": runtime.THREAD_ID, "turnId": job["turnId"],
+                "item": {**job["item"], "status": "completed" if exit_code == 0 else "failed",
+                         "exitCode": exit_code, "aggregatedOutput": spec.get("output", ""), "durationMs": 1200},
+            }})
+        state["running"] = {}
+    save_background_state(runtime, state)
+    runtime.write({"jsonrpc": "2.0", "id": message["id"], "result": {
+        "data": [{"itemId": job["item"]["id"], "processId": job["item"]["processId"],
+                  "command": job["item"]["command"], "cwd": job["item"]["cwd"], "osPid": 49264}
+                 for job in state["running"].values()],
+        "nextCursor": None,
+    }})
+
+
+def background_terminals_terminate(runtime, _session_state, message):
+    state = background_state(runtime)
+    process_id = message.get("params", {}).get("processId")
+    state["terminated"].append(process_id)
+    state["running"] = {key: job for key, job in state["running"].items() if job["item"]["processId"] != process_id}
+    save_background_state(runtime, state)
+    runtime.write({"jsonrpc": "2.0", "id": message["id"], "result": {"terminated": True}})

@@ -147,6 +147,47 @@ enum ConversationReattachResult: Equatable {
     case agentGone
 }
 
+/// A command the provider still runs for a conversation after the turn that started it ended.
+struct ProviderBackgroundJob: Codable, Equatable {
+    let id: String
+    let command: String
+}
+
+/// How a background job ended, as the provider reported it. `isKnown` is false when the job
+/// is gone from the provider with no result seen (it ended while nothing was connected).
+struct ProviderBackgroundJobResult: Equatable {
+    let job: ProviderBackgroundJob
+    var exitCode: Int?
+    var status: String?
+    var output: String = ""
+    var isKnown = true
+}
+
+/// A conversation's background work between turns: what still runs, and what ended since
+/// the last turn and has not been delivered to the agent yet.
+struct ProviderBackgroundWork: Equatable {
+    var running: [ProviderBackgroundJob] = []
+    var finished: [ProviderBackgroundJobResult] = []
+    var isEmpty: Bool { running.isEmpty && finished.isEmpty }
+}
+
+enum ProviderBackgroundWaitEnd: Equatable {
+    /// Every job ended.
+    case finished
+    /// The user stopped the work, or the caller's `shouldStop` asked for the wait to end.
+    case stopped
+    /// The wait ceiling passed with jobs still running.
+    case timedOut
+    /// The provider could no longer be asked about the jobs.
+    case providerLost(String)
+}
+
+/// The stopping outcome staged for a running turn, as its provider client may consult it.
+struct ProviderStoppingOutcomeProbe {
+    let isStaged: () -> Bool
+    let withdraw: () -> Void
+}
+
 @MainActor
 protocol ConversationProviderClient: AnyObject {
     var provider: ConversationProvider { get }
@@ -203,6 +244,21 @@ protocol ConversationProviderClient: AnyObject {
         callbacks: ConversationTurnCallbacks,
         onAttached: @escaping () -> Void
     ) async throws -> ConversationReattachResult
+    /// Work the provider still runs for `threadID` with no turn active, reconciled with the
+    /// provider. `known` are jobs Playhouse was waiting on before a restart: those the provider
+    /// no longer lists come back finished with an unknown result. Taking it hands over the
+    /// finished results once; they are not reported again.
+    func takeBackgroundWork(threadID: String, known: [ProviderBackgroundJob]) async -> ProviderBackgroundWork
+    /// Waits, outside any model turn, for the thread's running background jobs to end. The
+    /// thread counts as active meanwhile, so Stop reaches `interruptActiveTurn`, which ends
+    /// the jobs and the wait.
+    func waitForBackgroundJobs(threadID: String, timeout: TimeInterval, shouldStop: @escaping () -> Bool) async -> ProviderBackgroundWaitEnd
+    /// Stops tracking the thread's background jobs; they are left running.
+    func forgetBackgroundJobs(threadID: String)
+    /// Lets a provider that keeps its turn open through its own background work see the
+    /// stopping outcome the agent staged for the thread's turn, and withdraw it when the
+    /// agent's execution resumes after the report. `nil` removes it.
+    func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String)
     func interruptActiveTurn(threadID: String) async throws -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool
@@ -225,6 +281,11 @@ protocol ConversationProviderClient: AnyObject {
 }
 
 extension ConversationProviderClient {
+    // A provider that keeps its turn open through its own background work has none between turns.
+    func takeBackgroundWork(threadID: String, known: [ProviderBackgroundJob]) async -> ProviderBackgroundWork { ProviderBackgroundWork() }
+    func waitForBackgroundJobs(threadID: String, timeout: TimeInterval, shouldStop: @escaping () -> Bool) async -> ProviderBackgroundWaitEnd { .finished }
+    func forgetBackgroundJobs(threadID: String) {}
+    func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String) {}
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {}
 
     func diagnosticFields() -> [String: String] { diagnosticFields([:]) }
@@ -824,8 +885,9 @@ enum LeakedTurnOutcome {
         return try! NSRegularExpression(pattern:
             #"[\p{So}\x{FE0F}\s`]*\n[\p{So}\x{FE0F}\s`$>]*(?:'[^'\n]*|[^\s'`]*)"# + executable + #"'?\s+"# + subcommand
             + #"\s+([0-9A-Fa-f-]{36})\s+("#
-            + TurnOutcome.allCases.map { NSRegularExpression.escapedPattern(for: $0.rawValue) }.joined(separator: "|")
-            + #")[\s`.]*\z"#)
+            + (TurnOutcome.allCases.map(\.rawValue) + [TurnOutcome.legacyInProgress])
+                .map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+            + #")(?:\s+--reason\s+(?:"([^"\n]*)"|'([^'\n]*)'))?[\s`.]*\z"#)
     }()
 
     static func split(_ text: String) -> (text: String, taskID: UUID?, outcome: String?) {
@@ -838,7 +900,10 @@ enum LeakedTurnOutcome {
             return (text, nil, nil)
         }
         let visible = candidate[..<echo.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
-        return (visible, UUID(uuidString: String(candidate[id])), String(candidate[outcome]))
+        // An echoed `--reason` rides along in the stored-report form (`TurnOutcome.storedReport`).
+        let reason = [3, 4].compactMap { Range(match.range(at: $0), in: candidate) }.first.map { String(candidate[$0]) }
+        let reported = [String(candidate[outcome]), reason].compactMap { $0 }.joined(separator: "\n")
+        return (visible, UUID(uuidString: String(candidate[id])), reported)
     }
 
     static func visibleText(_ text: String) -> String { split(text).text }
