@@ -331,30 +331,35 @@ extension TaskConversationView {
     }
 
     /// The skill gallery as a full page that slides in from the trailing side
-    /// over the task, and back out when it closes.
+    /// over the task, and back out when it closes. In the standalone chat sidebar,
+    /// `skillsPageWindowWidth` widens it from the sidebar's leading edge across the
+    /// whole window, and `SkillsPageShowingKey` tells the board it is open.
     var skillsPage: some View {
-        ZStack {
-            if isShowingSkills {
-                SkillsPageView(
-                    task: task, manager: conversationManager, onUse: useSkill,
-                    onFixTask: { taskID, prompt in
+        SkillsPageWindowFrame {
+            ZStack {
+                if isShowingSkills {
+                    SkillsPageView(
+                        task: task, manager: conversationManager, onUse: useSkill,
+                        onFixTask: { taskID, prompt in
+                            isShowingSkills = false
+                            onOpenTask(taskID, prompt)
+                        }
+                    ) {
                         isShowingSkills = false
-                        onOpenTask(taskID, prompt)
+                        composerDraft.focusRequest += 1
                     }
-                ) {
-                    isShowingSkills = false
-                    composerDraft.focusRequest += 1
+                    .id(skillsPresentation)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
+                    .transition(.move(edge: .trailing))
                 }
-                .id(skillsPresentation)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
-                .transition(.move(edge: .trailing))
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipped()
         .allowsHitTesting(isShowingSkills)
         .animation(.spring(response: 0.34, dampingFraction: 0.92), value: isShowingSkills)
+        .preference(key: SkillsPageShowingKey.self, value: isShowingSkills)
     }
 
     /// Summarizes how the selected provider's native configuration differs, so a
