@@ -178,7 +178,7 @@ extension PlayhouseCLI {
       playhouse mcp status [--task <task-id>] [--provider <claude|codex>]
       playhouse mcp authenticate --provider <claude|codex> --name <server-name> [--task <task-id>]
       playhouse mcp authenticate-wait --provider <claude|codex> --name <server-name> [--task <task-id>]
-      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
+      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>|set-status-sounds <on|off>
       playhouse settings set-auto-compaction [--enabled <true|false>] [--threshold <tokens>] [--idle-minutes <minutes>] [--minimum <tokens>]
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

@@ -370,6 +370,16 @@ then
 	exit 1
 fi
 
+# The task status sounds the cases trigger would reach the host's speakers through Tart's
+# audio pass-through. The guest keeps its output device, so the app's sound playback (and
+# the cases asserting it) is unchanged, but its output is muted on every run, including a
+# reused VM.
+if ! guest_muted="$(tart exec "$vm_name" /usr/bin/osascript \
+	-e 'set volume output muted true' -e 'output muted of (get volume settings)' 2>/dev/null)" \
+	|| [[ "$guest_muted" != "true" ]]; then
+	printf 'Warning: could not mute the Tart guest audio output; task sounds may be audible on the host.\n' >&2
+fi
+
 printf 'Running UI tests in VM-local source snapshot...\n'
 source_sync_root="${run_artifacts}/source"
 mkdir -p "$source_sync_root"

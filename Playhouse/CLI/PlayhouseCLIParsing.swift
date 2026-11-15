@@ -727,6 +727,11 @@ extension PlayhouseCLI {
                     throw CLIError.usage("Use: playhouse settings set-cpu-usage-color-max <percent>")
                 }
                 return BridgeRequest(command: "settings.set-cpu-usage-color-max", arguments: ["max": .integer(max)])
+            case "set-status-sounds":
+                guard rest.count == 2, rest[1] == "on" || rest[1] == "off" else {
+                    throw CLIError.usage("Use: playhouse settings set-status-sounds <on|off>")
+                }
+                return BridgeRequest(command: "settings.set-status-sounds", arguments: ["enabled": .boolean(rest[1] == "on")])
             case "set-auto-compaction":
                 let usage = "Use: playhouse settings set-auto-compaction [--enabled <true|false>] [--threshold <tokens>] [--idle-minutes <minutes>] [--minimum <tokens>]"
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--enabled", "--threshold", "--idle-minutes", "--minimum"])
