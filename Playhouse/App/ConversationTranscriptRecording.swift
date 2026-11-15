@@ -103,7 +103,9 @@ extension ConversationManager {
                 guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
                 var activity = activity
                 activity.turnID = turnID
-                if let existing = transcript.turns[index].activities.firstIndex(where: { $0.id == activity.id }) {
+                if activity.isContextCompaction {
+                    ConversationActivity.upsertCompaction(activity, into: &transcript.turns[index].activities)
+                } else if let existing = transcript.turns[index].activities.firstIndex(where: { $0.id == activity.id }) {
                     activity = activity.preservingTimelineFields(of: transcript.turns[index].activities[existing])
                     transcript.turns[index].activities[existing] = activity
                 } else {

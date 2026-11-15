@@ -182,8 +182,10 @@ extension ClaudeSessionRunner {
             // Claude Code compacts before the call that would cross its
             // auto-compact window, and for `/compact`; either way it reports
             // the start here and the result as a boundary.
-            let rowID = "claude-compaction-\((message["uuid"] as? String) ?? UUID().uuidString.lowercased())"
             if message["status"] as? String == "compacting" {
+                // Claude Code can report one compaction's start more than once; it stays one row.
+                let rowID = pendingCompactionActivityID
+                    ?? "claude-compaction-\((message["uuid"] as? String) ?? UUID().uuidString.lowercased())"
                 pendingCompactionActivityID = rowID
                 activityHandler?(compactionActivity(id: rowID, status: "inProgress", details: nil))
             } else if let result = message["compact_result"] as? String, result != "success",

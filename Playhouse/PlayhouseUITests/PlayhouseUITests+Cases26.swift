@@ -280,6 +280,90 @@ extension PlayhouseUITests {
         XCTAssertTrue((terminalHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Continue after asynchronous failure." })
 
     }
+    // case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event.
+    func test_claude_compaction_shows_one_row() throws {
+        func compactionRows(_ taskID: String, environment: [String: String] = [:]) throws -> [[String: Any]] {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+            return (history["activities"] as? [[String: Any]] ?? []).filter { $0["isContextCompaction"] as? Bool == true }
+        }
+
+        var thresholdEnvironment = try installClaudeFixture(named: "claude-fixture-ui-compaction-rows")
+        thresholdEnvironment["CLAUDE_CONFIG_DIR"] = dataDirectory.appendingPathComponent("claude-config").path
+        let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-reattach").path
+        claudeFixtureExecutable = executable
+        clearReattachMarkers(executable)
+        let environment = restartServiceEnvironment()
+        let thresholdTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Repeated compaction start", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let thresholdTaskID = try XCTUnwrap(thresholdTask["id"] as? String)
+        _ = try runCLI(["conversation", "send", thresholdTaskID, "--message", "Hello."], extraEnvironment: thresholdEnvironment)
+        _ = try runCLI(["conversation", "send", thresholdTaskID, "--message", "fill context to 210000 tokens"], extraEnvironment: thresholdEnvironment)
+        let thresholdRows = try compactionRows(thresholdTaskID)
+        XCTAssertEqual(thresholdRows.map { $0["status"] as? String }, ["completed"], "The latest turn's compaction is one row: \(thresholdRows)")
+        let thresholdDetails = thresholdRows.first?["compaction"] as? [String: Any]
+        XCTAssertEqual(thresholdDetails?["preTokens"] as? Int, 210000)
+        XCTAssertEqual(thresholdDetails?["postTokens"] as? Int, 6000)
+        let thresholdUsage = try XCTUnwrap(try runCLI(["task", "token-usage", thresholdTaskID])["result"] as? [String: Any])
+        XCTAssertEqual((thresholdUsage["contextCompactions"] as? [[String: Any]])?.count, 1)
+
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Compaction across a restart", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let visibleRows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "context-compaction-row-"))
+        let spinningRows = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "In progress"
+        ))
+        openTask(named: "Repeated compaction start")
+        XCTAssertTrue(visibleRows.firstMatch.waitToExist(timeout: 10), "The threshold compaction is shown in the conversation.")
+        XCTAssertEqual(visibleRows.count, 1, "The latest turn's compaction is drawn once.")
+        XCTAssertEqual(spinningRows.count, 0, "No compaction row is left in progress.")
+        attachScreenshot(named: "compaction-rows-1-threshold-compaction-once")
+        attachElementScreenshot(visibleRows.firstMatch, named: "compaction-rows-1-threshold-row")
+
+        returnToBoard()
+        openTask(named: "Compaction across a restart")
+        touch(executable + ".reattach-compact")
+        sendFromComposer("Compact across a restart.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
+        XCTAssertTrue(spinningRows.firstMatch.waitToExist(timeout: 15), "The compaction start shows a compacting row.")
+        XCTAssertTrue(waitUntil({ ((try? compactionRows(taskID, environment: environment)) ?? []).map { $0["status"] as? String } == ["inProgress"] }, timeout: 15),
+                      "The compaction start is recorded once before the restart.")
+        XCTAssertEqual(visibleRows.count, 1, "The running compaction is drawn once.")
+        attachScreenshot(named: "compaction-rows-2-compacting-before-restart")
+        attachElementScreenshot(spinningRows.firstMatch, named: "compaction-rows-2-compacting-row")
+
+        try killDaemon(environment: environment)
+        // The window reconnects; the fresh daemon follows the still compacting turn.
+        XCTAssertTrue(waitForStatus(taskID, "In Progress", environment: environment))
+        XCTAssertEqual(try compactionRows(taskID, environment: environment).map { $0["status"] as? String }, ["inProgress"],
+                       "While the turn runs, its compaction is one in-progress row.")
+        XCTAssertTrue(spinningRows.firstMatch.waitToExist(timeout: 10), "The reconnected window still shows the compacting row.")
+        XCTAssertEqual(visibleRows.count, 1, "The reconnected window draws the running compaction once.")
+        XCTAssertEqual(spinningRows.count, 1)
+        // Only the next daemon reads the boundary; the turn keeps running after it.
+        touch(executable + ".reattach-compact-end")
+        // The turn holds until its release, so only the streamed boundary can end the row here.
+        XCTAssertTrue(waitUntil({ spinningRows.count == 0 }, timeout: 20), "The boundary ends the live compacting row.")
+        let running = try XCTUnwrap(try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        XCTAssertEqual(running["status"] as? String, "In Progress", "The turn is still running after the boundary.")
+        XCTAssertEqual(visibleRows.count, 1, "The live window shows the compaction as one row after its boundary.")
+        attachScreenshot(named: "compaction-rows-3-completed-while-running")
+        attachElementScreenshot(visibleRows.firstMatch, named: "compaction-rows-3-completed-row")
+        touch(executable + ".reattach-release")
+        XCTAssertTrue(transcriptMessage("After restart.").waitToExist(timeout: 20), "The window streams the end of the reattached turn.")
+        XCTAssertEqual(visibleRows.count, 1, "The finished turn still shows the compaction once.")
+        XCTAssertEqual(spinningRows.count, 0)
+        let rows = try compactionRows(taskID, environment: environment)
+        XCTAssertEqual(rows.map { $0["status"] as? String }, ["completed"], "No compaction row is left spinning: \(rows)")
+        let details = rows.first?["compaction"] as? [String: Any]
+        XCTAssertEqual(details?["preTokens"] as? Int, 190000)
+        XCTAssertEqual(details?["postTokens"] as? Int, 6000)
+        let usage = try XCTUnwrap(try runCLI(["task", "token-usage", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        XCTAssertEqual((usage["contextCompactions"] as? [[String: Any]])?.count, 1, "The compaction is recorded once.")
+    }
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     func test_settings_token_usage_color_max_round_trip() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")

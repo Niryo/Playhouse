@@ -685,6 +685,61 @@ class BridgeTestCases17:
         finally:
             hold.unlink(missing_ok=True)
             ready.unlink(missing_ok=True)
+    # case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event.
+    def test_claude_compaction_shows_one_row(self):
+        def compaction_rows(task_id, environment):
+            history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+            return [activity for activity in history["activities"] if activity.get("isContextCompaction")]
+
+        environment = self.install_claude_fixture("claude-fixture-compaction-rows")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        threshold_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Repeated compaction start", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", threshold_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli(
+            "conversation", "send", threshold_task, "--message", "fill context to 210000 tokens", extra_environment=environment
+        )[0])
+        rows = compaction_rows(threshold_task, environment)
+        self.assertEqual(len(rows), 1, f"The latest turn's compaction is one row, not one per reported start or copy: {rows}")
+        self.assertEqual(rows[0]["status"], "completed")
+        self.assertEqual((rows[0]["compaction"]["preTokens"], rows[0]["compaction"]["postTokens"]), (210000, 6000))
+        self.assertEqual(len(self.assert_success(self.call_cli("task", "token-usage", threshold_task)[0])["contextCompactions"]), 1)
+
+        executable = self.install_provider_fixture("claude", "claude-fixture-reattach-compaction")
+        restart_environment = self.restart_service_environment("claude", executable)
+        task = self.create_task("Compaction across a restart", provider="claude")
+        Path(str(executable) + ".reattach-compact").touch()
+        ready = Path(str(executable) + ".reattach-ready")
+        sender = threading.Thread(target=lambda: self.call_cli(
+            "conversation", "send", task["id"], "--message", "Compact across a restart.",
+            expected_status=69, timeout=60, extra_environment=restart_environment), daemon=True)
+        sender.start()
+        self.wait_for(ready.is_file, "The turn should be compacting before the daemon dies.")
+        self.wait_for(lambda: [row["status"] for row in compaction_rows(task["id"], restart_environment)] == ["inProgress"],
+                      "The compaction start is recorded once before the restart.")
+        self.kill_daemon(restart_environment)
+        sender.join(timeout=20)
+        # The watch starts the next daemon, which follows the still compacting turn.
+        watcher = self.start_cli("conversation", "watch", task["id"], extra_environment=restart_environment)
+        self.wait_for(lambda: self.task_for(task["id"], restart_environment)["status"] == "In Progress",
+                      "The next daemon follows the compacting turn.")
+        self.assertEqual([row["status"] for row in compaction_rows(task["id"], restart_environment)], ["inProgress"],
+                         "While the turn runs, its compaction is one in-progress row.")
+        # Only the next daemon reads the boundary; the turn keeps running after it.
+        Path(str(executable) + ".reattach-compact-end").touch()
+        self.wait_for(lambda: [row["status"] for row in compaction_rows(task["id"], restart_environment)] == ["completed"],
+                      "The boundary ends the compaction's one row while the turn still runs, leaving none spinning.")
+        self.assertEqual(self.task_for(task["id"], restart_environment)["status"], "In Progress")
+        Path(str(executable) + ".reattach-release").touch()
+        self.assertTrue(self.assert_success(self.finish_cli(watcher, "conversation watch", timeout=60)[0])["watched"])
+        rows = compaction_rows(task["id"], restart_environment)
+        self.assertEqual([row["status"] for row in rows], ["completed"],
+                         f"The finished turn keeps the compaction's one completed row: {rows}")
+        self.assertEqual((rows[0]["compaction"]["preTokens"], rows[0]["compaction"]["postTokens"]), (190000, 6000))
+        events = self.assert_success(self.call_cli("task", "token-usage", task["id"], extra_environment=restart_environment)[0])["contextCompactions"]
+        self.assertEqual(len(events), 1, "The compaction is recorded once.")
     # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     def test_settings_token_usage_color_max_round_trip(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
