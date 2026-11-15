@@ -517,7 +517,7 @@ class BridgeTestCases22:
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
         self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],
                          "Every other atom, including a Button or Link that holds children, is a leaf.")
-    # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+# case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, and sends the due message to that same task and conversation, preserving its Claude session or Codex thread identifier. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     def test_schedule_one_time_task_fires_when_due(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-once")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -580,15 +580,32 @@ class BridgeTestCases22:
         finished = self.wait_for_task_status(task_id, {"Review"})
         self.assertIsNone(finished.get("schedule"), "Firing clears the schedule.")
         self.assertIn("Tell me a story.", self.fixture_user_prompts(executable), "The scheduled prompt reaches the provider.")
+        original_session_id = finished["claudeSessionID"]
 
         again = self.assert_success(self.call_cli(
             "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=40)), extra_environment=environment
         )[0])
         self.assertEqual((again["fired"], again["dropped"]), ([], []), "A run happens once.")
-        started, _ = self.call_cli(
-            "schedule", "set", task_id, "--prompt", "Again", "--once", self.schedule_iso(fire_at + datetime.timedelta(days=1)), expected_status=1
+        follow_up_at = fire_at + datetime.timedelta(days=1)
+        follow_up = self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Send a scheduled follow-up.", "--once", self.schedule_iso(follow_up_at)
+        )[0])
+        self.assertEqual(follow_up["status"], "Review", "Scheduling a follow-up keeps the existing conversation's lifecycle state.")
+        self.assertEqual(follow_up["schedule"]["prompt"], "Send a scheduled follow-up.")
+        recurring_follow_up, _ = self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Repeat this", "--repeat", "daily", "--title", "Repeated follow-up", expected_status=1
         )
-        self.assert_failure(started, "invalid_transition")
+        self.assert_failure(recurring_follow_up, "invalid_transition")
+        follow_up_run = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(follow_up_at + datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual([run["taskID"] for run in follow_up_run["fired"]], [task_id], "The one-time message runs in the existing task.")
+        self.wait_for(
+            lambda: "Send a scheduled follow-up." in self.fixture_user_prompts(executable),
+            "The scheduled follow-up should reach the existing conversation.",
+        )
+        after_follow_up = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(after_follow_up["claudeSessionID"], original_session_id, "The follow-up stays in the original Claude session.")
 
         contents = Path(self.cli).resolve().parent.parent
         bundle_identifier = plistlib.loads((contents / "Info.plist").read_bytes())["CFBundleIdentifier"]

@@ -6,7 +6,10 @@ extension TaskConversationView {
     var composerModel: ComposerModel {
         let reason = startImplementingUnavailableReason
         let primary: ComposerModel.Primary
-        if isDisplayingActiveResponse
+        if composerSchedule != nil, canSchedule {
+            let label = isExistingConversation ? "Schedule message" : "Schedule task"
+            primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? label, label: label, value: composerSchedule?.summary() ?? "", testID: "send-message-button")
+        } else if isDisplayingActiveResponse
             || (providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
             primary = .init(kind: "stop", disabled: isPausingResponse || !canPauseResponse, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
         } else if hasPausedResponse {
@@ -133,7 +136,9 @@ extension TaskConversationView {
         ComposerActions(
             change: { draft = $0 },
             submit: {
-                if isResponding {
+                if composerSchedule != nil, canSchedule {
+                    confirmSchedule()
+                } else if isResponding {
                     queueDraftForAfterTurn()
                 } else {
                     sendOrSchedule()
@@ -217,23 +222,29 @@ extension TaskConversationView {
     var scheduleHint: some View {
         let validation = scheduleDraft.validationMessage()
         return VStack(alignment: .leading, spacing: 12) {
-            Picker("Schedule", selection: Binding(
-                get: { scheduleDraft.kind },
-                set: { kind in
-                    scheduleDraft.kind = kind
-                    if kind == .recurring, scheduleDraft.title.isEmpty, !Self.placeholderTitles.contains(task.title) {
-                        scheduleDraft.title = task.title
+            if !isExistingConversation {
+                Picker("Schedule", selection: Binding(
+                    get: { scheduleDraft.kind },
+                    set: { kind in
+                        scheduleDraft.kind = kind
+                        if kind == .recurring, scheduleDraft.title.isEmpty, !Self.placeholderTitles.contains(task.title) {
+                            scheduleDraft.title = task.title
+                        }
                     }
+                )) {
+                    Text("Once").tag(TaskScheduleKind.once)
+                    Text("Recurring").tag(TaskScheduleKind.recurring)
                 }
-            )) {
-                Text("Once").tag(TaskScheduleKind.once)
-                Text("Recurring").tag(TaskScheduleKind.recurring)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityIdentifier("schedule-kind-picker")
+            } else {
+                Text("One-time message")
+                    .font(.caption.weight(.medium))
+                    .accessibilityIdentifier("schedule-one-time-only")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .accessibilityIdentifier("schedule-kind-picker")
 
-            if scheduleDraft.kind == .recurring {
+            if scheduleDraft.kind == .recurring && !isExistingConversation {
                 TextField("Title", text: $scheduleDraft.title)
                     .textFieldStyle(.roundedBorder)
                     .focused($isScheduleTitleFocused)

@@ -420,7 +420,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("message-composer").waitToExist(timeout: 10))
         XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
     }
-    // case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+    // case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, and sends the due message to that same task and conversation, preserving its Claude session or Codex thread identifier. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     func test_schedule_one_time_task_fires_when_due() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-once")
         launchApp(defaultParent: fixture.parent.path)
@@ -512,14 +512,44 @@ extension PlayhouseUITests {
         XCTAssertEqual((due["fired"] as? [[String: Any]])?.compactMap { $0["taskID"] as? String }, [taskID], "A run 30 minutes late is inside the grace period.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 60), "The fired task follows the ordinary board lifecycle.")
         XCTAssertTrue(waitForDisappearance(badge, timeout: 10), "Firing clears the schedule badge.")
+        let originalSessionID = try XCTUnwrap(taskRecord(id: taskID)?["claudeSessionID"] as? String)
         XCTAssertTrue(claudeFixturePrompts().contains("Tell me a story."), "The scheduled prompt reaches the provider.")
         attachScreenshot(named: "The scheduled task ran and moved on the board")
         let again = try XCTUnwrap(try runCLI(["schedule", "tick", "--now", scheduleISO(fireAt.addingTimeInterval(2400))], extraEnvironment: environment)["result"] as? [String: Any])
         XCTAssertEqual((again["fired"] as? [Any])?.count, 0, "A run happens once.")
-        assertCLIError(
-            try runCLI(["schedule", "set", taskID, "--prompt", "Again", "--once", scheduleISO(fireAt.addingTimeInterval(86400))], expectedStatus: 1),
-            code: "invalid_transition"
-        )
+        openTask(named: "Scheduled once")
+        XCTAssertTrue(element("schedule-task-button").waitToExist(timeout: 10), "An existing conversation keeps the schedule control.")
+        replaceComposerText(with: "Send a scheduled follow-up.")
+        _ = openScheduleHint()
+        XCTAssertTrue(element("schedule-one-time-only").exists)
+        XCTAssertFalse(element("schedule-kind-picker").exists, "An existing conversation only offers one-time messages.")
+        XCTAssertTrue(element("schedule-date-picker").exists, "An existing conversation can choose the delivery time.")
+        attachScreenshot(named: "One-time scheduling in an existing conversation")
+        let scheduleHintCapture = XCTAttachment(screenshot: element("schedule-hint").screenshot())
+        scheduleHintCapture.name = "One-time schedule hint detail"
+        scheduleHintCapture.lifetime = .keepAlways
+        add(scheduleHintCapture)
+        element("schedule-done-button").click()
+        let followUpSend = element("send-message-button")
+        XCTAssertTrue(waitUntil({ followUpSend.label == "Schedule message" }, timeout: 5))
+        followUpSend.click()
+        let followUpSchedule = try XCTUnwrap(taskRecord(id: taskID)?["schedule"] as? [String: Any])
+        XCTAssertEqual(followUpSchedule["prompt"] as? String, "Send a scheduled follow-up.")
+        let followedUpTask = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(followedUpTask["status"] as? String, "Review", "Scheduling keeps the existing task state.")
+        attachScreenshot(named: "Existing conversation with a scheduled follow-up")
+        let followUpAt = try XCTUnwrap(scheduleDate(followUpSchedule["scheduledAt"] as? String))
+        let followUpRun = try XCTUnwrap(try runCLI(["schedule", "tick", "--now", scheduleISO(followUpAt.addingTimeInterval(600))], extraEnvironment: environment)["result"] as? [String: Any])
+        XCTAssertEqual((followUpRun["fired"] as? [[String: Any]])?.compactMap { $0["taskID"] as? String }, [taskID], "The message runs in the original conversation.")
+        XCTAssertTrue(waitUntil({ self.claudeFixturePrompts().contains("Send a scheduled follow-up.") }, timeout: 30))
+        let deliveredTask = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(deliveredTask["claudeSessionID"] as? String, originalSessionID, "The follow-up stays in the original Claude session.")
+        let deliveredFollowUp = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", "Send a scheduled follow-up.")
+        ).firstMatch
+        XCTAssertTrue(deliveredFollowUp.waitToExist(timeout: 10), "The scheduled follow-up appears in the existing conversation transcript.")
+        XCTAssertNil(deliveredTask["schedule"] as? [String: Any], "The one-time schedule clears after it fires.")
+        attachScreenshot(named: "Scheduled follow-up delivered in the existing conversation")
 
         let bundleIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
         let agentURL = appBundle.appendingPathComponent("Contents/Library/LaunchAgents/\(bundleIdentifier).scheduler.plist")

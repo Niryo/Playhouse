@@ -13,8 +13,8 @@ extension BoardTaskManager {
             .map { BoardTaskRecord(task: $0, includeDraftImages: false) }
     }
 
-    /// Confirms a schedule for a task whose conversation hasn't started. The prompt is
-    /// stored as the schedule's own payload; nothing is sent until it fires.
+    /// Confirms a schedule for a task. A started conversation can have one-time follow-ups;
+    /// recurring schedules remain templates for conversations that haven't started.
     @discardableResult
     func setSchedule(_ id: UUID, _ request: TaskScheduleRequest, now: Date = .now) async throws -> BoardTaskRecord {
         let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -46,9 +46,10 @@ extension BoardTaskManager {
         }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
-            guard task.codexThreadID == nil, task.claudeSessionID == nil, task.pendingSubmittedPrompt == nil,
-                  task.status == .backlog || task.status == .blocked else {
-                throw BridgeCommandError(code: "invalid_transition", message: "Only a task that hasn't started can be scheduled.")
+            let hasStarted = task.activeConversationID != nil || task.pendingSubmittedPrompt != nil
+                || !(task.status == .backlog || task.status == .blocked)
+            guard !hasStarted || request.kind == .once else {
+                throw BridgeCommandError(code: "invalid_transition", message: "An existing conversation can only have a one-time scheduled message.")
             }
             if !title.isEmpty { task.title = title }
             task.scheduleKind = request.kind
@@ -59,11 +60,14 @@ extension BoardTaskManager {
             task.scheduledModeRawValue = request.mode.rawValue
             task.scheduledModelID = request.modelID
             task.schedulePaused = false
-            // The composer shows the confirmed prompt as its draft when the task is opened again.
-            task.savedPrompt = prompt.isEmpty ? nil : request.prompt
-            task.draftImageDataURLs = request.imageDataURLs
-            task.hasUnsentDraft = task.savedPrompt != nil || !request.imageDataURLs.isEmpty
-            if task.status != .backlog {
+            // A new task keeps the scheduled prompt as its unsent draft until delivery. For an
+            // existing conversation the schedule payload stays separate from the user's draft.
+            if !hasStarted {
+                task.savedPrompt = prompt.isEmpty ? nil : request.prompt
+                task.draftImageDataURLs = request.imageDataURLs
+                task.hasUnsentDraft = task.savedPrompt != nil || !request.imageDataURLs.isEmpty
+            }
+            if !hasStarted && task.status != .backlog {
                 task.status = .backlog
                 task.statusMessage = nil
             }
@@ -155,19 +159,13 @@ extension BoardTaskManager {
             )
             switch kind {
             case .once:
-                let hasStarted = task.codexThreadID != nil || task.claudeSessionID != nil || task.pendingSubmittedPrompt != nil
+                let hasStarted = task.activeConversationID != nil || task.pendingSubmittedPrompt != nil
                     || !(task.status == .backlog || task.status == .blocked)
                 payload.dropped = !runNow && now.timeIntervalSince(scheduledAt) > gracePeriod
                 Self.resetSchedule(task)
-                if hasStarted {
-                    // The conversation already started some other way; the schedule has nothing left to send.
-                    try await saveTaskContext(taskID: id)
-                    PlayhouseDiagnostics.record("task.schedule.discarded_started", fields: ["taskID": id.uuidString])
-                    return nil
-                }
-                if payload.dropped {
+                if payload.dropped && !hasStarted {
                     Self.markMissedScheduledRun(task, occurrence: scheduledAt, prompt: payload.prompt, imageDataURLs: payload.imageDataURLs)
-                } else {
+                } else if !payload.dropped && !hasStarted {
                     // Until the send records the prompt, it waits as a draft, so a daemon that stops
                     // in between leaves it in the composer rather than losing it.
                     task.savedPrompt = payload.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : payload.prompt
