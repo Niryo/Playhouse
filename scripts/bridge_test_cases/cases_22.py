@@ -56,7 +56,7 @@ class BridgeTestCases22:
         self.assertEqual((installed / "index.js").read_text(), changed)
         self.assertEqual((draft / "index.js").read_text(), changed)
 
-    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, the chosen name, placement and presentation with a note that the user can ask to change any of them, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions, which let the user change any of those choices, even the name; a changed name, placement and presentation names the unsaved draft's editor and is published under the same plugin ID on save; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
         self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
@@ -86,6 +86,8 @@ class BridgeTestCases22:
         configured = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal", "--provider", "claude")[0])
         authored = configured["task"]
         self.assertEqual(authored["title"], "Timer")
+        self.assertEqual((authored.get("pluginAuthoringName"), authored.get("pluginAuthoringPresentation"), authored["pluginPlacement"]), ("Timer", "modal", "mainSidebar"),
+                         "The editor keeps the chosen name, presentation and placement its empty conversation shows.")
         self.assertIsNone(authored.get("pendingSubmittedPrompt"), "Creating the authoring session leaves its prompt unsent.")
         self.assertEqual(configured["prompt"], "")
         stored_authored = self.assert_success(self.call_cli("plugin", "edit", "--id", authored["authoredPluginID"])[0])["task"]
@@ -94,6 +96,7 @@ class BridgeTestCases22:
         self.assert_failure(self.call_cli("plugin", "edit", "--id", "missing", expected_status=3)[0], "not_found")
         self.assertEqual(stored_authored["authoredPluginID"], authored["authoredPluginID"])
         self.assertEqual(stored_authored["pluginPlacement"], "mainSidebar")
+        self.assertEqual((stored_authored.get("pluginAuthoringName"), stored_authored.get("pluginAuthoringPresentation")), ("Timer", "modal"), "Reopening keeps the chosen details.")
         self.assertFalse(stored_authored.get("savedPrompt"))
         selected_model = self.assert_success(self.call_cli("conversation", "model", authored["id"], "set", "claude-opus-5-5")[0])
         self.assertEqual(selected_model["modelID"], "claude-opus-5-5")
@@ -108,6 +111,20 @@ class BridgeTestCases22:
 
         other = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal")[0])
         self.assertNotEqual(other["task"]["authoredPluginID"], authored["authoredPluginID"])
+        # Every setup choice can change later, even the name: the draft manifest wins on save.
+        renamed_id = other["task"]["authoredPluginID"]
+        renamed_draft = self.plugins_folder() / ".drafts" / "plugins" / renamed_id
+        renamed_draft.mkdir(parents=True, exist_ok=True)
+        (renamed_draft / "plugin.json").write_text(json.dumps({"id": renamed_id, "name": "Stopwatch", "icon": "stopwatch", "placement": "conversationToolbar", "presentation": "sidebar"}), encoding="utf-8")
+        (renamed_draft / "index.js").write_text(self.PLUGIN_CONTEXT_SOURCE, encoding="utf-8")
+        renamed_session = next(entry for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"] if entry["authoredPluginID"] == renamed_id)
+        self.assertEqual(renamed_session["title"], "Stopwatch", "An unsaved draft's editor is listed under the name the agent changed it to.")
+        renamed_saved = self.assert_success(self.call_cli("plugin", "save", "--id", renamed_id)[0])["plugin"]
+        self.assertEqual((renamed_saved["id"], renamed_saved["name"], renamed_saved["placement"], renamed_saved["presentation"]),
+                         (renamed_id, "Stopwatch", "conversationToolbar", "sidebar"), "Saving publishes the changed name, placement and presentation under the same ID.")
+        listed = next(entry for entry in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"] if entry["id"] == renamed_id)
+        self.assertEqual((listed["name"], listed["placement"], listed["presentation"], listed["valid"]), ("Stopwatch", "conversationToolbar", "sidebar", True))
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", renamed_id)[0])["task"]["id"], other["task"]["id"], "The changed plugin keeps its editor conversation.")
         self.write_installed_plugin("existing-editor", self.PLUGIN_CONTEXT_SOURCE, placement="composerActions")
         edits = []
         def open_existing():
@@ -170,6 +187,7 @@ class BridgeTestCases22:
         self.assertIn(task["authoredPluginID"], instructions)
         self.assertIn("The chosen plugin name is Context Claude.", instructions)
         self.assertIn("The chosen presentation is modal.", instructions)
+        self.assertIn(self.PLUGIN_CHANGE_RULE, instructions, "Every setup choice, even the name, can change on request.")
         self.assertIn("Chat input actions placement (`composerActions`)", instructions)
         self.assertIn("`composer` ({draft, selection", instructions, "The instructions describe the placement's context.")
         self.assertTrue(str(self.plugins_folder()) in instructions or os.path.realpath(self.plugins_folder()) in instructions)
@@ -195,6 +213,7 @@ class BridgeTestCases22:
         self.assertIn("Plugin authoring", resumed_instructions)
         self.assertIn("The chosen plugin name is Context Claude.", resumed_instructions)
         self.assertIn("The chosen presentation is modal.", resumed_instructions)
+        self.assertIn(self.PLUGIN_CHANGE_RULE, resumed_instructions)
         self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), resumed_instructions)
         resumed_directories = [resumed["arguments"][index + 1] for index, value in enumerate(resumed["arguments"]) if value == "--add-dir"]
         self.assertIn(os.path.realpath(wrappers[0]), [os.path.realpath(path) for path in resumed_directories], "The resumed turn keeps the skill wrapper.")
@@ -233,7 +252,7 @@ class BridgeTestCases22:
         self.assertNotIn(legacy_delete["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
         self.assertNotIn("legacy-delete", [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]])
 
-    # case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement and generated plugin identity in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
+    # case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
     def test_plugin_authoring_codex_instructions_resume(self):
         # Codex: the instructions ride the thread and the skill an extra root plus a structured input.
         executable = self.install_provider_fixture("codex", "codex-fixture-plugin-author")
@@ -251,6 +270,7 @@ class BridgeTestCases22:
         self.assertIn("plugin render", history["threadStartDeveloperInstructions"])
         self.assertIn("The chosen plugin name is Context Codex.", history["threadStartDeveloperInstructions"])
         self.assertIn("The chosen presentation is popover.", history["threadStartDeveloperInstructions"])
+        self.assertIn(self.PLUGIN_CHANGE_RULE, history["threadStartDeveloperInstructions"], "Codex is told every setup choice can change on request.")
         self.assertIn(task["authoredPluginID"], history["threadStartDeveloperInstructions"])
         self.assertIn("persistent draft", history["threadStartDeveloperInstructions"])
         roots = [Path(root) for root in history["skillExtraRoots"] if (Path(root) / "playhouse-plugin" / "SKILL.md").exists()]
@@ -272,6 +292,7 @@ class BridgeTestCases22:
         self.assertIn(task["authoredPluginID"], resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertIn("The chosen plugin name is Context Codex.", resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertIn("The chosen presentation is popover.", resumed_history["threadResumeDeveloperInstructions"][-1])
+        self.assertIn(self.PLUGIN_CHANGE_RULE, resumed_history["threadResumeDeveloperInstructions"][-1], "Codex is told every setup choice can change on request.")
         self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertEqual(reopened_codex["codexThreadID"], self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]["codexThreadID"])
 

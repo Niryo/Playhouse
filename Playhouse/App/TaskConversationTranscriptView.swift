@@ -177,7 +177,59 @@ extension TaskConversationView {
                 .foregroundStyle(.secondary)
                 .accessibilityLabel(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                 .accessibilityIdentifier("model-prompt")
+            if task.authoringPluginID != nil {
+                emptyConversationPluginDetails
+            }
         }
+    }
+
+    /// The choices the plugin editor started from, which the user can change by asking the agent.
+    var emptyConversationPluginDetailRows: [(id: String, label: String, value: String)] {
+        let chat = task as? StandaloneChat
+        var rows: [(id: String, label: String, value: String)] = []
+        if let name = chat?.pluginAuthoringName { rows.append(("name", "Name", name)) }
+        if let rawPlacement = task.authoringPluginPlacement {
+            rows.append(("placement", "Placement", PluginPlacement(rawValue: rawPlacement)?.title ?? rawPlacement))
+        }
+        if let rawPresentation = chat?.pluginAuthoringPresentation {
+            rows.append(("presentation", "Opens as", PluginPresentation(rawValue: rawPresentation)?.title ?? rawPresentation))
+        }
+        return rows
+    }
+
+    var emptyConversationPluginDetails: some View {
+        VStack(spacing: 12) {
+            if !emptyConversationPluginDetailRows.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(emptyConversationPluginDetailRows, id: \.id) { row in
+                        HStack(alignment: .firstTextBaseline, spacing: 14) {
+                            Text(row.label)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 72, alignment: .trailing)
+                            Text(row.value)
+                                .fontWeight(.medium)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("\(row.label): \(row.value)")
+                        .accessibilityIdentifier("plugin-detail-\(row.id)")
+                    }
+                }
+                .font(.system(size: 13))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+            }
+            Text("Want to change any of these, even the name? Just ask in your prompt.")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .accessibilityIdentifier("plugin-details-change-hint")
+        }
+        .frame(maxWidth: 360)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plugin-details")
     }
 
     /// Space between the transcript's rows, and between the rows of one message.

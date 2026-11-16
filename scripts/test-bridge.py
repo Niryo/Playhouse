@@ -614,6 +614,8 @@ function Probe() {
 Playhouse.render(h(Probe));
 """
 
+    # TaskThreadDeveloperInstructions.pluginChangeRule: the editor's setup choices are a starting point.
+    PLUGIN_CHANGE_RULE = "When the user asks to change the plugin's name, icon, placement or presentation, update plugin.json to match and keep the plugin ID and folder"
     PLUGIN_CONTEXT_SOURCE = """
 function Context() {
   var props = Playhouse.useProps();

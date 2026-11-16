@@ -469,7 +469,7 @@ enum TaskOperationLockGate {
 
 struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let id: UUID
-    let title: String
+    var title: String
     let status: String
     let statusMessage: String?
     let progressType: String?
@@ -500,6 +500,9 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     /// The plugin placement an Add Plugin mode task builds for, if any.
     let pluginPlacement: String?
     let authoredPluginID: String?
+    /// The name and presentation a plugin editor was set up with; the empty conversation shows them.
+    let pluginAuthoringName: String?
+    let pluginAuthoringPresentation: String?
 
     /// Accepts any conversation owner: a board task, or the standalone chat, which reports
     /// empty workspace roots and worktrees because it has none.
@@ -509,6 +512,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         scheduleSourceTaskID = boardTask?.scheduleSourceTaskID
         pluginPlacement = boardTask?.pluginPlacement ?? (task as? StandaloneChat)?.pluginPlacement
         authoredPluginID = boardTask?.authoredPluginID ?? (task as? StandaloneChat)?.authoredPluginID
+        pluginAuthoringName = (task as? StandaloneChat)?.pluginAuthoringName
+        pluginAuthoringPresentation = (task as? StandaloneChat)?.pluginAuthoringPresentation
         id = task.id
         title = task.title
         status = task.status.rawValue

@@ -49,6 +49,7 @@ enum TaskThreadDeveloperInstructions {
             This conversation is not a task and has no task board status or outcome to report.
             The plugin ID and folder are \(pluginID ?? "unknown"); its folder is inside \(pluginsDirectory ?? "the Playhouse plugins directory"). When it already exists, edit that plugin rather than creating a different one.
             \(pluginName.map { "The chosen plugin name is \($0)." } ?? "") \(pluginPresentation.map { "The chosen presentation is \($0)." } ?? "")
+            \(pluginChangeRule)
             \(pluginAuthoringInstructions(placement: pluginPlacement, executable: quotedExecutable, pluginsDirectory: pluginsDirectory))
             """
         }
@@ -129,6 +130,9 @@ enum TaskThreadDeveloperInstructions {
     /// The skill an Add Plugin mode task uses.
     static let pluginSkillName = "playhouse-plugin"
 
+    /// The editor's setup choices are a starting point; the user can change any of them later.
+    static let pluginChangeRule = "These setup choices are only a starting point. When the user asks to change the plugin's name, icon, placement or presentation, update plugin.json to match and keep the plugin ID and folder; the user's latest request wins over the choices above."
+
     /// Guidance for a task started from an Add Plugin mode placeholder: where the
     /// plugin goes, what it receives, and how to install and check it.
     static func pluginAuthoringInstructions(placement rawPlacement: String?, executable: String, pluginsDirectory: String?) -> String {
@@ -136,9 +140,9 @@ enum TaskThreadDeveloperInstructions {
         let directory = pluginsDirectory ?? "the plugins folder"
         return """
 
-        Plugin authoring: this task builds a new Playhouse plugin whose entry button goes in the \(placement.title) placement (`\(placement.rawValue)`). Use the /\(pluginSkillName) skill for the plugin system's details and the chosen name and presentation when supplied. Ask the user for any required details the request leaves open before writing it.
-        - Write the plugin to \(directory)/<plugin-id>/ as plugin.json (id, name, icon, placement "\(placement.rawValue)", presentation) and index.js. That folder is this task's context folder; it is not a Git repository and needs no worktree or pull request.
-        - Context the plugin receives in Playhouse.props at this placement: \(placement.contextDescription)
+        Plugin authoring: this task builds a new Playhouse plugin whose entry button the user first chose to put in the \(placement.title) placement (`\(placement.rawValue)`). Use the /\(pluginSkillName) skill for the plugin system's details and the chosen name and presentation when supplied. Ask the user for any required details the request leaves open before writing it.
+        - Write the plugin to \(directory)/<plugin-id>/ as plugin.json (id, name, icon, placement "\(placement.rawValue)" unless the user asks for another, presentation) and index.js. That folder is this task's context folder; it is not a Git repository and needs no worktree or pull request.
+        - Context the plugin receives in Playhouse.props at this placement: \(placement.contextDescription) The skill lists the context of the other placements.
         - This folder is a persistent draft. Never modify the installed plugin or publish it; the user chooses Save in the editor. Check the draft with \(executable) plugin render --file \(directory)/<plugin-id>/index.js and fix errors before finishing.
 
         """
