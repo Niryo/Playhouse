@@ -513,12 +513,13 @@ struct KanbanBoardView: View {
                         }
 
                         HStack(spacing: 0) {
-                            // The board centers its columns with its own frame and keeps the scroll view's
-                            // clip origin at zero. Left to itself, the two-axis scroll view centers narrower
-                            // content by giving AppKit's clip view a negative bounds origin, and after a
-                            // horizontal scroll nudge followed by a content-height change, SwiftUI's hit
-                            // testing lost that offset: the board drew centered while clicks resolved as if
-                            // it were flush left, so buttons stopped responding until the window was resized.
+                            // The board pins its columns to the top leading corner, just under the header,
+                            // with its own viewport-sized frame and keeps the scroll view's clip origin at
+                            // zero. Left to itself, the two-axis scroll view centers narrower content by
+                            // giving AppKit's clip view a negative bounds origin, and after a horizontal
+                            // scroll nudge followed by a content-height change, SwiftUI's hit testing lost
+                            // that offset: the board drew centered while clicks resolved as if it were flush
+                            // left, so buttons stopped responding until the window was resized.
                             // The board's scrollers always float over the content (see HoverRevealScrollers),
                             // so the visible area is the reader's full frame.
                             GeometryReader { viewport in
@@ -559,7 +560,7 @@ struct KanbanBoardView: View {
                                     .padding(.bottom, 28)
                                     // Room for the Done drawer, so the last column scrolls clear of it.
                                     .padding(.trailing, DoneDropDrawer.gutterWidth)
-                                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height)
+                                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .topLeading)
                                     .hoverRevealScrollers()
                                 }
                                 .modifier(TopLeadingScrollAlignment())
@@ -948,9 +949,6 @@ struct KanbanBoardView: View {
 
 
 }
-
-/// Places scroll content smaller than its container at the top leading corner instead of
-/// centering it through a negative clip origin; the board centers its columns itself.
 
 /// Where the session files the token map reads live, as this window's bridge
 /// requests would name them.

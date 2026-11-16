@@ -637,7 +637,9 @@ extension PlayhouseUITests {
         }
         assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.50, rgb: (71, 176, 235), accuracy: 30, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.50, rgb: (148, 41, 121), accuracy: 30, file: file, line: line)
-        assertPixel(logoImage, normalizedX: 0.50, normalizedY: 0.35, rgb: (245, 179, 124), accuracy: 35, file: file, line: line)
+        // The warm center sits in the stage's solid block; higher up it is a sliver that a 1x
+        // screen renders as a blend with the magenta curtain beside it.
+        assertPixel(logoImage, normalizedX: 0.50, normalizedY: 0.66, rgb: (245, 179, 124), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.80, rgb: (177, 54, 171), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.80, rgb: (240, 82, 121), accuracy: 30, file: file, line: line)
     }
