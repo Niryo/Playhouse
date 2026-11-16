@@ -196,32 +196,6 @@ extension KanbanBoardView {
         }
     }
 
-    /// Slides in over the board like the Skills page, presented by the board's Page atom. It stays
-    /// up while a task opened from it is showing, so closing that task returns here.
-    var scheduledTasksPage: some View {
-        ScheduledTasksPageView(
-            scheduledTasks: allTasks.filter { $0.scheduleKind != nil },
-            remoteConversations: remoteConversations,
-            onNewTask: { openNewTask(presentingSchedule: .recurring) },
-            onOpenTask: { task in
-                isSelectedTaskNew = false
-                conflictResolutionTaskID = nil
-                presentScheduleOnOpen = nil
-                selectedTask = task
-            },
-            onOpenRunTask: { id in
-                if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
-                    isShowingScheduledTasks = false
-                    isSelectedTaskNew = false
-                    presentScheduleOnOpen = nil
-                    selectedTask = task
-                }
-            }
-        ) {
-            isShowingScheduledTasks = false
-        }
-    }
-
     func openNewTask() {
         openNewTask(presentingSchedule: nil)
     }

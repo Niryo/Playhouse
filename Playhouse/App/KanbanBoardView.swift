@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftData
 import SwiftUI
 
@@ -145,7 +146,9 @@ struct KanbanBoardView: View {
     /// Board cards. Recurring schedule templates aren't board tasks; the Scheduled Tasks page
     /// lists them, and each of their runs appears here as its own task.
     var tasks: [BoardTask] { allTasks.filter { !$0.isRecurringScheduleTemplate } }
-    @State var isShowingScheduledTasks = false
+    /// Every scheduled task, soonest first, as `schedule.list` lists them for
+    /// the main sidebar's `props.schedules`.
+    @Query(filter: #Predicate<BoardTask> { $0.scheduleKindRawValue != nil }) var scheduledTasks: [BoardTask]
     /// Opens the next new task with the schedule hint already showing, set to this kind.
     @State var presentScheduleOnOpen: TaskScheduleKind?
     @State var isCreatingNewTask = false
@@ -618,19 +621,17 @@ struct KanbanBoardView: View {
                     .zIndex(2)
             }
         }
-        // The archive is a SidePanel atom over the board, and the Scheduled Tasks page a Page atom.
+        // The archive is a SidePanel atom over the board; the main sidebar's
+        // plugins (the Scheduled Tasks page among them) present over it too.
         .atomSidePanel(
             SidePanelProps(isPresented: isShowingDoneArchive, width: 340),
             common: AtomCommon(testID: "done-archive-panel")
         ) {
             doneArchivePanel
         }
-        .atomPage(PageProps(isPresented: isShowingScheduledTasks)) {
-            scheduledTasksPage
-        }
         .pluginPresentation(
             $openBoardPlugin,
-            props: { PluginContext.props(plugin: $0, appearance: appearance, task: nil, composer: nil) },
+            props: mainSidebarPluginProps,
             actions: boardPluginActions
         )
         .background {
@@ -799,24 +800,13 @@ struct KanbanBoardView: View {
 
     var boardSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            AtomButton(
-                common: AtomCommon(testID: "scheduled-tasks-button", help: "Scheduled tasks", fillWidth: true),
-                action: { isShowingScheduledTasks.toggle() }
-            ) {
-                AtomPanel(
-                    props: PanelProps(fill: "accent", fillOpacity: isShowingScheduledTasks ? 0.14 : 0, cornerRadius: 8),
-                    common: AtomCommon(fillWidth: true, padding: 0, paddingX: 12, paddingY: 9)
-                ) {
-                    AtomLabel(props: LabelProps(text: "Scheduled Tasks", icon: "clock", size: 12, weight: "medium"))
-                }
-            }
-
             PluginSlot(
                 placement: .mainSidebar,
-                props: { PluginContext.props(plugin: $0, appearance: appearance, task: nil, composer: nil) },
+                props: mainSidebarPluginProps,
                 actions: boardPluginActions,
                 open: { openBoardPlugin = $0 },
-                add: startPluginTask
+                add: startPluginTask,
+                openPluginID: openBoardPlugin?.id
             )
 
             Spacer(minLength: 0)
@@ -926,16 +916,31 @@ struct KanbanBoardView: View {
     }
 
 
+    /// `Playhouse.props` for a main sidebar plugin: the standalone context plus `schedules`.
+    func mainSidebarPluginProps(_ plugin: PluginRecord) -> [String: PluginValue] {
+        let records = BoardTaskManager.scheduledTaskRecords(scheduledTasks)
+        let schedules = PluginSchedulesContext(
+            tasks: (try? BridgeValue.encoding(records)).map(PluginValue.init(bridge:))?.array ?? [],
+            needsLoginItemsApproval: SchedulerAgent.requiresApproval
+        )
+        return PluginContext.props(plugin: plugin, appearance: appearance, task: nil, composer: nil, schedules: schedules)
+    }
+
     var boardPluginActions: PluginUIActions {
         let confirmations = pluginConfirmations
         var actions = PluginUIActions(openTask: { id in
             if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
-                openBoardPlugin = nil
+                // A page stays up behind the task, so closing the task returns to it.
+                if openBoardPlugin?.presentationKind != .page { openBoardPlugin = nil }
                 isSelectedTaskNew = false
+                conflictResolutionTaskID = nil
+                presentScheduleOnOpen = nil
                 selectedTask = task
             }
         })
         actions.confirm = { await confirmations.ask($0) }
+        actions.newTask = { schedule in openNewTask(presentingSchedule: schedule) }
+        actions.openLoginItems = { SMAppService.openSystemSettingsLoginItems() }
         return actions
     }
 

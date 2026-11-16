@@ -17,7 +17,7 @@ extension PlayhouseUITests {
         let logo = app.images["Playhouse logo"]
         XCTAssertTrue(logo.waitToExist(timeout: 5), "The board header should display the transparent theater logo.")
         let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
-        let scheduledTasksButton = element("scheduled-tasks-button")
+        let scheduledTasksButton = element("plugin-entry-scheduled-tasks")
         XCTAssertTrue(sidebar.waitToExist(timeout: 5), "The Kanban sidebar should be visible.")
         XCTAssertEqual(sidebar.frame.width, 216, accuracy: 2, "The Kanban sidebar should be 10% narrower than the previous 240-point width.")
         XCTAssertTrue(scheduledTasksButton.isHittable, "The Scheduled Tasks button should be hittable.")
@@ -156,7 +156,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(section.waitToExist(timeout: 30), "Agents info should appear once an agent CLI is installed.")
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label =[c] %@ OR value =[c] %@", "Agents info", "Agents info")).firstMatch.exists, "The section should be titled Agents info.")
         XCTAssertTrue(sidebar.frame.contains(section.frame), "Agents info should be inside the left sidebar.")
-        XCTAssertLessThanOrEqual(element("scheduled-tasks-button").frame.maxY, section.frame.minY, "Agents info should sit below the Scheduled Tasks button.")
+        XCTAssertLessThanOrEqual(element("plugin-entry-scheduled-tasks").frame.maxY, section.frame.minY, "Agents info should sit below the Scheduled Tasks button.")
         XCTAssertLessThan(sidebar.frame.maxY - section.frame.maxY, 40, "Agents info should be pinned at the bottom of the sidebar.")
         let claudeBlock = element("agents-info-claude")
         let codexBlock = element("agents-info-codex")

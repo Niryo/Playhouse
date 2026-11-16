@@ -769,7 +769,13 @@ final class PlayhouseBridgeRuntime {
                                 runningTasks: try taskManager.list(status: .inProgress).reduce(into: [:]) { $0[$1.conversationProvider, default: 0] += 1 }
                             )
                         }
-                        command.baseProps = PluginContext.props(plugin: stated, appearance: settings.appearance, task: task, composer: nil, agents: agents)
+                        // The board's scheduled tasks, as `schedule.list` returns them. Only the
+                        // app can ask macOS about Login Items, so headlessly it reads false.
+                        var schedules: PluginSchedulesContext?
+                        if command.placement == .mainSidebar {
+                            schedules = PluginSchedulesContext(tasks: PluginValue(bridge: try Self.value(taskManager.scheduledTasks())).array ?? [])
+                        }
+                        command.baseProps = PluginContext.props(plugin: stated, appearance: settings.appearance, task: task, composer: nil, agents: agents, schedules: schedules)
                     }
                     // The plugin's Playhouse.bridge calls run as requests of this caller,
                     // against the same managers the CLI reaches.

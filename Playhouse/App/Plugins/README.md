@@ -80,7 +80,7 @@ compares the two.
 Plugins present UI the same three ways the board does, each a controlled
 atom whose first child is what it is presented over: `Modal` (a sheet over
 the window, which Escape dismisses through `onDismiss`; the board's Token
-Stats modal), `Page` (slides in over all of its first child; the Scheduled
+Stats modal), `Page` (slides in over all of its first child; the built-in Scheduled
 Tasks page) and `SidePanel` (slides in over one edge; the Done archive). The
 owner closes a Page or SidePanel with its own control, as the board's Back
 and close buttons do. A Page or SidePanel keeps an empty AppKit view behind what it covers so
@@ -95,8 +95,7 @@ atom views (`atomModal`, `atomPage` and `atomSidePanel`).
 
 Smaller native views are also built straight from atoms, with no catalog
 copy because they have no state or layout a plugin would need to match: the
-board's header, sidebar button, worktree notice and Rename Task sheet (`KanbanBoardView.swift`), the Scheduled Tasks
-page apart from its delete alert (`ScheduledTasksPageView.swift`), and in the
+board's header, worktree notice and Rename Task sheet (`KanbanBoardView.swift`), and in the
 conversation the notices above the composer, the queued follow-ups, the
 pending comment count, the active goal row, the comment hover card, the
 recall, goal, compaction, provider-switch and chat page rows, and the
@@ -213,7 +212,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`, `inset` (padding around the content, 14 default), `spacing` (between its children, 10 default); shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
 | `StepSlider` | `options` (`[{value, label}]`), `selected`; a discrete slider as wide as its container, driven by click, drag or arrow keys; its common `label` and `testID` name it | `onChange(value)` | |
 | `Modal` | `isPresented` (required), `width`, `height` (fix the sheet's size, content at the top; it fits its content otherwise), `title`, `subtitle`, `icon` (SF Symbol), `inset` (padding around the header and content, 24 default), `spacing` (between the header and each child, 16 default); a sheet over the window presented from its first child, which stays laid out as usual, showing the rest in a leading column. With a `title` the sheet starts with the app's standard modal header: the accent `icon`, the 19-point semibold rounded title (`<testID>-title`), the secondary subtitle, and a close button (`<testID>-close`, or `modal-title` and `modal-close` without a `testID`); its `testID` and accessibility props name the sheet's content | `onDismiss()` (Escape or the header's close button; the owner sets `isPresented` false) | atoms: the presenter, then the content |
-| `Page` | `isPresented` (required); slides in from the trailing edge over all of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a leading column on the window background, like the Scheduled Tasks page; its `testID` and accessibility props name the page; the owner closes it with its own control | | atoms: the covered view, then the page |
+| `Page` | `isPresented` (required); slides in from the trailing edge over all of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a leading column on the window background, like the built-in Scheduled Tasks page; its `testID` and accessibility props name the page; the owner closes it with its own control | | atoms: the covered view, then the page |
 | `SidePanel` | `isPresented` (required), `edge` (`trailing` default, `leading`), `width` (340 default); a full-height panel sliding in over that edge of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a column with no spacing on the window background, with a hairline along its inner edge and a shadow, like the Done archive; its `testID` and accessibility props name the panel; the owner closes it with its own control | | atoms: the covered view, then the panel |
 
 ### Defaults
@@ -306,7 +305,7 @@ and deleting a plugin forgets its disabled state.
 
 | Placement | Where | Entry | Extra context in `Playhouse.props` |
 | --- | --- | --- | --- |
-| `mainSidebar` | The board's sidebar, below Scheduled Tasks | Labeled | None: it is standalone |
+| `mainSidebar` | The board's sidebar, after the built-in Scheduled Tasks entry | Labeled | `schedules` (`{tasks, needsLoginItemsApproval}`): `tasks` is what `schedule.list` returns (every scheduled task, soonest first, each with its `schedule` record), kept live from the window's SwiftData query, and `needsLoginItemsApproval` says macOS waits for the user to allow the scheduler in Login Items (always false in `plugin render`, which can't ask macOS) |
 | `mainSidebarBottom` | The bottom of the board's sidebar, where sections stack in plugin order: the first sits on top, and expanding one grows it upward, pushing those above it up | None: always `section` | `agents` (`{usage, runningTasks}`): `usage` is what `usage.get` returns, kept live by the window's usage feed (`AgentUsageModel`, which runs only while a section is shown) or null before the first read, and `runningTasks` counts the In Progress tasks per provider, always listing `claude` and `codex` |
 | `conversationSidebar` | The task sidebar: entry buttons first, then inline sections such as Changes | Labeled, or none when `inline` | `task`, `repositories`, `contextFolders`, `workspace` (`{revision, openDiff: {repository, path, group} or null}`) and `sidebar` (`{collapsed}`) |
 | `conversationToolbar` | The task sidebar's bottom row, beside Terminal | Icon | `task`, `repositories`, `contextFolders` |
@@ -364,7 +363,7 @@ Installed plugins also get host calls. Each returns a Promise:
 | `Playhouse.bridge(command, arguments)` | Full app access: any bridge command the CLI sends (`"task.list"`, `"task.rename"`, `"conversation.send"`, …) except `plugin.render`, which would recurse. It resolves with the command's result, or rejects with an Error carrying `code` and `message`. In the app it goes through `DaemonClient`; in `plugin render`, through the daemon's own `PlayhouseBridgeRuntime` |
 | `Playhouse.setState(key, value)` | Saves one of the plugin's values, which come back as `props.state`; `plugin.state.set` with the plugin's id |
 | `Playhouse.ui.close()` | Closes the surface |
-| `Playhouse.ui.openTask(taskID)` | Opens a task |
+| `Playhouse.ui.openTask(taskID)` | Opens a task; a page plugin stays open behind it, so closing the task returns to the page |
 | `Playhouse.ui.composer.setDraft(text)`, `.insertText(text)`, `.replaceSelection(text)`, `.focus()` | Edit the composer at the conversation placements; elsewhere they reject |
 | `Playhouse.ui.openDiff(entry)` | Opens the window's diff view for an entry of `task.changes.list` (`{repository, path, group, …}`) at the conversation placements |
 | `Playhouse.ui.refreshWorkspace()` | Tells the window the task's folders changed: it bumps `workspace.revision` for every sidebar plugin and refreshes an open diff. The window also bumps it whenever its file watcher sees a change, while an inline sidebar plugin is shown |
@@ -373,8 +372,10 @@ Installed plugins also get host calls. Each returns a Promise:
 | `Playhouse.ui.alert(title, message)` | Shows an alert over the window, for a failure the user should see |
 | `Playhouse.ui.confirm({title, message, confirm, destructive})` | Asks the user with the board's dialog (`PluginConfirmationModifier`) and resolves true when they confirm, false when they cancel; `plugin render` resolves null without asking |
 | `Playhouse.ui.openURL(url)` | Opens an `http` or `https` link in the browser (a test build opens nothing) |
+| `Playhouse.ui.newTask({schedule})` | Opens a new task on the board; with `schedule` `"recurring"` or `"once"` its schedule picker is already up |
+| `Playhouse.ui.openLoginItems()` | Opens Login Items in System Settings, where the user allows scheduled runs |
 
-`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, a composer call from the board's sidebar or a task card is `unavailable`, an `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`, a `moveTask`, `resolveConflicts` or `alert` call from anywhere but a task card is `unavailable`, a `confirm` call from anywhere but the board (its sidebar, the sidebar's bottom or a task card) is `unavailable`, and an `openURL` call whose `url` is not an `http` or `https` URL with a host is `invalid_argument`.
+`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, a composer call from the board's sidebar or a task card is `unavailable`, an `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`, a `moveTask`, `resolveConflicts` or `alert` call from anywhere but a task card is `unavailable`, a `confirm`, `newTask` or `openLoginItems` call from anywhere but the board (its sidebar, the sidebar's bottom or a task card) is `unavailable`, a `newTask` call whose `schedule` is neither null, `"once"` nor `"recurring"` is `invalid_argument`, and an `openURL` call whose `url` is not an `http` or `https` URL with a host is `invalid_argument`.
 
 ### Events and throttling
 
@@ -422,7 +423,10 @@ with `builtIn` true, it sits at a placement with a presentation, it reads the
 same `Playhouse.props`, it composes only atoms, and it acts only through
 `PluginHost`, which answers its `bridge` and `ui` calls exactly as it answers a
 script's. `BuiltInPluginView` maps a built-in id to its view, which
-`PluginInlineSlot` mounts in place of `PluginSurfaceView`.
+`PluginInlineSlot`, `PluginSectionSlot` and `PluginPresentationModifier` mount
+in place of `PluginSurfaceView`. A presented built-in (a page) draws its own
+chrome instead of the installed plugins' standard header, and closes with
+`ui.close`.
 A built-in can be enabled or disabled from the Plugins menu's Built-in Plugins
 section or the CLI, but not edited, rendered or deleted (`invalid_argument`),
 and an installed plugin's folder can't take a built-in's id.
@@ -433,6 +437,7 @@ and an installed plugin's folder can't take a built-in's id.
 | `pull-requests` (`BuiltIn/PullRequestsPlugin.swift`) | `taskItem` | `inline` | The task card's pull request controls: the create button, the links coloured by health, the merged check (which moves the task to Done with `ui.moveTask`, passing `pullRequestsMerged` so the move trusts the merge its probe just saw instead of asking GitHub again; the window honors that only from a built-in plugin, since the move records the pull requests merged) and the resolve-conflicts button (`ui.resolveConflicts`). It probes `task.pr.status` with `shared` (a short cache with in-flight dedupe, so cards and windows share one GitHub read) on focus and when its task moves, through `PluginThrottle`, and raises a failed probe with `ui.alert` while the task is in Review |
 | `changes` (`BuiltIn/ChangesPlugin.swift`) | `conversationSidebar` | `inline` | The Changes section: lists the task's Git changes with `task.changes.list`, reloads on `workspace.revision`, opens diffs with `ui.openDiff`, marks files with `task.changes.mark-viewed`, `mark-unviewed` and `mark-all-viewed`, and shows the pending count on the sidebar's rail. Disabling it hides the section and stops the window's file watching. Whether the section is collapsed is its plugin state, `state.collapsed` |
 | `agents-info` (`BuiltIn/AgentsInfoPlugin.swift`) | `mainSidebarBottom` | `section` | The board's Agents info section: each installed agent's account and usage windows from `props.agents.usage`. It reads the usage again once per launch (`usage.get` with `refresh` on `app.launched`), signs in with `usage.login` and `ui.openURL`, and switches accounts with `usage.switch-account`, asking first with `ui.confirm` when that provider has running tasks (`props.agents.runningTasks`). With no agent CLI installed it renders nothing, so its section hides. Its collapsed state moved from `WorkspaceSettings.agentsInfoSectionCollapsedKey` into its plugin state, carried over once |
+| `scheduled-tasks` (`BuiltIn/ScheduledTasksPlugin.swift`) | `mainSidebar` | `page` | The board's Scheduled Tasks page, which replaced the sidebar's native button and page: recurring and one-time sections from `props.schedules.tasks`. It pauses and resumes with `schedule.pause` and `schedule.resume`, runs with `schedule.run-now`, deletes with `task.delete` after `ui.confirm`, opens a schedule's task with `ui.openTask` (the board keeps a page up behind a task opened from it, so closing the task returns here), opens the last run with `ui.close` then `ui.openTask`, starts a recurring task with `ui.newTask`, and shows the Login Items notice from `props.schedules.needsLoginItemsApproval` with `ui.openLoginItems`. Disabling it removes the sidebar entry; schedules still run |
 
 ### Network
 

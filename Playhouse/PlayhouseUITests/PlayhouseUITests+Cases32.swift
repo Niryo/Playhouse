@@ -1358,4 +1358,103 @@ extension PlayhouseUITests {
         XCTAssertEqual(usageSession["pluginAuthoringPresentation"] as? String, "section")
         attachElementScreenshot(element("plugin-details"), named: "Sidebar bottom: a new plugin there opens as a collapsible section")
     }
+
+    // Each test ID is prefixed with the plugin's id; it reads props.schedules when it has them.
+    static let schedulesPageSource = """
+        function Page() {
+          var props = Playhouse.useProps();
+          var id = props.plugin.id;
+          var result = React.useState("idle");
+          var schedules = props.schedules;
+          var tasks = schedules ? schedules.tasks : [];
+          function act(name, call) {
+            return h(Button, { testID: id + "-" + name, style: "bordered", onPress: function () {
+              call().then(function (value) { result[1](name + ": " + JSON.stringify(value)); }, function (error) { result[1](name + ": " + error.code); });
+            } }, h(Text, { size: 11 }, name));
+          }
+          return h(Stack, { spacing: 4, align: "leading" },
+            h(Text, { size: 11, testID: id + "-count" }, schedules ? tasks.length + " scheduled" : "no schedules"),
+            h(Text, { size: 11, testID: id + "-ids" }, tasks.map(function (task) { return task.id; }).join(",")),
+            h(Text, { size: 11, testID: id + "-kinds" }, tasks.map(function (task) { return task.schedule.kind + (task.schedule.paused ? " paused" : ""); }).join(",")),
+            h(Text, { size: 11, testID: id + "-approval" }, schedules ? "approval " + schedules.needsLoginItemsApproval : "no approval"),
+            h(Text, { size: 11, testID: id + "-result" }, result[0]),
+            h(Stack, { axis: "h", spacing: 4 },
+              act("new-recurring", function () { return Playhouse.ui.newTask({ schedule: "recurring" }); }),
+              act("new-once", function () { return Playhouse.ui.newTask({ schedule: "once" }); }),
+              act("new-plain", function () { return Playhouse.ui.newTask(); }),
+              act("new-weekly", function () { return Playhouse.ui.newTask({ schedule: "weekly" }); }),
+              act("login-items", function () { return Playhouse.ui.openLoginItems(); })));
+        }
+        Playhouse.render(h(Page));
+        """
+    // case-contract: test_plugin_main_sidebar_schedules_context_and_new_task | A plugin at the board's mainSidebar placement gets `props.schedules`: `tasks`, the scheduled tasks exactly as `schedule list` returns them (soonest first, each with its schedule's kind and paused state), and `needsLoginItemsApproval`; with no schedules the list is empty, and a conversation sidebar plugin gets no schedules. ui.newTask (with schedule "recurring", "once" or none) and ui.openLoginItems are host calls only the board answers: a conversation sidebar plugin is refused as unavailable, and any other schedule is invalid_argument. The board's Scheduled Tasks button and page are the built-in scheduled-tasks plugin, which can't be rendered headlessly (invalid_argument). In the window, a mainSidebar page plugin lists the schedules and follows them live as one is paused, and its ui.newTask opens a new task with the schedule picker up; disabling the built-in Scheduled Tasks removes its sidebar button, and enabling it brings back the button, which opens the Scheduled Tasks page.
+    func test_plugin_main_sidebar_schedules_context_and_new_task() throws {
+        try writeInstalledPlugin("schedules-probe", source: Self.schedulesPageSource, placement: "mainSidebar", presentation: "page", name: "Schedules Probe", icon: "calendar")
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["plugin", "refresh"])
+
+        // With no schedules, the page plugin's list is there and empty.
+        let entry = element("plugin-entry-schedules-probe")
+        XCTAssertTrue(entry.waitToExist(timeout: 15), "The page plugin's button is in the board's sidebar.")
+        entry.click()
+        let page = element("plugin-surface-schedules-probe")
+        XCTAssertTrue(page.waitToExist(timeout: 10), "The page plugin opens.")
+        XCTAssertTrue(waitForStableFrame(page), "The page finishes sliding in.")
+        func probe(_ name: String) -> XCUIElement { page.descendants(matching: .any)["schedules-probe-\(name)"] }
+        XCTAssertTrue(waitUntil({ self.pluginText(probe("count")) == "0 scheduled" }, timeout: 10), "No schedules yet: \(pluginText(probe("count")))")
+        XCTAssertTrue(["approval true", "approval false"].contains(pluginText(probe("approval"))), "props.schedules says whether Login Items approval is needed.")
+
+        // Schedules made elsewhere reach the open page live, in `schedule list`'s order.
+        func createTask(_ title: String) throws -> String {
+            try XCTUnwrap((try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+            ])["result"] as? [String: Any])?["id"] as? String)
+        }
+        let onceID = try createTask("Plugin one-time schedule")
+        _ = try runCLI(["schedule", "set", onceID, "--prompt", "Tell me a story.", "--once", scheduleISO(Date().addingTimeInterval(3 * 86_400))])
+        let dailyID = try createTask("Plugin daily schedule")
+        _ = try runCLI(["schedule", "set", dailyID, "--prompt", "Summarize the day.", "--repeat", "daily", "--time", "09:00", "--title", "Daily summary"])
+        let listed = ((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
+        XCTAssertEqual(Set(listed), [onceID, dailyID])
+        XCTAssertTrue(waitUntil({ self.pluginText(probe("count")) == "2 scheduled" }, timeout: 10), "The open page follows new schedules: \(pluginText(probe("count")))")
+        XCTAssertEqual(pluginText(probe("ids")), listed.joined(separator: ","), "props.schedules.tasks is `schedule list` in its order.")
+        let kinds = Dictionary(uniqueKeysWithValues: zip(listed, pluginText(probe("kinds")).components(separatedBy: ",")))
+        XCTAssertEqual(kinds, [onceID: "once", dailyID: "recurring"])
+        _ = try runCLI(["schedule", "pause", dailyID])
+        XCTAssertTrue(waitUntil({ self.pluginText(probe("kinds")).components(separatedBy: ",").contains("recurring paused") }, timeout: 10),
+                      "Pausing a schedule reaches the open page: \(pluginText(probe("kinds")))")
+        attachScreenshot(named: "A mainSidebar page plugin lists the schedules, one paused")
+        attachElementScreenshot(page, named: "The page plugin's schedules from props.schedules")
+
+        // ui.newTask opens a new task with the schedule picker up; going back shows the page again.
+        probe("new-weekly").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(probe("result")) == "new-weekly: invalid_argument" }, timeout: 5), "Only once, recurring or no schedule.")
+        probe("new-recurring").click()
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "ui.newTask opens the new task with the schedule hint up.")
+        XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "It starts on Recurring.")
+        attachScreenshot(named: "ui.newTask from a page plugin opens the schedule hint")
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(element("schedule-hint"), timeout: 5), "Escape dismisses the schedule hint.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the new task.")
+        XCTAssertTrue(page.waitToExist(timeout: 10), "Going back shows the page plugin again.")
+        XCTAssertTrue(waitUntil({ self.pluginText(probe("count")) == "2 scheduled" }, timeout: 10), "The page plugin still lists the schedules.")
+        page.descendants(matching: .any)["plugin-surface-close"].click()
+        XCTAssertTrue(waitForDisappearance(page, timeout: 10), "The page closes.")
+
+        // The board's Scheduled Tasks is the built-in plugin: disabling it removes its button.
+        let scheduledEntry = element("plugin-entry-scheduled-tasks")
+        XCTAssertTrue(scheduledEntry.waitToExist(timeout: 5), "The built-in Scheduled Tasks has its sidebar button.")
+        _ = try runCLI(["plugin", "disable", "--id", "scheduled-tasks"])
+        XCTAssertTrue(waitForDisappearance(scheduledEntry, timeout: 10), "Disabling Scheduled Tasks removes its button.")
+        attachElementScreenshot(element(withAccessibilityLabel: "Kanban sidebar"), named: "The board's sidebar with Scheduled Tasks disabled")
+        _ = try runCLI(["plugin", "enable", "--id", "scheduled-tasks"])
+        XCTAssertTrue(scheduledEntry.waitToExist(timeout: 10), "Enabling it brings the button back.")
+        scheduledEntry.click()
+        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10), "The button opens the Scheduled Tasks page.")
+        XCTAssertTrue(element("scheduled-task-row-\(onceID)").waitToExist(timeout: 10), "The page lists the one-time schedule.")
+        XCTAssertTrue(element("scheduled-task-row-\(dailyID)").exists, "The page lists the recurring schedule.")
+        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The page finishes sliding in.")
+        attachScreenshot(named: "The built-in Scheduled Tasks page, enabled again")
+    }
 }

@@ -19,6 +19,8 @@ struct BuiltInPluginView: View {
             PullRequestsPlugin(host: host, props: props)
         case BuiltInPlugins.agentsInfoID:
             AgentsInfoPlugin(host: host, props: props)
+        case BuiltInPlugins.scheduledTasksID:
+            ScheduledTasksPlugin(host: host, props: props)
         default:
             AtomText(props: TextProps(text: "Unknown built-in plugin \(plugin.id).", size: 11, color: "red"), common: AtomCommon(testID: "plugin-error"))
         }

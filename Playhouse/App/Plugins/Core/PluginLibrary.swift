@@ -3,7 +3,7 @@ import Foundation
 /// Where an installed plugin's entry button sits. Each placement hands the
 /// plugin a different context in `Playhouse.props`.
 enum PluginPlacement: String, CaseIterable, Codable, Sendable {
-    /// The board's sidebar, below Scheduled Tasks. Standalone: no task.
+    /// The board's sidebar. Standalone (no task), plus `schedules`.
     case mainSidebar
     /// The conversation task sidebar's first section, above Changes.
     case conversationSidebar
@@ -44,7 +44,7 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
     var contextDescription: String {
         switch self {
         case .mainSidebar:
-            "Standalone: only `plugin` and `app` (no task)."
+            "Standalone (no task): `plugin`, `app`, and `schedules` ({tasks, needsLoginItemsApproval}): `tasks` is what `schedule.list` returns (every scheduled task, one-time and recurring, soonest first; each task's `schedule` holds {kind, scheduledAt, summary, prompt, paused, lastRunTaskID, …}), kept live as schedules change; `needsLoginItemsApproval` says macOS is waiting for the user to allow Playhouse in Login Items, which scheduled runs need while the app is closed (`ui.openLoginItems` opens that setting). `ui.newTask({schedule: \"recurring\" or \"once\"})` opens a new task with its schedule picker up."
         case .conversationSidebar, .conversationToolbar:
             "`plugin`, `app`, `task` ({id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}), `repositories` ([{repositoryPath, worktreePath, branch, isPending, awaitsPullRequest, pullRequest: {number, url, merged} or null}]), `pastPullRequests` ([{repositoryPath, number, url, merged}], from worktrees the task has removed) and `contextFolders` ([path])."
         case .taskItem:
@@ -179,12 +179,15 @@ enum BuiltInPlugins {
     /// The board sidebar's bottom section with each agent's usage and
     /// account, from `props.agents`.
     static let agentsInfoID = "agents-info"
+    /// The board sidebar's Scheduled Tasks page, listing `props.schedules`.
+    static let scheduledTasksID = "scheduled-tasks"
 
     static let manifests: [PluginManifest] = [
         PluginManifest(id: changesID, name: "Changes", version: 1, icon: "plusminus", placement: PluginPlacement.conversationSidebar.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: pullRequestModeID, name: "Pull request mode", version: 1, icon: "arrow.triangle.branch", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: pullRequestsID, name: "Pull requests", version: 1, icon: "arrow.triangle.pull", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
-        PluginManifest(id: agentsInfoID, name: "Agents info", version: 1, icon: "gauge.with.dots.needle.33percent", placement: PluginPlacement.mainSidebarBottom.rawValue, presentation: PluginPresentation.section.rawValue)
+        PluginManifest(id: agentsInfoID, name: "Agents info", version: 1, icon: "gauge.with.dots.needle.33percent", placement: PluginPlacement.mainSidebarBottom.rawValue, presentation: PluginPresentation.section.rawValue),
+        PluginManifest(id: scheduledTasksID, name: "Scheduled Tasks", version: 1, icon: "clock", placement: PluginPlacement.mainSidebar.rawValue, presentation: PluginPresentation.page.rawValue)
     ]
 
     static func isBuiltIn(_ id: String) -> Bool { manifests.contains { $0.id == id } }
@@ -294,6 +297,18 @@ struct PluginAgentsContext: Sendable, Equatable {
     }
 }
 
+/// What the board's sidebar tells its plugins about the scheduled tasks:
+/// `schedule.list`'s tasks, as the bridge encodes them, and whether macOS
+/// still waits for the user to allow the scheduler in Login Items.
+struct PluginSchedulesContext: Sendable, Equatable {
+    var tasks: [PluginValue] = []
+    var needsLoginItemsApproval = false
+
+    var value: PluginValue {
+        .object(["tasks": .array(tasks), "needsLoginItemsApproval": .bool(needsLoginItemsApproval)])
+    }
+}
+
 enum PluginContext {
     /// `Playhouse.props` for a plugin at its placement.
     static func props(
@@ -302,7 +317,8 @@ enum PluginContext {
         task: PluginTaskContext?,
         composer: PluginComposerContext?,
         workspace: PluginWorkspaceContext? = nil,
-        agents: PluginAgentsContext? = nil
+        agents: PluginAgentsContext? = nil,
+        schedules: PluginSchedulesContext? = nil
     ) -> [String: PluginValue] {
         var props: [String: PluginValue] = [
             "plugin": .object([
@@ -351,6 +367,9 @@ enum PluginContext {
                 } ?? .null
             ])
             props["sidebar"] = .object(["collapsed": .bool(workspace.sidebarCollapsed)])
+        }
+        if placement == .mainSidebar {
+            props["schedules"] = (schedules ?? PluginSchedulesContext()).value
         }
         if placement == .mainSidebarBottom {
             props["agents"] = (agents ?? PluginAgentsContext()).value
@@ -663,7 +682,7 @@ struct PluginLibrary: Sendable {
 /// What a host refuses from a plugin, the same in the window and in
 /// `plugin render`, so the headless check matches what the user sees.
 enum PluginHostRules {
-    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "openURL", "confirm", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
+    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "openURL", "confirm", "newTask", "openLoginItems", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
 
     /// Nil when the host should answer `call`. `placement` is nil for a plugin
     /// rendered from a file or a catalog page, which may call anything.
@@ -687,6 +706,14 @@ enum PluginHostRules {
             // Only the board window asks the user to confirm.
             if name == "confirm", let placement, !placement.isOnBoard {
                 return PluginHostError(code: "unavailable", message: "Only a plugin on the board can call ui.confirm, not one at the \(placement.title) placement.")
+            }
+            // Only the board opens a new task or the Login Items setting.
+            if ["newTask", "openLoginItems"].contains(name), let placement, !placement.isOnBoard {
+                return PluginHostError(code: "unavailable", message: "Only a plugin on the board can call ui.\(name), not one at the \(placement.title) placement.")
+            }
+            if name == "newTask", let schedule = arguments.object?["schedule"], schedule != .null,
+               !["once", "recurring"].contains(schedule.string ?? "") {
+                return PluginHostError(code: "invalid_argument", message: "newTask's schedule is \"once\", \"recurring\" or null.")
             }
             if name == "openURL", openableURL(arguments) == nil {
                 return PluginHostError(code: "invalid_argument", message: "openURL needs an http or https URL.")

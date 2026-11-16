@@ -30,6 +30,11 @@ struct PluginUIActions {
     /// Asks the user to confirm and answers whether they did; nil where the
     /// window can't ask (only the board does).
     var confirm: ((PluginConfirmation) async -> Bool)? = nil
+    /// Opens a new task, with its schedule picker up for a schedule kind;
+    /// nil where there is no board.
+    var newTask: ((TaskScheduleKind?) -> Void)? = nil
+    /// Opens Login Items in System Settings; nil where there is no board.
+    var openLoginItems: (() -> Void)? = nil
     /// Opens a web link; a test build never opens a browser.
     var openURL: (URL) -> Void = { url in
         guard !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) else { return }
@@ -145,6 +150,17 @@ struct PluginHost {
                 destructive: object["destructive"]?.bool == true
             ))
             return .success(.bool(confirmed))
+        case ("ui", "newTask"):
+            guard let newTask = actions.newTask else {
+                return .failure(PluginHostError(code: "unavailable", message: "There is no board here to open a new task on."))
+            }
+            // `PluginHostRules` has already refused any other schedule.
+            newTask(arguments.object?["schedule"]?.string.flatMap(TaskScheduleKind.init(rawValue:)))
+        case ("ui", "openLoginItems"):
+            guard let openLoginItems = actions.openLoginItems else {
+                return .failure(PluginHostError(code: "unavailable", message: "This window can't open Login Items."))
+            }
+            openLoginItems()
         case ("ui", let name) where name.hasPrefix("composer."):
             guard let composer = actions.composer else {
                 return .failure(PluginHostError(code: "unavailable", message: "There is no composer at this placement."))
@@ -214,9 +230,11 @@ struct PluginConfirmationModifier: ViewModifier {
             Button(confirmation.confirm, role: confirmation.destructive ? .destructive : nil) { confirmations.answer(true) }
                 .buttonHoverPointer()
                 .nativeHelp(confirmation.confirm)
+                .accessibilityIdentifier("plugin-confirm-button")
             Button("Cancel", role: .cancel) { confirmations.answer(false) }
                 .buttonHoverPointer()
                 .nativeHelp("Cancel")
+                .accessibilityIdentifier("plugin-confirm-cancel")
         } message: { confirmation in
             Text(confirmation.message)
         }
