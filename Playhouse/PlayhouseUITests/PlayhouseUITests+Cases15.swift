@@ -298,7 +298,7 @@ extension PlayhouseUITests {
                           "The saved Claude title should appear on the board.")
         }
     }
-    // case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running.
+    // case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running. The held conversation first completes a turn with a tool call. Before the held turn reports anything, its mid-turn history has only its question after that turn, with no assistant message or activity of its own, and its open Working for shows a Thinking row with a spinner instead of an empty list, despite the earlier turn's tool call; once the turn settles, opening its Worked for shows no Thinking row.
     func test_conversation_runs_concurrent_claude_sends_in_parallel() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-sends")
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
@@ -331,10 +331,34 @@ extension PlayhouseUITests {
         openTask(named: "Held Claude conversation")
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitToExist(timeout: 10))
+        // An earlier turn with a tool call stays inline above the held turn; it is not this turn's activity.
+        let earlierPrompt = "Summarize the release notes."
+        composer.click()
+        composer.typeText(earlierPrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.fixtureTurnCount(executable, containing: earlierPrompt) > 0 && self.noTurnIsRunning() }, timeout: 30),
+                      "The earlier tool-using turn should finish before the held turn starts.")
+        let earlierActivityIDs = Set(((try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])?["activities"] as? [[String: Any]] ?? [])
+            .compactMap { $0["id"] as? String })
+        XCTAssertTrue(earlierActivityIDs.contains("toolu_chat_read"), "The earlier turn should record its tool call.")
         composer.click()
         composer.typeText(firstPrompt)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The first Claude turn should be active before the second conversation starts.")
+        // Nothing has been reported yet, so the open Working for shows Thinking instead of an empty list.
+        let thinking = element("codex-activity-thinking")
+        XCTAssertTrue(thinking.waitToExist(timeout: 10), "A held turn with no progress yet should show Thinking inside Working for.")
+        XCTAssertEqual(thinking.label, "Thinking…")
+        XCTAssertEqual(element("codex-activity-disclosure").value as? String, "Expanded, down chevron")
+        XCTAssertTrue(element("codex-activity-disclosure").label.hasPrefix("Working for"), "Thinking should sit under the live Working for header.")
+        let heldHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
+        let heldMessages = heldHistory["messages"] as? [[String: Any]] ?? []
+        let heldQuestionIndex = try XCTUnwrap(heldMessages.lastIndex { ($0["role"] as? String) == "user" && ($0["text"] as? String) == firstPrompt })
+        XCTAssertTrue(heldMessages[(heldQuestionIndex + 1)...].allSatisfy { ($0["role"] as? String) != "assistant" },
+                      "The held turn should have no assistant message yet.")
+        XCTAssertTrue(Set((heldHistory["activities"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }).isSubset(of: earlierActivityIDs),
+                      "The held turn should have no activity of its own yet.")
+        attachAppWindowScreenshot(named: "Thinking before the turn reports progress")
 
         // Both turns run inside this one Playhouse process: the second
         // conversation must be usable and answer while the first is held.
@@ -363,6 +387,13 @@ extension PlayhouseUITests {
         openTask(named: "Held Claude conversation")
         XCTAssertTrue(app.staticTexts["OK."].waitToExist(timeout: 20),
                       "The held conversation should show its own answer once released.")
+        // Opening the settled, still empty Worked for must not bring Thinking back.
+        let disclosure = element("codex-activity-disclosure")
+        XCTAssertTrue(waitUntil({ disclosure.exists && disclosure.label.hasPrefix("Worked for") }, timeout: 10),
+                      "The settled turn should fold into Worked for.")
+        disclosure.click()
+        XCTAssertTrue(waitUntil({ disclosure.value as? String == "Expanded, down chevron" }, timeout: 5))
+        XCTAssertFalse(thinking.exists, "Thinking should disappear once the turn settles.")
 
         let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
         let firstMessages = firstHistory["messages"] as? [[String: Any]] ?? []
