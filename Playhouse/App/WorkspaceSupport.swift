@@ -102,7 +102,8 @@ enum WorkspaceSettings {
     static let appearanceKey = "appearance"
     /// Whether the task view's sidebar is hidden to a narrow rail; one value shared by every task.
     static let taskSidebarCollapsedKey = "taskSidebarCollapsed"
-    /// Whether the Changes section inside the task sidebar is collapsed; one value shared by every task.
+    /// Whether the Changes section inside the task sidebar was collapsed, before the
+    /// built-in Changes plugin kept it in its plugin state; read once to carry it over.
     static let workspaceChangesSectionCollapsedKey = "workspaceChangesSectionCollapsed"
     /// Whether the Agents info section at the bottom of the board sidebar is minimized.
     static let agentsInfoSectionCollapsedKey = "agentsInfoSectionCollapsed"
@@ -127,6 +128,10 @@ enum WorkspaceSettings {
     /// Bumped whenever the plugins folder changes (`plugin refresh`, `plugin delete`), so
     /// the window reloads its installed plugins.
     static let pluginsRevisionKey = "pluginsRevision"
+    /// The ids of the plugins, built-in or installed, the user disabled.
+    static let disabledPluginIDsKey = "disabledPluginIDs"
+    /// Each plugin's own saved values (`plugin state`), as JSON keyed by plugin id.
+    static let pluginStatesKey = "pluginStates"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG

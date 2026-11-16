@@ -23,7 +23,8 @@ archive exist only as native SwiftUI built from the same atoms
 | `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`). Also compiled into the bridge daemon. |
 | `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom name to a builder that decodes the node's props. |
 | `Renderer/` | `PluginSurface` (runs one script and renders its tree) and the Plugin Catalog window. |
-| `Host/` | Installed plugins in the app: `PluginRegistry` (the plugins `plugin list` reports), `PluginSlot` (a placement's entry buttons and Add Plugin mode's "Add here" placeholder), `PluginSurfaceView` (a mounted plugin with live props and host calls), its popover, modal, sidebar and page presentations, and the mode's banner. |
+| `Host/` | Installed plugins in the app: `PluginRegistry` (the plugins `plugin list` reports), `PluginSlot` (a placement's entry buttons and Add Plugin mode's "Add here" placeholder), `PluginInlineSlot` (a placement's inline plugins, rendered in place), `PluginHost` (the host calls, answered the same way for script and built-in plugins), `PluginSurfaceView` (a mounted script plugin with live props), its popover, modal, sidebar, page and inline presentations, and the mode's banner. |
+| `BuiltIn/` | The built-in plugins, written in Swift and compiled into the app (see "Built-in plugins"). |
 | `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, `TokenStats.js`, `SkillsPage.js`, `RepositoryChips.js`, `Composer.js`, `KanbanColumn.js`, `DoneArchive.js`, and their `sample-*.json` data). |
 
 `catalog/TaskItem.js` is a demo that copies `TaskItemView` atom for atom, so the
@@ -186,8 +187,8 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 
 | Atom | Props | Events | Children |
 | --- | --- | --- | --- |
-| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary` | | atoms |
-| `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits` | | strings |
+| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels), `summary` (one accessibility element that reads only as its `label`, hiding its children, for a notice whose combined texts would otherwise hide the label); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary` | | atoms |
+| `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits`, `align` (how wrapped lines line up: `leading` default, `center`, `trailing`) | | strings |
 | `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color`, `original` (draw the asset in its own colors, as the board's logo) | | |
 | `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color`; SwiftUI's label for an `Icon` and a `Text` in a row `Stack` (see Composite atoms below) | | |
 | `Button` | `style` (`plain` default, `borderless`, `bordered` push button, `prominent` accent push button, `link` accent text like a hyperlink, `automatic` the platform default), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size), `disabled`, `controlSize` (`small` or `large`; inherited otherwise), `shortcut` (`default`: Return presses it; `cancel`: Escape presses it; window-wide, so only a window's primary or dismissing action sets one), `destructive` (the destructive role), `selected` (marked selected to accessibility: the current choice in a row of buttons) | `onPress()` | atoms (its label) |
@@ -294,22 +295,42 @@ the plugin invalid. The Plugins menu lists every plugin with its placement;
 an invalid one also shows its first error and gets no button. A plugin is
 deleted with its Delete item in the Plugins menu, or with `plugin delete --id`.
 
+Each plugin, built-in or installed, has Enable and Disable in its Plugins menu
+submenu, as `plugin enable --id` and `plugin disable --id` do. The disabled ids
+persist in settings (`WorkspaceSettings.disabledPluginIDsKey`, owned by
+`WorkspaceSettingsManager.setPluginEnabled`); `plugin list` reports each plugin's
+`enabled`. A disabled plugin gets no button or section and never runs (an open
+surface closes when its plugin is disabled or deleted):
+`plugin render` refuses it with `unavailable`. Enabling it again restores it,
+and deleting a plugin forgets its disabled state.
+
 | Placement | Where | Entry | Extra context in `Playhouse.props` |
 | --- | --- | --- | --- |
 | `mainSidebar` | The board's sidebar, below Scheduled Tasks | Labeled | None: it is standalone |
-| `conversationSidebar` | The task sidebar, the first section, above Changes | Labeled | `task`, `repositories`, `contextFolders` |
+| `conversationSidebar` | The task sidebar: entry buttons first, then inline sections such as Changes | Labeled, or none when `inline` | `task`, `repositories`, `contextFolders`, `workspace` (`{revision, openDiff: {repository, path, group} or null}`) and `sidebar` (`{collapsed}`) |
 | `conversationToolbar` | The task sidebar's bottom row, beside Terminal | Icon | `task`, `repositories`, `contextFolders` |
 | `composerActions` | The composer's actions row, beside Skills (also in the standalone chat) | Icon | The above and `composer` (`{draft, selection: {location, length, text}}`) |
 
-Every plugin also gets `plugin` (`{id, name, placement, presentation}`) and
-`app` (`{appearance}`). `presentation` is one of:
+Every plugin also gets `plugin` (`{id, name, placement, presentation}`),
+`app` (`{appearance}`) and `state`, the plugin's own saved values.
+`Playhouse.setState(key, value)` (the bridge's `plugin.state.set`, the CLI's
+`plugin state --id <id> --key <key> --value <json>`) stores one, and `null`
+removes it. They persist in settings (`WorkspaceSettings.pluginStatesKey`,
+owned by `WorkspaceSettingsManager.setPluginState`), `plugin list` reports each
+plugin's `state`, a change bumps the plugins revision so every mounted copy gets
+the new props, and deleting a plugin forgets them. `presentation` is one of:
 
 - `popover`: anchored to the entry button.
 - `modal`: a sheet.
 - `sidebar`: slides in from the trailing edge.
 - `page`: covers the board or the conversation.
+- `inline`: rendered in place as a section of the conversation sidebar, with
+  no entry button, header or padding of its own beyond a 10-point inset. It
+  stays mounted while its task is open, so it can keep the task's state live.
+  While the sidebar is hidden to its narrow rail, `sidebar.collapsed` is true
+  and the plugin should show at most a compact count there.
 
-Each presentation starts with the app's standard modal header (the plugin's
+Each presentation but `inline` starts with the app's standard modal header (the plugin's
 icon and name, `plugin-surface-title`, and its close button,
 `plugin-surface-close`) and pads the header and the script's atoms (24 points
 in a modal or page, 20 in a sidebar, 16 in a popover), spacing its root atoms
@@ -325,11 +346,33 @@ Installed plugins also get host calls. Each returns a Promise:
 | Call | What it does |
 | --- | --- |
 | `Playhouse.bridge(command, arguments)` | Full app access: any bridge command the CLI sends (`"task.list"`, `"task.rename"`, `"conversation.send"`, …) except `plugin.render`, which would recurse. It resolves with the command's result, or rejects with an Error carrying `code` and `message`. In the app it goes through `DaemonClient`; in `plugin render`, through the daemon's own `PlayhouseBridgeRuntime` |
+| `Playhouse.setState(key, value)` | Saves one of the plugin's values, which come back as `props.state`; `plugin.state.set` with the plugin's id |
 | `Playhouse.ui.close()` | Closes the surface |
 | `Playhouse.ui.openTask(taskID)` | Opens a task |
 | `Playhouse.ui.composer.setDraft(text)`, `.insertText(text)`, `.replaceSelection(text)`, `.focus()` | Edit the composer at the conversation placements; elsewhere they reject |
+| `Playhouse.ui.openDiff(entry)` | Opens the window's diff view for an entry of `task.changes.list` (`{repository, path, group, …}`) at the conversation placements |
+| `Playhouse.ui.refreshWorkspace()` | Tells the window the task's folders changed: it bumps `workspace.revision` for every sidebar plugin and refreshes an open diff. The window also bumps it whenever its file watcher sees a change, while an inline sidebar plugin is shown |
 
-`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, and a composer call from the board's sidebar is `unavailable`.
+`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, and a composer, `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`.
+
+### Built-in plugins
+
+A built-in plugin is an existing feature implemented as a plugin in Swift and
+compiled into the app. It shares the whole plugin infrastructure, so a user
+could write the same plugin in JavaScript: it has a manifest
+(`BuiltInPlugins` in `Core/PluginLibrary.swift`) that `plugin list` reports
+with `builtIn` true, it sits at a placement with a presentation, it reads the
+same `Playhouse.props`, it composes only atoms, and it acts only through
+`PluginHost`, which answers its `bridge` and `ui` calls exactly as it answers a
+script's. `BuiltInPluginView` maps a built-in id to its view, which
+`PluginInlineSlot` mounts in place of `PluginSurfaceView`.
+A built-in can be enabled or disabled from the Plugins menu's Built-in Plugins
+section or the CLI, but not edited, rendered or deleted (`invalid_argument`),
+and an installed plugin's folder can't take a built-in's id.
+
+| Built-in | Placement | Presentation | What it is |
+| --- | --- | --- | --- |
+| `changes` (`BuiltIn/ChangesPlugin.swift`) | `conversationSidebar` | `inline` | The Changes section: lists the task's Git changes with `task.changes.list`, reloads on `workspace.revision`, opens diffs with `ui.openDiff`, marks files with `task.changes.mark-viewed`, `mark-unviewed` and `mark-all-viewed`, and shows the pending count on the sidebar's rail. Disabling it hides the section and stops the window's file watching. Whether the section is collapsed is its plugin state, `state.collapsed` |
 
 ### Network
 

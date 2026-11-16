@@ -22,6 +22,7 @@ Playhouse.render(h(Stack, { axis: "v", spacing: 10, align: "leading" },
     h(Text, { size: 11, color: "accent" }, "accent")),
   h(Text, { size: 10, color: "secondary", lineLimit: 2, width: 220 }, "lineLimit: 2 — a long status message that keeps going well past two lines, so it is cut off with an ellipsis at the end."),
   h(Text, { size: 11, wrap: true, width: 220 }, "wrap: true — this text grows vertically to fit instead of truncating."),
+  h(Text, { size: 11, wrap: true, width: 220, align: "center", testID: "text-centered" }, "align: center — wrapped lines line up in the middle, as a notice's do."),
   h(Text, { text: "From the text prop", size: 11 }),
   h(Counter)
 ));

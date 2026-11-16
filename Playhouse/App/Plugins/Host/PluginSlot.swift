@@ -125,6 +125,7 @@ struct PluginPresentationModifier: ViewModifier {
     @Binding var plugin: PluginRecord?
     let props: (PluginRecord) -> [String: PluginValue]
     let actions: PluginUIActions
+    @Environment(PluginRegistry.self) private var registry
 
     private func isPresenting(_ kind: PluginPresentation) -> Bool {
         plugin?.presentationKind == kind
@@ -148,6 +149,14 @@ struct PluginPresentationModifier: ViewModifier {
                 common: surfaceCommon
             ) { surface }
             .atomPage(PageProps(isPresented: isPresenting(.page)), common: surfaceCommon) { surface }
+            // An open plugin follows its reloaded record (so a saved
+            // `state` reaches it); one disabled or deleted while open stops
+            // running.
+            .onChange(of: registry.plugins) { _, plugins in
+                guard let open = plugin else { return }
+                let current = plugins.first { $0.id == open.id && $0.isActive }
+                if current != open { plugin = current }
+            }
     }
 
     @ViewBuilder
@@ -165,5 +174,27 @@ struct PluginPresentationModifier: ViewModifier {
 extension View {
     func pluginPresentation(_ plugin: Binding<PluginRecord?>, props: @escaping (PluginRecord) -> [String: PluginValue], actions: PluginUIActions) -> some View {
         modifier(PluginPresentationModifier(plugin: plugin, props: props, actions: actions))
+    }
+}
+
+/// One placement's inline plugins (`PluginPresentation.inline`), rendered in
+/// place as sections of their sidebar: a built-in plugin's native view, or
+/// an installed plugin's atoms without a header.
+struct PluginInlineSlot: View {
+    let placement: PluginPlacement
+    let props: (PluginRecord) -> [String: PluginValue]
+    var actions = PluginUIActions()
+    @Environment(PluginRegistry.self) private var registry
+
+    var body: some View {
+        ForEach(registry.inlinePlugins(for: placement)) { plugin in
+            PluginPropsScope {
+                if plugin.builtIn {
+                    BuiltInPluginView(plugin: plugin, props: props(plugin), actions: actions)
+                } else {
+                    PluginSurfaceView(plugin: plugin, props: props(plugin), actions: actions)
+                }
+            }
+        }
     }
 }

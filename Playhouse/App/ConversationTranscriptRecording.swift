@@ -551,6 +551,7 @@ extension ConversationManager {
                 }
             },
             onTurnStarted: { turnID in
+                ConversationTurnLaunch.turnStarted(taskID)
                 if provider == .codex, let segment {
                     self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: turnID, modelID: modelID)
                 }

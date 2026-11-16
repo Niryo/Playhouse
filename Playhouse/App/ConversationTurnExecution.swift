@@ -138,6 +138,9 @@ extension ConversationManager {
         }
         try tasks.prepareConversationTurnOutcome(taskID)
         defer { tasks.clearConversationTurnOutcome(taskID) }
+        // Stop and steer requests wait on this launch until the provider turn exists.
+        ConversationTurnLaunch.begin(taskID)
+        defer { ConversationTurnLaunch.end(taskID) }
         var persistedThreadID = task.activeConversationID
         PlayhouseDiagnostics.recordAndFlush("conversation.send.started", fields: client.diagnosticFields(forThread: persistedThreadID ?? "", [
             "taskID": taskID.uuidString,
@@ -194,6 +197,7 @@ extension ConversationManager {
             repositoryRoot = task.isStandaloneChat ? nil : try (Self.launchRoots(task)
                 .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
                 .first ?? settingsManager.requireRepositoryRootFolder())
+            try ConversationTurnLaunch.checkStop(taskID)
             if !isPlayhouseNudge && !reopensDoneTask {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
@@ -230,6 +234,7 @@ extension ConversationManager {
                     )
                 }
                 resolvedWorktreeTitle = task.title
+                try ConversationTurnLaunch.checkStop(taskID)
             }
             // A standalone chat owns no repositories, so there is no worktree to prepare.
             if !task.isStandaloneChat && task.authoringPluginID == nil {
@@ -239,12 +244,14 @@ extension ConversationManager {
                     resolvedTitle: resolvedWorktreeTitle ?? typedText
                 )
             }
+            try ConversationTurnLaunch.checkStop(taskID)
             if !isPlayhouseNudge, !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: typedText, status: .inProgress, submitted: true)
             }
             let roots = Self.launchRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) }
             workspace = try launchWorkspace(for: task, roots: roots, message: normalizedText)
             _ = try await tasks.clearProgressReport(taskID)
+            try ConversationTurnLaunch.checkStop(taskID)
             if shouldGenerateTitle && !resolveTitleBeforeWorktree {
                 let latest = try tasks.conversationSubject(taskID)
                 let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
@@ -278,8 +285,12 @@ extension ConversationManager {
         } catch {
             // No turn started: a rejected branch claim, title race, or missing
             // root must not leave the task In Progress. The prompt returns to the
-            // composer as the unsent draft.
-            _ = try? await tasks.setLifecycleStatus(taskID, to: priorStatus, message: priorStatusMessage)
+            // composer as the unsent draft. A stop the user asked for while the turn
+            // was still being prepared ends the same way, and never In Progress.
+            let restoredStatus = ConversationTurnLaunch.isStoppedBeforeStart(error) && priorStatus == .inProgress
+                ? .waitingResponse
+                : priorStatus
+            _ = try? await tasks.setLifecycleStatus(taskID, to: restoredStatus, message: priorStatusMessage)
             if !isPlayhouseNudge { try? await tasks.returnUnsentSubmittedPromptToDraft(taskID) }
             throw error
         }
@@ -292,6 +303,7 @@ extension ConversationManager {
             // new native thread: Codex can't list a thread that has no turns yet.
             phase = "transcript-segment"
             let segment = try await prepareSegment(task: try tasks.conversationSubject(taskID))
+            try ConversationTurnLaunch.checkStop(taskID)
             // A standalone chat page is its own context, so its recovery transcript is that page
             // alone; task conversations still hand off their whole visible history.
             let standaloneChatPage = task.isStandaloneChat ? standaloneChatActivePage(taskID: taskID) : nil
@@ -432,6 +444,9 @@ extension ConversationManager {
                     phase = "thread-start"
                 }
             }
+            // The last point where nothing of this turn exists yet: past it the message is
+            // recorded and sent, and a stop interrupts the provider turn instead.
+            try ConversationTurnLaunch.checkStop(taskID)
             let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
             // Only a private answer's recovery turn hides its output; a status nudge is shown.
             let hidesRecoveryOutput = hideSensitiveRecoveryPrompt
@@ -542,6 +557,22 @@ extension ConversationManager {
             )
         } catch {
             await titleGeneration?.value
+            if ConversationTurnLaunch.isStoppedBeforeStart(error) {
+                // Stopped before anything reached the provider: the message returns to the
+                // composer as the unsent draft and the task waits for the user.
+                _ = try? await tasks.setLifecycleStatus(
+                    taskID,
+                    to: priorStatus == .inProgress ? .waitingResponse : priorStatus,
+                    message: priorStatusMessage
+                )
+                if !isPlayhouseNudge { try? await tasks.returnUnsentSubmittedPromptToDraft(taskID) }
+                PlayhouseDiagnostics.record("conversation.send.stopped_before_start", fields: [
+                    "taskID": taskID.uuidString,
+                    "provider": provider.rawValue,
+                    "phase": phase
+                ])
+                throw error
+            }
             for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
                 try? await tasks.recordConversationActivityDuration(
                     taskID: taskID,

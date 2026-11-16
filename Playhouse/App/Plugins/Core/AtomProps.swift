@@ -232,7 +232,10 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
 /// center or trailing for a column and top, center, bottom or baseline (the
 /// first line of text) for a row.
 /// `group` makes it one accessibility container for its children; `combine`
-/// makes it one accessibility element whose label joins theirs.
+/// makes it one accessibility element whose label joins theirs; `summary`
+/// makes it one element that reads only as its `label`, hiding its children
+/// (on macOS a combined element of Texts can report them as a value that
+/// hides an explicit label).
 ///
 /// It draws nothing unless it has a surface prop. `fill` (a color name,
 /// primary by default) at `fillOpacity` (1 by default) fills it when either is
@@ -261,9 +264,10 @@ struct StackProps: AtomPropsDecodable, Equatable {
     var strokeOpacity: Double?
     var strokeWidth: Double?
     var dash: [Double]?
+    var summary: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case axis, spacing, align, group, combine, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash
+        case axis, spacing, align, group, combine, summary, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash
     }
 
     /// Whether it fills its shape.
@@ -293,9 +297,11 @@ struct TextProps: AtomPropsDecodable, Equatable {
     var truncation: String?
     /// Give every digit the same width, so changing numbers don't shift.
     var monospacedDigits: Bool?
+    /// How wrapped lines line up: leading (default), center or trailing.
+    var align: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits
+        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits, align
     }
 }
 

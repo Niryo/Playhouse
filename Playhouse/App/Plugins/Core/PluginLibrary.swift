@@ -58,6 +58,17 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
     case sidebar
     /// A full page over the board or the conversation.
     case page
+    /// Rendered in place at its placement, without an entry button or a
+    /// header: a section of the sidebar it sits in. Only the sidebars'
+    /// placements have room for one.
+    case inline
+
+    /// The placements an inline plugin may sit in.
+    static let inlinePlacements: Set<PluginPlacement> = [.conversationSidebar]
+
+    static func inlinePlacementError(_ placement: PluginPlacement) -> String {
+        "An inline plugin can't sit at the \(placement.title) placement; only in the conversation sidebar."
+    }
 }
 
 /// `plugin.json`, the manifest in each plugin's folder.
@@ -92,6 +103,46 @@ struct PluginRecord: Codable, Equatable, Sendable, Identifiable {
     /// Valid plugins are mounted; invalid ones are listed with their errors.
     let valid: Bool
     let errors: [String]
+    /// Compiled into the app (`BuiltInPlugins`): it has no folder or script,
+    /// can't be edited or deleted, and only be disabled.
+    var builtIn = false
+    /// A disabled plugin is listed but neither shown nor run.
+    var enabled = true
+    /// The plugin's own saved values (`plugin.state.set`), its `Playhouse.props.state`.
+    var state: [String: PluginValue] = [:]
+
+    /// Mounted in the window: valid and not disabled.
+    var isActive: Bool { valid && enabled }
+}
+
+/// The plugins compiled into the app. Each is declared with the same manifest
+/// an installed plugin's `plugin.json` holds, and the app renders it with a
+/// native view (`BuiltInPluginView`) built from the same atoms, the same
+/// `Playhouse.props` and the same host calls a JavaScript plugin gets, so a
+/// user could write the same plugin as an installed one.
+enum BuiltInPlugins {
+    /// The conversation sidebar's Changes section.
+    static let changesID = "changes"
+
+    static let manifests: [PluginManifest] = [
+        PluginManifest(id: changesID, name: "Changes", version: 1, icon: "plusminus", placement: PluginPlacement.conversationSidebar.rawValue, presentation: PluginPresentation.inline.rawValue)
+    ]
+
+    static func isBuiltIn(_ id: String) -> Bool { manifests.contains { $0.id == id } }
+
+    /// The built-ins as `plugin list` reports them, with each one's enabled state.
+    static func records(disabled: Set<String>) -> [PluginRecord] {
+        manifests.map { manifest in
+            var record = PluginRecord(
+                id: manifest.id, name: manifest.name, version: manifest.version ?? 0, icon: manifest.icon ?? PluginLibrary.defaultIcon,
+                placement: manifest.placement, presentation: manifest.presentation, width: manifest.width, height: manifest.height,
+                folder: "", entryPath: "", valid: true, errors: []
+            )
+            record.builtIn = true
+            record.enabled = !disabled.contains(manifest.id)
+            return record
+        }
+    }
 }
 
 /// The plain task details a placement's context is built from, so the core
@@ -126,13 +177,34 @@ struct PluginComposerContext: Sendable, Equatable {
     }
 }
 
+/// What the conversation sidebar tells its plugins about the task's folders
+/// and the sidebar itself.
+struct PluginWorkspaceContext: Sendable, Equatable {
+    /// The diff the window shows, as `ui.openDiff` opened it.
+    struct OpenDiff: Sendable, Equatable {
+        var repository: String
+        var path: String
+        var group: String
+    }
+
+    /// Bumped whenever the task's folders may have changed on disk (a file
+    /// watcher, a finished turn, a repository added or removed, or a plugin's
+    /// `ui.refreshWorkspace`), so a plugin reloads what it shows.
+    var revision = 0
+    var openDiff: OpenDiff?
+    /// The sidebar is hidden to its narrow rail, where an inline plugin has
+    /// room for a count at most.
+    var sidebarCollapsed = false
+}
+
 enum PluginContext {
     /// `Playhouse.props` for a plugin at its placement.
     static func props(
         plugin: PluginRecord,
         appearance: String,
         task: PluginTaskContext?,
-        composer: PluginComposerContext?
+        composer: PluginComposerContext?,
+        workspace: PluginWorkspaceContext? = nil
     ) -> [String: PluginValue] {
         var props: [String: PluginValue] = [
             "plugin": .object([
@@ -142,7 +214,8 @@ enum PluginContext {
                 "placement": .string(plugin.placement),
                 "presentation": .string(plugin.presentation)
             ]),
-            "app": .object(["appearance": .string(appearance)])
+            "app": .object(["appearance": .string(appearance)]),
+            "state": .object(plugin.state)
         ]
         let placement = PluginPlacement(rawValue: plugin.placement)
         if placement?.hasTask == true, let task {
@@ -161,6 +234,16 @@ enum PluginContext {
                 ])
             })
             props["contextFolders"] = .array(task.contextFolders.map(PluginValue.string))
+        }
+        if placement == .conversationSidebar {
+            let workspace = workspace ?? PluginWorkspaceContext()
+            props["workspace"] = .object([
+                "revision": .number(Double(workspace.revision)),
+                "openDiff": workspace.openDiff.map {
+                    .object(["repository": .string($0.repository), "path": .string($0.path), "group": .string($0.group)])
+                } ?? .null
+            ])
+            props["sidebar"] = .object(["collapsed": .bool(workspace.sidebarCollapsed)])
         }
         if placement == .composerActions {
             let composer = composer ?? PluginComposerContext(draft: "")
@@ -208,14 +291,18 @@ struct PluginLibrary: Sendable {
     /// Every plugin folder, sorted by id. With `validate`, each valid-looking
     /// plugin is also rendered once headlessly with sample context, and any
     /// script error marks it invalid.
-    func list(validate: Bool = true) -> [PluginRecord] {
+    /// The `disabled` plugins are marked so and, since they must not run,
+    /// never rendered to validate them.
+    func list(validate: Bool = true, disabled: Set<String> = []) -> [PluginRecord] {
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         return entries.sorted().compactMap { entry in
             guard !entry.hasPrefix(".") else { return nil }
             let folder = directory.appendingPathComponent(entry, isDirectory: true)
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
-            return record(folder: folder, validate: validate)
+            var record = record(folder: folder, validate: validate && !disabled.contains(entry))
+            record.enabled = !disabled.contains(entry)
+            return record
         }
     }
 
@@ -386,7 +473,11 @@ struct PluginLibrary: Sendable {
             }
             if PluginPresentation(rawValue: manifest.presentation) == nil {
                 errors.append("Unknown presentation \"\(manifest.presentation)\". Presentations: \(PluginPresentation.allCases.map(\.rawValue).joined(separator: ", ")).")
+            } else if manifest.presentation == PluginPresentation.inline.rawValue,
+                      let placement = PluginPlacement(rawValue: manifest.placement), !PluginPresentation.inlinePlacements.contains(placement) {
+                errors.append(PluginPresentation.inlinePlacementError(placement))
             }
+            if BuiltInPlugins.isBuiltIn(folderID) { errors.append("\"\(folderID)\" is a built-in plugin's id.") }
         }
         let entry = folder.appendingPathComponent(manifest.entry ?? Self.defaultEntry)
         let entryInside = entry.standardizedFileURL.path.hasPrefix(folder.standardizedFileURL.path + "/")
@@ -452,7 +543,7 @@ struct PluginLibrary: Sendable {
 /// What a host refuses from a plugin, the same in the window and in
 /// `plugin render`, so the headless check matches what the user sees.
 enum PluginHostRules {
-    static let uiCalls: Set<String> = ["close", "openTask", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
+    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
 
     /// Nil when the host should answer `call`. `placement` is nil for a plugin
     /// rendered from a file or a catalog page, which may call anything.
@@ -465,6 +556,9 @@ enum PluginHostRules {
             guard uiCalls.contains(name) else { return PluginHostError(code: "invalid_argument", message: "Unknown host call ui.\(name).") }
             if name.hasPrefix("composer."), let placement, !placement.hasTask {
                 return PluginHostError(code: "unavailable", message: "There is no composer at the \(placement.title) placement.")
+            }
+            if name == "openDiff" || name == "refreshWorkspace", let placement, !placement.hasTask {
+                return PluginHostError(code: "unavailable", message: "There is no task's workspace at the \(placement.title) placement.")
             }
             return nil
         case "net":
