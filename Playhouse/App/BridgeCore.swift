@@ -769,6 +769,9 @@ extension BridgeRequest {
         }
     }
 
+    /// True when the caller reads earlier messages' images separately (`conversation.images`).
+    var defersHistoryImages: Bool { arguments["deferImages"]?.bool == true }
+
     /// A positive message count for a paged history read, when one was given.
     func optionalHistoryLimit(_ name: String = "historyLimit") throws -> Int? {
         guard let raw = arguments[name]?.string else { return nil }

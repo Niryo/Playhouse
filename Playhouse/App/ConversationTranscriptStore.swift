@@ -289,6 +289,28 @@ final class ConversationTranscriptStore {
         }
     }
 
+    /// Which of the given messages have stored images, as the turns holding each,
+    /// read without touching the image data itself.
+    func turnsWithImages(_ taskID: UUID, messageIDs: Set<String>) throws -> [String: Set<String>] {
+        guard !messageIDs.isEmpty else { return [:] }
+        let ids = Array(messageIDs)
+        return try pool.read { db in
+            var result: [String: Set<String>] = [:]
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                let chunk = Array(ids[start..<min(start + 500, ids.count)])
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT turn_id, id FROM conversation_messages WHERE task_id = ? AND image_data_urls IS NOT NULL AND id IN (\(Self.placeholders(chunk.count)))",
+                    arguments: StatementArguments([taskID.uuidString] + chunk)
+                )
+                for row in rows {
+                    result[row["id"], default: []].insert(row["turn_id"])
+                }
+            }
+            return result
+        }
+    }
+
     /// The task's turns in order with their message IDs, without message bodies.
     struct Outline {
         struct Turn {
@@ -607,6 +629,7 @@ final class ConversationTranscriptStore {
             if let (oldPosition, old) = previous[message.id], oldPosition == position, old == message { continue }
             var payload = message
             payload.imageDataURLs = []
+            payload.imagesDeferred = nil
             try db.execute(
                 sql: """
                 INSERT INTO conversation_messages (task_id, turn_id, id, position, payload, image_data_urls) VALUES (?, ?, ?, ?, ?, ?)

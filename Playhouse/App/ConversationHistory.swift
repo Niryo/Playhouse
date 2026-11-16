@@ -41,22 +41,43 @@ extension ConversationManager {
             }
         }
         var hydratedImageMessages = 0
+        var deferredImageMessages = 0
         if includesImageData {
-            // Composition reads transcript messages without their image data;
-            // fill it in for the messages actually returned.
-            let images = try transcripts.imageDataURLs(taskID, messageIDs: Set(history.messages.compactMap {
+            // A reader that defers images opens on the newest turn the user started, so only
+            // that turn's images travel with the page. Earlier messages are only marked:
+            // their images can be tens of megabytes that the reader may never show.
+            // An earlier page holds no part of that turn, so all of its images wait.
+            let inlineStart = !defersHistoryImages ? 0
+                : beforeMessageID != nil ? history.messages.count
+                : ConversationMessage.latestTurnStartIndex(in: history.messages) ?? 0
+            let store = try transcripts
+            let deferredTurns = try store.turnsWithImages(taskID, messageIDs: Set(history.messages[..<inlineStart].compactMap {
                 $0.imageDataURLs.isEmpty ? $0.id : nil
             }))
-            if !images.isEmpty {
-                history.messages = history.messages.map { message in
-                    guard message.imageDataURLs.isEmpty, let byTurn = images[message.id],
-                          let stored = message.turnID.flatMap({ byTurn[$0] }) ?? (byTurn.count == 1 ? byTurn.values.first : nil)
-                    else { return message }
-                    hydratedImageMessages += 1
-                    var message = message
-                    message.imageDataURLs = stored
+            // Composition reads transcript messages without their image data;
+            // fill it in for the messages actually returned.
+            let images = try store.imageDataURLs(taskID, messageIDs: Set(history.messages[inlineStart...].compactMap {
+                $0.imageDataURLs.isEmpty ? $0.id : nil
+            }))
+            history.messages = history.messages.enumerated().map { index, message in
+                var message = message
+                if index < inlineStart {
+                    // Codex returns a user's images inline with its thread; stored ones are only looked up.
+                    let stored = deferredTurns[message.id].map { turns in
+                        message.turnID.map(turns.contains) == true || turns.count == 1
+                    } == true
+                    guard stored || !message.imageDataURLs.isEmpty else { return message }
+                    deferredImageMessages += 1
+                    message.imageDataURLs = []
+                    message.imagesDeferred = true
                     return message
                 }
+                guard message.imageDataURLs.isEmpty, let byTurn = images[message.id],
+                      let stored = message.turnID.flatMap({ byTurn[$0] }) ?? (byTurn.count == 1 ? byTurn.values.first : nil)
+                else { return message }
+                hydratedImageMessages += 1
+                message.imageDataURLs = stored
+                return message
             }
         }
         PlayhouseDiagnostics.record("conversation.history.read", fields: [
@@ -67,8 +88,38 @@ extension ConversationManager {
             "returnedMessageCount": String(history.messages.count),
             "earlierMessageCount": history.earlierMessageCount.map(String.init) ?? "none",
             "hydratedImageMessageCount": String(hydratedImageMessages),
+            "deferredImageMessageCount": String(deferredImageMessages),
         ])
         return history
+    }
+
+    /// The images of the given messages, for a reader whose history read left
+    /// them out (`imagesDeferred`). Messages without images are not returned.
+    func messageImages(taskID: UUID, messageIDs: [String]) async throws -> [ConversationMessageImages] {
+        let task = try tasks.conversationSubject(taskID)
+        let wanted = Set(messageIDs)
+        guard !wanted.isEmpty, !wanted.contains("") else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Name at least one message to read images for.")
+        }
+        var found = try transcripts.imageDataURLs(taskID, messageIDs: wanted).flatMap { id, byTurn in
+            byTurn.map { ConversationMessageImages(id: id, turnID: $0.key, imageDataURLs: $0.value) }
+        }
+        let missing = wanted.subtracting(found.map(\.id))
+        // Codex keeps a user's images in its thread rather than in the transcript store.
+        if !missing.isEmpty, task.codexThreadID != nil {
+            let history = try await history(taskID: taskID, restoringEarlierChatPages: true)
+            found += history.messages.compactMap { message in
+                missing.contains(message.id) && !message.imageDataURLs.isEmpty
+                    ? ConversationMessageImages(id: message.id, turnID: message.turnID, imageDataURLs: message.imageDataURLs) : nil
+            }
+        }
+        PlayhouseDiagnostics.record("conversation.images.read", fields: [
+            "taskID": taskID.uuidString,
+            "requestedMessageCount": String(wanted.count),
+            "returnedMessageCount": String(found.count),
+            "readProviderThread": String(!missing.isEmpty && task.codexThreadID != nil),
+        ])
+        return found.sorted { ($0.id, $0.turnID ?? "") < ($1.id, $1.turnID ?? "") }
     }
 
     static func pageEnd(of messages: [ConversationMessage], before messageID: String?) throws -> Int {
@@ -374,6 +425,18 @@ extension ConversationManager {
         }
     }
 
+    /// The index of the turn message a compaction row follows: the message it was recorded after,
+    /// or, for a row recorded without one, the last message written before its compaction finished.
+    /// Nil when neither is known, so the row stays after the turn's messages.
+    static func compactionAnchor(_ activity: ConversationActivity, in messages: [ConversationMessage], recordedAt: Date?) -> Int? {
+        if let afterMessageID = activity.afterMessageID,
+           let index = messages.firstIndex(where: { $0.id == afterMessageID }) {
+            return index
+        }
+        guard let recordedAt else { return nil }
+        return messages.lastIndex { $0.createdAt.map { $0 <= recordedAt } == true }
+    }
+
     /// Orders every visible element by provider segment, then by its position
     /// within that provider's own timeline, and inserts a divider wherever the
     /// provider changes.
@@ -443,18 +506,34 @@ extension ConversationManager {
             let precedingTurn = codex?.messages.last { ($0.timelineOrder ?? 0) < order }?.turnID
             elements.append((codexSegment(activity.turnID ?? precedingTurn), order, 0, .compaction(activity)))
         }
+        let compactionRecordedAt = Dictionary(
+            (transcript.contextCompactions ?? []).map { ($0.id, $0.recordedAt) }, uniquingKeysWith: { first, _ in first }
+        )
         var localOrder = 0
         for turn in transcript.turns {
             if privateTranscriptReminderTurnIDs.contains(turn.id) { continue }
             let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
+            var messagePositions: [(order: Int, tieBreak: Int)] = []
             for message in turn.messages {
                 let position = transcriptOrder(for: message, fallback: localOrder)
                 elements.append((segment, position.order, position.tieBreak, .message(message)))
+                messagePositions.append(position)
                 localOrder += 1
             }
+            var compactionsAfterMessage: [Int: Int] = [:]
             for activity in turn.activities where activity.turnID.map(allSensitiveTurnIDs.contains) != true {
                 if activity.isContextCompaction {
-                    elements.append((segment, activity.timelineOrder ?? localOrder, 0, .compaction(activity)))
+                    if activity.timelineOrder == nil,
+                       let anchor = Self.compactionAnchor(activity, in: turn.messages, recordedAt: compactionRecordedAt[activity.id]) {
+                        // A long turn can compact several times; each row stays between the messages
+                        // it came between instead of every row stacking after the turn's last message.
+                        let count = compactionsAfterMessage[anchor, default: 0] + 1
+                        compactionsAfterMessage[anchor] = count
+                        let position = messagePositions[anchor]
+                        elements.append((segment, position.order, position.tieBreak + count, .compaction(activity)))
+                    } else {
+                        elements.append((segment, activity.timelineOrder ?? localOrder, 0, .compaction(activity)))
+                    }
                 }
                 localOrder += 1
             }
