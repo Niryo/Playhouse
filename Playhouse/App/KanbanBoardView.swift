@@ -177,6 +177,7 @@ struct KanbanBoardView: View {
     @State var pullRequestError: String?
     /// An alert a task card's plugin raised with `ui.alert`.
     @State var pluginAlert: PluginAlert?
+    @State var pluginConfirmations = PluginConfirmations()
     /// A modal, sidebar or page plugin opened from a task card, and that card's task.
     @State var openTaskItemPlugin: PluginRecord?
     @State var openTaskItemPluginTask: BoardTask?
@@ -323,6 +324,10 @@ struct KanbanBoardView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // The built-in plugins' daemon services hear the focus too.
             PluginServiceHost.publish(PluginEvent(name: PluginEvent.appFocus))
+        }
+        .task {
+            // And the launch, once.
+            if PluginLaunch.claim("#services") { PluginServiceHost.publish(PluginEvent(name: PluginEvent.appLaunched)) }
         }
         .sheet(isPresented: Binding(
             get: { taskBeingRenamed != nil },
@@ -635,6 +640,7 @@ struct KanbanBoardView: View {
                 actions: taskItemPluginActions
             )
             .modifier(PluginAlertModifier(alert: $pluginAlert))
+            .modifier(PluginConfirmationModifier(confirmations: pluginConfirmations))
         }
         .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
             guard isShowingDoneArchive else { return }
@@ -815,7 +821,7 @@ struct KanbanBoardView: View {
 
             Spacer(minLength: 0)
 
-            AgentsInfoView(runningProviders: runningTaskCountByProvider)
+            BoardSidebarBottomSlot(runningProviders: runningTaskCountByProvider, appearance: appearance, actions: boardPluginActions, add: startPluginTask)
         }
         .padding(12)
         .frame(width: boardSidebarWidth)
@@ -921,13 +927,16 @@ struct KanbanBoardView: View {
 
 
     var boardPluginActions: PluginUIActions {
-        PluginUIActions(openTask: { id in
+        let confirmations = pluginConfirmations
+        var actions = PluginUIActions(openTask: { id in
             if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
                 openBoardPlugin = nil
                 isSelectedTaskNew = false
                 selectedTask = task
             }
         })
+        actions.confirm = { await confirmations.ask($0) }
+        return actions
     }
 
     /// What a task card's plugins can do: the board's actions, plus moving a

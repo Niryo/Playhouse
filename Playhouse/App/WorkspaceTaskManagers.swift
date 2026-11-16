@@ -82,6 +82,11 @@ final class WorkspaceSettingsManager {
            defaults.object(forKey: WorkspaceSettings.workspaceChangesSectionCollapsedKey) != nil {
             states[BuiltInPlugins.changesID, default: [:]]["collapsed"] = .bool(defaults.bool(forKey: WorkspaceSettings.workspaceChangesSectionCollapsedKey))
         }
+        // The Agents info section's collapsed state, from before it was a built-in plugin.
+        if states[BuiltInPlugins.agentsInfoID]?["collapsed"] == nil,
+           defaults.object(forKey: WorkspaceSettings.agentsInfoSectionCollapsedKey) != nil {
+            states[BuiltInPlugins.agentsInfoID, default: [:]]["collapsed"] = .bool(defaults.bool(forKey: WorkspaceSettings.agentsInfoSectionCollapsedKey))
+        }
         return states
     }
 
@@ -113,8 +118,9 @@ final class WorkspaceSettingsManager {
 
     private func writePluginStates(_ states: [String: [String: PluginValue]]) {
         defaults.set(try? JSONEncoder().encode(states), forKey: WorkspaceSettings.pluginStatesKey)
-        // The legacy key is carried over once it is written.
+        // The legacy keys are carried over once it is written.
         defaults.removeObject(forKey: WorkspaceSettings.workspaceChangesSectionCollapsedKey)
+        defaults.removeObject(forKey: WorkspaceSettings.agentsInfoSectionCollapsedKey)
     }
 
     /// Tells every window to reload the installed plugins.

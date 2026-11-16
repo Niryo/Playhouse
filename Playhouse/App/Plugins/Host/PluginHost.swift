@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A composer change a plugin asks for through `Playhouse.ui.composer`.
@@ -26,6 +27,35 @@ struct PluginUIActions {
     var resolveConflicts: ((UUID) -> Void)? = nil
     /// Shows an alert with a title and a message over the window.
     var alert: ((String, String) -> Void)? = nil
+    /// Asks the user to confirm and answers whether they did; nil where the
+    /// window can't ask (only the board does).
+    var confirm: ((PluginConfirmation) async -> Bool)? = nil
+    /// Opens a web link; a test build never opens a browser.
+    var openURL: (URL) -> Void = { url in
+        guard !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+/// What a plugin's `Playhouse.ui.confirm` asks.
+struct PluginConfirmation: Identifiable {
+    let id = UUID()
+    var title: String
+    var message: String
+    var confirm: String
+    var destructive: Bool
+}
+
+/// Hands each plugin `app.launched` once per app launch, the first time one
+/// of its views mounts.
+@MainActor
+enum PluginLaunch {
+    private static var delivered: Set<String> = []
+
+    /// True the first time it is asked about `pluginID` in this launch.
+    static func claim(_ pluginID: String) -> Bool {
+        delivered.insert(pluginID).inserted
+    }
 }
 
 /// Answers a mounted plugin's host calls, `Playhouse.bridge`, `Playhouse.ui`
@@ -40,7 +70,7 @@ struct PluginHost {
 
     func answer(kind: String, name: String, arguments: PluginValue) async -> Result<PluginValue, PluginHostError> {
         let text = arguments.object?["text"]?.string ?? ""
-        if let refusal = PluginHostRules.refusal(kind: kind, name: name, placement: PluginPlacement(rawValue: plugin.placement)) {
+        if let refusal = PluginHostRules.refusal(kind: kind, name: name, placement: PluginPlacement(rawValue: plugin.placement), arguments: arguments) {
             return .failure(refusal)
         }
         switch (kind, name) {
@@ -101,6 +131,20 @@ struct PluginHost {
                 return .failure(PluginHostError(code: "unavailable", message: "This window can't show an alert."))
             }
             alert(arguments.object?["title"]?.string ?? "", arguments.object?["message"]?.string ?? "")
+        case ("ui", "openURL"):
+            // `PluginHostRules` has already refused any other URL.
+            if let url = PluginHostRules.openableURL(arguments) { actions.openURL(url) }
+        case ("ui", "confirm"):
+            guard let confirm = actions.confirm else {
+                return .failure(PluginHostError(code: "unavailable", message: "This window can't ask to confirm."))
+            }
+            let object = arguments.object ?? [:]
+            let confirmed = await confirm(PluginConfirmation(
+                title: object["title"]?.string ?? "", message: object["message"]?.string ?? "",
+                confirm: object["confirm"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "OK",
+                destructive: object["destructive"]?.bool == true
+            ))
+            return .success(.bool(confirmed))
         case ("ui", let name) where name.hasPrefix("composer."):
             guard let composer = actions.composer else {
                 return .failure(PluginHostError(code: "unavailable", message: "There is no composer at this placement."))
@@ -129,5 +173,52 @@ struct PluginHost {
     /// A host call whose result a built-in plugin doesn't need.
     func call(_ kind: String, _ name: String, _ arguments: [String: PluginValue] = [:]) async throws {
         if case .failure(let error) = await answer(kind: kind, name: name, arguments: .object(arguments)) { throw error }
+    }
+}
+
+/// The board's pending `ui.confirm`: one question at a time, answered by
+/// `PluginConfirmationModifier`'s dialog. A new question answers an
+/// unanswered one with false.
+@MainActor
+@Observable
+final class PluginConfirmations {
+    private(set) var current: PluginConfirmation?
+    @ObservationIgnored private var continuation: CheckedContinuation<Bool, Never>?
+
+    func ask(_ confirmation: PluginConfirmation) async -> Bool {
+        answer(false)
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            current = confirmation
+        }
+    }
+
+    func answer(_ confirmed: Bool) {
+        current = nil
+        continuation?.resume(returning: confirmed)
+        continuation = nil
+    }
+}
+
+/// The confirmation dialog a plugin's `ui.confirm` shows over the board.
+struct PluginConfirmationModifier: ViewModifier {
+    let confirmations: PluginConfirmations
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            confirmations.current?.title ?? "",
+            isPresented: Binding(get: { confirmations.current != nil }, set: { if !$0 { confirmations.answer(false) } }),
+            titleVisibility: .visible,
+            presenting: confirmations.current
+        ) { confirmation in
+            Button(confirmation.confirm, role: confirmation.destructive ? .destructive : nil) { confirmations.answer(true) }
+                .buttonHoverPointer()
+                .nativeHelp(confirmation.confirm)
+            Button("Cancel", role: .cancel) { confirmations.answer(false) }
+                .buttonHoverPointer()
+                .nativeHelp("Cancel")
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
     }
 }

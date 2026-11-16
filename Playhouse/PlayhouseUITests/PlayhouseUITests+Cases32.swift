@@ -1192,4 +1192,170 @@ extension PlayhouseUITests {
     func launchMarkerExists(_ executable: String, _ suffix: String) -> Bool {
         FileManager.default.fileExists(atPath: executable + ".\(suffix)")
     }
+
+    // Each test ID is prefixed with the plugin's id, so two sections never share one.
+    static let sidebarSectionSource = """
+        function Section() {
+          var props = Playhouse.useProps();
+          var id = props.plugin.id;
+          var launches = React.useState(0);
+          var late = React.useState(0);
+          var result = React.useState("idle");
+          var agents = props.agents || {};
+          React.useEffect(function () {
+            return Playhouse.on("app.launched", function () { launches[1](function (count) { return count + 1; }); });
+          }, []);
+          function act(name, call) {
+            return h(Button, { testID: id + "-" + name, style: "bordered", onPress: function () {
+              call().then(function (value) { result[1](name + ": " + JSON.stringify(value)); }, function (error) { result[1](name + ": " + error.code); });
+            } }, h(Text, { size: 11 }, name));
+          }
+          var running = agents.runningTasks ? "claude " + agents.runningTasks.claude + ", codex " + agents.runningTasks.codex : "no agents";
+          var usage = agents.usage ? agents.usage.providers.map(function (entry) { return entry.provider + (entry.installed ? " installed" : " missing"); }).join(", ") : "no usage";
+          return h(Stack, { spacing: 4, align: "leading" },
+            h(Text, { size: 11, testID: id + "-running" }, running),
+            h(Text, { size: 11, testID: id + "-usage" }, usage),
+            h(Text, { size: 11, testID: id + "-launches" }, "launches " + launches[0] + ", late " + late[0]),
+            h(Text, { size: 11, testID: id + "-result" }, result[0]),
+            h(Stack, { axis: "h", spacing: 4 },
+              h(Button, { testID: id + "-listen", style: "bordered", onPress: function () {
+                Playhouse.on("app.launched", function () { late[1](function (count) { return count + 1; }); });
+              } }, h(Text, { size: 11 }, "listen")),
+              act("confirm", function () { return Playhouse.ui.confirm({ title: "Run " + id + "?", message: "Asked from the sidebar bottom.", confirm: "Run It", destructive: true }); })),
+            h(Stack, { axis: "h", spacing: 4 },
+              act("open", function () { return Playhouse.ui.openURL("https://example.com/usage"); }),
+              act("open-file", function () { return Playhouse.ui.openURL("file:///etc/hosts"); })));
+        }
+        Playhouse.render(h(Section));
+        """
+
+    // case-contract: test_plugin_sidebar_bottom_sections_and_agents_context | The board sidebar's bottom is the mainSidebarBottom placement, whose plugins always use the section presentation: a manifest or an authoring request with any other presentation there, or with section anywhere else, is invalid with an error naming the rule. A section plugin gets `props.agents` with the last-known agent usage report (the same providers `usage get` reports, each with whether its CLI is installed) and `runningTasks`, each provider's count of In Progress tasks, which counts a running Codex turn. The app.launched event reaches a plugin once per launch, and the first listener a plugin adds after it was emitted still hears it once; a later listener does not. ui.confirm and ui.openURL are host calls: confirm is answered only by the board (unavailable at the conversation sidebar; in `plugin render` it resolves null), and openURL accepts only http and https URLs (anything else is invalid_argument). In the window, sections stack at the bottom of the sidebar, each under a collapsible header with the plugin's name, open by default: collapsed, they sit one above the other at the bottom, and expanding the lower one grows it upward and pushes the upper one up. A section's collapsed state is its plugin state `collapsed` and survives a relaunch. The section's plugin hears app.launched, reads both providers' running counts, gets true from ui.confirm when the user confirms the board's dialog (showing its title, message and confirm button) and false when they cancel, opens http URLs and is refused other URLs, and the built-in Agents info section is not shown when no agent CLI is installed. Authoring a plugin there starts it as a section without asking how it opens: `plugin author --placement mainSidebarBottom` with a name and the section presentation records both and the placement, and in the window Add Plugin mode shows an Add here button below the sections whose setup goes from the name straight to the editor, which says it opens as a collapsible section.
+    func test_plugin_sidebar_bottom_sections_and_agents_context() throws {
+        try writeInstalledPlugin("section-a", source: Self.sidebarSectionSource, placement: "mainSidebarBottom", presentation: "section", name: "Section A")
+        try writeInstalledPlugin("section-b", source: Self.sidebarSectionSource, placement: "mainSidebarBottom", presentation: "section", name: "Section B")
+        try writeInstalledPlugin("bottom-popover", source: Self.sidebarSectionSource, placement: "mainSidebarBottom", presentation: "popover")
+        try writeInstalledPlugin("sidebar-section", source: Self.sidebarSectionSource, placement: "mainSidebar", presentation: "section")
+        // Neither agent CLI is installed, so the built-in Agents info section is not there.
+        codexFixtureExecutable = "none"
+        claudeFixtureExecutable = "none"
+        launchApp(defaultParent: fixture.parent.path)
+        let refreshed = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        let byID = Dictionary(uniqueKeysWithValues: refreshed.compactMap { plugin in (plugin["id"] as? String).map { ($0, plugin) } })
+        XCTAssertEqual(byID["section-a"]?["valid"] as? Bool, true, "\(byID["section-a"] ?? [:])")
+        XCTAssertEqual(byID["section-b"]?["presentation"] as? String, "section")
+        XCTAssertEqual(byID["bottom-popover"]?["valid"] as? Bool, false)
+        XCTAssertTrue((byID["bottom-popover"]?["errors"] as? [String] ?? []).contains { $0.contains("always a collapsible section; its presentation must be \"section\"") })
+        XCTAssertEqual(byID["sidebar-section"]?["valid"] as? Bool, false)
+        XCTAssertTrue((byID["sidebar-section"]?["errors"] as? [String] ?? []).contains { $0.contains("only at the Main sidebar bottom") })
+        for (placement, presentation) in [("mainSidebarBottom", "popover"), ("mainSidebar", "section")] {
+            assertCLIError(try runCLI(["plugin", "author", "--placement", placement, "--name", "Bottom", "--presentation", presentation], expectedStatus: 2), code: "invalid_argument")
+        }
+
+        // Both sections are open by default, stacked at the sidebar's bottom.
+        let headerA = element("plugin-section-section-a-toggle")
+        let headerB = element("plugin-section-section-b-toggle")
+        XCTAssertTrue(headerA.waitToExist(timeout: 15), "Section A's header shows at the sidebar's bottom.")
+        XCTAssertTrue(headerB.waitToExist(timeout: 5))
+        XCTAssertTrue(element("section-a-running").waitToExist(timeout: 10), "A section is open by default.")
+        XCTAssertTrue(element("section-b-running").waitToExist(timeout: 5))
+        XCTAssertLessThan(headerA.frame.minY, headerB.frame.minY, "Section A sits above Section B.")
+        XCTAssertLessThan(headerB.frame.maxY, element("section-b-running").frame.minY + 1, "A section's content is below its header.")
+        XCTAssertLessThan(element("section-a-running").frame.maxY, headerB.frame.minY + 1, "The upper section's content sits above the lower header.")
+        XCTAssertFalse(element("plugin-section-bottom-popover").exists, "An invalid plugin has no section.")
+        XCTAssertFalse(element("plugin-section-agents-info").exists, "Agents info is not shown when no agent CLI is installed.")
+
+        // The plugin's context: launches, running agents, and the usage report.
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("section-a-launches")) == "launches 1, late 0" }, timeout: 10), "The section hears app.launched once.")
+        XCTAssertEqual(pluginText(element("section-b-launches")), "launches 1, late 0")
+        XCTAssertEqual(pluginText(element("section-a-running")), "claude 0, codex 0", "Both providers' running counts are listed.")
+        let usage = try XCTUnwrap(try runCLI(["usage", "get"])["result"] as? [String: Any])
+        let expectedUsage = (usage["providers"] as? [[String: Any]] ?? []).map { "\($0["provider"] as? String ?? "") \($0["installed"] as? Bool == true ? "installed" : "missing")" }.joined(separator: ", ")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("section-a-usage")) == expectedUsage }, timeout: 15), "props.agents.usage is the usage report: \(self.pluginText(self.element("section-a-usage")))")
+        element("section-a-listen").click()
+        XCTAssertFalse(waitUntil({ self.pluginText(self.element("section-a-launches")) != "launches 1, late 0" }, timeout: 2), "A launch that was heard is not heard again.")
+        attachScreenshot(named: "Sidebar bottom: two open sections stacked above each other")
+        attachElementScreenshot(element("plugin-section-section-a"), named: "Sidebar bottom: Section A open")
+
+        // ui.confirm asks with the board's dialog; ui.openURL opens only web pages.
+        element("section-a-confirm").click()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitToExist(timeout: 10), "ui.confirm asks with a dialog.")
+        XCTAssertTrue(sheet.staticTexts["Run section-a?"].exists, "The dialog shows the title.")
+        XCTAssertTrue(sheet.staticTexts["Asked from the sidebar bottom."].exists, "The dialog shows the message.")
+        XCTAssertTrue(sheet.buttons["Run It"].exists, "The dialog shows the confirm button.")
+        attachScreenshot(named: "Sidebar bottom: a section's ui.confirm dialog")
+        sheet.buttons["Run It"].click()
+        XCTAssertTrue(waitForDisappearance(sheet))
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("section-a-result")) == "confirm: true" }, timeout: 5), "Confirming answers true.")
+        element("section-a-confirm").click()
+        XCTAssertTrue(sheet.waitToExist(timeout: 10))
+        sheet.buttons["Cancel"].click()
+        XCTAssertTrue(waitForDisappearance(sheet))
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("section-a-result")) == "confirm: false" }, timeout: 5), "Cancelling answers false.")
+        element("section-a-open").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("section-a-result")) == "open: null" }, timeout: 5), "An https URL opens.")
+        element("section-a-open-file").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("section-a-result")) == "open-file: invalid_argument" }, timeout: 5), "A file URL is refused.")
+
+        // Collapsed, they sit one above the other at the bottom.
+        headerA.click()
+        XCTAssertTrue(waitForDisappearance(element("section-a-running")), "Collapsing hides Section A's content.")
+        headerB.click()
+        XCTAssertTrue(waitForDisappearance(element("section-b-running")))
+        XCTAssertTrue(waitUntil({ self.waitForStableFrame(headerB) && abs(headerA.frame.maxY - headerB.frame.minY) < 24 }, timeout: 5),
+                      "Collapsed, Section A's header sits right above Section B's: \(headerA.frame) \(headerB.frame)")
+        XCTAssertLessThan(visibleSidebarBottom() - headerB.frame.maxY, 60, "The collapsed sections sit at the sidebar's bottom: \(headerB.frame) above \(visibleSidebarBottom())")
+        let collapsedA = headerA.frame
+        let collapsedB = headerB.frame
+        attachScreenshot(named: "Sidebar bottom: both sections collapsed at the bottom")
+        XCTAssertTrue(waitUntil({
+            let states = ((try? self.runCLI(["plugin", "list"]))?["result"] as? [String: Any])?["plugins"] as? [[String: Any]] ?? []
+            return states.filter { ["section-a", "section-b"].contains($0["id"] as? String ?? "") }.allSatisfy { ($0["state"] as? [String: Any])?["collapsed"] as? Bool == true }
+        }, timeout: 10), "Each section's collapsed state is its plugin state.")
+
+        // Expanding the lower one grows it upward and pushes the upper one up.
+        headerB.click()
+        XCTAssertTrue(element("section-b-running").waitToExist(timeout: 5), "Expanding shows Section B's content.")
+        XCTAssertTrue(waitUntil({ self.waitForStableFrame(headerB) && headerB.frame.minY < collapsedB.minY - 40 }, timeout: 5), "Section B's header moves up as it grows: \(headerB.frame)")
+        XCTAssertLessThan(headerA.frame.minY, collapsedA.minY - 40, "Section A is pushed up: \(headerA.frame) from \(collapsedA)")
+        XCTAssertGreaterThan(element("section-b-running").frame.minY, headerB.frame.maxY - 1, "The lower section's content is below its header.")
+        XCTAssertFalse(element("section-a-running").exists, "Section A stays collapsed.")
+        attachScreenshot(named: "Sidebar bottom: the lower section expanded pushes the upper one up")
+
+        // The collapsed state survives a relaunch, and the next launch is heard again.
+        XCTAssertTrue(waitUntil({
+            let states = ((try? self.runCLI(["plugin", "list"]))?["result"] as? [String: Any])?["plugins"] as? [[String: Any]] ?? []
+            return (states.first { $0["id"] as? String == "section-b" }?["state"] as? [String: Any])?["collapsed"] as? Bool == false
+        }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(element("section-b-running").waitToExist(timeout: 15), "Section B is still open after a relaunch.")
+        XCTAssertTrue(headerA.waitToExist(timeout: 5))
+        XCTAssertFalse(element("section-a-running").exists, "Section A is still collapsed after a relaunch.")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("section-b-launches")) == "launches 1, late 0" }, timeout: 10), "The new launch is heard once.")
+        attachScreenshot(named: "Sidebar bottom: sections keep their collapsed state after a relaunch")
+
+        // Authoring there goes from the name straight to the editor: a section never asks how it opens.
+        _ = try runCLI(["plugin", "mode", "--on"])
+        let placeholder = element("plugin-add-here-mainSidebarBottom")
+        XCTAssertTrue(placeholder.waitToExist(timeout: 10), "Add Plugin mode shows the sidebar bottom's placeholder.")
+        XCTAssertGreaterThanOrEqual(placeholder.frame.minY, headerB.frame.maxY - 1, "The placeholder sits below the sections.")
+        attachScreenshot(named: "Sidebar bottom: Add here below the sections")
+        placeholder.click()
+        XCTAssertTrue(element("plugin-creation-name").waitToExist(timeout: 10))
+        element("plugin-creation-name").click()
+        element("plugin-creation-name").typeText("Usage")
+        element("plugin-creation-continue").click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15), "Continue opens the editor at once.")
+        XCTAssertFalse(element("plugin-creation-presentation").exists, "A section never asks how it opens.")
+        XCTAssertTrue(element("plugin-detail-placement").waitToExist(timeout: 15), "The editor's empty state lists the new plugin's details.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("plugin-detail-placement")), "Placement: Main sidebar bottom")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("plugin-detail-presentation")), "Opens as: Collapsible section")
+        let sessions = try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
+        let usageSession = try XCTUnwrap(sessions.first { $0["title"] as? String == "Usage" })
+        XCTAssertEqual(usageSession["pluginPlacement"] as? String, "mainSidebarBottom")
+        XCTAssertEqual(usageSession["pluginAuthoringPresentation"] as? String, "section")
+        attachElementScreenshot(element("plugin-details"), named: "Sidebar bottom: a new plugin there opens as a collapsible section")
+    }
 }

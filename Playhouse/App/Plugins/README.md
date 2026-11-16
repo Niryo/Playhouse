@@ -307,6 +307,7 @@ and deleting a plugin forgets its disabled state.
 | Placement | Where | Entry | Extra context in `Playhouse.props` |
 | --- | --- | --- | --- |
 | `mainSidebar` | The board's sidebar, below Scheduled Tasks | Labeled | None: it is standalone |
+| `mainSidebarBottom` | The bottom of the board's sidebar, where sections stack in plugin order: the first sits on top, and expanding one grows it upward, pushing those above it up | None: always `section` | `agents` (`{usage, runningTasks}`): `usage` is what `usage.get` returns, kept live by the window's usage feed (`AgentUsageModel`, which runs only while a section is shown) or null before the first read, and `runningTasks` counts the In Progress tasks per provider, always listing `claude` and `codex` |
 | `conversationSidebar` | The task sidebar: entry buttons first, then inline sections such as Changes | Labeled, or none when `inline` | `task`, `repositories`, `contextFolders`, `workspace` (`{revision, openDiff: {repository, path, group} or null}`) and `sidebar` (`{collapsed}`) |
 | `conversationToolbar` | The task sidebar's bottom row, beside Terminal | Icon | `task`, `repositories`, `contextFolders` |
 | `composerActions` | The composer's actions row, beside Skills (also in the standalone chat) | Icon | The above and `composer` (`{draft, selection: {location, length, text}}`) |
@@ -331,6 +332,12 @@ the new props, and deleting a plugin forgets them. `presentation` is one of:
 - `modal`: a sheet.
 - `sidebar`: slides in from the trailing edge.
 - `page`: covers the board or the conversation.
+- `section`: only at, and always at, `mainSidebarBottom`. The host
+  (`PluginSectionSlot` in `Host/PluginSlot.swift`) draws a collapsible header
+  with the plugin's name (`plugin-section-<id>-toggle`) above the plugin, which
+  stays mounted while collapsed. Whether it is collapsed is its plugin state
+  `collapsed` (open by default). A section that renders nothing hides, header
+  included: a built-in reports that through `PluginSectionContentKey`.
 - `inline`: rendered in place as a section of the conversation sidebar, or in
   the task card's bottom row, with no entry button, header or padding of its
   own beyond a 10-point inset. It stays mounted while its task is open (or its
@@ -339,7 +346,7 @@ the new props, and deleting a plugin forgets them. `presentation` is one of:
   show at most a compact count there. On a task card, keep it to an icon or a
   short label.
 
-Each presentation but `inline` starts with the app's standard modal header (the plugin's
+Each presentation but `inline` and `section` starts with the app's standard modal header (the plugin's
 icon and name, `plugin-surface-title`, and its close button,
 `plugin-surface-close`) and pads the header and the script's atoms (24 points
 in a modal or page, 20 in a sidebar, 16 in a popover), spacing its root atoms
@@ -364,8 +371,10 @@ Installed plugins also get host calls. Each returns a Promise:
 | `Playhouse.ui.moveTask(taskID, status)` | Moves a task to a board column the way dragging its card does, including the window's own checks and alerts |
 | `Playhouse.ui.resolveConflicts(taskID)` | Starts the task's pull request conflict resolution turn |
 | `Playhouse.ui.alert(title, message)` | Shows an alert over the window, for a failure the user should see |
+| `Playhouse.ui.confirm({title, message, confirm, destructive})` | Asks the user with the board's dialog (`PluginConfirmationModifier`) and resolves true when they confirm, false when they cancel; `plugin render` resolves null without asking |
+| `Playhouse.ui.openURL(url)` | Opens an `http` or `https` link in the browser (a test build opens nothing) |
 
-`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, a composer call from the board's sidebar or a task card is `unavailable`, an `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`, and a `moveTask`, `resolveConflicts` or `alert` call from anywhere but a task card is `unavailable`.
+`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, a composer call from the board's sidebar or a task card is `unavailable`, an `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`, a `moveTask`, `resolveConflicts` or `alert` call from anywhere but a task card is `unavailable`, a `confirm` call from anywhere but the board (its sidebar, the sidebar's bottom or a task card) is `unavailable`, and an `openURL` call whose `url` is not an `http` or `https` URL with a host is `invalid_argument`.
 
 ### Events and throttling
 
@@ -377,6 +386,7 @@ Installed plugins also get host calls. Each returns a Promise:
 | `task.statusChanged` | `{taskID, from, to}` (column names, such as `"In Progress"` and `"Review"`) | The plugin's task moved between board columns |
 | `app.focus` | `{}` | The app became the active application |
 | `plugin.stateChanged` | `{pluginID, key, value}` | One of the plugin's saved values changed |
+| `app.launched` | `{}` | Once per app launch, as the plugin first mounts. The window claims each plugin's launch once (`PluginLaunch.claim`); a launch no listener heard is kept, and the first listener the plugin adds later hears it |
 
 A mounted plugin hears them from its surface (`PluginSurfaceView` compares
 its old and new props). A task card's plugin keeps running when its card is
@@ -398,7 +408,7 @@ A built-in plugin's background half is a `PluginService`
 daemon, whether or not a window shows the plugin, and acts only through bridge
 commands. The daemon raises `task.statusChanged` and `plugin.stateChanged` for
 the changes its commands save; a window forwards the others (`app.focus`)
-over `plugin.event`, which the CLI sends as
+over `plugin.event` (`app.launched` too, so a service can act once per launch), which the CLI sends as
 `plugin event <name> [--payload <json>]` (an unknown name is
 `invalid_argument`).
 
@@ -422,6 +432,7 @@ and an installed plugin's folder can't take a built-in's id.
 | `pull-request-mode` (`BuiltIn/PullRequestModePlugin.swift`, `Services/PullRequestModeService.swift`) | `taskItem` | `inline` | The task card's mode pill: Manual, PR, Green or Merge. The mode is this plugin's state, keyed by task id (none means PR, or the recurring schedule's mode for a scheduled run), not a property of the task. Its service decides what each mode does: when the task reaches Review it opens the pull request (`task.pr.create` with `ifNeeded`) unless the mode is Manual; in Green and Merge it then runs `task.pr.autopilot` passes (with `merge` in Merge mode) until the PR is green or merged, polling while checks run, again when the mode changes and, throttled, when the app comes to the front |
 | `pull-requests` (`BuiltIn/PullRequestsPlugin.swift`) | `taskItem` | `inline` | The task card's pull request controls: the create button, the links coloured by health, the merged check (which moves the task to Done with `ui.moveTask`, passing `pullRequestsMerged` so the move trusts the merge its probe just saw instead of asking GitHub again; the window honors that only from a built-in plugin, since the move records the pull requests merged) and the resolve-conflicts button (`ui.resolveConflicts`). It probes `task.pr.status` with `shared` (a short cache with in-flight dedupe, so cards and windows share one GitHub read) on focus and when its task moves, through `PluginThrottle`, and raises a failed probe with `ui.alert` while the task is in Review |
 | `changes` (`BuiltIn/ChangesPlugin.swift`) | `conversationSidebar` | `inline` | The Changes section: lists the task's Git changes with `task.changes.list`, reloads on `workspace.revision`, opens diffs with `ui.openDiff`, marks files with `task.changes.mark-viewed`, `mark-unviewed` and `mark-all-viewed`, and shows the pending count on the sidebar's rail. Disabling it hides the section and stops the window's file watching. Whether the section is collapsed is its plugin state, `state.collapsed` |
+| `agents-info` (`BuiltIn/AgentsInfoPlugin.swift`) | `mainSidebarBottom` | `section` | The board's Agents info section: each installed agent's account and usage windows from `props.agents.usage`. It reads the usage again once per launch (`usage.get` with `refresh` on `app.launched`), signs in with `usage.login` and `ui.openURL`, and switches accounts with `usage.switch-account`, asking first with `ui.confirm` when that provider has running tasks (`props.agents.runningTasks`). With no agent CLI installed it renders nothing, so its section hides. Its collapsed state moved from `WorkspaceSettings.agentsInfoSectionCollapsedKey` into its plugin state, carried over once |
 
 ### Network
 

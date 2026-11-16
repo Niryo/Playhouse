@@ -302,10 +302,14 @@
     }
 
     // App events (PluginEvent in Swift): Swift calls __playhouseEmit(name, payload)
-    // for "task.statusChanged", "app.focus" and "plugin.stateChanged".
+    // for "task.statusChanged", "app.focus", "plugin.stateChanged" and "app.launched".
     var eventListeners = {};
+    // "app.launched" arrives as the plugin first mounts, often before the effect
+    // that listens for it has run: the first listener added later still hears it.
+    var unheardLaunch = null;
     global.__playhouseEmit = function (name, payload) {
       var listeners = (eventListeners[name] || []).slice();
+      if (name === "app.launched" && listeners.length === 0) unheardLaunch = payload || {};
       reconciler.batchedUpdates(function () {
         listeners.forEach(function (listener) { run(function () { listener(payload || {}); }); });
       });
@@ -314,6 +318,14 @@
     function on(name, listener) {
       name = String(name);
       (eventListeners[name] = eventListeners[name] || []).push(listener);
+      if (name === "app.launched" && unheardLaunch !== null) {
+        var launch = unheardLaunch;
+        unheardLaunch = null;
+        global.setTimeout(function () {
+          if ((eventListeners[name] || []).indexOf(listener) < 0) return;
+          reconciler.batchedUpdates(function () { run(function () { listener(launch); }); });
+        }, 0);
+      }
       return function () {
         var listeners = eventListeners[name] || [];
         var index = listeners.indexOf(listener);
@@ -392,6 +404,17 @@
         resolveConflicts: function (taskID) { return hostCall("ui", "resolveConflicts", { taskID: String(taskID) }); },
         // Shows an alert over the window, for a failure the user should see.
         alert: function (title, message) { return hostCall("ui", "alert", { title: String(title), message: message == null ? "" : String(message) }); },
+        // Opens an http(s) link in the default browser.
+        openURL: function (url) { return hostCall("ui", "openURL", { url: String(url) }); },
+        // Asks the user to confirm ({title, message, confirm, destructive}); resolves true when they do.
+        // Only on the board.
+        confirm: function (options) {
+          options = options || {};
+          return hostCall("ui", "confirm", {
+            title: String(options.title || ""), message: options.message == null ? "" : String(options.message),
+            confirm: options.confirm == null ? "OK" : String(options.confirm), destructive: options.destructive === true
+          });
+        },
         composer: {
           setDraft: function (text) { return hostCall("ui", "composer.setDraft", { text: String(text) }); },
           insertText: function (text) { return hostCall("ui", "composer.insertText", { text: String(text) }); },

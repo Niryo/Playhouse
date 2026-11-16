@@ -44,10 +44,15 @@ struct PluginCreationSetup: View {
                     .accessibilityIdentifier("plugin-creation-name")
                 Button("Continue") {
                     nameFocused = false
-                    withAnimation { hasName = true }
+                    // A plugin at the sidebar's bottom always opens as a collapsible section.
+                    if placement == .mainSidebarBottom {
+                        onStart(name.trimmingCharacters(in: .whitespacesAndNewlines), .section)
+                    } else {
+                        withAnimation { hasName = true }
+                    }
                 }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .buttonHoverPointer().nativeHelp("Choose how the plugin opens")
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStarting)
+                    .buttonHoverPointer().nativeHelp(placement == .mainSidebarBottom ? "Start creating this plugin" : "Choose how the plugin opens")
                     .accessibilityIdentifier("plugin-creation-continue")
             }
         }

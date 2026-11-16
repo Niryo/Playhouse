@@ -84,6 +84,8 @@ extension PlayhouseUITests {
     func test_agents_info_usage_recovers_when_account_reads_fail() throws {
         let codex = try makeCodexFixture(emptyQuestions: false)
         codexFixtureExecutable = codex.path
+        // The shared fixture keeps its account beside itself; a case that failed mid-switch leaves another one.
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: codex.path + ".account"))
         let claude = dataDirectory.appendingPathComponent("claude-fixture-usage-failure")
         try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claude)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
@@ -150,7 +152,7 @@ extension PlayhouseUITests {
 
         // The section sits at the bottom of the sidebar, below the Scheduled Tasks button, with one block per agent.
         let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
-        let section = element("agents-info")
+        let section = element("plugin-section-agents-info")
         XCTAssertTrue(section.waitToExist(timeout: 30), "Agents info should appear once an agent CLI is installed.")
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label =[c] %@ OR value =[c] %@", "Agents info", "Agents info")).firstMatch.exists, "The section should be titled Agents info.")
         XCTAssertTrue(sidebar.frame.contains(section.frame), "Agents info should be inside the left sidebar.")
@@ -161,7 +163,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(claudeBlock.exists && codexBlock.exists, "Claude and Codex should each have their own block.")
         XCTAssertLessThanOrEqual(claudeBlock.frame.maxY, codexBlock.frame.minY, "The blocks should be separate, Claude above Codex.")
         XCTAssertLessThan(section.frame.height, 330, "The section should stay a compact sidebar footer.")
-        let toggle = element("agents-info-toggle")
+        let toggle = element("plugin-section-agents-info-toggle")
         XCTAssertEqual(toggle.value as? String, "Expanded", "The section should be open by default.")
         let expandedTitleMinY = toggle.frame.minY
 
@@ -330,7 +332,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !self.element("agents-info-claude").exists && !self.element("agents-info-codex").exists }, timeout: 10), "Minimizing should hide the agent blocks.")
         XCTAssertEqual(toggle.value as? String, "Collapsed")
         XCTAssertGreaterThan(toggle.frame.minY, expandedTitleMinY, "The title should move down as the section collapses.")
-        XCTAssertLessThan(sidebar.frame.maxY - toggle.frame.maxY, 40, "The minimized title should rest at the bottom of the sidebar.")
+        XCTAssertLessThan(visibleSidebarBottom() - toggle.frame.maxY, 40, "The minimized title should rest at the bottom of the sidebar.")
         attachScreenshot(named: "Agents info minimized at the bottom of the sidebar")
         XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the minimized relaunch.")
         launchAppWithOpen()
@@ -359,7 +361,7 @@ extension PlayhouseUITests {
         let bare = try XCTUnwrap(try runCLI(["usage", "get"])["result"] as? [String: Any])
         let installed = (bare["providers"] as? [[String: Any]] ?? []).map { $0["installed"] as? Bool }
         XCTAssertEqual(installed, [false, false], "Neither CLI is installed without the fixtures.")
-        XCTAssertFalse(waitUntil({ self.element("agents-info").exists }, timeout: 15), "With neither CLI installed the section should not show.")
+        XCTAssertFalse(waitUntil({ self.element("plugin-section-agents-info").exists }, timeout: 15), "With neither CLI installed the section should not show.")
         XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").exists)
         attachScreenshot(named: "Sidebar without Agents info when no agent CLI is installed")
     }

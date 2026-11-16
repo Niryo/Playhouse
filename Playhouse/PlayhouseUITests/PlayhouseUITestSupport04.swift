@@ -164,6 +164,12 @@ extension PlayhouseUITests {
         XCTAssertLessThan(hideChange, 0.03, "Moving the pointer off the \(name) should hide its scroller again (change \(hideChange)).")
         return revealChange
     }
+    /// The sidebar's drawn bottom edge. A collapsed bottom section keeps its content
+    /// mounted at zero height, and its accessibility frame still counts toward the
+    /// sidebar's, so the sidebar can report a frame past the window's bottom.
+    func visibleSidebarBottom() -> CGFloat {
+        min(element(withAccessibilityLabel: "Kanban sidebar").frame.maxY, app.windows["main"].frame.maxY)
+    }
     func attachScreenshot(named name: String, fullScreen: Bool = false) {
         let screenshot = XCUIScreen.main.screenshot()
         let attachment = (fullScreen ? nil : appWindowsImage(of: screenshot)).map { XCTAttachment(image: $0) }
