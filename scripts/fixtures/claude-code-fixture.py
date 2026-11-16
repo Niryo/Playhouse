@@ -858,6 +858,20 @@ def main():
                 if configured_window and filled >= configured_window:
                     write_compaction_boundary(session_id, "auto", filled)
                     turn["autoCompacted"] = True
+            if "compact twice mid turn" in user_text.lower():
+                # A long turn compacts before each call that would cross the window, after the
+                # text and tool call written before it, then continues from its own summary message,
+                # as the real CLI does.
+                text("msg_fixture_before_compactions", "Reading the build log before the first compaction.")
+                run_tool("toolu_fixture_first_compaction", "Bash", {"command": "true"})
+                write_compaction_boundary(session_id, "auto", 170000, 14000)
+                write({"type": "user", "isSynthetic": True, "parent_tool_use_id": None, "uuid": f"fixture-summary-{time.time_ns()}",
+                       "message": {"role": "user", "content": [{"type": "text", "text": "Continued after the first compaction."}]}})
+                text("msg_fixture_between_compactions", "Checking the log again between compactions.")
+                run_tool("toolu_fixture_second_compaction", "Bash", {"command": "true"})
+                write_compaction_boundary(session_id, "auto", 168000, 15000)
+                write({"type": "user", "isSynthetic": True, "parent_tool_use_id": None, "uuid": f"fixture-summary-{time.time_ns()}",
+                       "message": {"role": "user", "content": [{"type": "text", "text": "Continued after the second compaction."}]}})
             # What arrived of each image, without keeping its payload in the history.
             turn["images"] = [
                 {"mediaType": block.get("source", {}).get("media_type"),
