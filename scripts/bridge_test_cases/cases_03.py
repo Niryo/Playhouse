@@ -367,7 +367,7 @@ class BridgeTestCases03:
         reopened = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(reopened["title"], "Profile restart")
         self.assertEqual(reopened["savedPrompt"], "Keep this draft after restart.")
-    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
+    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured, and such a send runs its provider in the configured repository root rather than the home folder, with instructions saying so. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     def test_task_creation_rejects_invalid_title_roots_and_missing_folder(self):
         response, _ = self.call_cli(
             "task", "create", "--title", "   ", "--prompt", "Fixture task description.", "--root", self.primary,
@@ -398,6 +398,11 @@ class BridgeTestCases03:
         main_history_path = self.data_directory / "codex-fixture.history"
         main_history = json.loads(main_history_path.read_text(encoding="utf-8"))
         instructions = main_history["threadStartDeveloperInstructions"]
+        configured_root = self.assert_success(self.call_cli("settings", "get")[0])["defaultParentFolder"]
+        self.assertTrue(configured_root)
+        self.assertSamePath(main_history["cwd"], configured_root)
+        self.assertNotEqual(Path(main_history["cwd"]).resolve(), Path.home().resolve(), "A task with no roots must not run in the home folder.")
+        self.assertIn("with no repository or folder context, the cwd is the configured repository root", instructions)
         self.assertIn("read-only inspection of returned source paths", instructions)
         self.assertIn("Add a repository to this task only when you intend to create or commit changes in it", instructions)
         self.assertIn("workspace repos list", instructions)
@@ -427,6 +432,61 @@ class BridgeTestCases03:
             expected_status=2,
         )
         self.assert_failure(response, "invalid_argument")
+    # case-contract: test_rootless_claude_resume_keeps_session_working_folder | A Claude task with no repository or folder starts its session in the configured repository root, and a later turn resumes that native session, without handoff context, in the folder its session recorded even after the repository root setting changes; a side chat forks and continues that session in the same recorded folder. A new rootless task follows the changed root, and when a session's recorded folder no longer exists the resumed turn runs in the current repository root.
+    def test_rootless_claude_resume_keeps_session_working_folder(self):
+        environment = self.install_claude_fixture("claude-fixture-session-cwd")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        history_path = self.data_directory / "claude-fixture-session-cwd.history"
+        first_root = self.assert_success(self.call_cli("settings", "get")[0])["defaultParentFolder"]
+        changed_root = self.fixture / "suggested-parent" / "alternate-parent"
+
+        def send(task_id, message):
+            self.assert_success(self.call_cli("conversation", "send", task_id, "--message", message, extra_environment=environment)[0])
+            return next(turn for turn in reversed(json.loads(history_path.read_text(encoding="utf-8"))["turns"])
+                        if turn.get("userText") == message)
+
+        task = self.create_task(title="Rootless Claude resume", roots=[], provider="claude")
+        self.assertEqual(task["workspaceRoots"], [])
+        first = send(task["id"], "Tell me a very short dog story.")
+        self.assertFalse(first["resumed"], first)
+        self.assertSamePath(first["cwd"], first_root, "A rootless Claude task starts in the configured repository root.")
+        self.assert_success(self.call_cli("settings", "set-parent", changed_root)[0])
+        # A side chat forks the session from, and keeps, the folder the session recorded.
+        opened = self.assert_success(self.call_cli(
+            "conversation", "side-chat", task["id"], "--selection", "dog", "--message", "Why a dog?",
+            extra_environment=environment,
+        )[0])
+        turns = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+        fork = next(turn for turn in reversed(turns) if turn.get("forkedFrom") == first["sessionID"])
+        self.assertSamePath(fork["cwd"], first_root, "A side chat forks a rootless session in its recorded folder.")
+        self.assert_success(self.call_cli(
+            "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"], "--message", "And then?",
+            extra_environment=environment,
+        )[0])
+        follow_up = next(turn for turn in reversed(json.loads(history_path.read_text(encoding="utf-8"))["turns"])
+                         if "And then?" in turn.get("userText", ""))
+        self.assertEqual(follow_up["sessionID"], opened["sideChat"]["threadID"])
+        self.assertTrue(follow_up["resumed"], follow_up)
+        self.assertSamePath(follow_up["cwd"], first_root, "A continued side chat resumes in its fork's recorded folder.")
+        resumed = send(task["id"], "Please inspect the workspace.")
+        self.assertTrue(resumed["resumed"], resumed)
+        self.assertEqual(resumed["sessionID"], first["sessionID"])
+        self.assertSamePath(resumed["cwd"], first_root, "A resumed rootless session keeps the folder its session recorded.")
+        self.assertNotIn("<playhouse-handoff-context>", resumed["userText"])
+
+        # A recorded folder that is gone falls back to the current repository root.
+        vanishing_root = self.data_directory / "vanishing-root"
+        vanishing_root.mkdir()
+        self.assert_success(self.call_cli("settings", "set-parent", vanishing_root)[0])
+        other = self.create_task(title="Rootless Claude moved root", roots=[], provider="claude")
+        started = send(other["id"], "Tell me a very short dog story.")
+        self.assertSamePath(started["cwd"], vanishing_root, "A new rootless task follows the changed repository root.")
+        self.assert_success(self.call_cli("settings", "set-parent", changed_root)[0])
+        shutil.rmtree(vanishing_root)
+        moved = send(other["id"], "Please inspect the workspace.")
+        self.assertTrue(moved["resumed"], moved)
+        self.assertSamePath(moved["cwd"], changed_root, "A session whose recorded folder is gone resumes in the current root.")
+        self.assert_success(self.call_cli("settings", "set-parent", first_root)[0])
     # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send. The conversation shows the additional context folder without repeating repository worktrees in a Working in summary. Saving an unsent prompt records task creation, prompt save, and subsequent reads with safe argument metadata, result state, and outcome while excluding prompt text.
     def test_task_creation_persists_ordered_roots_across_fresh_connections(self):
         branch_token = uuid.uuid4().hex[:8]

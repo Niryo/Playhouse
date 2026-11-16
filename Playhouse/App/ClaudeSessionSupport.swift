@@ -253,6 +253,19 @@ enum ClaudeSessionUsageReader {
             .sorted { $0.agentID < $1.agentID }
     }
 
+    /// The working folder Claude Code recorded for a session, from the first line
+    /// carrying a `cwd`; nil when the session or folder is gone.
+    static func recordedWorkingDirectory(sessionID: String, configDirectory: String) -> URL? {
+        guard let file = sessionFile(sessionID: sessionID, configDirectory: configDirectory),
+              let data = try? Data(contentsOf: file, options: .mappedIfSafe) else { return nil }
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  let cwd = object["cwd"] as? String else { continue }
+            return WorkspaceSettings.validDirectoryURL(for: cwd)
+        }
+        return nil
+    }
+
     static func sessionFile(sessionID: String, configDirectory: String) -> URL? {
         let projects = URL(fileURLWithPath: configDirectory, isDirectory: true).appendingPathComponent("projects", isDirectory: true)
         let directories = (try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []

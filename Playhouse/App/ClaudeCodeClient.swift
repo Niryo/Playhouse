@@ -154,7 +154,11 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     /// Where Claude Code keeps its sessions: the override Playhouse launches it
     /// with, else the user's own configuration directory.
     var configDirectory: String {
-        configDirectoryOverride
+        Self.configDirectory(override: configDirectoryOverride)
+    }
+
+    static func configDirectory(override: String?) -> String {
+        override
             ?? PlayhouseProcessEnvironment.current["CLAUDE_CONFIG_DIR"]
             ?? NSHomeDirectory() + "/.claude"
     }
