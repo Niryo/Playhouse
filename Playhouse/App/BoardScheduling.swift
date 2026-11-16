@@ -14,13 +14,10 @@ extension BoardTaskManager {
     }
 
     /// Confirms a schedule for a task. A started conversation can have one-time follow-ups;
-    /// recurring schedules remain templates for conversations that haven't started.
+    /// recurring schedules remain templates for conversations that haven't started. A request
+    /// that keeps its payload reschedules an already scheduled task, keeping its saved prompt.
     @discardableResult
     func setSchedule(_ id: UUID, _ request: TaskScheduleRequest, now: Date = .now) async throws -> BoardTaskRecord {
-        let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty || !request.imageDataURLs.isEmpty else {
-            throw BridgeCommandError(code: "invalid_argument", message: "A scheduled task needs a prompt.")
-        }
         if request.imageDataURLs.count > 8 || request.imageDataURLs.contains(where: { !ConversationManager.isValidImageDataURL($0) }) {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
@@ -50,6 +47,22 @@ extension BoardTaskManager {
                 || !(task.status == .backlog || task.status == .blocked)
             guard !hasStarted || request.kind == .once else {
                 throw BridgeCommandError(code: "invalid_transition", message: "An existing conversation can only have a one-time scheduled message.")
+            }
+            // A request that keeps its payload only reschedules: the task keeps the prompt,
+            // images, mode and model it was scheduled with.
+            var request = request
+            if request.keepsPayload {
+                guard task.scheduleKind != nil else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "A scheduled task needs a prompt.")
+                }
+                request.prompt = task.scheduledPrompt ?? ""
+                request.imageDataURLs = task.scheduledImageDataURLs
+                request.mode = task.scheduledModeRawValue.flatMap(ConversationMode.init(rawValue:)) ?? request.mode
+                request.modelID = task.scheduledModelID
+            }
+            let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty || !request.imageDataURLs.isEmpty else {
+                throw BridgeCommandError(code: "invalid_argument", message: "A scheduled task needs a prompt.")
             }
             if !title.isEmpty { task.title = title }
             task.scheduleKind = request.kind
