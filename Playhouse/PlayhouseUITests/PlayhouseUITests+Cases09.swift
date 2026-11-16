@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected and, in place of the send-a-message prompt, shows a compact + button reading Click here to add repositories to the context that opens the header's Add repository picker and keeps the typed draft; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
+    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected and, in place of the send-a-message prompt, shows a standalone round + button with its explanation, Add repositories to the task's context, as separate text centered below it; the + opens the header's Add repository picker and keeps the typed draft; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
@@ -31,12 +31,18 @@ extension PlayhouseUITests {
         // With no repository, the empty state's + replaces the send-a-message prompt and opens the header's picker.
         let addRepositoryPrompt = element("empty-conversation-add-repository-button")
         XCTAssertTrue(addRepositoryPrompt.waitToExist(timeout: 10), "A task with no repository should show the add-repository + in its empty state.")
-        XCTAssertEqual(accessibleLabelOrValue(of: addRepositoryPrompt), "Click here to add repositories to the context")
+        XCTAssertEqual(accessibleLabelOrValue(of: addRepositoryPrompt), "Add repository")
         XCTAssertFalse(element("model-prompt").exists, "The add-repository prompt replaces the send-a-message prompt.")
-        XCTAssertLessThan(addRepositoryPrompt.frame.height, 44, "The add-repository + should be a compact inline capsule.")
-        XCTAssertGreaterThan(addRepositoryPrompt.frame.width, addRepositoryPrompt.frame.height * 4, "The + should sit beside its caption, not above it.")
+        let plusFrame = addRepositoryPrompt.frame
+        XCTAssertLessThan(abs(plusFrame.width - plusFrame.height), 2, "The add-repository + should be a standalone round button, not a capsule with its caption.")
+        XCTAssertLessThan(plusFrame.width, 60, "The + should hold only its icon, not the explanation.")
+        let addRepositoryCaption = element("empty-conversation-add-repository-caption")
+        XCTAssertTrue(addRepositoryCaption.waitToExist(timeout: 5), "The + should be explained by a caption.")
+        XCTAssertEqual(accessibleLabelOrValue(of: addRepositoryCaption), "Add repositories to the task's context")
+        XCTAssertGreaterThanOrEqual(addRepositoryCaption.frame.minY, plusFrame.maxY, "The explanation should sit below the +, not beside it.")
+        XCTAssertLessThan(abs(addRepositoryCaption.frame.midX - plusFrame.midX), 2, "The explanation should be centered under the +.")
         attachScreenshot(named: "Empty task shows the add-repository plus")
-        attachElementScreenshot(addRepositoryPrompt, named: "Add-repository plus close-up")
+        attachElementScreenshot(element("empty-conversation"), named: "Add-repository plus and explanation close-up")
         addRepositoryPrompt.click()
         XCTAssertTrue(repositorySearch.waitToExist(timeout: 5), "Clicking the empty state's + should open the header's Add repository picker.")
         attachScreenshot(named: "Add-repository plus opens the Add repository picker")

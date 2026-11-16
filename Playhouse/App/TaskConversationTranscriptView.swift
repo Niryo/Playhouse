@@ -163,7 +163,7 @@ extension TaskConversationView {
     }
 
     var emptyConversationAddRepositoryPrompt: some View {
-        EmptyConversationAddRepositoryButton(action: showRepositoryPicker)
+        EmptyConversationAddRepositoryPrompt(action: showRepositoryPicker)
     }
 
     var emptyConversationModelPrompt: some View {
@@ -647,39 +647,35 @@ extension TaskConversationView {
     }
 }
 
-/// The empty conversation's add-repository prompt: a small + like the header's, with its
-/// caption beside it, in a capsule that lights up on hover.
-private struct EmptyConversationAddRepositoryButton: View {
+/// The empty conversation's add-repository prompt: a standalone + like the header's, larger,
+/// that lights up on hover, with its explanation below it.
+private struct EmptyConversationAddRepositoryPrompt: View {
     let action: () -> Void
     @State private var isHovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
+        VStack(spacing: 12) {
+            Button(action: action) {
                 Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(Color.accentColor.opacity(isHovering ? 0.22 : 0.14)))
-                Text("Click here to add repositories to the context")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(isHovering ? .primary : .secondary)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(Color.accentColor.opacity(isHovering ? 0.24 : 0.14)))
+                    .overlay(Circle().strokeBorder(Color.accentColor.opacity(isHovering ? 0.4 : 0.22)))
+                    .contentShape(Circle())
             }
-            .padding(.leading, 6)
-            .padding(.trailing, 14)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(Color.primary.opacity(isHovering ? 0.08 : 0.04)))
-            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
-            .contentShape(Capsule())
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .nativeHelp("Add a repository")
+            .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .accessibilityLabel("Add repository")
+            .accessibilityIdentifier("empty-conversation-add-repository-button")
+            Text("Add repositories to the task's context")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .accessibilityIdentifier("empty-conversation-add-repository-caption")
         }
-        .buttonStyle(.plain)
-        .buttonHoverPointer()
-        .nativeHelp("Add a repository")
-        .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Click here to add repositories to the context")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityIdentifier("empty-conversation-add-repository-button")
     }
 }
