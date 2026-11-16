@@ -146,6 +146,15 @@ enum WorkspaceSettings {
         return .standard
     }
 
+    /// Where a provider runs for a task with no repository or folder: the repository root
+    /// that repository suggestions come from, so an agent's searches stay among the user's
+    /// repositories instead of walking the home folder into other apps' data (which macOS
+    /// guards with an "access data from other apps" prompt). Home only while no root is set.
+    static var rootlessWorkingDirectoryURL: URL {
+        validDirectoryURL(for: preferencesStore.string(forKey: defaultParentFolderKey) ?? "")
+            ?? FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+    }
+
     static func validDirectoryURL(for path: String) -> URL? {
         guard !path.isEmpty else { return nil }
         let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
@@ -204,7 +213,9 @@ struct ConversationWorkspaceContext {
         return config.isEmpty ? nil : config
     }
 
-    init(roots: [URL]) throws {
+    /// With no roots the provider runs in `rootlessDirectory`, else in the configured
+    /// repository root (`WorkspaceSettings.rootlessWorkingDirectoryURL`).
+    init(roots: [URL], rootlessDirectory: URL? = nil) throws {
         let normalized = roots.map(\.standardizedFileURL)
         guard normalized.allSatisfy({ WorkspaceSettings.validDirectoryURL(for: $0.path) != nil }) else {
             throw WorkspaceError.unavailableRoot
@@ -213,11 +224,7 @@ struct ConversationWorkspaceContext {
             ($0 as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
         }
         self.roots = uniqueRoots
-        if let firstRoot = uniqueRoots.first {
-            cwd = firstRoot
-        } else {
-            cwd = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
-        }
+        cwd = uniqueRoots.first ?? rootlessDirectory?.standardizedFileURL ?? WorkspaceSettings.rootlessWorkingDirectoryURL
     }
 }
 

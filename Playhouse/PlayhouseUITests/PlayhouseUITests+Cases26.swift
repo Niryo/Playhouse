@@ -526,6 +526,119 @@ extension PlayhouseUITests {
         XCTAssertEqual(toggle.value as? String, "collapsed")
         attachScreenshot(named: "long-notice-6-collapsed-after-reopen")
     }
+    // case-contract: test_long_command_activity_title_is_previewed | A tool call whose command is long keeps its whole command: the streamed activity and fresh CLI/XPC history carry its title as Running followed by every line of a heredoc or every character of a long single-line command, and a short command's title is recorded unchanged. While the heredoc still runs, its live command row shows only the title's first line ending in an ellipsis, with no expand control. In the transcript's Worked for list a long title shows its first line, cut to 160 characters and ending in an ellipsis, with an expand control whose accessibility label names expanding the activity title; expanding reveals all of the command and collapsing restores the preview, while the row's accessibility label keeps the full title. A short command's row shows its whole title with no control, and reopening the task shows the long title collapsed again. The preview is Playhouse-owned presentation in the activity row both providers share, and both build a command's title as Running followed by the whole command, so Claude is the representative provider.
+    func test_long_command_activity_title_is_previewed() throws {
+        _ = try installClaudeFixture(named: "claude-fixture-ui-long-command")
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-ui-long-command")
+        _ = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Long command title", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let prompt = "Write the release notes with one long heredoc."
+        // Matches LONG_HEREDOC_COMMAND's first line and LONG_SINGLE_LINE_COMMAND in scripts/fixtures/claude-code-fixture.py.
+        let heredocPreview = "Running cat > /tmp/playhouse-fixture-release-notes.md <<'NOTES'…"
+        let lastLine = "Release note line 120: this change keeps a long command readable without laying all of it out."
+        let singleLineTitle = "Running echo " + (1...40).map { String(format: "release-note-%03d", $0) }.joined(separator: " ")
+        let singleLinePreview = String(singleLineTitle.prefix(160)).trimmingCharacters(in: .whitespaces) + "…"
+        func text(of element: XCUIElement) -> String {
+            [element.label, element.value as? String ?? ""].joined(separator: " ")
+        }
+        func openWorkedFor() {
+            let disclosure = element("codex-activity-disclosure")
+            XCTAssertTrue(disclosure.waitToExist(timeout: 20), "The finished turn offers its Worked for list.")
+            if disclosure.value as? String != "Expanded, down chevron" { disclosure.click() }
+            XCTAssertTrue(waitUntil({ disclosure.value as? String == "Expanded, down chevron" }, timeout: 10), "Worked for opens.")
+        }
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Long command title")
+        let longRow = element("codex-activity-row-toolu_long_heredoc")
+        let longTitle = element("codex-activity-title-toolu_long_heredoc")
+        let toggle = element("codex-activity-title-toggle-toolu_long_heredoc")
+
+        // While the heredoc runs it is the live command row, which shows only its preview.
+        let hold = executable.path + ".long-command"
+        touch(hold + "-pause")
+        sendFromComposer(prompt)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: hold + "-ready") }, timeout: 20), "The fixture holds the turn while the heredoc runs.")
+        XCTAssertTrue(longTitle.waitToExist(timeout: 10), "The running heredoc shows as the live command row.")
+        XCTAssertTrue(text(of: longTitle).contains(heredocPreview), "The live row shows the command's first line with an ellipsis: \(text(of: longTitle))")
+        XCTAssertFalse(text(of: longTitle).contains("Release note line"), "The live row shows none of the heredoc's body.")
+        XCTAssertFalse(toggle.exists, "The live command row has no expand control.")
+        XCTAssertTrue(longRow.label.contains(lastLine), "The live row's accessibility label keeps the whole command.")
+        attachScreenshot(named: "long-command-1-live-row-preview")
+        attachElementScreenshot(longRow, named: "long-command-1-live-row-closeup")
+        touch(hold + "-release")
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: prompt) == 1 && self.noTurnIsRunning()
+        }, timeout: 30), "The turn should finish once released.")
+        for suffix in ["-pause", "-ready", "-release"] { try? FileManager.default.removeItem(atPath: hold + suffix) }
+
+        openWorkedFor()
+        XCTAssertTrue(scrollTranscriptUntilExists(longTitle), "The long command's row is listed under Worked for.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 5), "A long title offers an expand control.")
+        XCTAssertTrue(text(of: longTitle).contains(heredocPreview), "The collapsed title is the command's first line ending in an ellipsis: \(text(of: longTitle))")
+        XCTAssertFalse(text(of: longTitle).contains("Release note line"), "The collapsed title shows none of the heredoc's body.")
+        XCTAssertEqual(toggle.label, "Expand activity title to show all text")
+        XCTAssertEqual(toggle.value as? String, "collapsed")
+        XCTAssertTrue(longRow.label.contains(lastLine), "The row's accessibility label keeps the whole command.")
+        let collapsedHeight = longRow.frame.height
+        XCTAssertLessThan(collapsedHeight, 120, "The collapsed row stays a few lines tall: \(longRow.frame)")
+
+        // A long single-line command is cut at 160 characters.
+        let singleTitle = element("codex-activity-title-toolu_long_single_line")
+        let singleToggle = element("codex-activity-title-toggle-toolu_long_single_line")
+        XCTAssertTrue(singleTitle.waitToExist(timeout: 5), "The single-line command's row is listed under Worked for.")
+        XCTAssertTrue(text(of: singleTitle).contains(singleLinePreview), "The title is cut to its first 160 characters: \(text(of: singleTitle))")
+        XCTAssertFalse(text(of: singleTitle).contains("release-note-040"), "The collapsed title stops before the line's end.")
+        XCTAssertTrue(singleToggle.exists, "A long single-line title offers an expand control.")
+
+        // A short command's row shows its whole title, with no control.
+        let shortRow = element("codex-activity-row-toolu_short_command")
+        let shortTitle = element("codex-activity-title-toolu_short_command")
+        XCTAssertTrue(shortTitle.waitToExist(timeout: 5), "The short command's row is listed under Worked for.")
+        XCTAssertTrue(text(of: shortTitle).contains("Running echo release notes checked"))
+        XCTAssertFalse(text(of: shortTitle).contains("…"), "A title that fits shows without an ellipsis.")
+        XCTAssertFalse(element("codex-activity-title-toggle-toolu_short_command").exists, "A short title has no expand control.")
+        attachScreenshot(named: "long-command-2-collapsed-previews")
+        attachElementScreenshot(longRow, named: "long-command-2-collapsed-heredoc-row")
+        attachElementScreenshot(shortRow, named: "long-command-2-short-row-without-control")
+
+        singleToggle.click()
+        XCTAssertTrue(waitUntil({ (singleToggle.value as? String) == "expanded" && text(of: singleTitle).contains("release-note-040") }, timeout: 5),
+                      "Expanding the single-line title reveals the end of the line.")
+        singleToggle.click()
+        XCTAssertTrue(waitUntil({ (singleToggle.value as? String) == "collapsed" && text(of: singleTitle).contains(singleLinePreview) }, timeout: 5))
+
+        toggle.click()
+        XCTAssertTrue(waitUntil({ (toggle.value as? String) == "expanded" && text(of: longTitle).contains(lastLine) }, timeout: 5),
+                      "Expanding reveals every line of the command.")
+        XCTAssertEqual(toggle.label, "Collapse activity title")
+        XCTAssertFalse(text(of: longTitle).contains("…"), "The expanded title has no ellipsis.")
+        XCTAssertGreaterThan(longRow.frame.height, collapsedHeight + 500, "The expanded row shows the heredoc's lines: \(longRow.frame)")
+        bringIntoTranscriptViewport(toggle, scrollView: element("conversation-scroll-view"))
+        attachScreenshot(named: "long-command-3-expanded")
+        attachElementScreenshot(toggle, named: "long-command-3-collapse-control")
+
+        toggle.click()
+        XCTAssertTrue(waitUntil({ (toggle.value as? String) == "collapsed" && text(of: longTitle).contains(heredocPreview) }, timeout: 5),
+                      "Collapsing restores the preview.")
+        XCTAssertEqual(toggle.label, "Expand activity title to show all text")
+        XCTAssertLessThan(longRow.frame.height, collapsedHeight + 2, "The collapsed row returns to its preview height.")
+
+        // Reopening the task, left expanded, starts the title collapsed again.
+        toggle.click()
+        XCTAssertTrue(waitUntil({ (toggle.value as? String) == "expanded" }, timeout: 5))
+        returnToBoard()
+        openTask(named: "Long command title")
+        openWorkedFor()
+        XCTAssertTrue(scrollTranscriptUntilExists(longTitle), "The reopened task lists the long command again.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "collapsed", "A reopened task shows the long title collapsed.")
+        XCTAssertTrue(text(of: longTitle).contains(heredocPreview))
+        attachScreenshot(named: "long-command-4-collapsed-after-reopen")
+        attachElementScreenshot(longRow, named: "long-command-4-collapsed-row-after-reopen")
+    }
+
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     func test_settings_token_usage_color_max_round_trip() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")

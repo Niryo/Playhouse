@@ -641,7 +641,9 @@ extension PlayhouseUITests {
         }
         assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.50, rgb: (71, 176, 235), accuracy: 30, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.50, rgb: (148, 41, 121), accuracy: 30, file: file, line: line)
-        assertPixel(logoImage, normalizedX: 0.50, normalizedY: 0.35, rgb: (245, 179, 124), accuracy: 35, file: file, line: line)
+        // The warm center sits in the stage's solid block; higher up it is a sliver that a 1x
+        // screen renders as a blend with the magenta curtain beside it.
+        assertPixel(logoImage, normalizedX: 0.50, normalizedY: 0.66, rgb: (245, 179, 124), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.80, rgb: (177, 54, 171), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.80, rgb: (240, 82, 121), accuracy: 30, file: file, line: line)
     }
@@ -670,10 +672,25 @@ extension PlayhouseUITests {
             let y = min(cgImage.height - 1, max(0, Int(CGFloat(cgImage.height) * normalizedY)))
             return bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
         }
+        // The outline is only a few pixels wide, so sub-pixel placement can land the exact
+        // sample on its anti-aliased edge; use the darkest slate pixel in a small neighborhood,
+        // skipping the neutral row background around the icon.
+        func darkestSlateColorNear(_ normalizedX: CGFloat, _ normalizedY: CGFloat, radius: Int = 2) -> NSColor? {
+            let centerX = Int(CGFloat(cgImage.width) * normalizedX)
+            let centerY = Int(CGFloat(cgImage.height) * normalizedY)
+            let candidates = (-radius...radius).flatMap { dx in
+                (-radius...radius).compactMap { dy -> NSColor? in
+                    let x = min(cgImage.width - 1, max(0, centerX + dx))
+                    let y = min(cgImage.height - 1, max(0, centerY + dy))
+                    return bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+                }
+            }
+            return candidates.filter { $0.blueComponent > $0.redComponent * 1.15 }.min { max($0.redComponent, $0.greenComponent, $0.blueComponent) < max($1.redComponent, $1.greenComponent, $1.blueComponent) }
+        }
         guard let topCyan = colorAt(0.5125, 0.2125),
               let leftEye = colorAt(0.3625, 0.4875),
               let face = colorAt(0.5125, 0.5125),
-              let lowerLeftAccent = colorAt(0.2125, 0.7875) else {
+              let lowerLeftAccent = darkestSlateColorNear(0.2125, 0.7875) else {
             XCTFail("Could not sample the subagent icon artwork.", file: file, line: line)
             return
         }

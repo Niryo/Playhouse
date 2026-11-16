@@ -372,6 +372,11 @@ struct PluginLibrary: Sendable {
         return record(folder: folder, validate: validate)
     }
 
+    /// Whether the plugin has ever been saved, so its folder is installed.
+    func isInstalled(id: String) -> Bool {
+        Self.isValidID(id) && FileManager.default.fileExists(atPath: directory.appendingPathComponent(id).path)
+    }
+
     /// Drafts and historical revisions live outside the installed-plugin listing.
     var draftDataDirectory: URL { directory.appendingPathComponent(".drafts", isDirectory: true) }
     var draftLibrary: PluginLibrary { PluginLibrary(dataDirectory: draftDataDirectory.path, resources: resources) }

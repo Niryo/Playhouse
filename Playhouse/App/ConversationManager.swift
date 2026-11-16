@@ -224,7 +224,8 @@ final class ConversationManager {
     /// or load the task's own provider session (send, history, goals) uses this:
     /// Codex keeps a loaded thread's skill config, so the first load decides it.
     func launchWorkspace(for task: any ConversationSubject, roots: [URL], message: String = "") throws -> ConversationWorkspaceContext {
-        var workspace = try ConversationWorkspaceContext(roots: roots)
+        // A rootless task runs in the same repository root its instructions name.
+        var workspace = try ConversationWorkspaceContext(roots: roots, rootlessDirectory: settingsManager.defaultParentFolderURL)
         if let skills = clients.skills {
             let bridge = skills.bridge(for: task, message: message)
             workspace.skillBridge = bridge

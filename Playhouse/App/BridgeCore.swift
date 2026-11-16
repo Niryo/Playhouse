@@ -496,7 +496,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     /// The recurring schedule that started this task, if any.
     let scheduleSourceTaskID: UUID?
     /// The plugin placement an Add Plugin mode task builds for, if any.
-    let pluginPlacement: String?
+    var pluginPlacement: String?
     let authoredPluginID: String?
     /// The name and presentation a plugin editor was set up with; the empty conversation shows them.
     let pluginAuthoringName: String?

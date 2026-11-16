@@ -131,7 +131,7 @@ extension ConversationManager {
         }
         // A Done task keeps its conversation; a follow-up reopens it below, once validated.
         let availableRoots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
-        let validationWorkspace = try ConversationWorkspaceContext(roots: availableRoots)
+        let validationWorkspace = try ConversationWorkspaceContext(roots: availableRoots, rootlessDirectory: settingsManager.defaultParentFolderURL)
         let effort = ConversationEffort(rawValue: task.conversationEffort) ?? .medium
         try await client.validateEffort(effort, modelID: modelID, workspace: validationWorkspace)
         if requestedModelID != nil {
@@ -219,7 +219,7 @@ extension ConversationManager {
                 )
                 if reserved != nil {
                     let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-                    let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
+                    let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots, rootlessDirectory: settingsManager.defaultParentFolderURL)
                     resolvedWorktreeTitle = try await generateAndApplyTitle(
                         taskID: taskID,
                         prompt: typedText,

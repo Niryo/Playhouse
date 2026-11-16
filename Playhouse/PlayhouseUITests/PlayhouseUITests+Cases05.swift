@@ -494,7 +494,7 @@ extension PlayhouseUITests {
         try runGit(fixture.secondary, "show-ref", "--verify", "--quiet", "refs/heads/\(dirtyBranch)")
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. The board's scroller stays hidden until the pointer is over the board, then shows at a subdued opacity while the pointer rests there, and hides again once the pointer leaves; holding its knob makes it clearly more opaque than the same knob hovered, and releasing returns it to the subdued opacity. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. The board's scroller stays hidden until the pointer is over the board, then shows at a subdued opacity while the pointer rests there, and hides again once the pointer leaves; holding its knob makes it clearly more opaque than the same knob hovered, and releasing returns it to the subdued opacity. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -688,10 +688,10 @@ extension PlayhouseUITests {
         }
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
 
-        // The columns are narrower than the window, so the board centers them. A sideways
-        // scroll nudge followed by a content-height change used to leave hit testing flush
-        // left while the columns still drew centered, so clicks missed every card and button
-        // until the window was resized.
+        // When the scroll view centered narrower content itself, a sideways scroll nudge
+        // followed by a content-height change left hit testing flush left while the columns
+        // still drew centered, so clicks missed every card and button until the window was
+        // resized. The board now places its columns itself; this guards that they stay put.
         // The newest card lands at the top, so start there; any later vertical scroll would
         // re-sync the stale geometry and hide the regression.
         let newestBacklogTask = app.buttons["Backlog scroll 12"]
@@ -701,20 +701,20 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ newestBacklogTask.isHittable }, timeout: 10), "Scrolling up should return to the top of the backlog.")
         let mainWindow = app.windows["main"]
         XCTAssertTrue(mainWindow.exists)
-        let centeredBacklogMinX = backlogColumn.frame.minX
-        XCTAssertGreaterThan(centeredBacklogMinX - mainWindow.frame.minX, 40, "The window is wider than the columns, so they should sit centered: backlog=\(backlogColumn.frame), window=\(mainWindow.frame).")
+        let drawnBacklogMinX = backlogColumn.frame.minX
+        XCTAssertGreaterThan(drawnBacklogMinX - mainWindow.frame.minX, 40, "The columns should sit right of the sidebar: backlog=\(backlogColumn.frame), window=\(mainWindow.frame).")
         boardViewport.scroll(byDeltaX: -120, deltaY: 0)
         boardViewport.scroll(byDeltaX: 120, deltaY: 0)
         try createTaskFixture(title: "Backlog after nudge", roots: [fixture.primary.path])
         let nudgedTask = app.buttons["Backlog after nudge"]
         XCTAssertTrue(waitUntil({ nudgedTask.exists && nudgedTask.isHittable }, timeout: 10), "The new backlog card should appear at the top of the column.")
-        XCTAssertTrue(waitUntil({ abs(backlogColumn.frame.minX - centeredBacklogMinX) <= 4 }, timeout: 3), "A sideways nudge and a new card should not move the board's hit-test layout away from where it draws: backlog=\(backlogColumn.frame), expected minX=\(centeredBacklogMinX).")
-        attachScreenshot(named: "Centered board after a sideways nudge and a new card: columns stay where they draw")
-        // Click near the card's drawn trailing edge, derived from the centered layout
+        XCTAssertTrue(waitUntil({ abs(backlogColumn.frame.minX - drawnBacklogMinX) <= 4 }, timeout: 3), "A sideways nudge and a new card should not move the board's hit-test layout away from where it draws: backlog=\(backlogColumn.frame), expected minX=\(drawnBacklogMinX).")
+        attachScreenshot(named: "Board after a sideways nudge and a new card: columns stay where they draw")
+        // Click near the card's drawn trailing edge, derived from the layout before the nudge
         // rather than its current accessibility frame, so a stale hit-test layout
         // (shifted toward the leading edge) would miss the card.
         let cardTrailingInset = nudgedTask.frame.maxX - backlogColumn.frame.minX
-        let drawnCardPoint = CGPoint(x: centeredBacklogMinX + cardTrailingInset - 12, y: nudgedTask.frame.midY)
+        let drawnCardPoint = CGPoint(x: drawnBacklogMinX + cardTrailingInset - 12, y: nudgedTask.frame.midY)
         mainWindow.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: drawnCardPoint.x - mainWindow.frame.minX, dy: drawnCardPoint.y - mainWindow.frame.minY))
             .click()

@@ -206,16 +206,17 @@ extension BoardTaskManager {
         return BoardTaskRecord(task: chat)
     }
 
+    /// Plugin editor conversations; an editor's title and placement are its draft's current ones, not its setup-time choices.
     func pluginConversations() throws -> [BoardTaskRecord] {
         let sessions = try modelContext.fetch(FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)]))
             .filter { $0.authoredPluginID != nil }.map { chat in
                 var record = BoardTaskRecord(task: chat)
-                // The agent can rename the plugin; its draft manifest's name wins over the setup-time title.
+                // The agent can rename or move the plugin; its draft manifest wins over the setup-time choices.
                 if let folder = chat.pluginContextFolder, let id = chat.authoredPluginID, PluginLibrary.isValidID(id),
                    FileManager.default.fileExists(atPath: URL(fileURLWithPath: folder).appendingPathComponent(id).appendingPathComponent("plugin.json").path),
-                   let name = try? PluginLibrary(dataDirectory: URL(fileURLWithPath: folder).deletingLastPathComponent().path).plugin(id: id, validate: false).name,
-                   !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    record.title = name
+                   let draft = try? PluginLibrary(dataDirectory: URL(fileURLWithPath: folder).deletingLastPathComponent().path).plugin(id: id, validate: false) {
+                    if !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { record.title = draft.name }
+                    if PluginPlacement(rawValue: draft.placement) != nil { record.pluginPlacement = draft.placement }
                 }
                 return record
             }
@@ -302,11 +303,13 @@ extension BoardTaskManager {
     }
 
     /// Lock every editor turn while deleting its plugin, then remove its conversation records.
+    /// A plugin that was never saved has only its draft and editor conversations, which go together.
     /// If deleting the folder fails, the saved conversations remain available for retry.
     func deletePlugin(id: String, library: PluginLibrary) async throws {
-        _ = try library.plugin(id: id, validate: false)
         let ids = try pluginConversations().filter { $0.authoredPluginID == id }.map(\.id)
             .sorted { $0.uuidString < $1.uuidString }
+        let installed = library.isInstalled(id: id)
+        if installed || ids.isEmpty { _ = try library.plugin(id: id, validate: false) }
         func reserve(_ index: Int) async throws {
             if index < ids.count {
                 try await withConversationTurnReservation(ids[index]) {
@@ -316,7 +319,7 @@ extension BoardTaskManager {
                 }
                 return
             }
-            try library.delete(id: id)
+            if installed { try library.delete(id: id) } else { try library.discardDraft(id: id) }
             for id in ids {
                 if let chat = try standaloneChatModel(id) { modelContext.delete(chat) }
                 else if let task = try? taskModel(id) { modelContext.delete(task) }

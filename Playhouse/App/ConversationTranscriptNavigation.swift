@@ -458,11 +458,12 @@ extension TaskConversationView {
             HStack(spacing: 7) {
                 Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : ["interrupted", "stopped"].contains(activity.status) ? "pause.circle.fill" : "gearshape.2.fill")
                     .foregroundStyle(activity.status == "completed" ? .green : ["interrupted", "stopped"].contains(activity.status) ? .orange : .accentColor)
-                Text(activity.title)
+                Text(activity.titlePreview ?? activity.title)
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .textSelection(.enabled)
+                    .accessibilityIdentifier("codex-activity-title-\(activity.id)")
                 if !displayDetail.isEmpty {
                     Text(displayDetail)
                         .font(.system(size: 10, design: .monospaced))
@@ -501,13 +502,46 @@ extension TaskConversationView {
             HStack(spacing: 7) {
                 Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : ["interrupted", "stopped"].contains(activity.status) ? "pause.circle.fill" : "gearshape.2.fill")
                     .foregroundStyle(activity.status == "completed" ? .green : ["interrupted", "stopped"].contains(activity.status) ? .orange : .accentColor)
-                Text(activity.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .textSelection(.enabled)
+                // A long title shows its preview until the reader expands it; see `titlePreview`.
+                let titlePreview = activity.titlePreview
+                let isTitleExpanded = titlePreview != nil && expandedActivityTitleIDs.contains(activity.id)
+                if !isTitleExpanded {
+                    Text(titlePreview ?? activity.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("codex-activity-title-\(activity.id)")
+                }
                 Spacer(minLength: 4)
+                if titlePreview != nil {
+                    Button {
+                        if isTitleExpanded { expandedActivityTitleIDs.remove(activity.id) } else { expandedActivityTitleIDs.insert(activity.id) }
+                    } label: {
+                        Image(systemName: isTitleExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .buttonHoverPointer()
+                    .nativeHelp(isTitleExpanded ? "Show only the start of this title" : "Show the whole title")
+                    .accessibilityLabel(isTitleExpanded ? "Collapse activity title" : "Expand activity title to show all text")
+                    .accessibilityValue(isTitleExpanded ? "expanded" : "collapsed")
+                    .accessibilityIdentifier("codex-activity-title-toggle-\(activity.id)")
+                }
                 Text(activity.statusLabel)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
+            }
+            if expandedActivityTitleIDs.contains(activity.id), activity.titlePreview != nil {
+                // On its own line rather than in the header's stack, which would measure it
+                // as one line of the whole title on every pass.
+                Text(activity.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("codex-activity-title-\(activity.id)")
             }
             if !displayDetail.isEmpty {
                 Text(displayDetail)

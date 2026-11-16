@@ -655,7 +655,16 @@ final class PlayhouseBridgeRuntime {
                 let library = try pluginLibrary()
                 let id = try request.requiredString("pluginID")
                 result = try await taskManager.withPluginOperationLock(id) {
-                  try await taskManager.withPluginEditorsReserved(id: id) {
+                  // A plugin that was never saved has no saved version to reset to:
+                  // discarding it removes its draft and editor conversations, as deleting does.
+                  if request.command == "plugin.discard", !library.isInstalled(id: id) {
+                      do { try await taskManager.deletePlugin(id: id, library: library) }
+                      catch let error as PluginLibraryError { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
+                      catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
+                      settings.clearPluginState(id)
+                      return .object(["discarded": .string(id), "deleted": .boolean(true), "revision": .integer(settings.bumpPluginsRevision())])
+                  }
+                  return try await taskManager.withPluginEditorsReserved(id: id) {
                     switch request.command {
                     case "plugin.save":
                         let published = try library.saveDraft(id: id)

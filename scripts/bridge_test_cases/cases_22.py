@@ -56,6 +56,71 @@ class BridgeTestCases22:
         self.assertEqual((installed / "index.js").read_text(), changed)
         self.assertEqual((draft / "index.js").read_text(), changed)
 
+    # case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard draft in an unsaved plugin's editor asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
+    def test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it(self):
+        def sessions():
+            return [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]]
+        def revision():
+            return self.assert_success(self.call_cli("plugin", "list")[0])["revision"]
+        drafts = self.plugins_folder() / ".drafts" / "plugins"
+
+        # Discarded before the first prompt: nothing of it is kept.
+        fresh = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Blamos", "--presentation", "popover", "--provider", "claude")[0])["task"]
+        fresh_id = fresh["authoredPluginID"]
+        self.assertIn(fresh_id, sessions())
+        before = revision()
+        discarded = self.assert_success(self.call_cli("plugin", "discard", "--id", fresh_id)[0])
+        self.assertEqual(discarded["discarded"], fresh_id)
+        self.assertTrue(discarded["deleted"], "An unsaved plugin has nothing to reset to, so discarding deletes it.")
+        self.assertGreater(discarded["revision"], before, "The window reloads its Plugins menu.")
+        self.assertNotIn(fresh_id, sessions())
+        self.assertFalse((drafts / fresh_id).exists())
+        self.assertFalse((self.plugins_folder() / fresh_id).exists())
+        self.assert_failure(self.call_cli("plugin", "edit", "--id", fresh_id, expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "discard", "--id", fresh_id, expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "delete", "--id", "missing-plugin", expected_status=3)[0], "not_found")
+
+        # Discarded after a turn wrote its draft: the draft and conversation go too.
+        environment = self.install_claude_fixture("claude-fixture-plugin-preview")
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        sent = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Sent", "--presentation", "popover", "--provider", "claude")[0])["task"]
+        sent_id = sent["authoredPluginID"]
+        message = "plugin-preview-fixture " + json.dumps({"folder": str(drafts / sent_id), "text": "Sent preview"})
+        self.assert_success(self.call_cli("conversation", "send", sent["id"], "--message", message, extra_environment=environment)[0])
+        self.assertTrue((drafts / sent_id / "index.js").is_file(), "The turn wrote the plugin's draft.")
+        self.assert_success(self.call_cli("plugin", "discard", "--id", sent_id)[0])
+        self.assertNotIn(sent_id, sessions())
+        self.assertFalse((drafts / sent_id).exists())
+        self.assertFalse((self.plugins_folder() / sent_id).exists(), "Discarding never publishes the draft.")
+
+        # A draft that can't be removed keeps the editor conversation for a retry.
+        stuck = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Stuck", "--presentation", "popover", "--provider", "claude")[0])["task"]
+        stuck_id = stuck["authoredPluginID"]
+        (drafts / stuck_id).mkdir(parents=True)
+        (drafts / stuck_id / "index.js").write_text("draft", encoding="utf-8")
+        drafts.chmod(0o500)
+        try:
+            self.assert_failure(self.call_cli("plugin", "discard", "--id", stuck_id, expected_status=1)[0], "operation_failed")
+        finally:
+            drafts.chmod(0o700)
+        self.assertIn(stuck_id, sessions())
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", stuck_id)[0])["task"]["id"], stuck["id"])
+        # Deleting an unsaved plugin removes it the same way.
+        self.assert_success(self.call_cli("plugin", "delete", "--id", stuck_id)[0])
+        self.assertNotIn(stuck_id, sessions())
+        self.assertFalse((drafts / stuck_id).exists())
+
+        # A saved plugin's discard only resets its draft and keeps its editor.
+        installed = self.write_installed_plugin("kept-editor", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
+        editor = self.assert_success(self.call_cli("plugin", "edit", "--id", "kept-editor")[0])["task"]
+        (drafts / "kept-editor" / "index.js").write_text("changed", encoding="utf-8")
+        reset = self.assert_success(self.call_cli("plugin", "discard", "--id", "kept-editor")[0])
+        self.assertNotIn("deleted", reset)
+        self.assertEqual((drafts / "kept-editor" / "index.js").read_text(), self.PLUGIN_CONTEXT_SOURCE)
+        self.assertTrue(installed.is_dir())
+        self.assertIn("kept-editor", sessions())
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", "kept-editor")[0])["task"]["id"], editor["id"])
+
     # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, the chosen name, placement and presentation with a note that the user can ask to change any of them, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions, which let the user change any of those choices, even the name; a changed name, placement and presentation names the unsaved draft's editor and is published under the same plugin ID on save; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
@@ -119,6 +184,7 @@ class BridgeTestCases22:
         (renamed_draft / "index.js").write_text(self.PLUGIN_CONTEXT_SOURCE, encoding="utf-8")
         renamed_session = next(entry for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"] if entry["authoredPluginID"] == renamed_id)
         self.assertEqual(renamed_session["title"], "Stopwatch", "An unsaved draft's editor is listed under the name the agent changed it to.")
+        self.assertEqual(renamed_session["pluginPlacement"], "conversationToolbar", "Its Plugins menu row shows the placement the agent moved it to.")
         renamed_saved = self.assert_success(self.call_cli("plugin", "save", "--id", renamed_id)[0])["plugin"]
         self.assertEqual((renamed_saved["id"], renamed_saved["name"], renamed_saved["placement"], renamed_saved["presentation"]),
                          (renamed_id, "Stopwatch", "conversationToolbar", "sidebar"), "Saving publishes the changed name, placement and presentation under the same ID.")

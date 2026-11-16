@@ -215,6 +215,24 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         return title
     }
 
+    /// The most characters of a title an activity row shows until the reader expands it.
+    static let titlePreviewLimit = 160
+
+    /// The title as a collapsed activity row shows it: its first line, cut to
+    /// `titlePreviewLimit` characters and ending in an ellipsis. Nil when the whole title fits.
+    /// A command's title carries the whole command, which can be tens of thousands of
+    /// characters (a heredoc that writes a file); laying all of that out on every pass
+    /// of the transcript stalls the main thread, so only the preview reaches a `Text`
+    /// until the reader asks for the rest.
+    /// Every row computes it on every update, so it reads at most one character past the limit.
+    var titlePreview: String? {
+        let head = title.prefix(Self.titlePreviewLimit + 1)
+        // `isNewline`, since "\r\n" is one Character that equals neither "\n" nor "\r".
+        let firstLine = head.prefix { !$0.isNewline }
+        guard firstLine.count > Self.titlePreviewLimit || firstLine.endIndex != title.endIndex else { return nil }
+        return firstLine.prefix(Self.titlePreviewLimit).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
     func durationLabel(at now: Date = .now) -> String? {
         if let durationMs {
             return "Duration · \(durationMs) ms"

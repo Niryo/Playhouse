@@ -22,7 +22,8 @@ extension ClaudeSessionRunner {
             "--permission-prompt-tool", "stdio",
             "--permission-mode", mode == .plan ? "plan" : "default"
         ]
-        if !resume, let source = owner?.forkSourceSessionID(for: sessionID) {
+        let forkSource = resume ? nil : owner?.forkSourceSessionID(for: sessionID)
+        if let source = forkSource {
             // A side chat's first turn copies the source session's context under its own ID.
             arguments += ["--resume", source, "--fork-session", "--session-id", sessionID]
         } else {
@@ -82,6 +83,18 @@ extension ClaudeSessionRunner {
         environment.removeValue(forKey: "CLAUDECODE")
         environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
 
+        // Claude Code finds a session to resume under its working folder. A rootless task's
+        // folder follows the repository root setting (and was the home folder in earlier
+        // builds), so its resumed or forked session keeps the folder Claude Code recorded for it.
+        let resumedSessionID = forkSource ?? (resume ? sessionID : nil)
+        let workingDirectory = workspace.roots.isEmpty
+            ? resumedSessionID.flatMap {
+                ClaudeSessionUsageReader.recordedWorkingDirectory(
+                    sessionID: $0, configDirectory: ClaudeCodeClient.configDirectory(override: configDirectoryOverride)
+                )
+            } ?? workspace.cwd
+            : workspace.cwd
+
         if let runsDirectory {
             let command = ConversationProviderFixture.launchCommand(executable: executable, arguments: arguments)
             stdoutBuffer.removeAll(keepingCapacity: true)
@@ -92,7 +105,7 @@ extension ClaudeSessionRunner {
                 run = try ClaudeAgentRun.start(
                     runsDirectory: runsDirectory, sessionID: sessionID, mode: mode,
                     executable: command.executable, arguments: command.arguments,
-                    environment: environment, workingDirectory: workspace.cwd.path
+                    environment: environment, workingDirectory: workingDirectory.path
                 )
             } catch {
                 throw ClientError.processStart(error.localizedDescription)
@@ -101,7 +114,7 @@ extension ClaudeSessionRunner {
             followAgentRun(run)
             PlayhouseDiagnostics.record("claude.process.started", fields: diagnosticFields([
                 "executable": executable,
-                "workingDirectory": workspace.cwd.path,
+                "workingDirectory": workingDirectory.path,
                 "processID": String(run.identity?.pid ?? -1),
                 "resume": String(resume),
                 "mode": mode.rawValue,
@@ -118,7 +131,7 @@ extension ClaudeSessionRunner {
         let command = ConversationProviderFixture.launchCommand(executable: executable, arguments: arguments)
         child.executableURL = URL(fileURLWithPath: command.executable)
         child.arguments = command.arguments
-        child.currentDirectoryURL = workspace.cwd
+        child.currentDirectoryURL = workingDirectory
         child.standardInput = stdin
         child.standardOutput = stdout
         child.standardError = stderr
@@ -184,7 +197,7 @@ extension ClaudeSessionRunner {
         }
         PlayhouseDiagnostics.record("claude.process.started", fields: diagnosticFields([
             "executable": executable,
-            "workingDirectory": workspace.cwd.path,
+            "workingDirectory": workingDirectory.path,
             "processID": String(child.processIdentifier),
             "resume": String(resume),
             "mode": mode.rawValue,

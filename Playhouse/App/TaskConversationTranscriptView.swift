@@ -306,7 +306,25 @@ extension TaskConversationView {
             .element
     }
 
+    @ViewBuilder
     var activityList: some View {
+        let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
+            .union(inlineToolCalls.ids)
+        let expandedActivities = activities.filter {
+            !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
+                && !(task.isStandaloneChat && $0.recalledChatPageID != nil)
+        }
+        let completedAgentActivities = activities.filter { $0.isSubagent && !$0.isActive }
+        if isDisplayingActiveResponse && progressMessages.isEmpty && expandedActivities.isEmpty
+            && completedAgentActivities.isEmpty && activeProcess == nil && activeSubagents.isEmpty
+            && liveChatPageRecalls.isEmpty {
+            thinkingRow
+        } else {
+            activityDisclosure(expandedActivities: expandedActivities, completedAgentActivities: completedAgentActivities)
+        }
+    }
+
+    func activityDisclosure(expandedActivities: [ConversationActivity], completedAgentActivities: [ConversationActivity]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
@@ -346,16 +364,9 @@ extension TaskConversationView {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
-                        .union(inlineToolCalls.ids)
-                    ForEach(activities.filter {
-                        !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
-                            && !(task.isStandaloneChat && $0.recalledChatPageID != nil)
-                    }) { activity in
+                    ForEach(expandedActivities) { activity in
                         activityRow(activity)
                     }
-                    let agentActivities = activities.filter(\.isSubagent)
-                    let completedAgentActivities = agentActivities.filter { !$0.isActive }
                     if !completedAgentActivities.isEmpty {
                         Text("Agents used")
                             .font(.system(size: 10, weight: .semibold))
@@ -371,6 +382,20 @@ extension TaskConversationView {
                 .accessibilityIdentifier("codex-activity-details")
             }
         }
+    }
+
+    /// Stands in for Working for until the turn reports its first progress or activity.
+    var thinkingRow: some View {
+        HStack(spacing: 7) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Thinking…")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Thinking…")
+        .accessibilityIdentifier("codex-activity-thinking")
     }
 
     /// Composed only of plugin atoms (Plugins/Atoms).

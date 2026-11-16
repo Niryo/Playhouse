@@ -90,6 +90,21 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
                "message": {"role": "user", "content": [{"type": "text", "text": runtime.LONG_HANDOFF_NOTICE if is_long else runtime.NO_VISIBLE_OUTPUT_NOTICE}]}})
         runtime.wait_for_release("handoff-notice", "The handoff notice streamed; the turn is still running.")
         runtime.text(f"msg_notice_handoff_reply_{suffix}", runtime.NOTICE_HANDOFF_REPLY)
+    elif user_text.rstrip().endswith(runtime.LONG_COMMAND_PROMPT):
+        # Only reported, never run: the title, not the file, is what the case is about. A test can
+        # hold the turn while the heredoc is still running, when it is the live command row.
+        runtime.assistant("msg_toolu_long_heredoc", [{"type": "tool_use", "id": "toolu_long_heredoc", "name": "Bash",
+                                                      "input": {"command": runtime.LONG_HEREDOC_COMMAND, "description": "Write the release notes"}}])
+        runtime.wait_for_release("long-command", "The long heredoc command is running.")
+        runtime.write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_long_heredoc", "content": "", "is_error": False}]}})
+        runtime.run_tool("toolu_long_single_line", "Bash", {"command": runtime.LONG_SINGLE_LINE_COMMAND, "description": "List the release notes"})
+        commands.append({"command": runtime.SHORT_COMMAND, "output": runtime.run_tool(
+            "toolu_short_command", "Bash", {"command": runtime.SHORT_COMMAND, "description": "Check the release notes"}, runtime.SHORT_COMMAND)})
+        runtime.text("msg_long_command_answer", runtime.LONG_COMMAND_ANSWER)
+        outcome = runtime.report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome, "output": runtime.run_tool("toolu_long_command_outcome", "Bash", {"command": outcome}, outcome)})
     elif runtime.PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
         question_input = {
             "questions": [{

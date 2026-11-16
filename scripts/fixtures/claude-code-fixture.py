@@ -108,6 +108,18 @@ LONG_HANDOFF_NOTICE = "\n".join(
     [f"Handoff context line {index:02d}: the previous session summarized this part of the task in detail." for index in range(1, 25)]
     + ["Handoff context ends here."]
 )
+# A turn that writes a file with one long heredoc command, then runs one long single-line command
+# and one short command, as an agent's real heredocs put tens of thousands of characters in a
+# command's title.
+LONG_COMMAND_PROMPT = "Write the release notes with one long heredoc."
+LONG_COMMAND_ANSWER = "The release notes are written."
+SHORT_COMMAND = "echo release notes checked"
+# One line far past the row's 160-character preview, as a long `python3 -c` or a Codex argument list joined by spaces.
+LONG_SINGLE_LINE_COMMAND = "echo " + " ".join(f"release-note-{index:03d}" for index in range(1, 41))
+LONG_HEREDOC_COMMAND = "cat > /tmp/playhouse-fixture-release-notes.md <<'NOTES'\n" + "\n".join(
+    [f"Release note line {index:03d}: this change keeps a long command readable without laying all of it out." for index in range(1, 121)]
+    + ["NOTES"]
+)
 # A chat turn that forgets close-turn; Playhouse's one visible nudge then gets it run.
 CHAT_SKIPPED_CLOSE_TURN_PROMPT = "Plan a weekend hiking trip."
 CHAT_SKIPPED_CLOSE_TURN_ANSWER = "Pick a loop trail under 15 km and start early."
@@ -713,6 +725,16 @@ def main():
                     write({"type": "result", "subtype": "error", "is_error": True,
                            "result": "No conversation found with session ID"})
                     return 1
+                # Like Claude Code, a session-cwd fixture's session file records the folder
+                # the session started in (a fork's too); Playhouse resumes a rootless task from it.
+                config = os.environ.get("CLAUDE_CONFIG_DIR")
+                starts_session = "--resume" not in sys.argv or "--fork-session" in sys.argv
+                if "-session-cwd" in Path(sys.argv[0]).name and config and "--session-id" in sys.argv and starts_session:
+                    project = Path(config) / "projects" / "-fixture-project"
+                    project.mkdir(parents=True, exist_ok=True)
+                    with open(project / f"{argument('--session-id')}.jsonl", "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({"type": "system", "subtype": "fixture-session-start",
+                                                 "sessionId": argument("--session-id"), "cwd": os.getcwd()}) + "\n")
                 # Claude Code announces the newest release of a family only through the
                 # bare alias, which names the concrete model in `resolvedModel`; no entry
                 # has that concrete name as its own value.

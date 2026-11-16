@@ -288,7 +288,7 @@ class BridgeTestCases10:
                 "task", "reconcile", task["id"], extra_environment=environment
             )[0])
             self.assertEqual((reconciled["id"], reconciled["status"], reconciled["title"]), (task["id"], fresh["status"], title))
-    # case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running.
+    # case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running. The held conversation first completes a turn with a tool call. Before the held turn reports anything, its mid-turn history has only its question after that turn, with no assistant message or activity of its own, and it shows only a Thinking row with a spinner in place of an empty Working for, despite the earlier turn's tool call; once the turn settles, opening its Worked for shows no Thinking row.
     def test_conversation_runs_concurrent_claude_sends_in_parallel(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-parallel-sends"
@@ -310,6 +310,13 @@ class BridgeTestCases10:
         second_command = ["conversation", "send", second["id"], "--message", second_prompt]
         ready = Path(str(executable) + ".concurrent-turn-ready")
         release = Path(str(executable) + ".concurrent-turn-release")
+        # An earlier turn with a tool call precedes the held turn; it is not the held turn's activity.
+        self.assert_success(self.call_cli(
+            "conversation", "send", first["id"], "--message", "Summarize the release notes.", extra_environment=environment
+        )[0])
+        earlier_history = self.assert_success(self.call_cli("conversation", "history", first["id"], extra_environment=environment)[0])
+        earlier_activity_ids = {row["id"] for row in earlier_history["activities"]}
+        self.assertIn("toolu_chat_read", earlier_activity_ids)
         first_process = self.start_cli(*first_command, extra_environment=environment)
         second_process = None
         try:
@@ -317,6 +324,15 @@ class BridgeTestCases10:
             while time.monotonic() < deadline and not ready.exists() and first_process.poll() is None:
                 time.sleep(0.02)
             self.assertTrue(ready.exists(), "The first Claude fixture turn should become active.")
+            # Before the held turn reports anything, its history has only the question, the
+            # state the transcript shows as Thinking.
+            held_history = self.assert_success(self.call_cli("conversation", "history", first["id"], extra_environment=environment)[0])
+            held_messages = held_history["messages"]
+            held_question_index = max(
+                index for index, message in enumerate(held_messages) if message["role"] == "user" and message["text"] == first_prompt
+            )
+            self.assertEqual([], [message for message in held_messages[held_question_index + 1:] if message["role"] == "assistant"])
+            self.assertLessEqual({row["id"] for row in held_history["activities"]}, earlier_activity_ids)
             pending = second_process = self.start_cli(*second_command, extra_environment=environment)
             second_result, _ = self.finish_cli(pending, second_command)
             second_process = None

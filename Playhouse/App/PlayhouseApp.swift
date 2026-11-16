@@ -241,7 +241,7 @@ struct PluginsMenuContent: View {
                         Button("Edit…") { edit(plugin.id) }
                             // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
                             .help("Open this plugin's editor")
-                        Button("Delete…") { confirmDelete(plugin) }
+                        Button("Delete…") { confirmDelete(plugin.id, name: plugin.name, detail: "Its folder is removed: \(plugin.folder)") }
                             // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
                             .help("Delete this plugin's folder")
                         Button("Settings…") {}
@@ -256,19 +256,38 @@ struct PluginsMenuContent: View {
                 }
             }
         }
+        // A plugin being authored that was never saved has an editor conversation but no folder.
+        let unsaved = registry.authoringSessions.filter { session in
+            session.authoredPluginID.map { id in !registry.plugins.contains { $0.id == id } } ?? false
+        }
+        if !unsaved.isEmpty {
+            Divider()
+            Section("Unsaved Plugins") {
+                ForEach(unsaved, id: \.id) { session in
+                    if let pluginID = session.authoredPluginID {
+                        Menu {
+                            Button("Edit…") { edit(pluginID) }
+                                // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                                .help("Open this plugin's editor")
+                            Button("Delete…") {
+                                confirmDelete(pluginID, name: session.title, detail: "It was never saved. Its draft and editor conversation are removed.")
+                            }
+                                // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                                .help("Delete this unsaved plugin and its conversation")
+                        } label: {
+                            let placement = session.pluginPlacement.flatMap(PluginPlacement.init(rawValue:))?.title ?? session.pluginPlacement ?? ""
+                            Label("\(session.title) — \(placement) (Unsaved)", systemImage: "square.dashed")
+                        }
+                            // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
+                            // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
+                    }
+                }
+            }
+        }
         Divider()
         Button("Reload Plugins") { Task { await registry.reload() } }
             .buttonHoverPointer()
             .help("Read the plugins folder again")
-        ForEach(registry.authoringSessions.filter { session in
-            !registry.plugins.contains { $0.id == session.authoredPluginID }
-        }, id: \.id) { session in
-            if let pluginID = session.authoredPluginID {
-                Button("Edit \(session.title)…") { edit(pluginID) }
-                    .buttonHoverPointer()
-                    .help("Open this plugin's editor")
-            }
-        }
     }
 
     private func pluginLabel(_ plugin: PluginRecord) -> some View {
@@ -307,21 +326,21 @@ struct PluginsMenuContent: View {
         }
     }
 
-    private func confirmDelete(_ plugin: PluginRecord) {
+    private func confirmDelete(_ pluginID: String, name: String, detail: String) {
         let alert = NSAlert()
-        alert.messageText = "Delete the plugin \(plugin.name)?"
-        alert.informativeText = "Its folder is removed: \(plugin.folder)"
+        alert.messageText = "Delete the plugin \(name)?"
+        alert.informativeText = detail
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task { @MainActor in
             do {
-                if let session = registry.authoringSessions.first(where: { $0.authoredPluginID == plugin.id }) {
+                if let session = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) {
                     NotificationCenter.default.post(name: .playhousePreparePluginEdit, object: session.id)
                     await Task.yield()
                 }
-                try await registry.delete(plugin.id)
+                try await registry.delete(pluginID)
             } catch {
                 let failure = NSAlert(error: error)
                 failure.runModal()
