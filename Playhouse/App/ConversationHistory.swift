@@ -374,6 +374,18 @@ extension ConversationManager {
         }
     }
 
+    /// The index of the turn message a compaction row follows: the message it was recorded after,
+    /// or, for a row recorded without one, the last message written before its compaction finished.
+    /// Nil when neither is known, so the row stays after the turn's messages.
+    static func compactionAnchor(_ activity: ConversationActivity, in messages: [ConversationMessage], recordedAt: Date?) -> Int? {
+        if let afterMessageID = activity.afterMessageID,
+           let index = messages.firstIndex(where: { $0.id == afterMessageID }) {
+            return index
+        }
+        guard let recordedAt else { return nil }
+        return messages.lastIndex { $0.createdAt.map { $0 <= recordedAt } == true }
+    }
+
     /// Orders every visible element by provider segment, then by its position
     /// within that provider's own timeline, and inserts a divider wherever the
     /// provider changes.
@@ -443,18 +455,34 @@ extension ConversationManager {
             let precedingTurn = codex?.messages.last { ($0.timelineOrder ?? 0) < order }?.turnID
             elements.append((codexSegment(activity.turnID ?? precedingTurn), order, 0, .compaction(activity)))
         }
+        let compactionRecordedAt = Dictionary(
+            (transcript.contextCompactions ?? []).map { ($0.id, $0.recordedAt) }, uniquingKeysWith: { first, _ in first }
+        )
         var localOrder = 0
         for turn in transcript.turns {
             if privateTranscriptReminderTurnIDs.contains(turn.id) { continue }
             let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
+            var messagePositions: [(order: Int, tieBreak: Int)] = []
             for message in turn.messages {
                 let position = transcriptOrder(for: message, fallback: localOrder)
                 elements.append((segment, position.order, position.tieBreak, .message(message)))
+                messagePositions.append(position)
                 localOrder += 1
             }
+            var compactionsAfterMessage: [Int: Int] = [:]
             for activity in turn.activities where activity.turnID.map(allSensitiveTurnIDs.contains) != true {
                 if activity.isContextCompaction {
-                    elements.append((segment, activity.timelineOrder ?? localOrder, 0, .compaction(activity)))
+                    if activity.timelineOrder == nil,
+                       let anchor = Self.compactionAnchor(activity, in: turn.messages, recordedAt: compactionRecordedAt[activity.id]) {
+                        // A long turn can compact several times; each row stays between the messages
+                        // it came between instead of every row stacking after the turn's last message.
+                        let count = compactionsAfterMessage[anchor, default: 0] + 1
+                        compactionsAfterMessage[anchor] = count
+                        let position = messagePositions[anchor]
+                        elements.append((segment, position.order, position.tieBreak + count, .compaction(activity)))
+                    } else {
+                        elements.append((segment, activity.timelineOrder ?? localOrder, 0, .compaction(activity)))
+                    }
                 }
                 localOrder += 1
             }

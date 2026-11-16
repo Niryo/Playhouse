@@ -280,7 +280,7 @@ extension PlayhouseUITests {
         XCTAssertTrue((terminalHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Continue after asynchronous failure." })
 
     }
-    // case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event.
+    // case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event. A long turn that compacts twice shows each compaction where it happened: the first after the text and tool call written before it and before the summary message Claude Code continues from, the second between the messages written after the first and its own summary, never stacked after the turn's last message. Compaction rows stored without the message they follow are placed the same way, by when each compaction finished.
     func test_claude_compaction_shows_one_row() throws {
         func compactionRows(_ taskID: String, environment: [String: String] = [:]) throws -> [[String: Any]] {
             let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: environment)["result"] as? [String: Any])
@@ -307,6 +307,44 @@ extension PlayhouseUITests {
         let thresholdUsage = try XCTUnwrap(try runCLI(["task", "token-usage", thresholdTaskID])["result"] as? [String: Any])
         XCTAssertEqual((thresholdUsage["contextCompactions"] as? [[String: Any]])?.count, 1)
 
+        // A long turn that compacts twice keeps each row where it happened, not stacked after its last message.
+        // The second task's rows are stored the way rows recorded before they kept the message they follow were.
+        var longTurns: [(title: String, firstRowID: String, secondRowID: String, answer: String)] = []
+        for title in ["Compaction mid turn", "Stored compaction mid turn"] {
+            let longTask = try XCTUnwrap(try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+            ])["result"] as? [String: Any])
+            let longTaskID = try XCTUnwrap(longTask["id"] as? String)
+            _ = try runCLI(["conversation", "send", longTaskID, "--message", "compact twice mid turn"], extraEnvironment: thresholdEnvironment)
+            let longRows = try compactionRows(longTaskID)
+            XCTAssertEqual(longRows.map { $0["status"] as? String }, ["completed", "completed"], "Each compaction of the turn is one row: \(longRows)")
+            func longRowID(preTokens: Int) throws -> String {
+                try XCTUnwrap(longRows.first { ($0["compaction"] as? [String: Any])?["preTokens"] as? Int == preTokens }?["id"] as? String)
+            }
+            let longHistory = try XCTUnwrap(try runCLI(["conversation", "history", longTaskID])["result"] as? [String: Any])
+            let answer = try XCTUnwrap((longHistory["messages"] as? [[String: Any]] ?? []).last {
+                $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer"
+            }?["text"] as? String, "The turn ends with an answer.")
+            longTurns.append((title, try longRowID(preTokens: 170000), try longRowID(preTokens: 168000), answer))
+        }
+        let storedTaskID = try XCTUnwrap(try conversationRows(
+            "SELECT DISTINCT task_id FROM conversation_activities WHERE id = '\(longTurns[1].firstRowID)'"
+        ).first?.first ?? nil)
+        var strippedRows = 0
+        for row in try conversationRows("SELECT turn_id, id, payload FROM conversation_activities WHERE task_id = '\(storedTaskID)'") {
+            guard let turnID = row[0], let rowID = row[1], let payload = row[2],
+                  var activity = try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
+                  activity["isContextCompaction"] as? Bool == true else { continue }
+            XCTAssertNotNil(activity.removeValue(forKey: "afterMessageID"), "A new compaction row records the message it follows.")
+            let stripped = String(decoding: try JSONSerialization.data(withJSONObject: activity), as: UTF8.self)
+            strippedRows += 1
+            try conversationExecute("""
+                UPDATE conversation_activities SET payload = '\(stripped.replacingOccurrences(of: "'", with: "''"))'
+                WHERE task_id = '\(storedTaskID)' AND turn_id = '\(turnID)' AND id = '\(rowID)'
+                """)
+        }
+        XCTAssertEqual(strippedRows, 2)
+
         let task = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Compaction across a restart", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])
@@ -324,6 +362,27 @@ extension PlayhouseUITests {
         attachElementScreenshot(visibleRows.firstMatch, named: "compaction-rows-1-threshold-row")
 
         returnToBoard()
+        for (index, longTurn) in longTurns.enumerated() {
+            openTask(named: longTurn.title)
+            let firstRow = app.descendants(matching: .any)["context-compaction-row-\(longTurn.firstRowID)"]
+            let secondRow = app.descendants(matching: .any)["context-compaction-row-\(longTurn.secondRowID)"]
+            let firstSummary = app.groups.matching(NSPredicate(format: "label CONTAINS %@", "Continued after the first compaction.")).firstMatch
+            let secondSummary = app.groups.matching(NSPredicate(format: "label CONTAINS %@", "Continued after the second compaction.")).firstMatch
+            XCTAssertTrue(secondSummary.waitToExist(timeout: 10), "\(longTurn.title): the turn's messages after its compactions are shown.")
+            XCTAssertTrue(firstRow.waitToExist(timeout: 5) && secondRow.exists, "\(longTurn.title): both compactions of the turn are shown.")
+            XCTAssertEqual(visibleRows.count, 2, "\(longTurn.title): each compaction of the turn is drawn once.")
+            XCTAssertLessThan(transcriptMessage("compact twice mid turn").frame.minY, firstRow.frame.minY, "\(longTurn.title): the first compaction follows the prompt.")
+            XCTAssertLessThan(firstRow.frame.minY, firstSummary.frame.minY, "\(longTurn.title): the first compaction comes before the message it was summarized into.")
+            XCTAssertLessThan(firstSummary.frame.minY, secondRow.frame.minY, "\(longTurn.title): the second compaction follows the messages written after the first one.")
+            XCTAssertLessThan(secondRow.frame.minY, secondSummary.frame.minY, "\(longTurn.title): the second compaction comes before the message it was summarized into.")
+            // The text and tool calls written before each compaction are the finished turn's progress, folded
+            // into its activity disclosure; the history order the CLI asserts places each row after them.
+            XCTAssertTrue(transcriptMessage(longTurn.answer).waitToExist(timeout: 5), "\(longTurn.title): the turn's answer is shown.")
+            XCTAssertLessThan(secondSummary.frame.minY, transcriptMessage(longTurn.answer).frame.minY,
+                              "\(longTurn.title): the turn's answer follows its compactions instead of the compactions stacking after it.")
+            attachScreenshot(named: index == 0 ? "compaction-rows-2-compactions-in-turn-order" : "compaction-rows-2-stored-compactions-in-turn-order")
+            returnToBoard()
+        }
         openTask(named: "Compaction across a restart")
         touch(executable + ".reattach-compact")
         sendFromComposer("Compact across a restart.")
@@ -332,8 +391,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? compactionRows(taskID, environment: environment)) ?? []).map { $0["status"] as? String } == ["inProgress"] }, timeout: 15),
                       "The compaction start is recorded once before the restart.")
         XCTAssertEqual(visibleRows.count, 1, "The running compaction is drawn once.")
-        attachScreenshot(named: "compaction-rows-2-compacting-before-restart")
-        attachElementScreenshot(spinningRows.firstMatch, named: "compaction-rows-2-compacting-row")
+        attachScreenshot(named: "compaction-rows-3-compacting-before-restart")
+        attachElementScreenshot(spinningRows.firstMatch, named: "compaction-rows-3-compacting-row")
 
         try killDaemon(environment: environment)
         // The window reconnects; the fresh daemon follows the still compacting turn.
@@ -350,8 +409,8 @@ extension PlayhouseUITests {
         let running = try XCTUnwrap(try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any])
         XCTAssertEqual(running["status"] as? String, "In Progress", "The turn is still running after the boundary.")
         XCTAssertEqual(visibleRows.count, 1, "The live window shows the compaction as one row after its boundary.")
-        attachScreenshot(named: "compaction-rows-3-completed-while-running")
-        attachElementScreenshot(visibleRows.firstMatch, named: "compaction-rows-3-completed-row")
+        attachScreenshot(named: "compaction-rows-4-completed-while-running")
+        attachElementScreenshot(visibleRows.firstMatch, named: "compaction-rows-4-completed-row")
         touch(executable + ".reattach-release")
         XCTAssertTrue(transcriptMessage("After restart.").waitToExist(timeout: 20), "The window streams the end of the reattached turn.")
         XCTAssertEqual(visibleRows.count, 1, "The finished turn still shows the compaction once.")
