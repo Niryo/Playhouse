@@ -201,3 +201,97 @@ struct PluginInlineSlot: View {
         }
     }
 }
+
+/// Whether a section plugin has anything to show: a section whose plugin
+/// renders nothing hides, header included, while it stays mounted to notice
+/// when it has something again.
+struct PluginSectionContentKey: PreferenceKey {
+    static let defaultValue = true
+
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = nextValue() }
+}
+
+/// The bottom of the board's sidebar (`PluginPlacement.mainSidebarBottom`):
+/// each section plugin under a collapsible header drawn from the Disclosure
+/// atom with the plugin's name, stacked top to bottom under the sidebar's
+/// spacer, so expanding a section grows it upward and pushes the sections
+/// above it up. In Add Plugin mode its "Add here" placeholder follows them.
+struct PluginSectionSlot: View {
+    let placement: PluginPlacement
+    let props: (PluginRecord) -> [String: PluginValue]
+    var actions = PluginUIActions()
+    var add: (PluginPlacement) -> Void = { _ in }
+    @Environment(PluginRegistry.self) private var registry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(registry.sectionPlugins(for: placement)) { plugin in
+                PluginSection(plugin: plugin, props: props, actions: actions)
+            }
+            // Only the placeholder: no plugin here has an entry button.
+            PluginSlot(placement: placement, props: props, actions: actions, add: add)
+                .padding(.top, 12)
+        }
+    }
+}
+
+/// One section plugin: the host's header and the plugin's view. The view
+/// stays mounted while the section is collapsed (with no height), so the
+/// plugin keeps running and its state survives. Whether it is collapsed is
+/// the plugin's state `collapsed`, saved with `plugin.state.set`.
+private struct PluginSection: View {
+    let plugin: PluginRecord
+    let props: (PluginRecord) -> [String: PluginValue]
+    let actions: PluginUIActions
+    /// The toggle's value until the saved state catches up.
+    @State private var pendingCollapsed: Bool?
+    @State private var hasContent = false
+
+    private var savedCollapsed: Bool { plugin.state["collapsed"] == .bool(true) }
+    private var isCollapsed: Bool { pendingCollapsed ?? savedCollapsed }
+
+    var body: some View {
+        let collapsed = isCollapsed
+        VStack(alignment: .leading, spacing: 0) {
+            if hasContent {
+                AtomDisclosure(
+                    props: DisclosureProps(title: plugin.name, collapsed: collapsed, toggleTestID: "plugin-section-\(plugin.id)-toggle"),
+                    onToggle: { toggle(to: !collapsed) }
+                ) {}
+            }
+            PluginPropsScope {
+                if plugin.builtIn {
+                    BuiltInPluginView(plugin: plugin, props: props(plugin), actions: actions)
+                } else {
+                    PluginSurfaceView(plugin: plugin, props: props(plugin), actions: actions)
+                }
+            }
+            .padding(.top, 6)
+            .frame(height: collapsed || !hasContent ? 0 : nil, alignment: .top)
+            .clipped()
+            .opacity(collapsed || !hasContent ? 0 : 1)
+            .allowsHitTesting(!collapsed && hasContent)
+            .accessibilityHidden(collapsed || !hasContent)
+        }
+        .padding(.top, hasContent ? 12 : 0)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plugin-section-\(plugin.id)")
+        // A section with nothing to show is not there at all.
+        .accessibilityHidden(!hasContent)
+        .onPreferenceChange(PluginSectionContentKey.self) { hasContent = $0 }
+        .onChange(of: savedCollapsed) { pendingCollapsed = nil }
+    }
+
+    private func toggle(to collapsed: Bool) {
+        pendingCollapsed = collapsed
+        let host = PluginHost(plugin: plugin, actions: actions)
+        Task { @MainActor in
+            do {
+                try await host.call("bridge", "plugin.state.set", ["pluginID": .string(plugin.id), "key": .string("collapsed"), "value": .bool(collapsed)])
+            } catch {
+                PlayhouseDiagnostics.record("plugin.section.toggle.failed", fields: ["pluginID": plugin.id, "error": error.localizedDescription])
+                pendingCollapsed = nil
+            }
+        }
+    }
+}

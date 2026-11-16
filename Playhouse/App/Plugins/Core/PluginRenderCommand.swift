@@ -125,7 +125,7 @@ struct PluginRenderCommand: Sendable {
                 guard let call = runtime.pendingHostCalls.first else { return }
                 var entry: [String: PluginValue] = ["kind": .string(call.kind), "name": .string(call.name), "arguments": call.arguments]
                 let result: Result<PluginValue, PluginHostError>
-                if let refusal = PluginHostRules.refusal(kind: call.kind, name: call.name, placement: placement) {
+                if let refusal = PluginHostRules.refusal(kind: call.kind, name: call.name, placement: placement, arguments: call.arguments) {
                     result = .failure(refusal)
                 } else if call.kind == "bridge", let bridge {
                     do {

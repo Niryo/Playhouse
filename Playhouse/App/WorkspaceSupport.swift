@@ -105,7 +105,8 @@ enum WorkspaceSettings {
     /// Whether the Changes section inside the task sidebar was collapsed, before the
     /// built-in Changes plugin kept it in its plugin state; read once to carry it over.
     static let workspaceChangesSectionCollapsedKey = "workspaceChangesSectionCollapsed"
-    /// Whether the Agents info section at the bottom of the board sidebar is minimized.
+    /// Whether the Agents info section at the bottom of the board sidebar was minimized; the
+    /// built-in Agents info plugin keeps it in its plugin state; read once to carry it over.
     static let agentsInfoSectionCollapsedKey = "agentsInfoSectionCollapsed"
     static let defaultConversationProviderKey = "defaultConversationProvider"
     static let tokenUsageColorMaxKey = "tokenUsageColorMax"

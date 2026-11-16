@@ -352,11 +352,17 @@ private struct NativeAgentsInfoDemo: View {
         // As wide as the board sidebar's content.
         AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
             AtomStack(props: StackProps(axis: "v"), common: AtomCommon(width: 160)) {
-                AgentsInfoSection(model: model, collapsed: collapsed, actions: AgentsInfoActions(
-                    toggle: { lastAction = collapsed ? "expand" : "collapse"; collapsed.toggle() },
-                    login: { signedOut = false; lastAction = "login \($0)" },
-                    switchAccount: { lastAction = "switch \($0)" }
-                ))
+                // Like a Main sidebar bottom section: its host's header, the content 6 points below.
+                AtomDisclosure(
+                    props: DisclosureProps(title: model.title, collapsed: collapsed, spacing: 6, toggleTestID: "\(model.id)-toggle"),
+                    common: AtomCommon(testID: model.id),
+                    onToggle: { lastAction = collapsed ? "expand" : "collapse"; collapsed.toggle() }
+                ) {
+                    AgentsInfoSection(model: model, actions: AgentsInfoActions(
+                        login: { signedOut = false; lastAction = "login \($0)" },
+                        switchAccount: { lastAction = "switch \($0)" }
+                    ))
+                }
             }
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
                 AtomButton(props: ButtonProps(style: "borderless"), common: AtomCommon(testID: "native-toggle-signed-out"), action: { signedOut.toggle() }) {

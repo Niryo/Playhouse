@@ -6,7 +6,8 @@ import SwiftUI
 /// its script renders, kept live as its placement's context changes. The
 /// surface pads both by its presentation's `inset` and spaces the script's
 /// root atoms apart, so a plugin needs no title or outer padding of its own.
-/// An inline plugin has no header: it is a section of its sidebar.
+/// An inline or section plugin has no header of its own: it is a section of
+/// its sidebar (a section plugin's collapsible header is `PluginSection`'s).
 /// Host calls are answered by `PluginHost`, as a built-in plugin's are.
 struct PluginSurfaceView: View {
     let plugin: PluginRecord
@@ -22,7 +23,7 @@ struct PluginSurfaceView: View {
     var body: some View {
         let inset = plugin.surfaceInset
         VStack(alignment: .leading, spacing: 0) {
-            if plugin.presentationKind == .inline {
+            if plugin.presentationKind.isInPlace {
                 // A section of its sidebar: no header, and the sidebar's own room
                 // instead of a scroll view, so the plugin can scroll its own lists.
                 content.padding(.horizontal, inset)
@@ -44,6 +45,8 @@ struct PluginSurfaceView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plugin-surface-\(plugin.id)")
+        // A section with nothing to show hides, header included.
+        .preference(key: PluginSectionContentKey.self, value: hasContent)
         .task(id: plugin.entryPath) { load() }
         .onDisappear {
             if let keepAliveKey { PluginRuntimeKeepAlive.release(keepAliveKey) }
@@ -93,6 +96,11 @@ struct PluginSurfaceView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var hasContent: Bool {
+        if let runtime { return !runtime.tree.root.children.isEmpty || !runtime.errors.isEmpty }
+        return loadError != nil
+    }
+
     private var host: PluginHost { PluginHost(plugin: plugin, actions: actions) }
 
     private func errors(_ errors: [String]) -> some View {
@@ -124,6 +132,8 @@ struct PluginSurfaceView: View {
             }
             if let keepAliveKey { PluginRuntimeKeepAlive.store(keepAliveKey, runtime: runtime, script: plugin.keepAliveScript, props: props) }
             self.runtime = runtime
+            // The prelude keeps it for the listener the plugin's first effects add.
+            if PluginLaunch.claim(plugin.id) { runtime.emit(PluginEvent(name: PluginEvent.appLaunched)) }
         } catch {
             loadError = error.localizedDescription
         }
@@ -206,7 +216,7 @@ extension PluginRecord {
         case .popover: CGSize(width: 320, height: 260)
         case .modal: CGSize(width: 520, height: 420)
         case .sidebar: CGSize(width: 360, height: 0)
-        case .page, .inline: CGSize(width: 0, height: 0)
+        case .page, .inline, .section: CGSize(width: 0, height: 0)
         }
         return CGSize(width: width ?? defaults.width, height: height ?? defaults.height)
     }
@@ -218,6 +228,8 @@ extension PluginRecord {
         case .popover: 16
         case .sidebar: 20
         case .inline: 10
+        // The section's header and the sidebar already inset it.
+        case .section: 0
         case .modal, .page: CGFloat(ModalProps.defaultInset)
         }
     }

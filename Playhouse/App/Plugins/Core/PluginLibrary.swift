@@ -13,6 +13,11 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
     case composerActions
     /// The bottom row of each task card on the board, beside its pull request controls.
     case taskItem
+    /// The bottom of the board's sidebar. Standalone, like the main sidebar,
+    /// plus `agents`. Every plugin here is a collapsible section
+    /// (`PluginPresentation.section`): the host draws its header, and the
+    /// sections stack upward from the sidebar's bottom edge.
+    case mainSidebarBottom
 
     var title: String {
         switch self {
@@ -21,6 +26,7 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
         case .conversationToolbar: "Conversation sidebar toolbar"
         case .composerActions: "Chat input actions"
         case .taskItem: "Task card"
+        case .mainSidebarBottom: "Main sidebar bottom"
         }
     }
 
@@ -29,7 +35,10 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
         self == .conversationToolbar || self == .composerActions || self == .taskItem
     }
 
-    var hasTask: Bool { self != .mainSidebar }
+    var hasTask: Bool { self != .mainSidebar && self != .mainSidebarBottom }
+
+    /// On the board, whose window answers `ui.confirm`.
+    var isOnBoard: Bool { self == .mainSidebar || self == .mainSidebarBottom || self == .taskItem }
 
     /// What this placement adds to `Playhouse.props`, for the authoring agent.
     var contextDescription: String {
@@ -42,6 +51,8 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
             "The same `plugin`, `app`, `task`, `repositories`, `pastPullRequests` and `contextFolders` as the conversation placements, for the card's task. The card is small: show an icon or a short label, and listen with `Playhouse.on(\"task.statusChanged\", …)` and `Playhouse.on(\"app.focus\", …)` for when to refresh what it shows."
         case .composerActions:
             "`plugin`, `app`, `task`, `repositories`, `contextFolders`, and `composer` ({draft, selection: {location, length, text}}), the composer's current draft and the text selected in it."
+        case .mainSidebarBottom:
+            "Standalone (no task): `plugin`, `app`, and `agents` ({usage, runningTasks}): `usage` is what `usage.get` returns ({generatedAt, providers: [{provider, installed, loggedIn, account, plan, loginInProgress, snapshot}]}), kept live as the providers report, or null before the first read; `runningTasks` counts the running tasks per provider ({claude, codex}). The plugin is a collapsible section under a header the host draws with its name; it hides, header included, while it renders nothing. Listen with `Playhouse.on(\"app.launched\", …)` to refresh once per app launch."
         }
     }
 
@@ -67,6 +78,10 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
     /// header: a section of the sidebar it sits in. Only the sidebars'
     /// placements have room for one.
     case inline
+    /// Rendered in place under a collapsible header the host draws with the
+    /// plugin's name, at the bottom of the board's sidebar: the only
+    /// presentation of `PluginPlacement.mainSidebarBottom`, and only there.
+    case section
 
     var title: String {
         switch self {
@@ -75,7 +90,23 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
         case .sidebar: "Side panel"
         case .page: "Page"
         case .inline: "Inline"
+        case .section: "Collapsible section"
         }
+    }
+
+    /// Rendered in place at its placement rather than opened from an entry button.
+    var isInPlace: Bool { self == .inline || self == .section }
+
+    /// Why a plugin can't open this way at `placement`, or nil when it can.
+    func placementError(_ placement: PluginPlacement) -> String? {
+        if self == .inline, !Self.inlinePlacements.contains(placement) { return Self.inlinePlacementError(placement) }
+        if self == .section, placement != .mainSidebarBottom {
+            return "A section plugin can't sit at the \(placement.title) placement; only at the \(PluginPlacement.mainSidebarBottom.title)."
+        }
+        if self != .section, placement == .mainSidebarBottom {
+            return "A plugin at the \(placement.title) placement is always a collapsible section; its presentation must be \"section\", not \"\(rawValue)\"."
+        }
+        return nil
     }
 
     /// The placements an inline plugin may sit in.
@@ -145,11 +176,15 @@ enum BuiltInPlugins {
     /// The task card's pull request controls: create, links coloured by
     /// health, the merged check and the resolve-conflicts button.
     static let pullRequestsID = "pull-requests"
+    /// The board sidebar's bottom section with each agent's usage and
+    /// account, from `props.agents`.
+    static let agentsInfoID = "agents-info"
 
     static let manifests: [PluginManifest] = [
         PluginManifest(id: changesID, name: "Changes", version: 1, icon: "plusminus", placement: PluginPlacement.conversationSidebar.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: pullRequestModeID, name: "Pull request mode", version: 1, icon: "arrow.triangle.branch", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
-        PluginManifest(id: pullRequestsID, name: "Pull requests", version: 1, icon: "arrow.triangle.pull", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue)
+        PluginManifest(id: pullRequestsID, name: "Pull requests", version: 1, icon: "arrow.triangle.pull", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
+        PluginManifest(id: agentsInfoID, name: "Agents info", version: 1, icon: "gauge.with.dots.needle.33percent", placement: PluginPlacement.mainSidebarBottom.rawValue, presentation: PluginPresentation.section.rawValue)
     ]
 
     static func isBuiltIn(_ id: String) -> Bool { manifests.contains { $0.id == id } }
@@ -241,6 +276,24 @@ struct PluginWorkspaceContext: Sendable, Equatable {
     var sidebarCollapsed = false
 }
 
+/// What the board's sidebar bottom tells its plugins about the agents: the
+/// daemon's usage report (`usage.get`'s result, nil before the first read)
+/// and how many tasks each provider is running.
+struct PluginAgentsContext: Sendable, Equatable {
+    var usage: PluginValue?
+    var runningTasks: [String: Int] = [:]
+    /// The providers `runningTasks` always lists.
+    static let providers = ["claude", "codex"]
+
+    var value: PluginValue {
+        var counts: [String: PluginValue] = [:]
+        for provider in Set(Self.providers).union(runningTasks.keys) {
+            counts[provider] = .number(Double(runningTasks[provider] ?? 0))
+        }
+        return .object(["usage": usage ?? .null, "runningTasks": .object(counts)])
+    }
+}
+
 enum PluginContext {
     /// `Playhouse.props` for a plugin at its placement.
     static func props(
@@ -248,7 +301,8 @@ enum PluginContext {
         appearance: String,
         task: PluginTaskContext?,
         composer: PluginComposerContext?,
-        workspace: PluginWorkspaceContext? = nil
+        workspace: PluginWorkspaceContext? = nil,
+        agents: PluginAgentsContext? = nil
     ) -> [String: PluginValue] {
         var props: [String: PluginValue] = [
             "plugin": .object([
@@ -297,6 +351,9 @@ enum PluginContext {
                 } ?? .null
             ])
             props["sidebar"] = .object(["collapsed": .bool(workspace.sidebarCollapsed)])
+        }
+        if placement == .mainSidebarBottom {
+            props["agents"] = (agents ?? PluginAgentsContext()).value
         }
         if placement == .composerActions {
             let composer = composer ?? PluginComposerContext(draft: "")
@@ -533,11 +590,12 @@ struct PluginLibrary: Sendable {
             if PluginPlacement(rawValue: manifest.placement) == nil {
                 errors.append("Unknown placement \"\(manifest.placement)\". Placements: \(PluginPlacement.allCases.map(\.rawValue).joined(separator: ", ")).")
             }
-            if PluginPresentation(rawValue: manifest.presentation) == nil {
+            if let presentation = PluginPresentation(rawValue: manifest.presentation) {
+                if let placement = PluginPlacement(rawValue: manifest.placement), let problem = presentation.placementError(placement) {
+                    errors.append(problem)
+                }
+            } else {
                 errors.append("Unknown presentation \"\(manifest.presentation)\". Presentations: \(PluginPresentation.allCases.map(\.rawValue).joined(separator: ", ")).")
-            } else if manifest.presentation == PluginPresentation.inline.rawValue,
-                      let placement = PluginPlacement(rawValue: manifest.placement), !PluginPresentation.inlinePlacements.contains(placement) {
-                errors.append(PluginPresentation.inlinePlacementError(placement))
             }
             if BuiltInPlugins.isBuiltIn(folderID) { errors.append("\"\(folderID)\" is a built-in plugin's id.") }
         }
@@ -605,11 +663,11 @@ struct PluginLibrary: Sendable {
 /// What a host refuses from a plugin, the same in the window and in
 /// `plugin render`, so the headless check matches what the user sees.
 enum PluginHostRules {
-    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
+    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "openURL", "confirm", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
 
     /// Nil when the host should answer `call`. `placement` is nil for a plugin
     /// rendered from a file or a catalog page, which may call anything.
-    static func refusal(kind: String, name: String, placement: PluginPlacement?) -> PluginHostError? {
+    static func refusal(kind: String, name: String, placement: PluginPlacement?, arguments: PluginValue = .null) -> PluginHostError? {
         switch kind {
         case "bridge":
             // Every other bridge command is the plugin's to call; rendering plugins would recurse.
@@ -626,6 +684,13 @@ enum PluginHostRules {
             if ["moveTask", "resolveConflicts", "alert"].contains(name), let placement, placement != .taskItem {
                 return PluginHostError(code: "unavailable", message: "Only a task card's plugin can call ui.\(name), not one at the \(placement.title) placement.")
             }
+            // Only the board window asks the user to confirm.
+            if name == "confirm", let placement, !placement.isOnBoard {
+                return PluginHostError(code: "unavailable", message: "Only a plugin on the board can call ui.confirm, not one at the \(placement.title) placement.")
+            }
+            if name == "openURL", openableURL(arguments) == nil {
+                return PluginHostError(code: "invalid_argument", message: "openURL needs an http or https URL.")
+            }
             return nil
         case "net":
             // fetch reaches the network from every placement; `PluginNetwork` checks its URL.
@@ -633,6 +698,15 @@ enum PluginHostRules {
         default:
             return PluginHostError(code: "invalid_argument", message: "Unknown host call \(kind).\(name).")
         }
+    }
+}
+
+extension PluginHostRules {
+    /// The web page `ui.openURL` opens; only http and https.
+    static func openableURL(_ arguments: PluginValue) -> URL? {
+        guard let url = arguments.object?["url"]?.string.flatMap(URL.init(string:)),
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else { return nil }
+        return url
     }
 }
 

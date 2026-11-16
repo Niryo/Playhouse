@@ -11,7 +11,11 @@ struct PluginEvent: Equatable, Sendable {
     /// A plugin's saved state changed: `{pluginID, key, value}`.
     static let pluginStateChanged = "plugin.stateChanged"
 
-    static let names = [taskStatusChanged, appFocus, pluginStateChanged]
+    /// The app launched: `{}`, once per launch to each plugin, when it is
+    /// first mounted, so it can refresh what an earlier launch left.
+    static let appLaunched = "app.launched"
+
+    static let names = [taskStatusChanged, appFocus, pluginStateChanged, appLaunched]
 
     var name: String
     var payload: [String: PluginValue] = [:]

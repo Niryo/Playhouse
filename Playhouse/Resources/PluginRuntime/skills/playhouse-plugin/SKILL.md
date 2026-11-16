@@ -19,6 +19,9 @@ message, for any the request leaves open. Don't guess:
 - **Placement**: where its button goes. The task's instructions name the
   placement the user picked. If none was picked, ask which of these:
   - `mainSidebar`: the board's sidebar. It gets no task context.
+  - `mainSidebarBottom`: a collapsible section at the bottom of the board's
+    sidebar, like the built-in Agents info. Its presentation is always
+    `section`.
   - `conversationSidebar`: a section of the task sidebar.
   - `conversationToolbar`: an icon beside the Terminal button.
   - `composerActions`: an icon beside the composer's Skills button.
@@ -32,6 +35,10 @@ message, for any the request leaves open. Don't guess:
   - `inline`: only at `conversationSidebar` or `taskItem`. No button: the
     plugin renders in place, as a section of the task sidebar like the
     built-in Changes, or in the task card's row like its pull request controls.
+  - `section`: only at `mainSidebarBottom`, and the only one there. The app
+    draws a collapsible header with the plugin's name and remembers whether
+    it is collapsed (`state.collapsed`); render the section's content only.
+    Render nothing to hide the section, header included.
 - **Name and icon**: a short name and an SF Symbol name for its button.
 
 The name, placement and presentation the user picked when the editor opened are
@@ -73,6 +80,7 @@ It uses these globals:
   | Every placement | `plugin` (`{id, name, placement, presentation}`), `app` (`{appearance}`) and `state` (the plugin's saved values, see `Playhouse.setState`) |
   | Conversation placements and `taskItem` | Add `task` (`{id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}`), `repositories` (`[{repositoryPath, worktreePath, branch, isPending, awaitsPullRequest, pullRequest: {number, url, merged} or null}]`), `pastPullRequests` (`[{repositoryPath, number, url, merged}]`) and `contextFolders` |
   | `composerActions` | Adds `composer` (`{draft, selection: {location, length, text}}`) |
+  | `mainSidebarBottom` | Adds `agents` (`{usage, runningTasks}`): `usage` is what `"usage.get"` returns (`{generatedAt, providers: [{provider, installed, loggedIn, account, plan, loginInProgress, snapshot}]}`), kept live, or null before the first read; `runningTasks` is `{claude, codex}`, each provider's count of running tasks |
   | `conversationSidebar` | Adds `workspace` (`{revision, openDiff: {repository, path, group} or null}`; `revision` grows whenever the task's files may have changed) and `sidebar` (`{collapsed}`, true on the hidden sidebar's narrow rail) |
 
 - `Playhouse.useProps()`, a hook that returns the current props and re-renders
@@ -108,11 +116,19 @@ It uses these globals:
     card does, `resolveConflicts(taskID)` starts resolving its pull request's
     conflicts, and `alert(title, message)` shows an alert. They work only from
     `taskItem`; elsewhere they reject with `unavailable`.
+  - `confirm({title, message, confirm, destructive})` asks the user and
+    resolves true when they confirm, false when they cancel. It works on the
+    board (`mainSidebar`, `mainSidebarBottom` and `taskItem`); elsewhere it rejects with
+    `unavailable`.
+  - `openURL(url)` opens an `http` or `https` link in the browser, from any
+    placement; any other URL rejects with `invalid_argument`.
 - `Playhouse.on(name, listener)` listens for an app event and returns a
   function that stops listening: `"task.statusChanged"` (`{taskID, from, to}`,
   when the plugin's task moves between board columns), `"app.focus"` (`{}`,
   when Playhouse comes to the front) and `"plugin.stateChanged"`
-  (`{pluginID, key, value}`, when a saved value changes). Subscribe in a
+  (`{pluginID, key, value}`, when a saved value changes) and `"app.launched"`
+  (`{}`, once per app launch; the first listener added after it still hears
+  it). Subscribe in a
   `React.useEffect` and return the stop function from it.
 - `Playhouse.throttle(fn, seconds)` returns a function that runs `fn` at once,
   then collapses the calls made while it runs or within `seconds` into one

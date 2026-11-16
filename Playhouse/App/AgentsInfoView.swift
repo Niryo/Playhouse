@@ -1,15 +1,16 @@
-import AppKit
 import SwiftUI
 
-/// The window's view of the daemon's usage store. The daemon owns the
-/// providers and receives their pushes, so this reads its state over the bridge:
-/// once with a refresh at launch and after a login (Codex's snapshot and both
-/// accounts' sign-in state), then follows the store's changes as the providers
-/// push them or the daemon refreshes them periodically.
+/// The window's feed of the daemon's usage store, for the board sidebar's
+/// bottom plugins (`props.agents.usage`). The daemon owns the providers and
+/// receives their pushes, so this reads its state over the bridge once, then
+/// follows the store's changes as the providers push them or the daemon
+/// refreshes them periodically. A plugin asks for a fresh read itself
+/// (`usage.get` with refresh, as the Agents info plugin does on `app.launched`).
 @MainActor
 final class AgentUsageModel: ObservableObject {
-    @Published private(set) var report: AgentUsageReport?
-    @Published private(set) var errorMessage: String?
+    /// The report as `usage.get` returns it, nil before the first read.
+    @Published private(set) var usage: PluginValue?
+    private var report: AgentUsageReport?
     let client: DaemonClient
     private var loop: Task<Void, Never>?
 
@@ -17,19 +18,16 @@ final class AgentUsageModel: ObservableObject {
         self.client = client
     }
 
-    /// Reads once with a refresh, then follows the daemon's changes; reconnects
-    /// if the daemon goes away. The daemon refreshes while the subscription is open.
+    /// Reads once, then follows the daemon's changes; reconnects if the daemon
+    /// goes away. The daemon refreshes while the subscription is open.
     func start() {
         guard loop == nil else { return }
         loop = Task { [weak self] in
-            await self?.load(refresh: true)
-            var reconnecting = false
             while !Task.isCancelled {
                 guard let self else { return }
                 // A daemon that restarted knows nothing until a read loads its
-                // saved state, so read once before following it again.
-                if reconnecting { await self.load(refresh: false) }
-                reconnecting = true
+                // saved state, so read before following it.
+                await self.load()
                 do {
                     try await self.client.call("usage.subscribe") { event in
                         guard event.type == "usage_state",
@@ -44,42 +42,57 @@ final class AgentUsageModel: ObservableObject {
         }
     }
 
-    /// Only a changed report re-renders the section.
+    /// Stops following the daemon, once no plugin reads the usage.
+    func stop() {
+        loop?.cancel()
+        loop = nil
+    }
+
+    /// Only a changed report re-renders the sections.
     private func apply(_ next: AgentUsageReport) {
         var comparable = next
         comparable.generatedAt = report?.generatedAt ?? next.generatedAt
-        if comparable != report { report = next }
+        guard comparable != report else { return }
+        report = next
+        usage = (try? JSONEncoder().encode(next)).flatMap { try? JSONDecoder().decode(PluginValue.self, from: $0) }
     }
 
-    func load(refresh: Bool) async {
-        guard let value = try? await client.call("usage.get", ["refresh": .boolean(refresh)]),
+    private func load() async {
+        guard let value = try? await client.call("usage.get", ["refresh": .boolean(false)]),
               let next = try? value.decoded(AgentUsageReport.self) else { return }
         apply(next)
     }
+}
 
-    func login(_ provider: ConversationProvider) async {
-        await run(command: "usage.login", provider: provider)
-    }
+/// The board sidebar's bottom (`PluginPlacement.mainSidebarBottom`), with
+/// `props.agents` from the app's usage feed and the board's running tasks.
+/// A view of its own, so a usage change re-renders only these sections.
+struct BoardSidebarBottomSlot: View {
+    /// Tasks running per provider.
+    let runningProviders: [ConversationProvider: Int]
+    let appearance: String
+    let actions: PluginUIActions
+    let add: (PluginPlacement) -> Void
+    /// App-wide, so returning to the board shows what is known instead of reading again.
+    @EnvironmentObject private var usage: AgentUsageModel
+    @Environment(PluginRegistry.self) private var registry
 
-    func switchAccount(_ provider: ConversationProvider) async {
-        await run(command: "usage.switch-account", provider: provider)
-    }
-
-    /// Starts the sign-in, opens Codex's URL, and re-reads the account while the
-    /// daemon waits for the browser step to finish.
-    private func run(command: String, provider: ConversationProvider) async {
-        errorMessage = nil
-        do {
-            let value = try await client.call(command, ["provider": .string(provider.rawValue)])
-            // A test build never opens a browser.
-            if let link = value.object?["loginURL"]?.string, let url = URL(string: link),
-               !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) {
-                NSWorkspace.shared.open(url)
-            }
-        } catch {
-            errorMessage = error.localizedDescription
+    var body: some View {
+        let agents = PluginAgentsContext(
+            usage: usage.usage,
+            runningTasks: Dictionary(uniqueKeysWithValues: runningProviders.map { ($0.key.rawValue, $0.value) })
+        )
+        let hasSections = !registry.sectionPlugins(for: .mainSidebarBottom).isEmpty
+        PluginSectionSlot(
+            placement: .mainSidebarBottom,
+            props: { PluginContext.props(plugin: $0, appearance: appearance, task: nil, composer: nil, agents: agents) },
+            actions: actions,
+            add: add
+        )
+        // The feed runs only while a plugin here can read it.
+        .task(id: hasSections) {
+            if hasSections { usage.start() } else { usage.stop() }
         }
-        await load(refresh: true)
     }
 }
 
@@ -221,33 +234,27 @@ extension AgentsInfoModel {
 
 /// What the section's controls do, by provider id ("claude", "codex").
 struct AgentsInfoActions {
-    var toggle: () -> Void = {}
     var login: (String) -> Void = { _ in }
     var switchAccount: (String) -> Void = { _ in }
 }
 
-/// The Agents info section, composed only of plugin atoms (Plugins/Atoms), so
-/// a plugin building it from the same atoms looks identical. A Disclosure
-/// holds one Panel per agent, then any error.
+/// The Agents info section's content, composed only of plugin atoms
+/// (Plugins/Atoms), so a plugin building it from the same atoms looks
+/// identical: one Panel per agent, then any error. The collapsible header is
+/// the section's host's (`PluginSectionSlot`), or the Disclosure the
+/// catalog's copy wraps it in; its views flatten into that container.
 struct AgentsInfoSection: View {
     let model: AgentsInfoModel
-    let collapsed: Bool
     var actions = AgentsInfoActions()
 
     private var id: String { model.id }
 
     var body: some View {
-        AtomDisclosure(
-            props: DisclosureProps(title: model.title, collapsed: collapsed, spacing: 6, toggleTestID: "\(id)-toggle"),
-            common: AtomCommon(testID: id),
-            onToggle: actions.toggle
-        ) {
-            ForEach(model.agents, id: \.provider) { agent in
-                block(agent)
-            }
-            if let message = model.errorMessage {
-                AtomText(props: TextProps(text: message, size: 9, color: "red", lineLimit: 3), common: AtomCommon(testID: "\(id)-error"))
-            }
+        ForEach(model.agents, id: \.provider) { agent in
+            block(agent)
+        }
+        if let message = model.errorMessage {
+            AtomText(props: TextProps(text: message, size: 9, color: "red", lineLimit: 3), common: AtomCommon(testID: "\(id)-error"))
         }
     }
 
@@ -328,70 +335,6 @@ struct AgentsInfoSection: View {
             }
             AtomMeter(props: MeterProps(fraction: window.fraction, color: window.barColor))
             AtomText(props: TextProps(text: window.reset, size: 9, color: "secondary"))
-        }
-    }
-}
-
-/// The board's Agents info section: the daemon's usage, re-derived on a slow
-/// tick, the remembered collapsed state, and the switch-account confirmation
-/// around the atom-built `AgentsInfoSection`.
-struct AgentsInfoView: View {
-    /// App-wide, so returning to the board shows what is known instead of reading again.
-    @EnvironmentObject private var model: AgentUsageModel
-    /// Providers that have a task running, which a sign-out would affect.
-    let runningProviders: [ConversationProvider: Int]
-    @State private var providerAwaitingSwitch: ConversationProvider?
-    /// Whether the user minimized the section; one value kept across launches, open by default.
-    @AppStorage(WorkspaceSettings.agentsInfoSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isCollapsed = false
-
-    init(runningProviders: [ConversationProvider: Int]) {
-        self.runningProviders = runningProviders
-    }
-
-    var body: some View {
-        // A stack, not a Group: the load below has to run while there is nothing to show yet.
-        VStack(spacing: 0) {
-            if !AgentsInfoModel.visibleProviders(model.report).isEmpty {
-                // Re-evaluated on a slow tick so reset times and "updated" hints stay current.
-                TimelineView(.periodic(from: .now, by: 30)) { timeline in
-                    AgentsInfoSection(
-                        model: AgentsInfoModel(report: model.report, runningProviders: runningProviders, errorMessage: model.errorMessage, now: timeline.date),
-                        collapsed: isCollapsed,
-                        actions: AgentsInfoActions(
-                            toggle: { isCollapsed.toggle() },
-                            login: { id in
-                                guard let provider = ConversationProvider(rawValue: id) else { return }
-                                Task { await model.login(provider) }
-                            },
-                            switchAccount: { id in
-                                guard let provider = ConversationProvider(rawValue: id) else { return }
-                                if (runningProviders[provider] ?? 0) > 0 { providerAwaitingSwitch = provider }
-                                else { Task { await model.switchAccount(provider) } }
-                            }
-                        )
-                    )
-                }
-            }
-        }
-        .task { model.start() }
-        .confirmationDialog(
-            "Switch \(providerAwaitingSwitch?.displayName ?? "") account?",
-            isPresented: Binding(get: { providerAwaitingSwitch != nil }, set: { if !$0 { providerAwaitingSwitch = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Switch Account", role: .destructive) {
-                guard let provider = providerAwaitingSwitch else { return }
-                providerAwaitingSwitch = nil
-                Task { await model.switchAccount(provider) }
-            }
-            .buttonHoverPointer()
-            .nativeHelp("Sign out and sign in again")
-            Button("Cancel", role: .cancel) { providerAwaitingSwitch = nil }
-                .buttonHoverPointer()
-                .nativeHelp("Keep the current account")
-        } message: {
-            let count = providerAwaitingSwitch.flatMap { runningProviders[$0] } ?? 0
-            Text("\(count) \(providerAwaitingSwitch?.displayName ?? "") task\(count == 1 ? " is" : "s are") running. Signing out affects running tasks.")
         }
     }
 }

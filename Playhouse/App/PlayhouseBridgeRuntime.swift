@@ -714,11 +714,11 @@ final class PlayhouseBridgeRuntime {
                 let name = request.arguments["name"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let presentation = request.arguments["presentation"]?.string
                 if name != nil || presentation != nil {
-                    guard let name, !name.isEmpty, let presentation, PluginPresentation(rawValue: presentation) != nil else {
+                    guard let name, !name.isEmpty, let presentation, let kind = PluginPresentation(rawValue: presentation) else {
                         throw BridgeCommandError(code: "invalid_argument", message: "A plugin name and valid presentation are required.")
                     }
-                    if presentation == PluginPresentation.inline.rawValue, !PluginPresentation.inlinePlacements.contains(placement) {
-                        throw BridgeCommandError(code: "invalid_argument", message: PluginPresentation.inlinePlacementError(placement))
+                    if let problem = kind.placementError(placement) {
+                        throw BridgeCommandError(code: "invalid_argument", message: problem)
                     }
                 }
                 let pluginID = "plugin-" + UUID().uuidString.lowercased()
@@ -760,7 +760,16 @@ final class PlayhouseBridgeRuntime {
                         stated.state = settings.pluginState(plugin.id)
                         command.file = plugin.entryPath
                         command.placement = PluginPlacement(rawValue: plugin.placement)
-                        command.baseProps = PluginContext.props(plugin: stated, appearance: settings.appearance, task: task, composer: nil)
+                        // The board's agents: the last-known usage and each provider's running tasks.
+                        var agents: PluginAgentsContext?
+                        if command.placement == .mainSidebarBottom {
+                            let report = try await AgentUsageService.report(clients: conversationClients(), refresh: false)
+                            agents = PluginAgentsContext(
+                                usage: PluginValue(bridge: try Self.value(report)),
+                                runningTasks: try taskManager.list(status: .inProgress).reduce(into: [:]) { $0[$1.conversationProvider, default: 0] += 1 }
+                            )
+                        }
+                        command.baseProps = PluginContext.props(plugin: stated, appearance: settings.appearance, task: task, composer: nil, agents: agents)
                     }
                     // The plugin's Playhouse.bridge calls run as requests of this caller,
                     // against the same managers the CLI reaches.

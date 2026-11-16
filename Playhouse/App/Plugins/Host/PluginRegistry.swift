@@ -30,12 +30,17 @@ final class PluginRegistry {
 
     /// The active plugins whose entry button goes in `placement`.
     func plugins(for placement: PluginPlacement) -> [PluginRecord] {
-        plugins.filter { $0.isActive && $0.placement == placement.rawValue && $0.presentationKind != .inline }
+        plugins.filter { $0.isActive && $0.placement == placement.rawValue && !$0.presentationKind.isInPlace }
     }
 
     /// The active plugins rendered in place as sections of `placement`.
     func inlinePlugins(for placement: PluginPlacement) -> [PluginRecord] {
         plugins.filter { $0.isActive && $0.placement == placement.rawValue && $0.presentationKind == .inline }
+    }
+
+    /// The active plugins rendered as collapsible sections of `placement`, top to bottom.
+    func sectionPlugins(for placement: PluginPlacement) -> [PluginRecord] {
+        plugins.filter { $0.isActive && $0.placement == placement.rawValue && $0.presentationKind == .section }
     }
 
     /// The compiled-in plugins, and the installed ones, as the Plugins menu lists them.
