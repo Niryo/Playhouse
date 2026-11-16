@@ -375,7 +375,7 @@ extension PlayhouseUITests {
         func olderPageWasRead(after readCount: Int) -> Bool {
             ((try? historyReads()) ?? []).dropFirst(readCount).contains {
                 $0["beforeMessageProvided"] as? String == "true" && $0["returnedMessageCount"] as? String == "\(total - 80)"
-                    && $0["earlierMessageCount"] as? String == "0" && $0["hydratedImageMessageCount"] as? String == "1"
+                    && $0["earlierMessageCount"] as? String == "0" && $0["deferredImageMessageCount"] as? String == "1"
             }
         }
         let readsBeforeOlderPage = try historyReads().count
@@ -385,7 +385,7 @@ extension PlayhouseUITests {
         // The older page is read while loaded messages remain above the rendered window, so
         // the reader does not arrive at the oldest loaded message and wait there for it.
         scrollUp(until: { olderPageWasRead(after: readsBeforeOlderPage) })
-        XCTAssertTrue(olderPageWasRead(after: readsBeforeOlderPage), "Scrolling toward the oldest loaded message reads the older page, with its image, from the store.")
+        XCTAssertTrue(olderPageWasRead(after: readsBeforeOlderPage), "Scrolling toward the oldest loaded message reads the older page from the store, leaving its image to load when shown.")
         XCTAssertLessThan(renderedCount(), 80, "The older page is read before the reader runs out of loaded messages; rendered=\(renderedCount()).")
         attachScreenshot(named: "Older Claude page read from the store while scrolling up")
         scrollUp(until: { renderedCount() > 80 })
@@ -396,7 +396,7 @@ extension PlayhouseUITests {
         scrollUp(until: { isVisible(oldest) })
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top shows the first turn.")
         let firstImage = element("chat-image-\(firstUserID)-0")
-        XCTAssertTrue(firstImage.waitToExist(timeout: 5), "The first turn's image is filled in when its page loads.")
+        XCTAssertTrue(firstImage.waitToExist(timeout: 5), "The first turn's image loads once its message is shown.")
         // The image renders above its message's text, so scroll until it is in view too.
         scrollUp(until: { isVisible(firstImage) })
         XCTAssertTrue(waitUntil({ isVisible(firstImage) }, timeout: 5), "The first turn's image is shown in the transcript.")

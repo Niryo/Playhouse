@@ -538,9 +538,19 @@ extension PlayhouseUITests {
                       "The completed outcome reported inside the nudged turn should move the task to Review.")
         XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15),
                       "The nudged turn's final report should appear in the visible transcript.")
-        // The transcript reloads when the turn ends; the earlier rows are briefly absent while it re-renders.
-        XCTAssertTrue(waitUntil({ self.transcriptContains(staleAnswer) }, timeout: 10),
-                      "The earlier turn's answer should stay in the transcript.")
+        // The nudged turn's answer, with its screenshot, is taller than the viewport. A transcript that
+        // followed it to the end has scrolled the earlier rows out of the lazy stack, so read them by scrolling up.
+        let transcript = element("conversation-scroll-view")
+        func scrollUpUntilShown(_ text: String) -> Bool {
+            // The transcript reloads when the turn ends; the earlier rows are briefly absent while it re-renders.
+            if waitUntil({ self.transcriptContains(text) }, timeout: 5) { return true }
+            for _ in 0..<20 {
+                transcript.scroll(byDeltaX: 0, deltaY: 300)
+                if waitUntil({ self.transcriptContains(text) }, timeout: 1) { return true }
+            }
+            return false
+        }
+        XCTAssertTrue(scrollUpUntilShown(staleAnswer), "The earlier turn's answer should stay in the transcript.")
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
         let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
         let assistant = messages.filter { $0["role"] as? String == "assistant" }.map { [($0["phase"] as? String) ?? "", ($0["text"] as? String) ?? ""] }
@@ -559,10 +569,10 @@ extension PlayhouseUITests {
         ], "The nudged turn's work should be recorded in order after the stale answer.")
         XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The final report is the latest message.")
         let imageID = try XCTUnwrap(messages.first { $0["phase"] as? String == "agent_image" }?["id"] as? String)
-        XCTAssertTrue(element("chat-image-\(imageID)-0").waitToExist(timeout: 10), "The screenshot the nudged turn presented should render.")
+        XCTAssertTrue(scrollTranscriptUntilExists(element("chat-image-\(imageID)-0")), "The screenshot the nudged turn presented should render.")
         let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "toolu_nudged_check" }
         XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged turn's shell call should be a timeline row.")
-        XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "The nudge Playhouse sent is shown in the transcript.")
+        XCTAssertTrue(scrollUpUntilShown("ended without reporting a task outcome"), "The nudge Playhouse sent is shown in the transcript.")
         try assertAutomaticMessageBubble(taskID: taskID, containing: "ended without reporting a task outcome")
         XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
         attachScreenshot(named: "Claude nudged turn work follows the stale answer")

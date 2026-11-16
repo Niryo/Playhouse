@@ -115,6 +115,10 @@ extension TaskConversationView {
             keepTranscriptPosition(renderedCount: renderedCount, windowStart: windowStart, presentedQuestion: presentedQuestion)
         }
         let incoming = incoming ?? history.messages
+        // Images this window already shows stay with it when the new read defers them.
+        for message in messages where !message.imageDataURLs.isEmpty {
+            deferredMessageImages[Self.deferredImageKey(message)] = message.imageDataURLs
+        }
         if let earlierCount = history.earlierMessageCount {
             if let first = incoming.first, let overlap = messages.firstIndex(where: { $0.id == first.id }) {
                 messages = Array(messages[..<overlap]) + incoming
@@ -280,7 +284,8 @@ extension TaskConversationView {
         return rendered.map { message in
             var hasher = Hasher()
             hasher.combine(message.text.utf16.count)
-            hasher.combine(message.imageDataURLs.count)
+            hasher.combine(transcriptImageDataURLs(for: message).count)
+            hasher.combine(message.imagesDeferred == true && deferredMessageImages[Self.deferredImageKey(message)] == nil)
             hasher.combine(message.asyncQuestions != nil)
             hasher.combine(context.inlineTools[message.id]?.count ?? 0)
             hasher.combine(context.boundariesByAnchorID[message.id]?.count ?? 0)

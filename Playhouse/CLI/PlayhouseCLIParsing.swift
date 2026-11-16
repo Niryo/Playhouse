@@ -790,11 +790,21 @@ extension PlayhouseCLI {
                 guard tail.count == 1 else { throw CLIError.usage("Use: playhouse conversation watch <task-id>") }
                 return BridgeRequest(command: "conversation.events.subscribe", arguments: ["taskID": .string(id)])
             case "history":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--limit", "--before"])
+                let options = Array(tail.dropFirst())
+                let flags = try parseFlags(options.filter { $0 != "--defer-images" }, valueFlags: ["--limit", "--before"])
                 var arguments: [String: BridgeValue] = ["taskID": .string(id)]
                 if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
                 if let before = flags["--before"]?.first { arguments["before"] = .string(before) }
+                if options.contains("--defer-images") { arguments["deferImages"] = .boolean(true) }
                 return BridgeRequest(command: "conversation.history", arguments: arguments)
+            case "images":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
+                guard let messages = flags["--message"], !messages.isEmpty else {
+                    throw CLIError.usage("Use: playhouse conversation images <task-id> --message <message-id> [--message <message-id>]...")
+                }
+                return BridgeRequest(command: "conversation.images", arguments: [
+                    "taskID": .string(id), "messages": .array(messages.map(BridgeValue.string))
+                ])
             case "present-image":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--image", "--caption"])
                 guard let path = flags["--image"]?.first, !path.isEmpty else {
@@ -935,7 +945,11 @@ extension PlayhouseCLI {
                 guard tail.count == 2 else { throw CLIError.usage("Use: playhouse conversation side-chat-close <task-id> <side-chat-id>") }
                 return BridgeRequest(command: "conversation.side_chat.close", arguments: ["taskID": .string(id), "sideChatID": .string(tail[1])])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image", "--context-page"])
+                let options = Array(tail.dropFirst())
+                let flags = try parseFlags(
+                    options.filter { $0 != "--defer-images" },
+                    valueFlags: ["--message", "--mode", "--model", "--answer", "--image", "--context-page"]
+                )
                 var answers: [String: [String]] = [:]
                 for pair in flags["--answer"] ?? [] {
                     guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
@@ -962,6 +976,7 @@ extension PlayhouseCLI {
                 if let contextPages = flags["--context-page"] {
                     sendArguments["contextPages"] = .array(contextPages.map(BridgeValue.string))
                 }
+                if options.contains("--defer-images") { sendArguments["deferImages"] = .boolean(true) }
                 return BridgeRequest(command: "conversation.send", arguments: sendArguments)
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }

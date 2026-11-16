@@ -159,6 +159,11 @@ struct TaskConversationView: View {
     // window that starts here and runs to the newest message; opening a
     // conversation starts the window at the latest user turn.
     @State var oldestRenderedMessageID: String?
+    /// Images of messages whose history page left them out, by `deferredImageKey`,
+    /// read as their rows come up. An empty entry is a message that turned out to have none.
+    @State var deferredMessageImages: [String: [String]] = [:]
+    @State var deferredImageRequests: Set<String> = []
+    @State var deferredImageLoads: Set<String> = []
     /// An older page of history is being read to reveal above the window.
     @State var isLoadingEarlierConversationMessages = false
     /// Messages older than `messages` that the daemon still holds. History is
@@ -435,12 +440,7 @@ struct TaskConversationView: View {
     /// top of the viewport with its answer below.
     var latestConversationTurnStartID: String? {
         let allMessages = conversationMessages
-        // Prompts Playhouse sends on its own are not a turn the user started: anchoring the
-        // window there would hide the conversation the recovery is continuing.
-        // When redaction has replaced every user message, the placeholders are all there is to anchor on.
-        return allMessages.last(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) && !$0.isPlayhouseSent })?.id
-            ?? allMessages.last(where: { $0.role == .user })?.id
-            ?? allMessages.last?.id
+        return ConversationMessage.latestTurnStartIndex(in: allMessages).map { allMessages[$0].id }
     }
 
     /// The window runs from `oldestRenderedMessageID` to the newest message.

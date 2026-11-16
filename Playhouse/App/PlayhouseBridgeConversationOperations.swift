@@ -15,7 +15,9 @@ extension PlayhouseBridgeRuntime {
             guard let mode = ConversationMode(rawValue: modeValue) else {
                 throw BridgeCommandError(code: "invalid_argument", message: "Unknown conversation mode '\(modeValue)'. Valid modes: default, plan.")
             }
-            let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+            let conversations = ConversationManager(
+                tasks: taskManager, clients: conversationClients(), settingsManager: settings, defersHistoryImages: request.defersHistoryImages
+            )
             let reportsTurnStarting = request.arguments["reportTurnStarting"]?.bool == true
             // Page bookkeeping stays in ConversationManager.send, shared with GUI sends.
             let history = try await conversations.send(

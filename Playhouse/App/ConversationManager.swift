@@ -164,6 +164,10 @@ final class ConversationManager {
     let clients: ConversationClients
     let settingsManager: WorkspaceSettingsManager
     let preferences: UserDefaults
+    /// Set for a reader that loads images as it shows them (the app's windows):
+    /// history it is handed carries image data only for the newest turn and marks
+    /// earlier messages `imagesDeferred`, to be read through `messageImages`.
+    let defersHistoryImages: Bool
     var dispatchingQueuedMessages = false
     static var dispatchingQueuedTaskIDs = Set<UUID>()
     /// Bumped whenever a turn changes what a task's conversation shows (its
@@ -191,11 +195,15 @@ final class ConversationManager {
         return (try? tasks.hasConversationTurnReservation(taskID)) != true
     }
 
-    init(tasks: BoardTaskManager, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil, preferences: UserDefaults = WorkspaceSettings.preferencesStore) {
+    init(
+        tasks: BoardTaskManager, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil,
+        preferences: UserDefaults = WorkspaceSettings.preferencesStore, defersHistoryImages: Bool = false
+    ) {
         self.tasks = tasks
         self.clients = clients
         self.settingsManager = settingsManager ?? WorkspaceSettingsManager()
         self.preferences = preferences
+        self.defersHistoryImages = defersHistoryImages
         if let directory = try? tasks.conversationSteerMailboxDirectory() {
             ConversationSteerMailbox.configure(directory: directory)
         }
@@ -262,6 +270,7 @@ final class ConversationManager {
     /// and reports how many earlier messages remain, so a reader can page
     /// backward. Image data is read only for the messages returned, and only
     /// when `includesImageData` asks for it; internal readers never need it.
+    /// A manager that `defersHistoryImages` reads it only for the newest turn.
 
     /// Answers a live provider request when its process still owns the control
     /// request. After a restart, replays the answer as a new provider turn using

@@ -41,22 +41,43 @@ extension ConversationManager {
             }
         }
         var hydratedImageMessages = 0
+        var deferredImageMessages = 0
         if includesImageData {
-            // Composition reads transcript messages without their image data;
-            // fill it in for the messages actually returned.
-            let images = try transcripts.imageDataURLs(taskID, messageIDs: Set(history.messages.compactMap {
+            // A reader that defers images opens on the newest turn the user started, so only
+            // that turn's images travel with the page. Earlier messages are only marked:
+            // their images can be tens of megabytes that the reader may never show.
+            // An earlier page holds no part of that turn, so all of its images wait.
+            let inlineStart = !defersHistoryImages ? 0
+                : beforeMessageID != nil ? history.messages.count
+                : ConversationMessage.latestTurnStartIndex(in: history.messages) ?? 0
+            let store = try transcripts
+            let deferredTurns = try store.turnsWithImages(taskID, messageIDs: Set(history.messages[..<inlineStart].compactMap {
                 $0.imageDataURLs.isEmpty ? $0.id : nil
             }))
-            if !images.isEmpty {
-                history.messages = history.messages.map { message in
-                    guard message.imageDataURLs.isEmpty, let byTurn = images[message.id],
-                          let stored = message.turnID.flatMap({ byTurn[$0] }) ?? (byTurn.count == 1 ? byTurn.values.first : nil)
-                    else { return message }
-                    hydratedImageMessages += 1
-                    var message = message
-                    message.imageDataURLs = stored
+            // Composition reads transcript messages without their image data;
+            // fill it in for the messages actually returned.
+            let images = try store.imageDataURLs(taskID, messageIDs: Set(history.messages[inlineStart...].compactMap {
+                $0.imageDataURLs.isEmpty ? $0.id : nil
+            }))
+            history.messages = history.messages.enumerated().map { index, message in
+                var message = message
+                if index < inlineStart {
+                    // Codex returns a user's images inline with its thread; stored ones are only looked up.
+                    let stored = deferredTurns[message.id].map { turns in
+                        message.turnID.map(turns.contains) == true || turns.count == 1
+                    } == true
+                    guard stored || !message.imageDataURLs.isEmpty else { return message }
+                    deferredImageMessages += 1
+                    message.imageDataURLs = []
+                    message.imagesDeferred = true
                     return message
                 }
+                guard message.imageDataURLs.isEmpty, let byTurn = images[message.id],
+                      let stored = message.turnID.flatMap({ byTurn[$0] }) ?? (byTurn.count == 1 ? byTurn.values.first : nil)
+                else { return message }
+                hydratedImageMessages += 1
+                message.imageDataURLs = stored
+                return message
             }
         }
         PlayhouseDiagnostics.record("conversation.history.read", fields: [
@@ -67,8 +88,38 @@ extension ConversationManager {
             "returnedMessageCount": String(history.messages.count),
             "earlierMessageCount": history.earlierMessageCount.map(String.init) ?? "none",
             "hydratedImageMessageCount": String(hydratedImageMessages),
+            "deferredImageMessageCount": String(deferredImageMessages),
         ])
         return history
+    }
+
+    /// The images of the given messages, for a reader whose history read left
+    /// them out (`imagesDeferred`). Messages without images are not returned.
+    func messageImages(taskID: UUID, messageIDs: [String]) async throws -> [ConversationMessageImages] {
+        let task = try tasks.conversationSubject(taskID)
+        let wanted = Set(messageIDs)
+        guard !wanted.isEmpty, !wanted.contains("") else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Name at least one message to read images for.")
+        }
+        var found = try transcripts.imageDataURLs(taskID, messageIDs: wanted).flatMap { id, byTurn in
+            byTurn.map { ConversationMessageImages(id: id, turnID: $0.key, imageDataURLs: $0.value) }
+        }
+        let missing = wanted.subtracting(found.map(\.id))
+        // Codex keeps a user's images in its thread rather than in the transcript store.
+        if !missing.isEmpty, task.codexThreadID != nil {
+            let history = try await history(taskID: taskID, restoringEarlierChatPages: true)
+            found += history.messages.compactMap { message in
+                missing.contains(message.id) && !message.imageDataURLs.isEmpty
+                    ? ConversationMessageImages(id: message.id, turnID: message.turnID, imageDataURLs: message.imageDataURLs) : nil
+            }
+        }
+        PlayhouseDiagnostics.record("conversation.images.read", fields: [
+            "taskID": taskID.uuidString,
+            "requestedMessageCount": String(wanted.count),
+            "returnedMessageCount": String(found.count),
+            "readProviderThread": String(!missing.isEmpty && task.codexThreadID != nil),
+        ])
+        return found.sorted { ($0.id, $0.turnID ?? "") < ($1.id, $1.turnID ?? "") }
     }
 
     static func pageEnd(of messages: [ConversationMessage], before messageID: String?) throws -> Int {
