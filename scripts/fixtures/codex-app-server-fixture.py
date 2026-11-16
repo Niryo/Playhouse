@@ -19,6 +19,33 @@ import functools
 import codex_fixture_handlers as _fixture_handlers
 
 
+class _AtomicHistoryPath:
+    """The fixture's history file, replaced whole on each write so tests polling it never read it half-written."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def exists(self):
+        return self.path.exists()
+
+    def is_file(self):
+        return self.path.is_file()
+
+    def read_text(self, encoding=None):
+        return self.path.read_text(encoding=encoding)
+
+    def write_text(self, text, encoding=None):
+        temporary = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+        temporary.write_text(text, encoding=encoding)
+        os.replace(temporary, self.path)
+
+    def __fspath__(self):
+        return str(self.path)
+
+    def __str__(self):
+        return str(self.path)
+
+
 def _bind_fixture_handler(handler):
     return functools.partial(handler, sys.modules[__name__])
 
@@ -295,7 +322,7 @@ def main():
     _session_state.saw_question = False
     _session_state.saw_turn = False
     _session_state.turn_message = None
-    _session_state.history_path = Path(str(sys.argv[0]) + ".history")
+    _session_state.history_path = _AtomicHistoryPath(str(sys.argv[0]) + ".history")
     _session_state.fixture_state_directory = Path(os.environ.get("PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY", str(Path(sys.argv[0]).parent)))
     if "-goal" in _session_state.mode:
         (_session_state.fixture_state_directory / f"{Path(sys.argv[0]).name}.launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")

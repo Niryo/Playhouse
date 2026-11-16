@@ -16,13 +16,6 @@ struct SkillsPageView: View {
         var id: String { rawValue }
     }
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case repo
-        case global
-        case builtin
-        var id: String { rawValue }
-    }
-
     let task: any ConversationSubject
     let manager: RemoteConversationManager
     let onUse: (SkillRecord) -> Void
@@ -35,7 +28,10 @@ struct SkillsPageView: View {
     @State private var isPresentingRulePanel = false
     /// A server's editor is open over the MCP list.
     @State private var isPresentingMcpPanel = false
-    @State private var tab: Tab = .repo
+    /// The group the list last scrolled to, and how many times it has, so
+    /// choosing the same anchor again scrolls back to it.
+    @State private var scrollTarget: String?
+    @State private var scrollRequest = 0
     @State private var catalog: SkillCatalog?
     @State private var search = ""
     @State private var errorMessage: String?
@@ -84,7 +80,7 @@ struct SkillsPageView: View {
 
     private var model: SkillsPageModel {
         SkillsPageModel(
-            catalog: catalog, kind: kind.rawValue, tab: tab.rawValue, search: search,
+            catalog: catalog, kind: kind.rawValue, scrollTo: scrollTarget, scrollRequest: scrollRequest, search: search,
             selection: isSelecting ? selection : nil, enabledOverrides: enabledOverrides,
             isLoadingBuiltins: isLoading, isFixing: isFixing, error: errorMessage,
             panelOpen: isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel
@@ -95,7 +91,7 @@ struct SkillsPageView: View {
         SkillsPageActions(
             back: onClose,
             selectKind: { if let kind = Kind(rawValue: $0) { self.kind = kind } },
-            selectTab: { if let tab = Tab(rawValue: $0) { self.tab = tab } },
+            jump: jump,
             search: { search = $0 },
             newSkill: { withAnimation(Self.panelAnimation) { panel = .creating } },
             fixSelected: { fix(selectedSkills.filter(SkillsPageModel.isFixable)) },
@@ -190,7 +186,7 @@ struct SkillsPageView: View {
                         taskID: task.id, name: manifest.name, description: manifest.description, body: manifest.body,
                         fields: [:], scope: scope, root: root
                     )
-                    tab = record.scope == .global ? .global : .repo
+                    jump(record.scope == .global ? "global" : "repo")
                     await reload()
                 }
                 .padding(.horizontal, 20)
@@ -201,6 +197,12 @@ struct SkillsPageView: View {
                 EmptyView()
             }
         }
+    }
+
+    /// Scrolls the list to a group: repo, global or builtin.
+    private func jump(_ group: String) {
+        scrollTarget = group
+        scrollRequest += 1
     }
 
     private func closePanel() {

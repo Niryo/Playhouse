@@ -847,7 +847,7 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
     }
-    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, is a full page that slides in from the side over the task and fills the window, and its back button returns to the conversation. Opened from the standalone chat sidebar, it likewise covers the whole window rather than only the sidebar, and closing it keeps the chat open. It lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the composer's Skills button that replaced the paperclip as a modal card centered over the task, about as wide as the composer (720 points) and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the standalone chat sidebar, its backdrop likewise covers the whole window rather than only the sidebar, the card centers in the window, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each skill row shows only its name, and its details show in a hint while the pointer rests on it: each user skill's hint shows it usable by both Claude and Codex with its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged beside the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     func test_skills_catalog_lists_repo_global_and_builtin_skills() throws {
         let repository = try makeSkillRepository("skills-catalog-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Agents layout repository skill"),
@@ -869,32 +869,54 @@ extension PlayhouseUITests {
         let taskID = try XCTUnwrap(task["id"] as? String)
         openTask(named: "Skills catalog")
         XCTAssertFalse(element("attach-chat-image-button").exists, "The Skills button replaces the composer's paperclip.")
+        let composer = element("message-composer").frame
         openSkillsPage()
         let window = app.windows.firstMatch.frame
         XCTAssertTrue(waitUntil({
             let page = self.element("skills-page").frame
-            return abs(page.minX - window.minX) < 2 && abs(page.maxX - window.maxX) < 2 && abs(page.maxY - window.maxY) < 2
-        }, timeout: 5), "The Skills page settles as a full page spanning the window's width down to its bottom edge, not an inset modal.")
-        XCTAssertGreaterThan(element("skills-page").frame.height, window.height * 0.85, "The Skills page fills the window.")
+            // The card is 720pt, about the composer's width; the composer sits right of the Changes panel, so the card centers on the window, not on it.
+            return abs(page.width - 720) < 2 && abs(page.width - composer.width) < 40 && abs(page.midX - window.midX) < 2 && page.minY > window.minY && page.maxY < window.maxY - 20
+        }, timeout: 5), "The Skills page settles as a modal card as wide as the composer, centered over the task.")
+        XCTAssertGreaterThan(element("skills-page").frame.height, min(760, window.height * 0.7), "The modal is nearly as tall as the window.")
 
         XCTAssertTrue(element("skills-repo-section-skills-catalog-repo").waitToExist(timeout: 10))
         XCTAssertTrue(element("skills-repo-section-skills-empty-repo").exists)
         XCTAssertTrue(element("skills-empty-skills-empty-repo").exists, "A repository without skills shows an empty state.")
         for name in ["repo-agents", "repo-claude", "repo-shared"] {
             XCTAssertTrue(element("skill-row-\(name)").waitToExist(timeout: 5), "\(name) should be listed.")
+            XCTAssertTrue(isListed("skill-row-\(name)", inSection: "skills-group-repo"), "\(name) is under Repo.")
+        }
+        XCTAssertFalse(element("skill-description-repo-agents").exists, "A row shows only its name until the pointer rests on it.")
+        XCTAssertFalse(element("skill-provider-repo-agents-claude").exists, "Badges wait for the hint too.")
+        attachScreenshot(named: "Skills modal lists every section in one compact list")
+        let hints = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'skill-hint-'"))
+        for name in ["repo-agents", "repo-claude", "repo-shared"] {
+            revealSkillHint(name)
+            XCTAssertTrue(waitUntil({ hints.count == 1 }, timeout: 3), "One hint at a time: resting on \(name) closes the last row's hint.")
             XCTAssertTrue(element("skill-provider-\(name)-claude").exists, "\(name) should be usable by Claude.")
             XCTAssertTrue(element("skill-provider-\(name)-codex").exists, "\(name) should be usable by Codex.")
+            if name == "repo-shared" {
+                XCTAssertTrue(element("skill-linked-repo-shared").exists, "A skill linked into both layouts is one Linked entry.")
+            }
         }
+        XCTAssertFalse(element("skill-hint-repo-agents").exists || element("skill-hint-repo-claude").exists,
+                       "Earlier rows' hints closed when the pointer moved on.")
+        attachScreenshot(named: "Moving to another row swaps the hint")
+        revealSkillHint("repo-agents")
         XCTAssertEqual(accessibleLabelOrValue(of: element("skill-description-repo-agents")), "Agents layout repository skill")
-        XCTAssertTrue(element("skill-linked-repo-shared").exists, "A skill linked into both layouts is one Linked entry.")
+        XCTAssertFalse(element("skill-linked-repo-agents").exists)
+        attachScreenshot(named: "Resting on a skill shows its details in a hint")
+        attachElementScreenshot(revealSkillHint("repo-agents"), named: "The repo-agents skill's hint")
+        element("skills-title").hover()
+        XCTAssertTrue(waitUntil({ !self.element("skill-hint-repo-agents").exists }, timeout: 3), "The hint closes when the pointer leaves its row.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "skill-row-repo-shared").count, 1,
                        "A skill in both layouts is listed once.")
-        XCTAssertFalse(element("skill-linked-repo-agents").exists)
         XCTAssertTrue(element("skill-conflict-repo-dup").exists, "Two different skills with one name are a conflict.")
         XCTAssertTrue(element("skill-invalid-repo-broken").exists, "A SKILL.md without frontmatter is invalid.")
+        revealSkillHint("repo-broken")
+        XCTAssertTrue(element("skill-location-repo-broken").exists)
         XCTAssertFalse(element("skill-provider-repo-broken-claude").exists || element("skill-provider-repo-broken-codex").exists,
                        "An invalid skill is usable by neither provider.")
-        attachScreenshot(named: "Skills page Repo tab lists each repository's skills")
         let search = element("skills-search")
         typeIntoField(search, text: "layout repository")
         XCTAssertTrue(waitUntil({ !self.element("skill-row-repo-shared").exists }, timeout: 5), "Search hides skills that don't match.")
@@ -908,22 +930,35 @@ extension PlayhouseUITests {
         search.typeKey(.delete, modifierFlags: [])
         XCTAssertTrue(element("skill-row-repo-shared").waitToExist(timeout: 5), "Clearing the search shows every skill again.")
 
-        selectSkillsTab("Global")
+        // Global sits near the list's end, so its anchor scrolls it as far up as the list goes.
+        jumpToSection("Global", picker: "skills-tab-picker")
+        XCTAssertTrue(element("skill-row-repo-agents").exists, "Jumping keeps the other sections in the list.")
         for name in ["global-agents", "global-claude", "codex-legacy"] {
             XCTAssertTrue(element("skill-row-\(name)").waitToExist(timeout: 5), "\(name) should be a global skill.")
+            XCTAssertTrue(isListed("skill-row-\(name)", inSection: "skills-group-global"), "\(name) is under Global.")
+            revealSkillHint(name)
             XCTAssertTrue(element("skill-provider-\(name)-claude").exists && element("skill-provider-\(name)-codex").exists)
         }
-        XCTAssertFalse(element("skill-row-synced-skill").exists, "claude.ai's synced skills are built-in, not global.")
-        attachScreenshot(named: "Skills page Global tab")
+        XCTAssertFalse(isListed("skill-row-synced-skill", inSection: "skills-group-global"), "claude.ai's synced skills are built-in, not global.")
+        attachScreenshot(named: "The Global anchor scrolls to the Global section")
 
-        selectSkillsTab("Built-in")
+        // Back to the top first, so the Built-in anchor has to move the list.
+        jumpToSection("Repo", picker: "skills-tab-picker")
+        jumpToSection("Built-in", picker: "skills-tab-picker")
         XCTAssertTrue(element("skill-row-codex-system-skill").waitToExist(timeout: 5))
+        XCTAssertTrue(isListed("skill-row-codex-system-skill", inSection: "skills-group-builtin"))
+        XCTAssertTrue(isListed("skill-row-global-agents", inSection: "skills-group-global"), "Jumping keeps the Global section in the list.")
+        XCTAssertTrue(hints.count <= 1, "Scrolling to a section never leaves stacked hints behind.")
+        revealSkillHint("codex-system-skill")
         XCTAssertTrue(element("skill-provider-codex-system-skill-codex").exists)
         XCTAssertFalse(element("skill-provider-codex-system-skill-claude").exists, "A built-in names only the provider it ships with.")
+        revealSkillHint("synced-skill")
         XCTAssertTrue(element("skill-provider-synced-skill-claude").exists)
         XCTAssertTrue(element("skill-row-simplify").waitToExist(timeout: 20), "Claude Code's built-ins load from its own session.")
+        selectSkillsTab("Built-in")
+        revealSkillHint("simplify")
         XCTAssertTrue(element("skill-provider-simplify-claude").exists)
-        attachScreenshot(named: "Skills page Built-in tab")
+        attachScreenshot(named: "The Built-in section")
 
         let catalog = try skillCatalog(taskID: taskID, includeBundled: true)
         let sections = try XCTUnwrap(catalog["repositories"] as? [[String: Any]])
@@ -940,10 +975,10 @@ extension PlayhouseUITests {
         assertCLIError(try runCLI(["skills", "get", "--task", taskID, "--skill", "global:no-such-skill"], expectedStatus: 3), code: "not_found")
 
         element("skills-back-button").click()
-        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Back returns to the conversation.")
+        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Close returns to the conversation.")
         XCTAssertTrue(element("message-composer").waitToExist(timeout: 5))
 
-        // From the standalone chat sidebar, the page covers the whole window, not just the sidebar.
+        // From the standalone chat sidebar, the backdrop covers the whole window, not just the sidebar, and the card centers in it.
         returnToBoard()
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
@@ -975,17 +1010,18 @@ extension PlayhouseUITests {
         openSkillsPage()
         XCTAssertTrue(waitUntil({
             let page = self.element("skills-page").frame
-            return abs(page.minX - chatWindow.minX) < 2 && abs(page.maxX - chatWindow.maxX) < 2 && abs(page.maxY - chatWindow.maxY) < 2
-        }, timeout: 5), "The chat's Skills page spans the whole window, not only the chat sidebar.")
-        XCTAssertGreaterThan(element("skills-page").frame.height, chatWindow.height * 0.85, "The chat's Skills page fills the window.")
+            return abs(page.width - min(720, chatWindow.width - 48)) < 2 && abs(page.midX - chatWindow.midX) < 2
+        }, timeout: 5), "The chat's Skills modal centers in the whole window, not only the chat sidebar.")
         XCTAssertTrue(waitUntil({ !self.element("chat-sidebar-resize-handle").exists }, timeout: 5),
                       "The sidebar's resize edge hides while the page covers the window.")
         let changedBoardPixels = try XCTUnwrap(changedPixelCount(before: boardBefore, after: try boardStripeImage(), step: 4, threshold: 0.08),
                                                "Could not compare the board's pixels.")
-        XCTAssertGreaterThan(changedBoardPixels, 20, "The page is drawn over the board beside the sidebar, not clipped to the sidebar.")
-        attachScreenshot(named: "Skills page opened from the standalone chat covers the window")
-        element("skills-back-button").click()
-        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Back returns to the chat.")
+        XCTAssertGreaterThan(changedBoardPixels, 20, "The backdrop dims the board beside the sidebar, not only the sidebar.")
+        attachScreenshot(named: "Skills modal opened from the standalone chat centers in the window")
+        // The chat window is wider than the VM's screen, so the centered modal's
+        // Close button can sit off screen; Esc is the same Close button's shortcut.
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Close (Esc) returns to the chat.")
         XCTAssertTrue(element("chat-sidebar").exists, "Closing the page keeps the chat sidebar open.")
         XCTAssertTrue(element("chat-sidebar-resize-handle").waitToExist(timeout: 5), "The sidebar's resize edge returns with the page closed.")
     }
@@ -1018,7 +1054,9 @@ extension PlayhouseUITests {
         typeIntoField(element("new-skill-body"), text: "Summarize merged changes.")
         element("new-skill-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-skill-name").exists }, timeout: 10), "Creating closes the sheet.")
-        XCTAssertTrue(element("skill-row-release-notes").waitToExist(timeout: 10), "The new skill shows on the Global tab.")
+        XCTAssertTrue(element("skill-row-release-notes").waitToExist(timeout: 10), "The new skill shows in the Global section.")
+        XCTAssertTrue(isListed("skill-row-release-notes", inSection: "skills-group-global"))
+        XCTAssertTrue(waitUntil({ self.isInView(section: "skills-group-global", in: "skills-list") }, timeout: 5), "Creating a global skill leaves its Global section in view.")
         let manifest = globalFolder.appendingPathComponent("release-notes/SKILL.md")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8),
                        "---\nname: release-notes\ndescription: \"Draft release notes\"\n---\n\nSummarize merged changes.\n")
@@ -1058,10 +1096,6 @@ extension PlayhouseUITests {
         // Cancel discards the edit, and the page still answers clicks once the editor is gone.
         element("skill-editor-cancel").click()
         XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5), "Cancel closes the editor.")
-        selectSkillsTab("Repo")
-        XCTAssertTrue(element("skills-empty-skills-manage-repo").waitToExist(timeout: 5), "After the editor closes, a click on the Repo tab still switches tabs.")
-        selectSkillsTab("Global")
-        XCTAssertTrue(row.waitToExist(timeout: 5), "A click on the Global tab switches back.")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), created, "Cancel discards the edit.")
         XCTAssertTrue(openPanel("skill-editor-panel", with: row), "A click on the skill row opens the editor again after it was closed.")
         XCTAssertEqual(editor.value as? String, created, "The reopened editor shows the file, not the discarded edit.")
@@ -1075,7 +1109,9 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Previewing an edited skill before saving")
         element("skill-editor-save").click()
         XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 10), "Saving closes the editor.")
-        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("skill-description-release-notes")) == "Draft concise release notes" }, timeout: 10))
+        revealSkillHint("release-notes")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("skill-description-release-notes")) == "Draft concise release notes" }, timeout: 10),
+                      "The hint shows the saved description.")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), edited, "Saving writes the file exactly as edited, keeping frontmatter Playhouse does not parse.")
         let renamed = dataDirectory.appendingPathComponent("skill-edit-renamed.md")
         try skillManifest("other-name", "Renamed").write(to: renamed, atomically: true, encoding: .utf8)
@@ -1136,7 +1172,8 @@ extension PlayhouseUITests {
         selectSkillsTab("Repo")
         XCTAssertTrue(element("skill-row-repo-new").waitToExist(timeout: 10))
         clickSkillMenuItem(skill: "repo-new", item: "skill-move-global-repo-new", title: "Move to Global")
-        XCTAssertTrue(waitUntil({ !self.element("skill-row-repo-new").exists }, timeout: 10), "A moved skill leaves the Repo tab.")
+        XCTAssertTrue(waitUntil({ !self.isListed("skill-row-repo-new", inSection: "skills-group-repo") && self.isListed("skill-row-repo-new", inSection: "skills-group-global") }, timeout: 10),
+                      "A moved skill leaves the Repo section for Global.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("repo-new/SKILL.md").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.appendingPathComponent(".agents/skills/repo-new").path))
         assertCLIError(try runCLI(["skills", "move", "--task", taskID, "--skill", "global:repo-new", "--scope", "global"], expectedStatus: 2), code: "invalid_argument")
@@ -1160,7 +1197,7 @@ extension PlayhouseUITests {
         clickDialogButton("confirm-delete-skill", title: "Delete")
         XCTAssertTrue(waitUntil({ !self.element("skill-row-repo-new").exists }, timeout: 10), "A deleted skill leaves the page.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("repo-new").path), "Deleting removes the folder from disk.")
-        attachScreenshot(named: "Global tab after deleting a skill")
+        attachScreenshot(named: "Global section after deleting a skill")
         let fresh = try skillCatalog(taskID: taskID)
         XCTAssertEqual(skillsByName(fresh["global"]).keys.sorted(), ["release-notes"])
         XCTAssertEqual(skillsByName(fresh["global"])["release-notes"]?["description"] as? String, "Draft release notes by area")

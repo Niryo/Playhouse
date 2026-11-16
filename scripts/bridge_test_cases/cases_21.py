@@ -394,21 +394,22 @@ class BridgeTestCases21:
         self.plugin_node(reopened["tree"], "token-stats-total")
         self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The counter opened it again.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "TokenStats", "--event", "token-stats-sections:onPress", expected_status=2)[0], "invalid_argument")
-    # case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills page's header and skill gallery composed in JavaScript from atoms above the native SwiftUI header and gallery the Skills page uses, built from the same atoms and sample data, each opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the back button, the Skills, Rules & MCP title, the Skills | Rules | MCP and Repo | Global | Built-in segmented pickers, the search field and New Skill, the hint, a repository section whose skill rows show their name, provider, Conflict and Invalid badges, description, issue and location, a small Fix with Agent button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea) with the Skills page's identifiers. Choosing Global in the JavaScript source picker runs onChange (Last: tab global) and shows the Linked and switched-off global skills while the native page stays on Repo. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the header shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the source picker and the search, and the back button closes the JavaScript page (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
+    # case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills modal's header and skill list composed in JavaScript from atoms above the native SwiftUI header and list the Skills modal uses, built from the same atoms and sample data, each 720 points wide like the composer and opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the close button (an xmark capsule labelled Close), the Skills, Rules & MCP title, the Skills | Rules | MCP segmented picker, a Jump to bar of Repo, Global and Built-in anchors with their counts, the search field and a small New Skill button, then one scrolling list with the Repo, Global and Built-in sections in order and the hint below them; a repository section's skills share one card with hairlines between them, each a single line with only its name, a Conflict or Invalid icon beside a broken skill's name, a small Fix button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, while its description, provider badges, issue and location sit in a hover hint (a Popover with hover on, beside the row) and the description is also the row's accessibility hint; and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea, Popover) with the Skills modal's identifiers. Pressing the JavaScript Global anchor runs its handler (Last: jump global) and asks the list to scroll to Global (scrollTo global, a new scrollRequest on each press) while every section stays in the list. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the anchors' row shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the anchors and the search, and the close button closes the JavaScript modal (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
     def test_plugin_skills_page_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage")[0])
         self.assertEqual(rendered["errors"], [])
         tree = rendered["tree"]
         # The same identifiers the Skills page's native header and gallery give their atoms.
-        for test_id in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-search", "new-skill-button",
+        for test_id in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-anchor-repo", "skills-anchor-global",
+                        "skills-anchor-builtin", "skills-group-repo", "skills-group-global", "skills-group-builtin", "skills-intro-repo", "skills-search", "new-skill-button",
                         "skills-provider-timing", "skills-list", "skills-repo-section-login-app", "skills-repo-section-docs-site", "skills-empty-docs-site",
-                        "skill-row-release-notes", "skill-text-release-notes", "skill-name-release-notes", "skill-provider-release-notes-claude",
+                        "skill-row-release-notes", "skill-text-release-notes", "skill-name-release-notes", "skill-hint-release-notes", "skill-provider-release-notes-claude",
                         "skill-provider-release-notes-codex", "skill-description-release-notes", "skill-location-release-notes", "skill-toggle-release-notes",
                         "skill-use-release-notes", "skill-actions-release-notes", "skill-conflict-review-login", "skill-issue-review-login",
                         "skill-fix-review-login", "skill-invalid-broken-skill", "skill-fix-broken-skill"]:
             self.plugin_node(tree, test_id)
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
-        self.assertEqual(types, {"Panel", "Stack", "Text", "Icon", "Label", "Button", "Spacer", "Divider", "Scroll", "Segmented", "TextField", "Toggle", "Menu", "PressArea"},
+        self.assertEqual(types, {"Panel", "Stack", "Text", "Icon", "Label", "Button", "Spacer", "Divider", "Scroll", "Segmented", "TextField", "Toggle", "Menu", "PressArea", "Popover"},
                          "The page is atoms only.")
 
         # The composer's Skills button opens it: a plain Button atom with the sparkles icon.
@@ -418,37 +419,64 @@ class BridgeTestCases21:
         self.assertEqual((opener["children"][0]["type"], opener["children"][0]["props"]["name"]), ("Icon", "sparkles"))
 
         back = self.plugin_node(tree, "skills-back-button")
-        self.assertEqual((back["props"]["shortcut"], back["props"]["label"]), ("cancel", "Back to the conversation"), "Escape goes back while nothing is open.")
+        self.assertEqual((back["props"]["shortcut"], back["props"]["label"], back["props"]["help"]), ("cancel", "Close", "Close (Esc)"), "Escape closes the modal while nothing is open.")
         circle = back["children"][0]
-        self.assertEqual((circle["type"], circle["props"]["width"], circle["props"]["height"], circle["props"]["cornerRadius"]), ("Panel", 26, 26, 13))
+        self.assertEqual((circle["type"], circle["props"]["width"], circle["props"]["height"], circle["props"]["capsule"]), ("Stack", 22, 22, True))
+        self.assertEqual(circle["children"][0]["props"]["name"], "xmark")
+        page = self.plugin_node(tree, "skills-page")
+        self.assertEqual((page["props"]["width"], page["props"]["cornerRadius"]), (720, 14), "The modal is as wide as the composer.")
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-title")), "Skills, Rules & MCP")
         kinds = self.plugin_node(tree, "skills-kind-picker")
         self.assertEqual(([option["label"] for option in kinds["props"]["options"]], kinds["props"]["selected"], kinds["props"]["disabled"]),
                          (["Skills", "Rules", "MCP"], "skills", False))
-        tabs = self.plugin_node(tree, "skills-tab-picker")
-        self.assertEqual(([option["label"] for option in tabs["props"]["options"]], tabs["props"]["selected"], tabs["props"]["width"]),
-                         (["Repo", "Global", "Built-in"], "repo", 260))
+        # The sources are anchors that scroll one sectioned list, not tabs.
+        anchors = self.plugin_node(tree, "skills-tab-picker")
+        self.assertEqual((anchors["type"], anchors["props"]["group"], anchors["props"]["label"]), ("Stack", True, "Jump to"))
+        self.assertEqual([(child["props"]["testID"], child["props"]["label"]) for child in anchors["children"]],
+                         [("skills-anchor-repo", "Repo"), ("skills-anchor-global", "Global"), ("skills-anchor-builtin", "Built-in")])
+        self.assertEqual([self.plugin_text(text) for text in anchors["children"][0]["children"][0]["children"]], ["Repo", "3"], "Each anchor shows its section's count.")
+        scroll = self.plugin_node(tree, "skills-list")
+        self.assertEqual([child["props"].get("testID") for child in scroll["children"]],
+                         ["skills-group-repo", "skills-group-global", "skills-group-builtin", "skills-provider-timing"], "Every section in one list, then the hint.")
+        self.assertEqual([child["props"].get("scrollID") for child in scroll["children"][:3]], ["repo", "global", "builtin"])
+        self.assertEqual(self.plugin_node(tree, "skills-intro-repo")["props"]["help"].split(".")[0], "Skills in the task's repositories")
+        group_ids = lambda tree, group: {node.get("props", {}).get("testID") for node in self.plugin_nodes(self.plugin_node(tree, f"skills-group-{group}"))}
+        self.assertIn("skill-row-shared-notes", group_ids(tree, "global"), "Global skills show in the same list, under Global.")
+        self.assertIn("skill-row-simplify", group_ids(tree, "builtin"))
+        self.assertIn("skill-row-release-notes", group_ids(tree, "repo"))
         title_row = next(node for node in self.plugin_nodes(tree) if any(child.get("props", {}).get("testID") == "skills-title" for child in node.get("children", [])))
         title_row_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(title_row)}
         for moved in ["skills-tab-picker", "skills-search", "new-skill-button"]:
             self.assertNotIn(moved, title_row_ids, f"{moved} sits on its own row, not in the title row.")
         self.assertIn("skills-kind-picker", title_row_ids, "The kind picker stays in the title row.")
         search = self.plugin_node(tree, "skills-search")
-        self.assertEqual((search["props"]["text"], search["props"]["placeholder"], search["props"]["width"]), ("", "Search skills", 200))
+        self.assertEqual((search["props"]["text"], search["props"]["placeholder"], search["props"]["style"]), ("", "Search skills", "plain"))
+        search_box = next(node for node in self.plugin_nodes(tree) if search in node.get("children", []))
+        self.assertEqual(search_box["props"]["width"], 180)
         new_skill = self.plugin_node(tree, "new-skill-button")
-        self.assertEqual((new_skill["props"]["style"], new_skill["children"][0]["props"]["text"]), ("bordered", "New Skill"))
-        self.assertTrue(self.plugin_text(self.plugin_node(tree, "skills-provider-timing")).startswith("Click a skill to open it, or press and hold one"))
-        scroll = self.plugin_node(tree, "skills-list")
-        self.assertEqual((scroll["props"]["lazy"], scroll["props"]["inset"], scroll["props"]["spacing"]), (True, 20, 10))
+        self.assertEqual((new_skill["props"]["style"], new_skill["props"]["controlSize"], new_skill["children"][0]["props"]["text"]), ("bordered", "small", "New Skill"))
+        self.assertTrue(self.plugin_text(self.plugin_node(tree, "skills-provider-timing")).startswith("Hover a skill for its details, click it to open it, or press and hold one"))
+        self.assertEqual((scroll["props"].get("lazy"), scroll["props"]["inset"], scroll["props"]["spacing"], scroll["props"]["scrollRequest"]), (None, 16, 18, 0))
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-empty-docs-site")), "No skills in docs-site.")
 
         row = self.plugin_node(tree, "skill-row-release-notes")
-        self.assertEqual((row["type"], row["props"]["fill"], row["props"]["fillOpacity"], row["props"]["cornerRadius"], row["props"].get("stroke")),
-                         ("Panel", "panel", 1, 10, None), "An unselected row is a panel-colored rounded card.")
-        self.assertEqual([child["type"] for child in row["children"][0]["children"]], ["PressArea", "Toggle", "Button", "Menu"], "The skill's text, then its switch, Use and its menu.")
-        self.assertEqual(self.plugin_node(tree, "skill-text-release-notes")["props"]["pointer"], True, "A skill with a folder opens on click.")
+        self.assertEqual((row["type"], row["props"].get("fill"), row["props"]["paddingY"]), ("Stack", None, 6), "An unselected row is a plain compact line.")
+        self.assertEqual([child["type"] for child in row["children"]], ["PressArea", "Toggle", "Button", "Menu"], "The skill's text, then its switch, Use and its menu.")
+        text = self.plugin_node(tree, "skill-text-release-notes")
+        self.assertEqual((text["props"]["pointer"], text["props"]["hint"]), (True, self.plugin_text(self.plugin_node(tree, "skill-description-release-notes"))),
+                         "A skill with a folder opens on click, and its text carries the description for accessibility.")
+        self.assertEqual([child["type"] for child in text["children"][0]["children"]], ["Text", "Spacer"], "The row shows only the skill's name.")
+        popover = next(node for node in self.plugin_nodes(tree) if node["type"] == "Popover" and row in node["children"])
+        self.assertEqual((popover["props"]["hover"], popover["props"]["isPresented"], popover["props"]["arrowEdge"], popover["props"]["width"]), (True, False, "trailing", 300),
+                         "The details show in a hint while the pointer rests on the row.")
+        hint_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(popover["children"][1])}
+        for detail in ["skill-description-release-notes", "skill-provider-release-notes-claude", "skill-location-release-notes"]:
+            self.assertIn(detail, hint_ids, f"{detail} is in the hint, not the row.")
+        card = next(node for node in self.plugin_nodes(tree) if popover in node.get("children", []))
+        self.assertEqual((card["props"]["fill"], card["props"]["cornerRadius"], card["props"]["stroke"]), ("panel", 10, "primary"), "A section's rows share one card.")
+        self.assertIn("Divider", [child["type"] for child in card["children"]], "A hairline separates the rows.")
         badge = self.plugin_node(tree, "skill-provider-release-notes-claude")
-        self.assertEqual((badge["type"], badge["props"]["fill"], badge["props"]["fillOpacity"]), ("Panel", "green", 0.12))
+        self.assertEqual((badge["type"], badge["props"]["fill"], badge["props"]["fillOpacity"], badge["props"]["capsule"]), ("Stack", "green", 0.12, True))
         self.assertEqual((badge["children"][0]["props"]["text"], badge["children"][0]["props"]["icon"]), ("Claude", "checkmark"))
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "skill-location-release-notes")), ".agents/skills")
         toggle = self.plugin_node(tree, "skill-toggle-release-notes")
@@ -458,35 +486,42 @@ class BridgeTestCases21:
                          ("bordered", "small", False, "Insert /release-notes into the message"))
         actions = self.plugin_node(tree, "skill-actions-release-notes")
         self.assertEqual((actions["props"]["icon"], actions["props"]["width"], actions["props"]["height"], actions["props"]["label"]),
-                         ("ellipsis", 24, 24, "Actions for release-notes"))
+                         ("ellipsis", 22, 22, "Actions for release-notes"))
         self.assertEqual([[item["testID"] for item in group] for group in actions["props"]["items"]], [
             ["skill-edit-release-notes", "skill-reveal-release-notes"],
             ["skill-move-global-release-notes", "skill-move-repo-release-notes-docs-site"],
             ["skill-link-release-notes"], ["skill-delete-release-notes"]])
         self.assertEqual(actions["props"]["items"][3][0]["destructive"], True)
         conflict = self.plugin_node(tree, "skill-row-review-login")
-        self.assertEqual([child["type"] for child in conflict["children"][0]["children"]], ["PressArea", "Button", "Toggle", "Button", "Menu"],
-                         "A conflicting skill offers Fix with Agent before its switch.")
+        self.assertEqual([child["type"] for child in conflict["children"]], ["PressArea", "Button", "Toggle", "Button", "Menu"],
+                         "A conflicting skill offers Fix before its switch.")
         fix = self.plugin_node(tree, "skill-fix-review-login")
-        self.assertEqual((fix["props"]["controlSize"], fix["children"][0]["props"]["text"]), ("small", "Fix with Agent"))
-        self.assertEqual(self.plugin_node(tree, "skill-conflict-review-login")["props"]["fill"], "orange")
-        self.assertEqual(self.plugin_node(tree, "skill-invalid-broken-skill")["props"]["fill"], "red")
+        self.assertEqual((fix["props"]["controlSize"], fix["children"][0]["props"]["text"]), ("small", "Fix"))
+        flag = self.plugin_node(tree, "skill-conflict-review-login")
+        self.assertEqual((flag["type"], flag["props"]["color"], flag["props"]["label"]), ("Icon", "orange", "Conflict"), "A conflict is an icon beside the name.")
+        self.assertIn(flag, self.plugin_node(tree, "skill-text-review-login")["children"][0]["children"])
+        self.assertEqual(self.plugin_node(tree, "skill-invalid-broken-skill")["props"]["color"], "red")
         self.assertEqual(self.plugin_node(tree, "skill-use-broken-skill")["props"]["disabled"], True, "No provider can use an invalid skill.")
         test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)}
         self.assertNotIn("skill-provider-broken-skill-claude", test_ids)
         self.assertNotIn("skill-select-release-notes", test_ids, "Rows show no checkbox until selecting.")
 
         switched = self.assert_success(self.call_cli(
-            "plugin", "render", "--page", "SkillsPage", "--event", "skills-tab-picker:onChange:global",
+            "plugin", "render", "--page", "SkillsPage", "--event", "skills-anchor-global:onPress",
             "--event", "skill-toggle-shared-notes:onToggle", "--event", "skill-use-shared-notes:onPress")[0])
         self.assertEqual(switched["errors"], [])
         tree = switched["tree"]
         commits = {commit["step"]: commit for commit in switched["commits"]}
         last_action = self.plugin_node(tree, "js-last-action")
-        self.assertEqual(self.plugin_node(tree, "skills-tab-picker")["props"]["selected"], "global")
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: use shared-notes")
-        tab_only = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-tab-picker:onChange:global")[0])
-        self.assertEqual(self.plugin_text(self.plugin_node(tab_only["tree"], "js-last-action")), "Last: tab global", "The source picker ran onChange with its value.")
+        jumped = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-anchor-global:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(jumped["tree"], "js-last-action")), "Last: jump global", "The Global anchor ran its handler.")
+        jumped_scroll = self.plugin_node(jumped["tree"], "skills-list")["props"]
+        self.assertEqual((jumped_scroll["scrollTo"], jumped_scroll["scrollRequest"]), ("global", 1), "The anchor asks the list to scroll to Global.")
+        self.assertIn("skill-row-release-notes", group_ids(jumped["tree"], "repo"), "Jumping keeps every section in the list.")
+        again = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skills-anchor-global:onPress", "--event", "skills-anchor-global:onPress")[0])
+        self.assertEqual(self.plugin_node(again["tree"], "skills-list")["props"]["scrollRequest"], 2, "Each press asks again, so a second jump scrolls back.")
         self.plugin_node(tree, "skill-linked-shared-notes")
         self.assertEqual(self.plugin_node(tree, "skill-toggle-quiet-skill")["props"]["isOn"], False, "A switched-off skill shows its switch off.")
         self.assertEqual(self.plugin_node(tree, "skill-use-quiet-skill")["props"]["disabled"], True, "A switched-off skill can't be used.")
@@ -517,8 +552,7 @@ class BridgeTestCases21:
         self.assertEqual((checked["props"]["name"], checked["props"]["label"], checked["props"]["color"]), ("checkmark.circle.fill", "Selected", "accent"))
         self.assertEqual(self.plugin_node(tree, "skill-select-review-login")["props"]["label"], "Not selected")
         selected_row = self.plugin_node(tree, "skill-row-release-notes")["props"]
-        self.assertEqual((selected_row["fill"], selected_row["fillOpacity"], selected_row["stroke"], selected_row["strokeOpacity"]), ("accent", 0.12, "accent", 0.6),
-                         "A selected row is highlighted with the accent.")
+        self.assertEqual((selected_row["fill"], selected_row["fillOpacity"]), ("accent", 0.12), "A selected row is highlighted with the accent.")
         for hidden in ["skill-toggle-release-notes", "skill-use-release-notes", "skill-actions-release-notes", "skill-fix-review-login", "skills-search", "new-skill-button"]:
             self.assertNotIn(hidden, test_ids, f"Selecting hides {hidden}.")
         self.assertEqual(self.plugin_node(tree, "skills-kind-picker")["props"]["disabled"], True, "The kind picker is locked while selecting.")
@@ -526,15 +560,14 @@ class BridgeTestCases21:
         self.assertEqual(self.plugin_node(tree, "skills-selection-done")["props"]["shortcut"], "cancel")
         selecting_title_row = next(node for node in self.plugin_nodes(tree) if any(child.get("props", {}).get("testID") == "skills-title" for child in node.get("children", [])))
         self.assertNotIn("skills-selection-done", {node.get("props", {}).get("testID") for node in self.plugin_nodes(selecting_title_row)},
-                         "The selection actions sit on the source row, not in the title row.")
+                         "The selection actions sit on the anchors' row, not in the title row.")
         self.assertEqual(self.plugin_node(tree, "skills-fix-selected")["props"]["disabled"], True, "Nothing selected is broken, so nothing can be fixed.")
         delete = self.plugin_node(tree, "skills-delete-selected")["props"]
         self.assertEqual((delete["disabled"], delete["destructive"]), (False, True))
         self.assertTrue(self.plugin_text(self.plugin_node(tree, "skills-provider-timing")).startswith("Click skills to select them."))
 
         built_in = self.assert_success(self.call_cli(
-            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress",
-            "--event", "skills-tab-picker:onChange:builtin")[0])
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress")[0])
         test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(built_in["tree"])}
         self.assertIn("skill-row-simplify", test_ids)
         self.assertNotIn("skill-select-simplify", test_ids, "A built-in skill shows no checkbox.")
@@ -575,7 +608,7 @@ class BridgeTestCases21:
 
         closed = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-back-button:onPress")[0])
         test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(closed["tree"])}
-        self.assertNotIn("skills-page", test_ids, "Back closed the page.")
+        self.assertNotIn("skills-page", test_ids, "Close closed the modal.")
         self.assertEqual(self.plugin_text(self.plugin_node(closed["tree"], "js-last-action")), "Last: back")
         reopened = self.assert_success(self.call_cli(
             "plugin", "render", "--page", "SkillsPage", "--event", "skills-back-button:onPress", "--event", "open-skills-button:onPress")[0])

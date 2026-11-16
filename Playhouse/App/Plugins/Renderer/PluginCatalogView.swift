@@ -515,8 +515,8 @@ private struct NativeTokenStatsDemo: View {
     }
 }
 
-/// The JavaScript Skills page above the native one (each as wide as a window,
-/// 1040 points, and 520 tall, so the page scrolls across), from the same
+/// The JavaScript Skills page above the native one (each as wide as the
+/// modal, 720 points, and 520 tall), from the same
 /// sample model, each opened by the composer's Skills button. Each side keeps its own page state; the native page uses a
 /// "native-" prefix so the two never share accessibility identifiers.
 private struct SkillsPageComparison: View {
@@ -529,12 +529,12 @@ private struct SkillsPageComparison: View {
                let sample = catalogValue("SkillsPage", { try Self.sample(page.props) }) {
                 ScrollView(.horizontal) {
                     VStack(alignment: .leading, spacing: 18) {
-                        comparisonColumn("JavaScript (React → atoms)", width: 1060) {
+                        comparisonColumn("JavaScript (React → atoms)", width: 740) {
                             PluginSurface(source: page.source, name: "SkillsPage.js", props: page.props)
                         }
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("plugin-catalog-js-skills-page")
-                        comparisonColumn("Native SwiftUI (atoms)", width: 1060) {
+                        comparisonColumn("Native SwiftUI (atoms)", width: 740) {
                             NativeSkillsPageDemo(sample: sample)
                         }
                         .accessibilityElement(children: .contain)
@@ -563,7 +563,8 @@ private struct NativeSkillsPageDemo: View {
     let sample: SkillsPageComparison.Sample
     @State private var open = true
     @State private var kind: String?
-    @State private var tab: String?
+    @State private var scrollTo: String?
+    @State private var scrollRequest = 0
     @State private var search: String?
     @State private var selection: [String]?
     @State private var switched: [String: Bool] = [:]
@@ -574,17 +575,18 @@ private struct NativeSkillsPageDemo: View {
         var model = sample.skillsPage
         model.prefix = "native-"
         model.kind = kind ?? model.kind
-        model.tab = tab ?? model.tab
+        model.scrollTo = scrollTo ?? model.scrollTo
+        model.scrollRequest = scrollRequest
         model.search = search ?? model.search
         model.selection = selection
-        let chosen = model.tabs.flatMap(\.sections).flatMap(\.rows).filter { selection?.contains($0.id) == true }
+        let chosen = model.groups.flatMap(\.sections).flatMap(\.rows).filter { selection?.contains($0.id) == true }
         model.selectionCount = SkillsPageModel.selectionCount(chosen.count)
         model.canFixSelection = chosen.contains(where: \.fixable)
-        for tab in model.tabs.indices {
-            for section in model.tabs[tab].sections.indices {
-                for row in model.tabs[tab].sections[section].rows.indices {
-                    let id = model.tabs[tab].sections[section].rows[row].id
-                    if let enabled = switched[id] { model.tabs[tab].sections[section].rows[row].enabled = enabled }
+        for group in model.groups.indices {
+            for section in model.groups[group].sections.indices {
+                for row in model.groups[group].sections[section].rows.indices {
+                    let id = model.groups[group].sections[section].rows[row].id
+                    if let enabled = switched[id] { model.groups[group].sections[section].rows[row].enabled = enabled }
                 }
             }
         }
@@ -592,14 +594,14 @@ private struct NativeSkillsPageDemo: View {
     }
 
     private func shownRow(_ id: String) -> SkillsPageModel.Row? {
-        model.tabs.flatMap(\.sections).flatMap(\.rows).first { $0.id == id }
+        model.groups.flatMap(\.sections).flatMap(\.rows).first { $0.id == id }
     }
 
     private var actions: SkillsPageActions {
         SkillsPageActions(
             back: { open = false; lastAction = "back" },
             selectKind: { kind = $0; lastAction = "kind \($0)" },
-            selectTab: { tab = $0; lastAction = "tab \($0)" },
+            jump: { scrollTo = $0; scrollRequest += 1; lastAction = "jump \($0)" },
             search: { search = $0; lastAction = "search \($0)" },
             newSkill: { lastAction = "new skill" },
             fixSelected: { lastAction = "fix \(selection?.count ?? 0) selected" },
@@ -645,7 +647,7 @@ private struct NativeSkillsPageDemo: View {
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
             if open {
-                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 10), common: AtomCommon(testID: "native-skills-page", width: 1040, height: 520, padding: 0)) {
+                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14), common: AtomCommon(testID: "native-skills-page", width: 720, height: 520, padding: 0)) {
                     SkillsPageHeader(model: model, actions: actions)
                     AtomDivider()
                     if model.kind == "skills" {

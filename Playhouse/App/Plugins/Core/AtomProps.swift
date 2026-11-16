@@ -231,6 +231,7 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
 /// A row or column. `axis` is "h" or "v" (default); `align` is leading,
 /// center or trailing for a column and top, center, bottom or baseline (the
 /// first line of text) for a row.
+/// `scrollID` names it as a place a Scroll around it can scroll to (`scrollTo`).
 /// `group` makes it one accessibility container for its children; `combine`
 /// makes it one accessibility element whose label joins theirs; `summary`
 /// makes it one element that reads only as its `label`, hiding its children
@@ -265,9 +266,10 @@ struct StackProps: AtomPropsDecodable, Equatable {
     var strokeWidth: Double?
     var dash: [Double]?
     var summary: Bool?
+    var scrollID: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case axis, spacing, align, group, combine, summary, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash
+        case axis, spacing, align, group, combine, summary, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash, scrollID
     }
 
     /// Whether it fills its shape.
@@ -489,17 +491,22 @@ struct MeterProps: AtomPropsDecodable, Equatable {
 /// Token Stats sections), stretched to the available width. `height` (a
 /// common prop) fixes its height; `maxHeight` lets it shrink to its content.
 /// `inset` pads the column inside the scroll view, and `lazy` builds only
-/// the children in view (the Skills page's gallery). It raises `onEndReached`
+/// the children in view (the Done archive's rows). It raises `onEndReached`
 /// each time the end of its content comes into view (and once when the
 /// content fits), so its owner can append the next page (the Done archive's
-/// 40 at a time).
+/// 40 at a time). Each new `scrollRequest` scrolls, animated, until the
+/// descendant Stack whose `scrollID` is `scrollTo` sits at the top (the
+/// Skills page's section anchors); a lazy column can reach only a Stack it
+/// has built.
 struct ScrollProps: AtomPropsDecodable, Equatable {
     var spacing: Double?
     var maxHeight: Double?
     var inset: Double?
     var lazy: Bool?
+    var scrollTo: String?
+    var scrollRequest: Int?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight, inset, lazy }
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight, inset, lazy, scrollTo, scrollRequest }
 }
 
 /// A thin separator line across the stack it sits in.
@@ -674,17 +681,26 @@ struct EditorProps: AtomPropsDecodable, Equatable {
 /// no padding of its own; a native owner that pads its content passes 0. The
 /// anchor and the content keep their own accessibility, so a `testID` here
 /// only names the popover to a plugin's events.
+///
+/// With `hover` it is a hint instead: it also opens while the pointer rests
+/// on the anchor for `delay` seconds (`defaultHoverDelay` unless set) and
+/// closes when the pointer leaves it. A hint takes no keyboard focus and no
+/// clicks away from the window, so it never raises `onDismiss` (the Skills
+/// page's rows show their details this way).
 struct PopoverProps: AtomPropsDecodable, Equatable {
     static let defaultInset: Double = 14
     static let defaultSpacing: Double = 10
+    static let defaultHoverDelay: Double = 0.4
 
     var isPresented: Bool
     var arrowEdge: String?
     var width: Double?
     var inset: Double?
     var spacing: Double?
+    var hover: Bool?
+    var delay: Double?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, arrowEdge, width, inset, spacing }
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, arrowEdge, width, inset, spacing, hover, delay }
 }
 
 /// A discrete slider over `options`, as wide as its container. It is

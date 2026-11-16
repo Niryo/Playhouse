@@ -8,14 +8,18 @@ struct AtomStack<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        if !props.hasSurface {
-            stack
-                .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true)
-        } else if props.capsule == true {
-            surfaced(Capsule())
-        } else {
-            surfaced(RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 0), style: .continuous))
+        Group {
+            if !props.hasSurface {
+                stack
+                    .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true)
+            } else if props.capsule == true {
+                surfaced(Capsule())
+            } else {
+                surfaced(RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 0), style: .continuous))
+            }
         }
+        // A place an enclosing Scroll's `scrollTo` reaches.
+        .modifier(Applied(when: props.scrollID != nil) { $0.id(props.scrollID ?? "") })
     }
 
     private var stack: some View {

@@ -255,7 +255,8 @@ struct AtomMeter: View {
 
 /// A vertical scroll view around a leading column that fills its width.
 /// `maxHeight` caps it while letting it shrink to its content; the common
-/// `height` fixes it.
+/// `height` fixes it. Each new `scrollRequest` scrolls the Stack whose
+/// `scrollID` is `scrollTo` to the top.
 ///
 /// With `onEndReached`, a zero-height marker after the column reports where it
 /// sits in the scroll view's own visible bounds, and the end is reported each
@@ -275,6 +276,18 @@ struct AtomScroll<Content: View>: View {
     @State private var space = UUID()
 
     var body: some View {
+        ScrollViewReader { proxy in
+            scrollView
+                .onChange(of: props.scrollRequest) {
+                    guard let target = props.scrollTo else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(target, anchor: .top) }
+                }
+        }
+        .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
+        .atomCommon(common, atom: .scroll)
+    }
+
+    private var scrollView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Group {
@@ -314,8 +327,6 @@ struct AtomScroll<Content: View>: View {
         .transformPreference(AtomScrollViewportHeightKey.self) { $0 = nil }
         // A Scroll that goes away reports no pending end.
         .onDisappear { lastEndOffset.generation += 1 }
-        .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
-        .atomCommon(common, atom: .scroll)
     }
 
     /// Reports the end once each time it comes into view. A lazy stack sizes

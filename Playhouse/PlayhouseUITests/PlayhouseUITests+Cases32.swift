@@ -117,8 +117,9 @@ extension PlayhouseUITests {
         clickDebugHighlightNativeAtoms()
         XCTAssertTrue(waitUntil({ outlines(in: self.app).count == 0 }, timeout: 5), "Turning the item off removes every outline.")
     }
-    // case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills page's header and skill gallery composed in JavaScript from atoms above the native SwiftUI header and gallery the Skills page uses, built from the same atoms and sample data, each opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the back button, the Skills, Rules & MCP title, the Skills | Rules | MCP and Repo | Global | Built-in segmented pickers, the search field and New Skill, the hint, a repository section whose skill rows show their name, provider, Conflict and Invalid badges, description, issue and location, a small Fix with Agent button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea) with the Skills page's identifiers. Choosing Global in the JavaScript source picker runs onChange (Last: tab global) and shows the Linked and switched-off global skills while the native page stays on Repo. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the header shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the source picker and the search, and the back button closes the JavaScript page (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
+    // case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills modal's header and skill list composed in JavaScript from atoms above the native SwiftUI header and list the Skills modal uses, built from the same atoms and sample data, each 720 points wide like the composer and opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the close button (an xmark capsule labelled Close), the Skills, Rules & MCP title, the Skills | Rules | MCP segmented picker, a Jump to bar of Repo, Global and Built-in anchors with their counts, the search field and a small New Skill button, then one scrolling list with the Repo, Global and Built-in sections in order and the hint below them; a repository section's skills share one card with hairlines between them, each a single line with only its name, a Conflict or Invalid icon beside a broken skill's name, a small Fix button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, while its description, provider badges, issue and location sit in a hover hint (a Popover with hover on, beside the row) and the description is also the row's accessibility hint; and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea, Popover) with the Skills modal's identifiers. Pressing the JavaScript Global anchor runs its handler (Last: jump global) and asks the list to scroll to Global (scrollTo global, a new scrollRequest on each press) while every section stays in the list. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the anchors' row shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the anchors and the search, and the close button closes the JavaScript modal (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
     func test_plugin_skills_page_renders_from_atoms_like_native() throws {
+        executionTimeAllowance = 360 // It walks every section, anchor and hint of both pages.
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
         let example = catalogSidebarRow("plugin-catalog-skills-page")
@@ -140,8 +141,8 @@ extension PlayhouseUITests {
         func pair(_ identifier: String) -> (js: XCUIElement, native: XCUIElement) {
             (js(identifier), native("native-\(identifier)"))
         }
-        // The pages are as wide as a window (1040 points) and 520 tall, so the
-        // native one sits below the JavaScript one, and the catalog page scrolls
+        // The pages are as wide as the composer (720 points) and 520 tall, the
+        // native one below the JavaScript one, and the catalog page scrolls
         // down and across to reach either.
         let page = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "plugin-catalog-skills-page-scroll"))
             .containing(.any, identifier: "plugin-catalog-js-skills-page").firstMatch
@@ -156,35 +157,74 @@ extension PlayhouseUITests {
                 let frame = element.frame
                 return element.isHittable || page.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
             }
+            // While a row's hint popover shows, XCTest may report no hit point
+            // for the scroll views, so rest the pointer on the catalog's sidebar
+            // to close it before scrolling.
+            if !hasHitTarget(element), app.popovers.count > 0 {
+                app.windows.matching(NSPredicate(format: "title == 'Plugin Catalog'")).firstMatch
+                    .coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).hover()
+                _ = waitUntil({ self.app.popovers.count == 0 }, timeout: 3)
+            }
+            // Scroll at a point of the view that is on screen rather than at its
+            // hit point: XCTest may report no hit point for these nested scroll
+            // views even while they are visible and scrollable. Scroll near the
+            // view's right edge, beside the 720-point pages: at its center the
+            // event lands on a page's own skills list, which takes the scroll
+            // and leaves the catalog page where it was.
+            func scroll(_ view: XCUIElement, deltaX: CGFloat, deltaY: CGFloat) {
+                let shown = view.frame.intersection(page.frame)
+                guard !shown.isNull else {
+                    XCTFail("\(view) has no part on screen inside the catalog page to scroll.")
+                    return
+                }
+                let origin = page.frame.origin
+                page.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: shown.maxX - 12 - origin.x, dy: shown.midY - origin.y))
+                    .scroll(byDeltaX: deltaX, deltaY: deltaY)
+            }
             var scrolls = 0
             while !hasHitTarget(element), scrolls < 20 {
                 let visible = page.frame, target = element.frame
                 if target.midY < visible.minY + 20 || target.midY > visible.maxY - 20 {
-                    page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -250 : 250)
+                    scroll(page, deltaX: 0, deltaY: target.midY > visible.midY ? -250 : 250)
                 } else if target.midX < visible.midX && target.minX < visible.minX + 20 {
-                    across.scroll(byDeltaX: 250, deltaY: 0)
+                    scroll(across, deltaX: 250, deltaY: 0)
                 } else if target.midX > visible.midX && target.maxX > visible.maxX - 20 {
-                    across.scroll(byDeltaX: -250, deltaY: 0)
+                    scroll(across, deltaX: -250, deltaY: 0)
                 } else if target.midX < visible.minX + 20 || target.midX > visible.maxX - 20 {
-                    across.scroll(byDeltaX: target.midX > visible.midX ? -250 : 250, deltaY: 0)
+                    scroll(across, deltaX: target.midX > visible.midX ? -250 : 250, deltaY: 0)
                 } else {
-                    page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -100 : 100)
+                    scroll(page, deltaX: 0, deltaY: target.midY > visible.midY ? -100 : 100)
                 }
                 scrolls += 1
             }
             XCTAssertTrue(hasHitTarget(element), "\(element) should be on screen after scrolling the catalog page.")
             return element
         }
-        func clickNativeRadio(_ label: String) {
-            let button = pair("skills-tab-picker").native.radioButtons[label]
-            if button.isHittable {
-                button.click()
+        func clickAnchor(_ element: XCUIElement) {
+            reveal(element)
+            if element.isHittable {
+                element.click()
                 return
             }
-            // This Picker is visibly inside the nested horizontal comparison
-            // scroll view, but AppKit doesn't expose a hit point for its radio
-            // buttons to XCTest. Tap the same visible screen frame directly.
-            button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+            // The anchor is visibly inside the nested horizontal comparison
+            // scroll view, but XCTest may report no hit point for it there.
+            // Click the same visible screen frame directly.
+            element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        }
+        // A row's details show only in its hover hint, a popover beside the row.
+        @discardableResult func hint(_ identifier: String, row: XCUIElement) -> XCUIElement {
+            let detail = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+            reveal(row)
+            // Like clickAnchor, hover the row's visible frame: inside the nested
+            // comparison scroll view XCTest may report no hit point for it.
+            for _ in 0..<3 where !detail.exists {
+                row.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).hover()
+                if detail.waitToExist(timeout: 3) { break }
+                js("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
+            }
+            XCTAssertTrue(detail.exists, "Resting on \(row) shows \(identifier) in its hint.")
+            return detail
         }
         func assertSameSize(_ identifier: String) {
             let (js, native) = pair(identifier)
@@ -203,14 +243,24 @@ extension PlayhouseUITests {
 
         for identifier in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-search", "new-skill-button",
                            "skills-provider-timing", "skills-repo-section-login-app", "skill-row-release-notes", "skill-row-review-login", "skill-row-broken-skill",
-                           "skill-name-release-notes", "skill-provider-release-notes-claude", "skill-provider-release-notes-codex", "skill-description-release-notes",
-                           "skill-location-release-notes", "skill-toggle-release-notes", "skill-use-release-notes", "skill-actions-release-notes",
-                           "skill-conflict-review-login", "skill-issue-review-login", "skill-fix-review-login", "skill-invalid-broken-skill",
+                           "skill-name-release-notes", "skill-toggle-release-notes", "skill-use-release-notes", "skill-actions-release-notes",
+                           "skill-conflict-review-login", "skill-fix-review-login", "skill-invalid-broken-skill",
                            "skill-fix-broken-skill", "skill-use-broken-skill", "skills-repo-section-docs-site", "skills-empty-docs-site"] {
             assertSameSize(identifier)
         }
         XCTAssertEqual(pluginText(pair("skills-title").js), "Skills, Rules & MCP")
-        XCTAssertEqual(pair("skills-page").js.frame.width, 1040, accuracy: 1, "Each page is as wide as a window, 1040 points.")
+        XCTAssertEqual(pair("skills-page").js.frame.width, 720, accuracy: 1, "Each page is as wide as the composer, 720 points.")
+        for anchor in ["repo", "global", "builtin"] {
+            assertSameSize("skills-anchor-\(anchor)")
+            assertSameSize("skills-group-\(anchor)")
+        }
+        XCTAssertEqual(pair("skills-tab-picker").js.label, "Jump to")
+        XCTAssertEqual(js("skills-anchor-global").label, "Global")
+        for side in [(js("skills-group-repo"), js("skills-group-global"), js("skills-group-builtin")),
+                     (native("native-skills-group-repo"), native("native-skills-group-global"), native("native-skills-group-builtin"))] {
+            XCTAssertLessThan(side.0.frame.minY, side.1.frame.minY, "Repo comes before Global in the one list.")
+            XCTAssertLessThan(side.1.frame.minY, side.2.frame.minY, "Global comes before Built-in in the one list.")
+        }
         XCTAssertGreaterThan(pair("skills-title").js.frame.width, 100, "The title shows in full on one line.")
         XCTAssertLessThan(pair("skills-title").js.frame.height, 30)
         for side in [(pair("skills-title").js, pair("skills-kind-picker").js, pair("skills-tab-picker").js, pair("skills-search").js, pair("new-skill-button").js),
@@ -218,49 +268,71 @@ extension PlayhouseUITests {
             let (title, kinds, tabs, search, newSkill) = side
             XCTAssertEqual(kinds.frame.midY, title.frame.midY, accuracy: 6, "The Skills | Rules | MCP picker stays in the title row.")
             for control in [tabs, search, newSkill] {
-                XCTAssertGreaterThanOrEqual(control.frame.minY, title.frame.maxY, "The source picker, search and New Skill sit on their own row below the title.")
-                XCTAssertEqual(control.frame.midY, tabs.frame.midY, accuracy: 8, "The source picker, search and New Skill share one row.")
+                XCTAssertGreaterThanOrEqual(control.frame.minY, title.frame.maxY, "The anchors, search and New Skill sit on their own row below the title.")
+                XCTAssertEqual(control.frame.midY, tabs.frame.midY, accuracy: 8, "The anchors, search and New Skill share one row.")
             }
         }
         XCTAssertLessThanOrEqual(pair("skills-page").js.frame.maxY, pair("skills-page").native.frame.minY, "The JavaScript page sits above the native one.")
-        for side in [pair("skills-tab-picker").js, pair("skills-tab-picker").native] {
-            XCTAssertTrue(isOn(side.radioButtons["Repo"]), "The page opens on its Repo skills.")
-        }
         XCTAssertTrue(isOn(pair("skills-kind-picker").js.radioButtons["Skills"]), "The page opens on Skills.")
-        XCTAssertEqual(pluginText(js("skill-description-release-notes")), "Draft release notes from the merged pull requests.")
-        XCTAssertEqual(pluginText(js("skill-location-release-notes")), ".agents/skills")
+        for row in [js("skill-row-release-notes"), native("native-skill-row-release-notes")] {
+            XCTAssertFalse(row.staticTexts["Draft release notes from the merged pull requests."].exists, "A row shows only the skill's name, not its description.")
+        }
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "skill-description-release-notes").firstMatch.exists, "The details stay hidden until the pointer rests on the row.")
+        XCTAssertEqual(pluginText(hint("skill-description-release-notes", row: js("skill-row-release-notes"))), "Draft release notes from the merged pull requests.")
+        XCTAssertEqual(pluginText(hint("skill-location-release-notes", row: js("skill-row-release-notes"))), ".agents/skills")
+        XCTAssertTrue(hint("skill-provider-release-notes-claude", row: js("skill-row-release-notes")).exists && app.descendants(matching: .any).matching(identifier: "skill-provider-release-notes-codex").firstMatch.exists, "The hint carries the provider badges.")
+        attachScreenshot(named: "Skills page: the JavaScript hover hint of release-notes")
+        // A hint closes when the pointer leaves its row, so read each one's size while it shows.
+        let jsHint = hint("skill-hint-release-notes", row: js("skill-row-release-notes"))
+        attachElementScreenshot(jsHint, named: "The JavaScript hint of release-notes")
+        let jsHintSize = jsHint.frame.size
+        let nativeHintSize = hint("native-skill-hint-release-notes", row: native("native-skill-row-release-notes")).frame.size
+        XCTAssertEqual(jsHintSize.width, nativeHintSize.width, accuracy: 1, "Both hints have the same width.")
+        XCTAssertEqual(jsHintSize.height, nativeHintSize.height, accuracy: 1, "Both hints have the same height.")
+        XCTAssertTrue(pluginText(hint("skill-issue-review-login", row: js("skill-row-review-login"))).isEmpty == false, "A conflicting skill's hint explains its issue.")
+        XCTAssertTrue(waitUntil({ !js("skill-hint-release-notes").exists }, timeout: 3), "Only one JavaScript hint shows at a time.")
         XCTAssertTrue(isOn(pair("skill-toggle-release-notes").js) && isOn(pair("skill-toggle-release-notes").native), "Both switches start on.")
         XCTAssertTrue(pair("skill-use-release-notes").js.isEnabled)
         XCTAssertFalse(js("skill-use-broken-skill").isEnabled, "No provider can use an invalid skill.")
         XCTAssertFalse(native("native-skill-use-broken-skill").isEnabled)
-        XCTAssertFalse(js("skill-provider-broken-skill-claude").exists)
+        hint("skill-hint-broken-skill", row: js("skill-row-broken-skill"))
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "skill-provider-broken-skill-claude").firstMatch.exists, "No provider badge shows for an invalid skill.")
         XCTAssertEqual(js("skill-actions-release-notes").label, "Actions for release-notes")
         reveal(js("skills-empty-docs-site"))
         XCTAssertEqual(pluginText(js("skills-empty-docs-site")), "No skills in docs-site.")
         reveal(pair("skills-page").js)
-        attachScreenshot(named: "Skills page: JavaScript above native, both on Repo")
+        attachScreenshot(named: "Skills page: JavaScript above native, every section in one list")
+        attachElementScreenshot(reveal(pair("skills-page").js), named: "The JavaScript Skills modal card")
 
-        // Each side keeps its own source; the Segmented atom is controlled.
-        reveal(pair("skills-tab-picker").js).radioButtons["Global"].click()
-        XCTAssertTrue(js("skill-row-shared-notes").waitToExist(timeout: 5), "Choosing Global shows the global skills.")
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: tab global" }, timeout: 5), "The source picker ran onChange with its value.")
-        XCTAssertTrue(js("skill-linked-shared-notes").exists, "A linked skill shows Linked.")
+        // An anchor scrolls its side's list to the section; every section stays listed.
+        func offset(_ group: XCUIElement, in list: XCUIElement) -> CGFloat { group.frame.minY - list.frame.minY }
+        let jsGlobal = js("skills-group-global"), nativeGlobal = native("native-skills-group-global")
+        let jsList = js("skills-list"), nativeList = native("native-skills-list")
+        // The sample list overflows only a little, so start the JavaScript one at
+        // its top (the Repo anchor) to leave the Global anchor room to move it.
+        clickAnchor(js("skills-anchor-repo"))
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: jump repo" && abs(offset(js("skills-group-repo"), in: jsList)) < 20 }, timeout: 5),
+                      "The Repo anchor scrolls the JavaScript list to its top.")
+        let jsBefore = offset(jsGlobal, in: jsList), nativeBefore = offset(nativeGlobal, in: nativeList)
+        clickAnchor(js("skills-anchor-global"))
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: jump global" }, timeout: 5), "The Global anchor ran its handler.")
+        XCTAssertTrue(waitUntil({ offset(jsGlobal, in: jsList) < jsBefore - 10 || abs(offset(jsGlobal, in: jsList)) < 40 }, timeout: 5),
+                      "The Global anchor scrolled the JavaScript list toward Global (\(jsBefore) → \(offset(jsGlobal, in: jsList))).")
+        XCTAssertTrue(js("skill-row-release-notes").exists && js("skill-row-shared-notes").exists && js("skill-row-simplify").exists, "Every section stays in the list.")
+        XCTAssertEqual(offset(nativeGlobal, in: nativeList), nativeBefore, accuracy: 2, "The native list keeps its own scroll.")
+        XCTAssertTrue(hint("skill-linked-shared-notes", row: js("skill-row-shared-notes")).exists, "A linked skill's hint shows Linked.")
         XCTAssertFalse(isOn(js("skill-toggle-quiet-skill")), "A switched-off skill shows its switch off.")
         XCTAssertFalse(js("skill-use-quiet-skill").isEnabled, "A switched-off skill can't be used.")
-        XCTAssertFalse(js("skill-row-release-notes").exists, "Global replaces the repository's skills.")
-        XCTAssertTrue(native("native-skill-row-release-notes").exists, "The native page stays on Repo.")
-        attachScreenshot(named: "Skills page: JavaScript on Global, native still on Repo")
-        reveal(pair("skills-tab-picker").native)
-        clickNativeRadio("Global")
-        XCTAssertTrue(native("native-skill-row-shared-notes").waitToExist(timeout: 5), "The native picker moves its own page.")
-        for identifier in ["skill-row-shared-notes", "skill-linked-shared-notes", "skill-row-quiet-skill", "skill-toggle-quiet-skill"] {
+        attachScreenshot(named: "Skills page: the JavaScript Global anchor scrolled its list")
+        clickAnchor(native("native-skills-anchor-global"))
+        XCTAssertTrue(waitUntil({ self.pluginText(native("native-last-action")) == "Last: jump global" }, timeout: 5), "The native anchor runs its own handler.")
+        XCTAssertTrue(waitUntil({ abs(offset(nativeGlobal, in: nativeList) - offset(jsGlobal, in: jsList)) < 2 }, timeout: 5), "Both lists scroll Global to the same place.")
+        for identifier in ["skill-row-shared-notes", "skill-row-quiet-skill", "skill-toggle-quiet-skill"] {
             assertSameSize(identifier)
         }
-        reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
-        XCTAssertTrue(js("skill-row-release-notes").waitToExist(timeout: 5))
-        reveal(pair("skills-tab-picker").native)
-        clickNativeRadio("Repo")
-        XCTAssertTrue(native("native-skill-row-release-notes").waitToExist(timeout: 5))
+        clickAnchor(js("skills-anchor-repo"))
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: jump repo" }, timeout: 5))
+        clickAnchor(native("native-skills-anchor-repo"))
 
         // The switch runs onToggle and turns Use off; Use runs its handler.
         let jsToggle = reveal(js("skill-toggle-release-notes"))
@@ -287,7 +359,8 @@ extension PlayhouseUITests {
         XCTAssertFalse(js("skill-toggle-release-notes").exists, "Selecting hides a row's own controls.")
         XCTAssertFalse(js("skills-search").exists, "Selecting replaces the search with the selection's actions.")
         XCTAssertTrue(js("skills-fix-selected").exists && js("skills-delete-selected").exists && js("skills-selection-done").exists)
-        XCTAssertGreaterThanOrEqual(js("skills-selection-done").frame.minY, js("skills-title").frame.maxY, "While selecting, the actions replace search on the source row below the title.")
+        XCTAssertGreaterThanOrEqual(js("skills-selection-done").frame.minY, js("skills-title").frame.maxY, "While selecting, the actions replace search on the anchors' row below the title.")
+        XCTAssertEqual(js("skills-selection-done").frame.midY, js("skills-tab-picker").frame.midY, accuracy: 8, "The selection's actions share the anchors' row.")
         XCTAssertFalse(js("skills-fix-selected").isEnabled, "Nothing selected is broken, so nothing can be fixed.")
         XCTAssertFalse(pair("skills-kind-picker").js.isEnabled, "The kind picker is locked while selecting.")
         XCTAssertTrue(native("native-skill-toggle-release-notes").exists, "The native page isn't selecting.")
@@ -296,7 +369,8 @@ extension PlayhouseUITests {
         reveal(js("skill-row-review-login")).click()
         XCTAssertTrue(waitUntil({ self.pluginText(js("skills-selection-count")) == "2 selected" }, timeout: 5), "A click on another row adds it.")
         XCTAssertTrue(waitUntil({ js("skills-fix-selected").isEnabled }, timeout: 5), "A selected conflict can be fixed.")
-        reveal(pair("skills-tab-picker").js).radioButtons["Built-in"].click()
+        clickAnchor(js("skills-anchor-builtin"))
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: jump builtin" }, timeout: 5))
         XCTAssertTrue(js("skill-row-simplify").waitToExist(timeout: 5))
         XCTAssertFalse(js("skill-select-simplify").exists, "A built-in skill shows no checkbox.")
         let nativeSkillText = reveal(native("native-skill-text-release-notes"))
@@ -305,7 +379,7 @@ extension PlayhouseUITests {
         for identifier in ["skills-selection-count", "skills-fix-selected", "skills-delete-selected", "skills-selection-done"] {
             assertSameSize(identifier)
         }
-        reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
+        clickAnchor(js("skills-anchor-repo"))
         XCTAssertTrue(js("skill-select-release-notes").waitToExist(timeout: 5))
         assertSameSize("skill-row-release-notes")
         assertSameSize("skill-select-release-notes")
@@ -324,13 +398,13 @@ extension PlayhouseUITests {
         edit.click()
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: menu release-notes edit" }, timeout: 5), "onMenu received the item's id.")
 
-        // Search runs onChange with the text; Rules hides the source picker and search.
+        // Search runs onChange with the text; Rules hides the anchors and search.
         let search = reveal(js("skills-search"))
         search.click()
         search.typeText("rel")
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: search rel" }, timeout: 5), "Typing in the search ran onChange with the text.")
         reveal(pair("skills-kind-picker").js).radioButtons["Rules"].click()
-        XCTAssertTrue(waitUntil({ !js("skills-tab-picker").exists && !js("skills-search").exists }, timeout: 5), "Rules hides the source picker and the search.")
+        XCTAssertTrue(waitUntil({ !js("skills-tab-picker").exists && !js("skills-search").exists }, timeout: 5), "Rules hides the anchors and the search.")
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: kind rules" }, timeout: 5))
         XCTAssertTrue(native("native-skills-tab-picker").exists, "The native page stays on Skills.")
         attachScreenshot(named: "Skills page: JavaScript on Rules, native on Skills")
