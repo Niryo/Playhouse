@@ -713,6 +713,16 @@ def main():
                     write({"type": "result", "subtype": "error", "is_error": True,
                            "result": "No conversation found with session ID"})
                     return 1
+                # Like Claude Code, a session-cwd fixture's session file records the folder
+                # the session started in (a fork's too); Playhouse resumes a rootless task from it.
+                config = os.environ.get("CLAUDE_CONFIG_DIR")
+                starts_session = "--resume" not in sys.argv or "--fork-session" in sys.argv
+                if "-session-cwd" in Path(sys.argv[0]).name and config and "--session-id" in sys.argv and starts_session:
+                    project = Path(config) / "projects" / "-fixture-project"
+                    project.mkdir(parents=True, exist_ok=True)
+                    with open(project / f"{argument('--session-id')}.jsonl", "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({"type": "system", "subtype": "fixture-session-start",
+                                                 "sessionId": argument("--session-id"), "cwd": os.getcwd()}) + "\n")
                 # Claude Code announces the newest release of a family only through the
                 # bare alias, which names the concrete model in `resolvedModel`; no entry
                 # has that concrete name as its own value.

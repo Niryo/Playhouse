@@ -45,7 +45,11 @@
   },
   {
     "id": "test_task_creation_rejects_invalid_title_roots_and_missing_folder",
-    "expectation": "New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets."
+    "expectation": "New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured, and such a send runs its provider in the configured repository root rather than the home folder, with instructions saying so. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets."
+  },
+  {
+    "id": "test_rootless_claude_resume_keeps_session_working_folder",
+    "expectation": "A Claude task with no repository or folder starts its session in the configured repository root, and a later turn resumes that native session, without handoff context, in the folder its session recorded even after the repository root setting changes; a side chat forks and continues that session in the same recorded folder. A new rootless task follows the changed root, and when a session's recorded folder no longer exists the resumed turn runs in the current repository root."
   },
   {
     "id": "test_task_creation_persists_ordered_roots_across_fresh_connections",

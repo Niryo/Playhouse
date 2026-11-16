@@ -590,7 +590,7 @@ extension PlayhouseUITests {
         let primaryDataDirectory = try XCTUnwrap(primary["dataDirectory"])
         XCTAssertFalse(loggedStorePaths.contains(where: { $0.hasPrefix(primaryDataDirectory) }), "The test app's log must not route to the primary store.")
     }
-    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
+    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured, and such a send runs its provider in the configured repository root rather than the home folder, with instructions saying so. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     func test_task_creation_rejects_invalid_title_roots_and_missing_folder() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -620,8 +620,16 @@ extension PlayhouseUITests {
         let mainHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
         // The fixture writes its history once the thread starts, which can trail the prompt showing in the transcript.
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: mainHistoryURL.path) }, timeout: 10), "The standalone send should reach the provider.")
-        let mainHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: mainHistoryURL)) as? [String: Any])
+        // The turn's cwd lands in the history once the turn starts, after the thread.
+        var mainHistory: [String: Any] = [:]
+        XCTAssertTrue(waitUntil({
+            mainHistory = (try? JSONSerialization.jsonObject(with: Data(contentsOf: mainHistoryURL)) as? [String: Any]) ?? [:]
+            return mainHistory["cwd"] is String
+        }, timeout: 10), "The standalone turn should record its working folder.")
+        let standaloneCwd = URL(fileURLWithPath: try XCTUnwrap(mainHistory["cwd"] as? String)).resolvingSymlinksInPath().path
+        XCTAssertEqual(standaloneCwd, fixture.parent.resolvingSymlinksInPath().path, "A task with no repository should run in the configured repository root, not the home folder.")
         let instructions = try XCTUnwrap(mainHistory["threadStartDeveloperInstructions"] as? String)
+        XCTAssertTrue(instructions.contains("with no repository or folder context, the cwd is the configured repository root"))
         XCTAssertTrue(instructions.contains("read-only inspection of returned source paths"))
         XCTAssertTrue(instructions.contains("Add a repository to this task only when you intend to create or commit changes in it"))
         XCTAssertTrue(instructions.contains("Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated."))
@@ -672,6 +680,96 @@ extension PlayhouseUITests {
         )
         XCTAssertEqual(deletedEmptyRootTask["deleted"] as? Bool, true)
         attachScreenshot(named: "Standalone task has no missing-folder warning")
+    }
+    // case-contract: test_rootless_claude_resume_keeps_session_working_folder | A Claude task with no repository or folder starts its session in the configured repository root, and a later turn resumes that native session, without handoff context, in the folder its session recorded even after the repository root setting changes; a side chat forks and continues that session in the same recorded folder. A new rootless task follows the changed root, and when a session's recorded folder no longer exists the resumed turn runs in the current repository root.
+    func test_rootless_claude_resume_keeps_session_working_folder() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-session-cwd")
+        let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
+        environment["CLAUDE_CONFIG_DIR"] = claudeConfig
+        environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"] = claudeConfig
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let historyURL = URL(fileURLWithPath: try XCTUnwrap(claudeFixtureExecutable) + ".history")
+        func resolved(_ path: String?) -> String? { path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } }
+        func send(_ text: String, inTask title: String) throws -> [String: Any] {
+            openTask(named: title)
+            let composer = element("message-composer")
+            XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept a message.")
+            composer.click()
+            composer.typeText(text)
+            element("send-message-button").click()
+            var turn: [String: Any]?
+            XCTAssertTrue(waitUntil({
+                let history = (try? JSONSerialization.jsonObject(with: Data(contentsOf: historyURL))) as? [String: Any]
+                turn = (history?["turns"] as? [[String: Any]])?.last { $0["userText"] as? String == text }
+                return turn != nil && self.noTurnIsRunning()
+            }, timeout: 30), "The Claude turn \"\(text)\" should run and finish.")
+            return try XCTUnwrap(turn)
+        }
+        func createRootlessClaudeTask(_ title: String) throws {
+            let created = try XCTUnwrap(try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--provider", "claude",
+            ])["result"] as? [String: Any])
+            XCTAssertEqual(created["workspaceRoots"] as? [String], [])
+        }
+
+        try createRootlessClaudeTask("Rootless Claude resume")
+        let first = try send("Tell me a very short dog story.", inTask: "Rootless Claude resume")
+        XCTAssertEqual(first["resumed"] as? Bool, false)
+        XCTAssertEqual(resolved(first["cwd"] as? String), resolved(fixture.parent.path), "A rootless Claude task starts in the configured repository root.")
+        _ = try runCLI(["settings", "set-parent", fixture.alternateParent.path])
+        // A side chat forks the session from, and keeps, the folder the session recorded.
+        // The fixture records a turn after streaming its reply, so the record is awaited.
+        func historyTurn(_ matches: @escaping ([String: Any]) -> Bool) throws -> [String: Any] {
+            var turn: [String: Any]?
+            XCTAssertTrue(waitUntil({
+                let history = (try? JSONSerialization.jsonObject(with: Data(contentsOf: historyURL))) as? [String: Any]
+                turn = (history?["turns"] as? [[String: Any]])?.last(where: matches)
+                return turn != nil
+            }, timeout: 10), "The side chat turn should be recorded.")
+            return try XCTUnwrap(turn)
+        }
+        let taskID = try taskID(named: "Rootless Claude resume")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let replyID = try XCTUnwrap(ordinaryMessages(try XCTUnwrap(history["messages"] as? [[String: Any]]))
+            .last { ($0["role"] as? String) == "assistant" }?["id"] as? String)
+        let replyText = element("assistant-message-\(replyID)").descendants(matching: .staticText).firstMatch
+        XCTAssertTrue(replyText.waitToExist(timeout: 10), "The story reply should be visible.")
+        XCTAssertTrue(waitForStableFrame(replyText), "The reply should settle before its text is selected.")
+        replyText.click()
+        replyText.typeKey("a", modifierFlags: .command)
+        try waitForSideChatBubble(at: replyText)
+        _ = sendSideChatMessage("Why a dog?", answerIndex: 1, containing: "Side chat about")
+        let fork = try historyTurn { $0["forkedFrom"] as? String == first["sessionID"] as? String }
+        XCTAssertEqual(resolved(fork["cwd"] as? String), resolved(fixture.parent.path), "A side chat forks a rootless session in its recorded folder.")
+        _ = sendSideChatMessage("And then?", answerIndex: 3, containing: "Side chat follow-up 2 on")
+        let followUp = try historyTurn { ($0["userText"] as? String ?? "").contains("And then?") }
+        XCTAssertEqual(followUp["sessionID"] as? String, fork["sessionID"] as? String)
+        XCTAssertEqual(followUp["resumed"] as? Bool, true)
+        XCTAssertEqual(resolved(followUp["cwd"] as? String), resolved(fixture.parent.path), "A continued side chat resumes in its fork's recorded folder.")
+        attachScreenshot(named: "Side chat on a rootless Claude task continued in its recorded folder")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(element("side-chat-bubble").waitForNonExistence(timeout: 5), "Escape should close the side chat bubble.")
+        let resumed = try send("Please inspect the workspace.", inTask: "Rootless Claude resume")
+        XCTAssertEqual(resumed["resumed"] as? Bool, true)
+        XCTAssertEqual(resumed["sessionID"] as? String, first["sessionID"] as? String)
+        XCTAssertEqual(resolved(resumed["cwd"] as? String), resolved(fixture.parent.path), "A resumed rootless session keeps the folder its session recorded.")
+        XCTAssertFalse((resumed["userText"] as? String ?? "").contains("<playhouse-handoff-context>"))
+        XCTAssertTrue(waitUntil({ self.transcriptContains("Inspection done: the workspace is ready.") }, timeout: 10))
+        attachScreenshot(named: "Rootless Claude task resumed its native session after the root changed")
+
+        // A recorded folder that is gone falls back to the current repository root.
+        let vanishingRoot = dataDirectory.appendingPathComponent("vanishing-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: vanishingRoot, withIntermediateDirectories: true)
+        _ = try runCLI(["settings", "set-parent", vanishingRoot.path])
+        try createRootlessClaudeTask("Rootless Claude moved root")
+        let started = try send("Tell me a very short dog story.", inTask: "Rootless Claude moved root")
+        XCTAssertEqual(resolved(started["cwd"] as? String), resolved(vanishingRoot.path), "A new rootless task follows the changed repository root.")
+        _ = try runCLI(["settings", "set-parent", fixture.alternateParent.path])
+        try FileManager.default.removeItem(at: vanishingRoot)
+        let moved = try send("Please inspect the workspace.", inTask: "Rootless Claude moved root")
+        XCTAssertEqual(moved["resumed"] as? Bool, true)
+        XCTAssertEqual(resolved(moved["cwd"] as? String), resolved(fixture.alternateParent.path), "A session whose recorded folder is gone resumes in the current root.")
+        attachScreenshot(named: "Rootless Claude session resumed in the current root after its folder was removed")
     }
     // case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send. The conversation shows the additional context folder without repeating repository worktrees in a Working in summary. Saving an unsent prompt records task creation, prompt save, and subsequent reads with safe argument metadata, result state, and outcome while excluding prompt text.
     func test_task_creation_persists_ordered_roots_across_fresh_connections() throws {
