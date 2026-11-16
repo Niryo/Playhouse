@@ -516,7 +516,7 @@ private struct NativeTokenStatsDemo: View {
 }
 
 /// The JavaScript Skills page above the native one (each as wide as the
-/// modal, 720 points, and 520 tall), from the same
+/// modal, 480 points, and 520 tall), from the same
 /// sample model, each opened by the composer's Skills button. Each side keeps its own page state; the native page uses a
 /// "native-" prefix so the two never share accessibility identifiers.
 private struct SkillsPageComparison: View {
@@ -647,9 +647,10 @@ private struct NativeSkillsPageDemo: View {
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
             if open {
-                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14), common: AtomCommon(testID: "native-skills-page", width: 720, height: 520, padding: 0)) {
+                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14), common: AtomCommon(testID: "native-skills-page", width: 480, height: 520, padding: 0)) {
                     SkillsPageHeader(model: model, actions: actions)
                     AtomDivider()
+                    SkillsPageTabs(model: model, actions: actions)
                     if model.kind == "skills" {
                         SkillGalleryView(model: model, actions: actions)
                     } else {

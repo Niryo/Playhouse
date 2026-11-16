@@ -5,8 +5,8 @@ import SwiftUI
 /// skills, instruction files and servers, the user's global ones, and the ones
 /// that came with each provider. Every skill, rule or server a user adds works with both Claude and Codex,
 /// so the page shows where it lives and who can use it rather than which
-/// provider owns it. The header and the skill gallery are composed of plugin
-/// atoms (`SkillsPageHeader` and `SkillGalleryView`); this view owns their
+/// provider owns it. The header, the tabs and the skill gallery are composed of
+/// plugin atoms (`SkillsPageHeader`, `SkillsPageTabs` and `SkillGalleryView`); this view owns their
 /// state, the confirmations and the editor panels, and the Rules and MCP lists.
 struct SkillsPageView: View {
     enum Kind: String, CaseIterable, Identifiable {
@@ -64,6 +64,7 @@ struct SkillsPageView: View {
         VStack(alignment: .leading, spacing: 0) {
             SkillsPageHeader(model: model, actions: actions)
             Divider()
+            SkillsPageTabs(model: model, actions: actions)
             switch kind {
             case .skills: skillsBody
             case .rules: RulesSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingRulePanel, onFixTask: onFixTask)
@@ -491,9 +492,9 @@ private struct NewSkillPanel: View {
     var body: some View {
         SkillPanel(identifier: "new-skill-panel") {
             VStack(alignment: .leading, spacing: 12) {
+                Text("New Skill").font(.headline)
+                // The controls get their own row so the panel fits the narrow modal.
                 HStack {
-                    Text("New Skill").font(.headline)
-                    Spacer()
                     Picker("Save to", selection: $destination) {
                         Text("Global (~/.agents/skills)").tag("global")
                         ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }

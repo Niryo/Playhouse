@@ -31,7 +31,7 @@
               {
                 "id": "repo:/tmp/repos/login-app#release-notes",
                 "name": "release-notes",
-                "badges": [
+                "providers": [
                   {
                     "text": "Claude",
                     "icon": "checkmark",
@@ -45,6 +45,7 @@
                     "testID": "skill-provider-release-notes-codex"
                   }
                 ],
+                "badges": [],
                 "location": ".agents/skills",
                 "editable": true,
                 "opensOnClick": true,
@@ -103,7 +104,7 @@
               {
                 "id": "repo:/tmp/repos/login-app#review-login",
                 "name": "review-login",
-                "badges": [
+                "providers": [
                   {
                     "text": "Claude",
                     "icon": "checkmark",
@@ -117,6 +118,7 @@
                     "testID": "skill-provider-review-login-codex"
                   }
                 ],
+                "badges": [],
                 "location": ".agents/skills · .claude/skills",
                 "editable": true,
                 "opensOnClick": true,
@@ -175,6 +177,7 @@
               {
                 "id": "repo:/tmp/repos/login-app#broken-skill",
                 "name": "broken-skill",
+                "providers": [],
                 "badges": [],
                 "location": ".agents/skills",
                 "editable": true,
@@ -261,7 +264,7 @@
               {
                 "id": "global:shared-notes",
                 "name": "shared-notes",
-                "badges": [
+                "providers": [
                   {
                     "text": "Claude",
                     "icon": "checkmark",
@@ -273,7 +276,9 @@
                     "icon": "checkmark",
                     "color": "green",
                     "testID": "skill-provider-shared-notes-codex"
-                  },
+                  }
+                ],
+                "badges": [
                   {
                     "text": "Linked",
                     "icon": "link",
@@ -339,7 +344,7 @@
               {
                 "id": "global:quiet-skill",
                 "name": "quiet-skill",
-                "badges": [
+                "providers": [
                   {
                     "text": "Claude",
                     "icon": "checkmark",
@@ -353,6 +358,7 @@
                     "testID": "skill-provider-quiet-skill-codex"
                   }
                 ],
+                "badges": [],
                 "location": ".agents/skills",
                 "editable": true,
                 "opensOnClick": true,
@@ -424,7 +430,7 @@
               {
                 "id": "builtin:claude#simplify",
                 "name": "simplify",
-                "badges": [
+                "providers": [
                   {
                     "text": "Claude",
                     "icon": "checkmark",
@@ -432,6 +438,7 @@
                     "testID": "skill-provider-simplify-claude"
                   }
                 ],
+                "badges": [],
                 "location": "Claude Code built-in",
                 "editable": false,
                 "opensOnClick": false,
@@ -446,7 +453,7 @@
               {
                 "id": "builtin:codex#skill-creator",
                 "name": "skill-creator",
-                "badges": [
+                "providers": [
                   {
                     "text": "Codex",
                     "icon": "checkmark",
@@ -454,6 +461,7 @@
                     "testID": "skill-provider-skill-creator-codex"
                   }
                 ],
+                "badges": [],
                 "location": "Codex built-in",
                 "editable": false,
                 "opensOnClick": true,

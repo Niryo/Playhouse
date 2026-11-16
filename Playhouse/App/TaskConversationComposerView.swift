@@ -393,8 +393,8 @@ extension TaskConversationView {
         .preference(key: SkillsPageShowingKey.self, value: isShowingSkills)
     }
 
-    /// The Skills modal's width: the composer's own maximum width.
-    static let skillsPageWidth: CGFloat = 720
+    /// The Skills modal's width: a narrow column centered over the conversation.
+    static let skillsPageWidth: CGFloat = 480
     static let skillsPageMaxHeight: CGFloat = 760
 
     /// Summarizes how the selected provider's native configuration differs, so a

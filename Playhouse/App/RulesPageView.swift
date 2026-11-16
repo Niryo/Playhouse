@@ -45,8 +45,6 @@ struct RulesSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                SkillsPageAnchorBar(testID: "rules-tab-picker", anchorPrefix: "rules-anchor", anchors: anchors, onJump: jump)
-                Spacer()
                 SkillsPageSearchField(text: search, placeholder: "Search rules", testID: "rules-search") { search = $0 }
                 AtomButton(
                     props: ButtonProps(style: "bordered", controlSize: "small"),
@@ -56,13 +54,18 @@ struct RulesSectionView: View {
                     AtomLabel(props: LabelProps(text: "New Rule", icon: "plus"))
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 20)
+            HStack(spacing: 8) {
+                SkillsPageAnchorBar(testID: "rules-tab-picker", anchorPrefix: "rules-anchor", anchors: anchors, onJump: jump)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
             if let errorMessage {
                 Text(errorMessage)
                     .font(.callout)
                     .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 20)
                     .padding(.bottom, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("rules-error")
@@ -78,7 +81,7 @@ struct RulesSectionView: View {
                             .padding(.horizontal, 4)
                             .accessibilityIdentifier("rules-provider-timing")
                     }
-                    .padding(16)
+                    .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .hoverRevealScrollers()
                 }
@@ -279,6 +282,7 @@ struct RulesSectionView: View {
                             .accessibilityLabel("Problem")
                             .accessibilityIdentifier("rule-problem-\(key)")
                     }
+                    providerBadges(rule.providers, key: key)
                     Spacer(minLength: 8)
                 }
                 .overlay {
@@ -315,7 +319,18 @@ struct RulesSectionView: View {
         }
     }
 
-    /// A rule's details: its summary, who reads it, any problem, and where it lives.
+    /// The agents that read a rule, beside its name on the row.
+    private func providerBadges(_ providers: [ConversationProvider], key: String) -> some View {
+        ForEach([ConversationProvider.claude, .codex]) { provider in
+            if providers.contains(provider) {
+                badge(provider.displayName, systemImage: "checkmark", color: .green)
+                    .fixedSize()
+                    .accessibilityIdentifier("rule-provider-\(key)-\(provider.rawValue)")
+            }
+        }
+    }
+
+    /// A rule's details: its summary, what it applies to, any problem, and where it lives.
     private func hint(_ rule: RuleRecord, key: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(rule.name).font(.system(size: 13, weight: .semibold))
@@ -327,12 +342,6 @@ struct RulesSectionView: View {
                     .accessibilityIdentifier("rule-summary-\(key)")
             }
             HStack(spacing: 4) {
-                ForEach([ConversationProvider.claude, .codex]) { provider in
-                    if rule.providers.contains(provider) {
-                        badge(provider.displayName, systemImage: "checkmark", color: .green)
-                            .accessibilityIdentifier("rule-provider-\(key)-\(provider.rawValue)")
-                    }
-                }
                 if !rule.paths.isEmpty {
                     badge(rule.paths.joined(separator: ", "), systemImage: "scope", color: .purple)
                         .accessibilityIdentifier("rule-paths-\(key)")
@@ -603,9 +612,9 @@ private struct NewRulePanel: View {
     var body: some View {
         SkillPanel(identifier: "new-rule-panel") {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("New Rule").font(.headline)
-                    Spacer()
+                Text("New Rule").font(.headline)
+                // The controls get their own rows so the panel fits the narrow modal.
+                VStack(alignment: .leading, spacing: 8) {
                     Picker("Kind", selection: $form) {
                         ForEach(Form.allCases) { form in Text(form.rawValue).tag(form) }
                     }

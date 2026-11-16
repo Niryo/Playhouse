@@ -49,6 +49,17 @@ struct McpServersSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
+                SkillsPageSearchField(text: search, placeholder: "Search servers", testID: "mcp-search") { search = $0 }
+                AtomButton(
+                    props: ButtonProps(style: "bordered", controlSize: "small"),
+                    common: AtomCommon(testID: "new-mcp-server-button", help: "Add an MCP server that both Claude and Codex can use"),
+                    action: { setPanel(.creating) }
+                ) {
+                    AtomLabel(props: LabelProps(text: "New Server", icon: "plus"))
+                }
+            }
+            .padding(.horizontal, 20)
+            HStack(spacing: 8) {
                 SkillsPageAnchorBar(testID: "mcp-tab-picker", anchorPrefix: "mcp-anchor", anchors: anchors, onJump: jump)
                 Spacer()
                 if isCheckingStatus {
@@ -59,22 +70,14 @@ struct McpServersSectionView: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("mcp-checking-status")
                 }
-                SkillsPageSearchField(text: search, placeholder: "Search servers", testID: "mcp-search") { search = $0 }
-                AtomButton(
-                    props: ButtonProps(style: "bordered", controlSize: "small"),
-                    common: AtomCommon(testID: "new-mcp-server-button", help: "Add an MCP server that both Claude and Codex can use"),
-                    action: { setPanel(.creating) }
-                ) {
-                    AtomLabel(props: LabelProps(text: "New Server", icon: "plus"))
-                }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
             if let errorMessage {
                 Text(errorMessage)
                     .font(.callout)
                     .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 20)
                     .padding(.bottom, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("mcp-error")
@@ -90,7 +93,7 @@ struct McpServersSectionView: View {
                             .padding(.horizontal, 4)
                             .accessibilityIdentifier("mcp-provider-timing")
                     }
-                    .padding(16)
+                    .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .hoverRevealScrollers()
                 }
@@ -403,6 +406,13 @@ struct McpServersSectionView: View {
                     } else if server.issue != nil {
                         flag("Problem", identifier: "mcp-problem-\(key)")
                     }
+                    ForEach([ConversationProvider.claude, .codex]) { provider in
+                        if server.providers.contains(provider) {
+                            badge(provider.displayName, systemImage: "checkmark", color: .green)
+                                .fixedSize()
+                                .accessibilityIdentifier("mcp-provider-\(key)-\(provider.rawValue)")
+                        }
+                    }
                     Spacer(minLength: 8)
                 }
                 .overlay {
@@ -450,8 +460,9 @@ struct McpServersSectionView: View {
             .accessibilityIdentifier(identifier)
     }
 
-    /// A server's details: its command line or URL, who starts it, its
-    /// variables, any problem, and where it is defined.
+    /// A server's details: its command line or URL, its transport, its
+    /// variables, any problem, and where it is defined. The agents that start
+    /// it show on the row.
     private func hint(_ server: McpServerRecord, key: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(server.name).font(.system(size: 13, weight: .semibold))
@@ -465,12 +476,6 @@ struct McpServersSectionView: View {
                 badge(server.transport == .stdio ? "Local" : server.transport.rawValue.uppercased(),
                       systemImage: server.transport == .stdio ? "terminal" : "network", color: .purple)
                     .accessibilityIdentifier("mcp-transport-\(key)")
-                ForEach([ConversationProvider.claude, .codex]) { provider in
-                    if server.providers.contains(provider) {
-                        badge(provider.displayName, systemImage: "checkmark", color: .green)
-                            .accessibilityIdentifier("mcp-provider-\(key)-\(provider.rawValue)")
-                    }
-                }
                 if server.availableOutsidePlayhouse {
                     badge("Both CLIs", systemImage: "checkmark.seal", color: .blue)
                         .accessibilityIdentifier("mcp-native-\(key)")
@@ -754,6 +759,9 @@ private struct McpServerEditorPanel: View {
                         .font(.title2.weight(.semibold))
                         .accessibilityIdentifier("mcp-editor-title")
                     Spacer()
+                }
+                // The controls get their own rows so the panel fits the narrow modal.
+                VStack(alignment: .leading, spacing: 8) {
                     if server == nil {
                         Picker("Save to", selection: $destination) {
                             Text("Global").tag("global")

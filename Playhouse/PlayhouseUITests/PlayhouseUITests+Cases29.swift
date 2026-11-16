@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name, and its details show in a hint while the pointer rests on it: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
+    // case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name and Claude and Codex badges for the agents that start it in Playhouse sessions, without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider badge: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
     func test_mcp_catalog_lists_repo_global_and_managed_servers() throws {
         let working = try makeSkillRepository("mcp-catalog-repo", skills: [
             ".mcp.json": #"{"mcpServers": {"repo-docs": {"type": "stdio", "command": "node", "args": ["docs.js"], "env": {"DOCS_TOKEN": "${DOCS_TOKEN}", "DOCS_MODE": "secret-mode-value"}}, "repo-sse": {"type": "sse", "url": "https://sse.example.com/mcp"}}}"#,
@@ -50,8 +50,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-file-problem")).contains(".codex/config.toml"))
         let docs = "mcp-catalog-repo:repo-docs"
         XCTAssertTrue(element("mcp-row-\(docs)").exists)
-        for detail in ["mcp-summary-\(docs)", "mcp-env-\(docs)", "mcp-provider-\(docs)-claude", "mcp-shared-\(docs)"] {
-            XCTAssertFalse(element(detail).exists, "A server row shows only its name until the pointer rests on it (\(detail)).")
+        for detail in ["mcp-summary-\(docs)", "mcp-env-\(docs)", "mcp-shared-\(docs)"] {
+            XCTAssertFalse(element(detail).exists, "A server row shows only its name and agents until the pointer rests on it (\(detail)).")
         }
         XCTAssertFalse(app.staticTexts["node docs.js"].exists, "The server's command waits for its hint.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-summary-\(docs)")), "node docs.js", "A server shows its command.")
@@ -59,16 +59,20 @@ extension PlayhouseUITests {
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-env-\(docs)")), "Environment: DOCS_MODE, DOCS_TOKEN",
                        "Only the names of its environment variables are shown.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'secret-mode-value'")).firstMatch.exists, "Values are never shown.")
-        XCTAssertTrue(hintDetail("mcp-provider-\(docs)-claude").exists && hintDetail("mcp-provider-\(docs)-codex").exists)
+        XCTAssertTrue(rowBadge("mcp-provider-\(docs)-claude").exists && rowBadge("mcp-provider-\(docs)-codex").exists, "The agents that start it show on its row.")
+        XCTAssertFalse(revealMcpHint(docs).descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'mcp-provider-'")).firstMatch.exists,
+                       "The agents show on the row, not in the hint.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-\(docs)")), "Playhouse passes it to Codex.", ".mcp.json is Claude's own.")
         let sse = "mcp-catalog-repo:repo-sse"
-        XCTAssertTrue(hintDetail("mcp-provider-\(sse)-claude").exists)
-        XCTAssertFalse(hintDetail("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
+        XCTAssertTrue(rowBadge("mcp-provider-\(sse)-claude").exists)
+        XCTAssertFalse(rowBadge("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-limitation-\(sse)")).contains("SSE"))
         XCTAssertTrue(element("mcp-row-mcp-catalog-repo:repo-codex").exists, "The worktree's .codex/config.toml servers are listed.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-mcp-other-repo:other-api")), "Playhouse passes it to Claude and Codex.",
                        "Neither agent reads another task repository's servers on its own.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-env-mcp-other-repo:other-api")), "Headers: Authorization")
+        assertSkillsModalLayout(search: "mcp-search", newButton: "new-mcp-server-button", anchors: "mcp-tab-picker")
+        restPointerOffList(hints: "mcp-hint-")
         attachScreenshot(named: "MCP list with each repository's servers")
         let search = element("mcp-search")
         typeIntoField(search, text: "docs.js")
@@ -114,9 +118,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-issue-clash")).contains("differently"))
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-claude-only")), "Playhouse passes it to Codex.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-codex-only")), "Playhouse passes it to Claude.")
-        XCTAssertFalse(hintDetail("mcp-provider-folder-tool-claude").exists, "Claude Code can't run a server with a working folder.")
+        XCTAssertFalse(rowBadge("mcp-provider-folder-tool-claude").exists, "Claude Code can't run a server with a working folder.")
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-limitation-folder-tool")).contains("working folder"))
-        XCTAssertFalse(hintDetail("mcp-provider-off-tool-claude").exists || hintDetail("mcp-provider-off-tool-codex").exists,
+        XCTAssertFalse(rowBadge("mcp-provider-off-tool-claude").exists || rowBadge("mcp-provider-off-tool-codex").exists,
                        "A server Codex's config turns off reaches neither agent.")
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-limitation-off-tool")).contains("enabled = false"))
         XCTAssertTrue(element("mcp-row-inline-tool").exists, "An inline config.toml server is listed.")
@@ -141,8 +145,8 @@ extension PlayhouseUITests {
         let managed = "managed:company"
         XCTAssertTrue(element("mcp-row-\(managed)").waitToExist(timeout: 5), "The managed server is listed.")
         XCTAssertTrue(isListed("mcp-row-\(managed)", inSection: "mcp-group-managed"), "The managed server is in the Managed section.")
-        XCTAssertTrue(hintDetail("mcp-provider-\(managed)-claude").exists)
-        XCTAssertFalse(hintDetail("mcp-provider-\(managed)-codex").exists, "The managed server is Claude's only.")
+        XCTAssertTrue(rowBadge("mcp-provider-\(managed)-claude").exists)
+        XCTAssertFalse(rowBadge("mcp-provider-\(managed)-codex").exists, "The managed server is Claude's only.")
         XCTAssertFalse(element("mcp-toggle-\(managed)").exists, "The managed server can't be turned off.")
         attachScreenshot(named: "MCP Managed section")
 
@@ -181,6 +185,7 @@ extension PlayhouseUITests {
         openMcpPage()
 
         XCTAssertTrue(openPanel("mcp-editor-panel", with: element("new-mcp-server-button")), "New Server opens its panel.")
+        XCTAssertLessThanOrEqual(element("mcp-editor-panel").frame.width, element("skills-page").frame.width + 1, "The New Server panel fits the narrow modal.")
         typeIntoField(element("mcp-editor-name"), text: "bad name")
         typeIntoField(element("mcp-editor-command"), text: "npx")
         element("mcp-editor-save").click()
@@ -325,8 +330,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? server("global:claude-tool"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a server off is saved where a fresh CLI process reads it.")
         XCTAssertTrue(hintDetail("mcp-always-on-claude-tool").waitToExist(timeout: 5), "The page says Claude still starts it itself.")
-        XCTAssertTrue(hintDetail("mcp-provider-claude-tool-claude").exists)
-        XCTAssertFalse(hintDetail("mcp-provider-claude-tool-codex").exists, "Turning it off stops Codex getting it.")
+        XCTAssertTrue(rowBadge("mcp-provider-claude-tool-claude").exists)
+        XCTAssertFalse(rowBadge("mcp-provider-claude-tool-codex").exists, "Turning it off stops Codex getting it.")
         XCTAssertEqual(try String(contentsOf: mcpClaudeState, encoding: .utf8), beforeClaude, "Claude Code's configuration is not written.")
         XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeCodex, "Codex's configuration is not written.")
         attachScreenshot(named: "A server Claude starts itself, turned off")
@@ -339,11 +344,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? server("global:claude-tool"))??["enabled"] as? Bool) == true }, timeout: 10))
 
         element("mcp-toggle-codex-tool").click()
-        XCTAssertTrue(waitUntil({ !self.hintDetail("mcp-provider-codex-tool-claude").exists && !self.hintDetail("mcp-provider-codex-tool-codex").exists }, timeout: 10),
+        XCTAssertTrue(waitUntil({ !self.rowBadge("mcp-provider-codex-tool-claude").exists && !self.rowBadge("mcp-provider-codex-tool-codex").exists }, timeout: 10),
                       "A server only Codex defines reaches neither agent once off.")
         XCTAssertFalse(hintDetail("mcp-always-on-codex-tool").exists)
         element("mcp-toggle-codex-tool").click()
-        XCTAssertTrue(waitUntil({ self.hintDetail("mcp-provider-codex-tool-claude").exists }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.rowBadge("mcp-provider-codex-tool-claude").exists }, timeout: 10))
         assertCLIError(try runCLI(["mcp", "disable", "--task", taskID, "--server", "managed:company"], expectedStatus: 2), code: "invalid_argument")
 
         let actions = element("mcp-actions-clash")
@@ -555,7 +560,7 @@ extension PlayhouseUITests {
         openMcpPage()
         let sse = "mcp-codex-repo:repo-sse"
         XCTAssertTrue(element("mcp-row-\(sse)").waitToExist(timeout: 10))
-        XCTAssertFalse(hintDetail("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
+        XCTAssertFalse(rowBadge("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
         let repoCodexOff = "mcp-codex-repo:repo-codex-off"
         XCTAssertTrue(element("mcp-toggle-\(repoCodexOff)").exists)
         element("mcp-toggle-\(repoCodexOff)").click()

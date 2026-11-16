@@ -211,6 +211,9 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
     var minHeight: Double?
     /// Stretch to the available width, content leading.
     var fillWidth: Bool?
+    /// Keep its natural size: a tight row neither wraps nor truncates it, and
+    /// squeezes its other children instead (a badge beside a name).
+    var fixedSize: Bool?
     var padding: Double?
     /// Extra horizontal padding, inside `padding`.
     var paddingX: Double?
@@ -222,7 +225,7 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
     var passThrough: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case testID, label, value, hint, help, width, height, minWidth, minHeight, fillWidth, padding, paddingX, paddingY, opacity, passThrough
+        case testID, label, value, hint, help, width, height, minWidth, minHeight, fillWidth, fixedSize, padding, paddingX, paddingY, opacity, passThrough
     }
 
     static let keys = Set(CodingKeys.allCases.map(\.stringValue))

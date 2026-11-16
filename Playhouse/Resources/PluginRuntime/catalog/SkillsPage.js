@@ -1,6 +1,6 @@
-// The Skills page's header and skill gallery, composed in JavaScript from the
-// same atoms the native SkillsPageHeader and SkillGalleryView
-// (Playhouse/App/SkillGalleryView.swift) use, from the same display model
+// The Skills page's header, tabs and skill gallery, composed in JavaScript from
+// the same atoms the native SkillsPageHeader, SkillsPageTabs and
+// SkillGalleryView (Playhouse/App/SkillGalleryView.swift) use, from the same display model
 // (Playhouse.props.skillsPage). Above it, the composer's Skills button
 // (SkillsButton) opens it, its close button closes it, and a readout names the
 // last action. The demo keeps the page's own state: the kind picker, the
@@ -33,18 +33,26 @@ function Header(props) {
       h(Icon, { name: "sparkles", size: 13, weight: "semibold", color: "accent" })),
     h(Text, { size: 15, weight: "semibold", testID: prefix + "skills-title" }, model.title),
     h(Spacer),
-    h(Segmented, {
-      options: model.kinds, selected: model.kind, disabled: selecting || model.panelOpen,
-      testID: prefix + "skills-kind-picker", label: "Show",
-      help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools", onChange: on.selectKind
-    }),
     h(Button, {
       shortcut: model.panelOpen || selecting ? undefined : "cancel", testID: prefix + "skills-back-button",
       label: "Close", help: "Close (Esc)", onPress: on.back
     }, h(Stack, { fill: "primary", fillOpacity: 0.07, capsule: true, width: 22, height: 22 },
       h(Icon, { name: "xmark", size: 9, weight: "bold", color: "secondary" })))
   ];
-  return h(Stack, { axis: "h", spacing: 10, paddingX: 16, paddingY: 12 }, children.map(keyed));
+  return h(Stack, { axis: "h", spacing: 10, paddingX: 20, paddingY: 14 }, children.map(keyed));
+}
+
+// The Skills | Rules | MCP tabs, centered at the top of the modal's body.
+function Tabs(props) {
+  var model = props.model, on = props.on;
+  return h(Stack, { axis: "h", paddingX: 20, paddingY: 14 },
+    h(Spacer),
+    h(Segmented, {
+      options: model.kinds, selected: model.kind, disabled: model.selection != null || model.panelOpen,
+      testID: model.prefix + "skills-kind-picker", label: "Show",
+      help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools", onChange: on.selectKind
+    }),
+    h(Spacer));
 }
 
 // The anchors scroll the list to a group; they are not tabs.
@@ -61,19 +69,20 @@ function AnchorBar(props) {
     }));
 }
 
+// The search and New Skill (or the selection's actions) on one row, the anchors on the next.
 function Toolbar(props) {
   var model = props.model, on = props.on, prefix = model.prefix;
-  var children = [h(AnchorBar, { model: model, on: on }), h(Spacer)];
-  if (model.selection != null) {
-    children.push(h(SelectionActions, { model: model, on: on }));
-  } else {
-    children.push(h(Stack, { axis: "h", spacing: 5, fill: "primary", fillOpacity: 0.05, cornerRadius: 7, width: 180, paddingX: 8, paddingY: 4 },
+  var children = model.selection != null ? [h(Spacer), h(SelectionActions, { model: model, on: on })] : [
+    h(Stack, { axis: "h", spacing: 6, fill: "primary", fillOpacity: 0.05, cornerRadius: 7, fillWidth: true, paddingX: 8, paddingY: 5 },
       h(Icon, { name: "magnifyingglass", size: 11, color: "secondary" }),
-      h(TextField, { text: model.search, placeholder: "Search skills", style: "plain", testID: prefix + "skills-search", fillWidth: true, onChange: on.search })));
-    children.push(h(Button, { style: "bordered", controlSize: "small", testID: prefix + "new-skill-button", help: "Create a skill that both Claude and Codex can use", onPress: on.newSkill },
-      h(Label, { text: "New Skill", icon: "plus" })));
-  }
-  return h(Stack, { axis: "h", spacing: 8, paddingX: 16, paddingY: 8 }, children.map(keyed));
+      h(TextField, { text: model.search, placeholder: "Search skills", style: "plain", testID: prefix + "skills-search", fillWidth: true, onChange: on.search })),
+    h(Button, { style: "bordered", controlSize: "small", testID: prefix + "new-skill-button", help: "Create a skill that both Claude and Codex can use", onPress: on.newSkill },
+      h(Label, { text: "New Skill", icon: "plus" }))
+  ];
+  return [
+    h(Stack, { key: "search", axis: "h", spacing: 8, paddingX: 20 }, children.map(keyed)),
+    h(Stack, { key: "anchors", axis: "h", spacing: 8, paddingX: 20, paddingY: 12 }, h(AnchorBar, { model: model, on: on }), h(Spacer))
+  ];
 }
 
 function SelectionActions(props) {
@@ -99,7 +108,7 @@ function emptyState(prefix, empty) {
 }
 
 function badge(badge, testID) {
-  return h(Stack, { key: badge.testID, fill: badge.color, fillOpacity: 0.12, capsule: true, paddingX: 6, paddingY: 2, testID: testID },
+  return h(Stack, { key: badge.testID, fill: badge.color, fillOpacity: 0.12, capsule: true, paddingX: 6, paddingY: 2, fixedSize: true, testID: testID },
     h(Label, { text: badge.text, icon: badge.icon, size: 10, weight: "medium", color: badge.color }));
 }
 
@@ -159,9 +168,8 @@ function Row(props) {
       testID: prefix + "skill-select-" + name, label: selected ? "Selected" : "Not selected"
     }) : null,
     h(Text, { size: 13, weight: "medium", lineLimit: 1, testID: prefix + "skill-name-" + name }, name),
-    row.flag ? h(Icon, { name: row.flag.icon, size: 11, color: row.flag.color, testID: prefix + row.flag.testID, label: row.flag.text, help: row.flag.text }) : null,
-    h(Spacer, { minLength: 8 })
-  ];
+    row.flag ? h(Icon, { name: row.flag.icon, size: 11, color: row.flag.color, testID: prefix + row.flag.testID, label: row.flag.text, help: row.flag.text }) : null
+  ].concat(row.providers.map(function (each) { return badge(each, prefix + each.testID); }), [h(Spacer, { minLength: 8 })]);
   // A press and hold starts selecting; a click opens the skill, or selects while
   // selecting. Only the skill's own text takes them.
   var children = [
@@ -229,10 +237,10 @@ function galleryContent(model, on) {
 function Gallery(props) {
   var model = props.model, on = props.on, prefix = model.prefix;
   return h(Stack, { axis: "v", spacing: 0, align: "leading" },
-    h(Toolbar, { model: model, on: on }),
-    model.error != null ? h(Text, { size: 12, color: "red", testID: prefix + "skills-error", fillWidth: true, paddingX: 16, paddingY: 4 }, model.error) : null,
+    Toolbar({ model: model, on: on }),
+    model.error != null ? h(Text, { size: 12, color: "red", testID: prefix + "skills-error", fillWidth: true, paddingX: 20, paddingY: 4 }, model.error) : null,
     h(Divider),
-    h(Scroll, { spacing: 18, inset: 16, scrollTo: model.scrollTo, scrollRequest: model.scrollRequest, testID: prefix + "skills-list" }, galleryContent(model, on)));
+    h(Scroll, { spacing: 18, inset: 20, scrollTo: model.scrollTo, scrollRequest: model.scrollRequest, testID: prefix + "skills-list" }, galleryContent(model, on)));
 }
 
 function rowNamed(model, id) {
@@ -305,9 +313,10 @@ function Demo() {
     use: function (id) { last[1]("use " + name(id)); },
     menu: function (id, item) { last[1]("menu " + name(id) + " " + item); }
   };
-  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14, width: 720, height: 520, padding: 0, testID: model.prefix + "skills-page" },
+  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14, width: 480, height: 520, padding: 0, testID: model.prefix + "skills-page" },
     h(Header, { model: model, on: on }),
     h(Divider),
+    h(Tabs, { model: model, on: on }),
     model.kind === "skills" ? h(Gallery, { model: model, on: on })
       : h(Text, { size: 12, color: "secondary", padding: 20, testID: model.prefix + "skills-native-list" }, "The Rules and MCP lists stay native.")) : null;
   return h(Stack, { axis: "v", spacing: 12, align: "leading" },

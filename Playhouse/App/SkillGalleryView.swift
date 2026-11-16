@@ -12,9 +12,9 @@ struct SkillsPageModel: Codable, Equatable {
         var label: String
     }
 
-    /// A capsule in a skill's hint: a provider that can use it, Private or
-    /// Linked; a private skill's namespaced command; or the row's flag (Conflict,
-    /// Shadowed or Invalid), which shows as its icon beside the name. `testID` is unprefixed.
+    /// A capsule on a skill's row (a provider that can use it) or in its hint
+    /// (Private or Linked, a private skill's namespaced command, or the row's flag:
+    /// Conflict, Shadowed or Invalid, which shows as its icon beside the name). `testID` is unprefixed.
     struct Badge: Codable, Equatable {
         var text: String
         var icon: String
@@ -36,6 +36,8 @@ struct SkillsPageModel: Codable, Equatable {
         /// The skill's id, which every row action names.
         var id: String
         var name: String
+        /// The providers that can use it, beside the name on the row.
+        var providers: [Badge]
         /// What the hint lists under the description.
         var badges: [Badge]
         /// Conflict, Shadowed or Invalid, marked beside the name.
@@ -194,9 +196,10 @@ extension SkillsPageModel {
 
     private static func row(_ skill: SkillRecord, repositories: [SkillRepositorySection], enabled: Bool) -> Row {
         let name = skill.name
-        var badges = ConversationProvider.allCases.filter(skill.providers.contains).map { provider in
+        let providers = ConversationProvider.allCases.filter(skill.providers.contains).map { provider in
             Badge(text: provider.displayName, icon: "checkmark", color: "green", testID: "skill-provider-\(name)-\(provider.rawValue)")
         }
+        var badges: [Badge] = []
         let isPrivate = skill.scope == .privateRepo
         var command: Badge?
         if isPrivate {
@@ -216,7 +219,7 @@ extension SkillsPageModel {
             nil
         }
         return Row(
-            id: skill.id, name: name, badges: badges, flag: flag, command: command,
+            id: skill.id, name: name, providers: providers, badges: badges, flag: flag, command: command,
             description: skill.description.isEmpty ? nil : skill.description,
             issue: skill.issue,
             location: isPrivate
@@ -319,30 +322,25 @@ struct SkillsButton: View {
     }
 }
 
-/// The Skills page's header, composed only of plugin atoms: the page's icon
-/// and title, the Skills | Rules | MCP picker and the close button. Each
-/// list's anchors, search and New button sit on their own row under it.
+/// The Skills page's header, composed only of plugin atoms: a standard modal
+/// header with the page's icon and title and the close button. The Skills |
+/// Rules | MCP tabs sit under it (`SkillsPageTabs`), and each list's search,
+/// New button and anchors on their own rows under those.
 struct SkillsPageHeader: View {
     let model: SkillsPageModel
     var actions = SkillsPageActions()
 
     private var prefix: String { model.prefix }
-    private var selection: [String]? { model.selection }
 
     var body: some View {
-        AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(paddingX: 16, paddingY: 12)) {
+        AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(paddingX: 20, paddingY: 14)) {
             AtomStack(props: StackProps(fill: "accent", fillOpacity: 0.14, cornerRadius: 7), common: AtomCommon(width: 26, height: 26)) {
                 AtomIcon(props: IconProps(name: "sparkles", size: 13, weight: "semibold", color: "accent"))
             }
             AtomText(props: TextProps(text: model.title, size: 15, weight: "semibold"), common: AtomCommon(testID: "\(prefix)skills-title"))
             AtomSpacer()
-            AtomSegmented(
-                props: SegmentedProps(options: model.kinds.map { .init(value: $0.value, label: $0.label) }, selected: model.kind, disabled: selection != nil || model.panelOpen),
-                common: AtomCommon(testID: "\(prefix)skills-kind-picker", label: "Show", help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools"),
-                onChange: actions.selectKind
-            )
             AtomButton(
-                props: ButtonProps(shortcut: model.panelOpen || selection != nil ? nil : "cancel"),
+                props: ButtonProps(shortcut: model.panelOpen || model.selection != nil ? nil : "cancel"),
                 common: AtomCommon(testID: "\(prefix)skills-back-button", label: "Close", help: "Close (Esc)"),
                 action: actions.back
             ) {
@@ -350,6 +348,25 @@ struct SkillsPageHeader: View {
                     AtomIcon(props: IconProps(name: "xmark", size: 9, weight: "bold", color: "secondary"))
                 }
             }
+        }
+    }
+}
+
+/// The Skills page's Skills | Rules | MCP tabs, composed only of plugin atoms:
+/// a segmented control centered at the top of the modal's body.
+struct SkillsPageTabs: View {
+    let model: SkillsPageModel
+    var actions = SkillsPageActions()
+
+    var body: some View {
+        AtomStack(props: StackProps(axis: "h"), common: AtomCommon(paddingX: 20, paddingY: 14)) {
+            AtomSpacer()
+            AtomSegmented(
+                props: SegmentedProps(options: model.kinds.map { .init(value: $0.value, label: $0.label) }, selected: model.kind, disabled: model.selection != nil || model.panelOpen),
+                common: AtomCommon(testID: "\(model.prefix)skills-kind-picker", label: "Show", help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools"),
+                onChange: actions.selectKind
+            )
+            AtomSpacer()
         }
     }
 }
@@ -388,7 +405,7 @@ struct SkillsPageAnchorBar: View {
 }
 
 /// A list's search field, composed only of plugin atoms: a magnifying glass
-/// and a plain text field in a soft rounded box.
+/// and a plain text field in a soft rounded box as wide as its row.
 struct SkillsPageSearchField: View {
     let text: String
     let placeholder: String
@@ -396,7 +413,7 @@ struct SkillsPageSearchField: View {
     let onChange: (String) -> Void
 
     var body: some View {
-        AtomStack(props: StackProps(axis: "h", spacing: 5, fill: "primary", fillOpacity: 0.05, cornerRadius: 7), common: AtomCommon(width: 180, paddingX: 8, paddingY: 4)) {
+        AtomStack(props: StackProps(axis: "h", spacing: 6, fill: "primary", fillOpacity: 0.05, cornerRadius: 7), common: AtomCommon(fillWidth: true, paddingX: 8, paddingY: 5)) {
             AtomIcon(props: IconProps(name: "magnifyingglass", size: 11, color: "secondary"))
             AtomTextField(props: TextFieldProps(text: text, placeholder: placeholder, style: "plain"), common: AtomCommon(testID: testID, fillWidth: true), onChange: onChange)
         }
@@ -438,11 +455,11 @@ struct SkillsPageCard<Content: View>: View {
     }
 }
 
-/// The Skills list under the header, composed only of plugin atoms: a row
-/// with the sections' anchors, the search and New Skill (or the selection's
-/// actions), then every section in one scroll view, each skill a single line
-/// with its name, switch, Use button and actions menu whose details show in
-/// a hint while the pointer rests on it.
+/// The Skills list under the tabs, composed only of plugin atoms: a row with
+/// the search and New Skill (or the selection's actions), a row with the
+/// sections' anchors, then every section in one scroll view, each skill a
+/// single line with its name, switch, Use button and actions menu whose
+/// details show in a hint while the pointer rests on it.
 struct SkillGalleryView: View {
     let model: SkillsPageModel
     var actions = SkillsPageActions()
@@ -452,14 +469,9 @@ struct SkillGalleryView: View {
 
     var body: some View {
         AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading")) {
-            AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 16, paddingY: 8)) {
-                SkillsPageAnchorBar(
-                    testID: "\(prefix)skills-tab-picker", anchorPrefix: "\(prefix)skills-anchor",
-                    anchors: model.groups.map { SkillsPageAnchor(value: $0.value, label: $0.label, count: $0.count) },
-                    onJump: actions.jump
-                )
-                AtomSpacer()
+            AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 20)) {
                 if isSelecting {
+                    AtomSpacer()
                     selectionActions
                 } else {
                     SkillsPageSearchField(text: model.search, placeholder: "Search skills", testID: "\(prefix)skills-search", onChange: actions.search)
@@ -472,12 +484,20 @@ struct SkillGalleryView: View {
                     }
                 }
             }
+            AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 20, paddingY: 12)) {
+                SkillsPageAnchorBar(
+                    testID: "\(prefix)skills-tab-picker", anchorPrefix: "\(prefix)skills-anchor",
+                    anchors: model.groups.map { SkillsPageAnchor(value: $0.value, label: $0.label, count: $0.count) },
+                    onJump: actions.jump
+                )
+                AtomSpacer()
+            }
             if let error = model.error {
-                AtomText(props: TextProps(text: error, size: 12, color: "red"), common: AtomCommon(testID: "\(prefix)skills-error", fillWidth: true, paddingX: 16, paddingY: 4))
+                AtomText(props: TextProps(text: error, size: 12, color: "red"), common: AtomCommon(testID: "\(prefix)skills-error", fillWidth: true, paddingX: 20, paddingY: 4))
             }
             AtomDivider()
             AtomScroll(
-                props: ScrollProps(spacing: 18, inset: 16, scrollTo: model.scrollTo, scrollRequest: model.scrollRequest),
+                props: ScrollProps(spacing: 18, inset: 20, scrollTo: model.scrollTo, scrollRequest: model.scrollRequest),
                 common: AtomCommon(testID: "\(prefix)skills-list")
             ) {
                 content
@@ -594,6 +614,7 @@ struct SkillGalleryView: View {
                         if let flag = row.flag {
                             AtomIcon(props: IconProps(name: flag.icon, size: 11, color: flag.color), common: AtomCommon(testID: "\(prefix)\(flag.testID)", label: flag.text, help: flag.text))
                         }
+                        ForEach(row.providers, id: \.testID) { badge($0, testID: "\(prefix)\($0.testID)") }
                         AtomSpacer(props: SpacerProps(minLength: 8))
                     }
                 }
@@ -666,7 +687,7 @@ struct SkillGalleryView: View {
     }
 
     private func badge(_ badge: SkillsPageModel.Badge, testID: String?) -> some View {
-        AtomStack(props: StackProps(fill: badge.color, fillOpacity: 0.12, capsule: true), common: AtomCommon(testID: testID, paddingX: 6, paddingY: 2)) {
+        AtomStack(props: StackProps(fill: badge.color, fillOpacity: 0.12, capsule: true), common: AtomCommon(testID: testID, fixedSize: true, paddingX: 6, paddingY: 2)) {
             AtomLabel(props: LabelProps(text: badge.text, icon: badge.icon, size: 10, weight: "medium", color: badge.color))
         }
     }

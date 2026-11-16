@@ -847,7 +847,7 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
     }
-    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the composer's Skills button that replaced the paperclip as a modal card centered over the task, about as wide as the composer (720 points) and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the standalone chat sidebar, its backdrop likewise covers the whole window rather than only the sidebar, the card centers in the window, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each skill row shows only its name, and its details show in a hint while the pointer rests on it: each user skill's hint shows it usable by both Claude and Codex with its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged beside the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the composer's Skills button that replaced the paperclip as a modal card centered over the task, a narrow column 480 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the standalone chat sidebar, its backdrop likewise covers the whole window rather than only the sidebar, the card centers in the window, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each skill row shows only its name and Claude and Codex badges for the agents that can use it, on the name's line and without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider badge: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged beside the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     func test_skills_catalog_lists_repo_global_and_builtin_skills() throws {
         let repository = try makeSkillRepository("skills-catalog-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Agents layout repository skill"),
@@ -874,10 +874,11 @@ extension PlayhouseUITests {
         let window = app.windows.firstMatch.frame
         XCTAssertTrue(waitUntil({
             let page = self.element("skills-page").frame
-            // The card is 720pt, about the composer's width; the composer sits right of the Changes panel, so the card centers on the window, not on it.
-            return abs(page.width - 720) < 2 && abs(page.width - composer.width) < 40 && abs(page.midX - window.midX) < 2 && page.minY > window.minY && page.maxY < window.maxY - 20
-        }, timeout: 5), "The Skills page settles as a modal card as wide as the composer, centered over the task.")
+            // The card is a narrow 480pt column, well inside the composer's width; the composer sits right of the Changes panel, so the card centers on the window, not on it.
+            return abs(page.width - 480) < 2 && page.width < composer.width - 100 && abs(page.midX - window.midX) < 2 && page.minY > window.minY && page.maxY < window.maxY - 20
+        }, timeout: 5), "The Skills page settles as a narrow modal card, centered over the task.")
         XCTAssertGreaterThan(element("skills-page").frame.height, min(760, window.height * 0.7), "The modal is nearly as tall as the window.")
+        assertSkillsModalLayout(search: "skills-search", newButton: "new-skill-button", anchors: "skills-tab-picker")
 
         XCTAssertTrue(element("skills-repo-section-skills-catalog-repo").waitToExist(timeout: 10))
         XCTAssertTrue(element("skills-repo-section-skills-empty-repo").exists)
@@ -887,14 +888,22 @@ extension PlayhouseUITests {
             XCTAssertTrue(isListed("skill-row-\(name)", inSection: "skills-group-repo"), "\(name) is under Repo.")
         }
         XCTAssertFalse(element("skill-description-repo-agents").exists, "A row shows only its name until the pointer rests on it.")
-        XCTAssertFalse(element("skill-provider-repo-agents-claude").exists, "Badges wait for the hint too.")
+        XCTAssertTrue(rowBadge("skill-provider-repo-agents-claude").exists && rowBadge("skill-provider-repo-agents-codex").exists,
+                      "The agents that can use a skill show on its row without the hint.")
+        XCTAssertGreaterThan(element("skill-provider-repo-agents-claude").frame.minX, element("skill-name-repo-agents").frame.maxX, "The badges follow the name.")
+        XCTAssertLessThan(abs(element("skill-provider-repo-agents-claude").frame.midY - element("skill-name-repo-agents").frame.midY), 4, "The badges share the name's line.")
+        XCTAssertLessThan(abs(element("skill-provider-repo-dup-claude").frame.height - element("skill-provider-repo-agents-claude").frame.height), 1,
+                          "A badge on a crowded row (a flag and Fix beside it) stays on one line.")
+        restPointerOffList(hints: "skill-hint-")
         attachScreenshot(named: "Skills modal lists every section in one compact list")
         let hints = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'skill-hint-'"))
         for name in ["repo-agents", "repo-claude", "repo-shared"] {
             revealSkillHint(name)
             XCTAssertTrue(waitUntil({ hints.count == 1 }, timeout: 3), "One hint at a time: resting on \(name) closes the last row's hint.")
-            XCTAssertTrue(element("skill-provider-\(name)-claude").exists, "\(name) should be usable by Claude.")
-            XCTAssertTrue(element("skill-provider-\(name)-codex").exists, "\(name) should be usable by Codex.")
+            XCTAssertTrue(rowBadge("skill-provider-\(name)-claude").exists, "\(name) should be usable by Claude.")
+            XCTAssertTrue(rowBadge("skill-provider-\(name)-codex").exists, "\(name) should be usable by Codex.")
+            XCTAssertFalse(element("skill-hint-\(name)").descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'skill-provider-'")).firstMatch.exists,
+                           "\(name)'s agents show on its row, not in its hint.")
             if name == "repo-shared" {
                 XCTAssertTrue(element("skill-linked-repo-shared").exists, "A skill linked into both layouts is one Linked entry.")
             }
@@ -915,7 +924,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("skill-invalid-repo-broken").exists, "A SKILL.md without frontmatter is invalid.")
         revealSkillHint("repo-broken")
         XCTAssertTrue(element("skill-location-repo-broken").exists)
-        XCTAssertFalse(element("skill-provider-repo-broken-claude").exists || element("skill-provider-repo-broken-codex").exists,
+        XCTAssertFalse(rowBadge("skill-provider-repo-broken-claude").exists || rowBadge("skill-provider-repo-broken-codex").exists,
                        "An invalid skill is usable by neither provider.")
         let search = element("skills-search")
         typeIntoField(search, text: "layout repository")
@@ -937,7 +946,7 @@ extension PlayhouseUITests {
             XCTAssertTrue(element("skill-row-\(name)").waitToExist(timeout: 5), "\(name) should be a global skill.")
             XCTAssertTrue(isListed("skill-row-\(name)", inSection: "skills-group-global"), "\(name) is under Global.")
             revealSkillHint(name)
-            XCTAssertTrue(element("skill-provider-\(name)-claude").exists && element("skill-provider-\(name)-codex").exists)
+            XCTAssertTrue(rowBadge("skill-provider-\(name)-claude").exists && rowBadge("skill-provider-\(name)-codex").exists)
         }
         XCTAssertFalse(isListed("skill-row-synced-skill", inSection: "skills-group-global"), "claude.ai's synced skills are built-in, not global.")
         attachScreenshot(named: "The Global anchor scrolls to the Global section")
@@ -950,14 +959,14 @@ extension PlayhouseUITests {
         XCTAssertTrue(isListed("skill-row-global-agents", inSection: "skills-group-global"), "Jumping keeps the Global section in the list.")
         XCTAssertTrue(hints.count <= 1, "Scrolling to a section never leaves stacked hints behind.")
         revealSkillHint("codex-system-skill")
-        XCTAssertTrue(element("skill-provider-codex-system-skill-codex").exists)
-        XCTAssertFalse(element("skill-provider-codex-system-skill-claude").exists, "A built-in names only the provider it ships with.")
+        XCTAssertTrue(rowBadge("skill-provider-codex-system-skill-codex").exists)
+        XCTAssertFalse(rowBadge("skill-provider-codex-system-skill-claude").exists, "A built-in names only the provider it ships with.")
         revealSkillHint("synced-skill")
-        XCTAssertTrue(element("skill-provider-synced-skill-claude").exists)
+        XCTAssertTrue(rowBadge("skill-provider-synced-skill-claude").exists)
         XCTAssertTrue(element("skill-row-simplify").waitToExist(timeout: 20), "Claude Code's built-ins load from its own session.")
         selectSkillsTab("Built-in")
         revealSkillHint("simplify")
-        XCTAssertTrue(element("skill-provider-simplify-claude").exists)
+        XCTAssertTrue(rowBadge("skill-provider-simplify-claude").exists)
         attachScreenshot(named: "The Built-in section")
 
         let catalog = try skillCatalog(taskID: taskID, includeBundled: true)
@@ -1010,7 +1019,7 @@ extension PlayhouseUITests {
         openSkillsPage()
         XCTAssertTrue(waitUntil({
             let page = self.element("skills-page").frame
-            return abs(page.width - min(720, chatWindow.width - 48)) < 2 && abs(page.midX - chatWindow.midX) < 2
+            return abs(page.width - min(480, chatWindow.width - 48)) < 2 && abs(page.midX - chatWindow.midX) < 2
         }, timeout: 5), "The chat's Skills modal centers in the whole window, not only the chat sidebar.")
         XCTAssertTrue(waitUntil({ !self.element("chat-sidebar-resize-handle").exists }, timeout: 5),
                       "The sidebar's resize edge hides while the page covers the window.")
@@ -1042,6 +1051,7 @@ extension PlayhouseUITests {
         element("new-skill-button").click()
         let name = element("new-skill-name")
         XCTAssertTrue(name.waitToExist(timeout: 5), "New Skill should open its sheet.")
+        XCTAssertLessThanOrEqual(element("new-skill-panel").frame.width, element("skills-page").frame.width + 1, "The New Skill panel fits the narrow modal.")
         typeIntoField(name, text: "Release Notes")
         typeIntoField(element("new-skill-description"), text: "Draft release notes")
         element("new-skill-create").click()

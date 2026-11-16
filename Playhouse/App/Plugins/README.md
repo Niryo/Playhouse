@@ -13,8 +13,8 @@ archive exist only as native SwiftUI built from the same atoms
 `KanbanColumnSection` in `Playhouse/App/KanbanColumnSection.swift`,
 `ComposerView` in `Playhouse/App/ComposerView.swift`, `AgentsInfoSection` in
 `Playhouse/App/AgentsInfoView.swift`, `TokenStatsView` in
-`Playhouse/App/TokenStatsView.swift`, `SkillsPageHeader` and
-`SkillGalleryView` in `Playhouse/App/SkillGalleryView.swift`,
+`Playhouse/App/TokenStatsView.swift`, `SkillsPageHeader`, `SkillsPageTabs`
+and `SkillGalleryView` in `Playhouse/App/SkillGalleryView.swift`,
 `RepositoryChipsView` and `RepositoryPickerView` in
 `Playhouse/App/RepositoryChipsView.swift`).
 
@@ -40,11 +40,12 @@ Token Stats modal's content, opened by the task item's token counter
 presents it as a sheet, and the raw input sheet it opens stays native. Change
 it whenever that modal changes; `test_plugin_token_stats_renders_from_atoms_like_native`
 compares those two. `catalog/SkillsPage.js` does the same for the Skills
-page's header and skill gallery (`SkillsPageHeader` and `SkillGalleryView`),
+page's header, tabs and skill gallery (`SkillsPageHeader`, `SkillsPageTabs`
+and `SkillGalleryView`),
 opened by the composer's Skills button (`SkillsButton`); `SkillsPageView`
 owns their state and keeps the delete and link confirmations, the editor and
 New Skill panels, and the Rules and MCP lists native. Change it whenever the
-header or gallery changes; `test_plugin_skills_page_renders_from_atoms_like_native`
+header, tabs or gallery changes; `test_plugin_skills_page_renders_from_atoms_like_native`
 compares those two. `catalog/RepositoryChips.js` does the same for the task
 header's repository chips (`RepositoryChipsView`) and the Add repository
 picker their + button opens (`RepositoryPickerView`); the header presents
@@ -174,6 +175,7 @@ Token Stats modal, the Skills page, the repository chips and picker, the compose
 | `help` | Hover tooltip |
 | `width`, `height`, `minWidth`, `minHeight` | Frame, in points (a Button's is its label's slot, and its hover capsule spills past it without growing the layout; a Link's surrounds the capsule) |
 | `fillWidth` | Stretch to the available width, content leading |
+| `fixedSize` | Keep its natural size, so a tight row squeezes its other children rather than wrapping or truncating it (a badge beside a name) |
 | `padding` | Uniform padding |
 | `paddingY` | Extra vertical padding (inside `padding`) |
 | `opacity` | Dims the atom and everything in it (0…1) |

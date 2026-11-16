@@ -529,7 +529,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("skill-private-committed").exists, "A committed skill's hint has no Private badge.")
         revealSkillHint("deploy-notes")
         XCTAssertTrue(element("skill-private-deploy-notes").waitToExist(timeout: 5), "The private skill's hint has a Private badge.")
-        XCTAssertTrue(element("skill-provider-deploy-notes-claude").exists && element("skill-provider-deploy-notes-codex").exists)
+        XCTAssertTrue(rowBadge("skill-provider-deploy-notes-claude").exists && rowBadge("skill-provider-deploy-notes-codex").exists)
         XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-deploy-notes")).hasPrefix("Private to skills-private-repo"), "The hint names the repository it belongs to.")
         attachScreenshot(named: "A private skill's hint with its Private badge")
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8),
