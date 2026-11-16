@@ -7,6 +7,9 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     var createdAt: Date?
     var text: String
     var imageDataURLs: [String]
+    /// True when the message has images that this read left out. A history read
+    /// that defers images sets it; `ConversationManager.messageImages` returns them.
+    var imagesDeferred: Bool?
     var phase: String?
     var turnID: String?
     var timelineOrder: Int?
@@ -34,7 +37,17 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     /// A user-role message Playhouse sent on its own, shown apart from the user's own.
     var isPlayhouseSent: Bool { role == .user && PlayhouseSentMessage.matches(text) }
 
-    private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }
+    /// Where the newest turn the user started begins: what a window opening the conversation shows first.
+    static func latestTurnStartIndex(in messages: [ConversationMessage]) -> Int? {
+        // Prompts Playhouse sends on its own are not a turn the user started: anchoring the
+        // window there would hide the conversation the recovery is continuing.
+        // When redaction has replaced every user message, the placeholders are all there is to anchor on.
+        messages.lastIndex(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) && !$0.isPlayhouseSent })
+            ?? messages.lastIndex(where: { $0.role == .user })
+            ?? messages.indices.last
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, imagesDeferred, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -42,6 +55,7 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
         text = try container.decode(String.self, forKey: .text)
         imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
+        imagesDeferred = try container.decodeIfPresent(Bool.self, forKey: .imagesDeferred)
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)

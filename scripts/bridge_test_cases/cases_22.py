@@ -121,7 +121,7 @@ class BridgeTestCases22:
         self.assertIn("kept-editor", sessions())
         self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", "kept-editor")[0])["task"]["id"], editor["id"])
 
-    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, the chosen name, placement and presentation with a note that the user can ask to change any of them, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions, which let the user change any of those choices, even the name; a changed name, placement and presentation names the unsaved draft's editor and is published under the same plugin ID on save; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
         self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
@@ -151,6 +151,8 @@ class BridgeTestCases22:
         configured = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal", "--provider", "claude")[0])
         authored = configured["task"]
         self.assertEqual(authored["title"], "Timer")
+        self.assertEqual((authored.get("pluginAuthoringName"), authored.get("pluginAuthoringPresentation"), authored["pluginPlacement"]), ("Timer", "modal", "mainSidebar"),
+                         "The editor keeps the chosen name, presentation and placement its empty conversation shows.")
         self.assertIsNone(authored.get("pendingSubmittedPrompt"), "Creating the authoring session leaves its prompt unsent.")
         self.assertEqual(configured["prompt"], "")
         stored_authored = self.assert_success(self.call_cli("plugin", "edit", "--id", authored["authoredPluginID"])[0])["task"]
@@ -159,6 +161,7 @@ class BridgeTestCases22:
         self.assert_failure(self.call_cli("plugin", "edit", "--id", "missing", expected_status=3)[0], "not_found")
         self.assertEqual(stored_authored["authoredPluginID"], authored["authoredPluginID"])
         self.assertEqual(stored_authored["pluginPlacement"], "mainSidebar")
+        self.assertEqual((stored_authored.get("pluginAuthoringName"), stored_authored.get("pluginAuthoringPresentation")), ("Timer", "modal"), "Reopening keeps the chosen details.")
         self.assertFalse(stored_authored.get("savedPrompt"))
         selected_model = self.assert_success(self.call_cli("conversation", "model", authored["id"], "set", "claude-opus-5-5")[0])
         self.assertEqual(selected_model["modelID"], "claude-opus-5-5")
@@ -173,6 +176,21 @@ class BridgeTestCases22:
 
         other = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal")[0])
         self.assertNotEqual(other["task"]["authoredPluginID"], authored["authoredPluginID"])
+        # Every setup choice can change later, even the name: the draft manifest wins on save.
+        renamed_id = other["task"]["authoredPluginID"]
+        renamed_draft = self.plugins_folder() / ".drafts" / "plugins" / renamed_id
+        renamed_draft.mkdir(parents=True, exist_ok=True)
+        (renamed_draft / "plugin.json").write_text(json.dumps({"id": renamed_id, "name": "Stopwatch", "icon": "stopwatch", "placement": "conversationToolbar", "presentation": "sidebar"}), encoding="utf-8")
+        (renamed_draft / "index.js").write_text(self.PLUGIN_CONTEXT_SOURCE, encoding="utf-8")
+        renamed_session = next(entry for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"] if entry["authoredPluginID"] == renamed_id)
+        self.assertEqual(renamed_session["title"], "Stopwatch", "An unsaved draft's editor is listed under the name the agent changed it to.")
+        self.assertEqual(renamed_session["pluginPlacement"], "conversationToolbar", "Its Plugins menu row shows the placement the agent moved it to.")
+        renamed_saved = self.assert_success(self.call_cli("plugin", "save", "--id", renamed_id)[0])["plugin"]
+        self.assertEqual((renamed_saved["id"], renamed_saved["name"], renamed_saved["placement"], renamed_saved["presentation"]),
+                         (renamed_id, "Stopwatch", "conversationToolbar", "sidebar"), "Saving publishes the changed name, placement and presentation under the same ID.")
+        listed = next(entry for entry in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"] if entry["id"] == renamed_id)
+        self.assertEqual((listed["name"], listed["placement"], listed["presentation"], listed["valid"]), ("Stopwatch", "conversationToolbar", "sidebar", True))
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", renamed_id)[0])["task"]["id"], other["task"]["id"], "The changed plugin keeps its editor conversation.")
         self.write_installed_plugin("existing-editor", self.PLUGIN_CONTEXT_SOURCE, placement="composerActions")
         edits = []
         def open_existing():
@@ -235,6 +253,7 @@ class BridgeTestCases22:
         self.assertIn(task["authoredPluginID"], instructions)
         self.assertIn("The chosen plugin name is Context Claude.", instructions)
         self.assertIn("The chosen presentation is modal.", instructions)
+        self.assertIn(self.PLUGIN_CHANGE_RULE, instructions, "Every setup choice, even the name, can change on request.")
         self.assertIn("Chat input actions placement (`composerActions`)", instructions)
         self.assertIn("`composer` ({draft, selection", instructions, "The instructions describe the placement's context.")
         self.assertTrue(str(self.plugins_folder()) in instructions or os.path.realpath(self.plugins_folder()) in instructions)
@@ -260,6 +279,7 @@ class BridgeTestCases22:
         self.assertIn("Plugin authoring", resumed_instructions)
         self.assertIn("The chosen plugin name is Context Claude.", resumed_instructions)
         self.assertIn("The chosen presentation is modal.", resumed_instructions)
+        self.assertIn(self.PLUGIN_CHANGE_RULE, resumed_instructions)
         self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), resumed_instructions)
         resumed_directories = [resumed["arguments"][index + 1] for index, value in enumerate(resumed["arguments"]) if value == "--add-dir"]
         self.assertIn(os.path.realpath(wrappers[0]), [os.path.realpath(path) for path in resumed_directories], "The resumed turn keeps the skill wrapper.")
@@ -298,7 +318,7 @@ class BridgeTestCases22:
         self.assertNotIn(legacy_delete["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
         self.assertNotIn("legacy-delete", [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]])
 
-    # case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement and generated plugin identity in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
+    # case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
     def test_plugin_authoring_codex_instructions_resume(self):
         # Codex: the instructions ride the thread and the skill an extra root plus a structured input.
         executable = self.install_provider_fixture("codex", "codex-fixture-plugin-author")
@@ -316,6 +336,7 @@ class BridgeTestCases22:
         self.assertIn("plugin render", history["threadStartDeveloperInstructions"])
         self.assertIn("The chosen plugin name is Context Codex.", history["threadStartDeveloperInstructions"])
         self.assertIn("The chosen presentation is popover.", history["threadStartDeveloperInstructions"])
+        self.assertIn(self.PLUGIN_CHANGE_RULE, history["threadStartDeveloperInstructions"], "Codex is told every setup choice can change on request.")
         self.assertIn(task["authoredPluginID"], history["threadStartDeveloperInstructions"])
         self.assertIn("persistent draft", history["threadStartDeveloperInstructions"])
         roots = [Path(root) for root in history["skillExtraRoots"] if (Path(root) / "playhouse-plugin" / "SKILL.md").exists()]
@@ -337,6 +358,7 @@ class BridgeTestCases22:
         self.assertIn(task["authoredPluginID"], resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertIn("The chosen plugin name is Context Codex.", resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertIn("The chosen presentation is popover.", resumed_history["threadResumeDeveloperInstructions"][-1])
+        self.assertIn(self.PLUGIN_CHANGE_RULE, resumed_history["threadResumeDeveloperInstructions"][-1], "Codex is told every setup choice can change on request.")
         self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertEqual(reopened_codex["codexThreadID"], self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]["codexThreadID"])
 
@@ -961,7 +983,7 @@ class BridgeTestCases22:
         self.assertIsNone(cleared.get("schedule"))
         self.assertIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "Clearing the schedule puts the task on the board.")
         self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
-    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, Send still sends ordinary messages while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove returns it to an empty composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     def test_scheduled_task_edit_and_page_management(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-edit")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -995,6 +1017,24 @@ class BridgeTestCases22:
         once_id = self.create_task("Sent by hand", provider="claude")["id"]
         fire_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
         self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at))[0])
+        # Without a prompt, a scheduled task is only moved: its saved prompt and mode stay.
+        moved_at = fire_at + datetime.timedelta(hours=2)
+        payload_flag, _ = self.call_cli("schedule", "set", once_id, "--once", self.schedule_iso(moved_at), "--mode", "plan", expected_status=2)
+        self.assert_failure(payload_flag, "invalid_argument")
+        blank, _ = self.call_cli("schedule", "set", once_id, "--prompt", "  ", "--once", self.schedule_iso(moved_at), expected_status=2)
+        self.assert_failure(blank, "invalid_argument")
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--once", self.schedule_iso(moved_at))[0])
+        moved = self.assert_success(self.call_cli("task", "get", once_id)[0])
+        self.assertEqual(moved["schedule"]["scheduledAt"], self.schedule_iso(moved_at), "Rescheduling persists the new time across fresh reads.")
+        self.assertEqual(moved["schedule"]["prompt"], "Tell me a story.", "Rescheduling keeps the scheduled prompt.")
+        self.assertEqual(moved["schedule"]["mode"], "default", "Rescheduling keeps the scheduled mode.")
+        self.assertEqual(moved["savedPrompt"], "Tell me a story.")
+        self.assertEqual(moved["status"], "Backlog")
+        self.assertEqual(self.fixture_user_prompts(executable), [], "Rescheduling starts no turn.")
+        unscheduled_id = self.create_task("Never scheduled", provider="claude")["id"]
+        no_prompt, _ = self.call_cli("schedule", "set", unscheduled_id, "--once", self.schedule_iso(moved_at), expected_status=2)
+        self.assert_failure(no_prompt, "invalid_argument")
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unscheduled_id)[0]).get("schedule"), "A task with no schedule still needs a prompt.")
         self.assert_success(self.call_cli("conversation", "send", once_id, "--message", "Tell me a story.", extra_environment=environment)[0])
         self.assertIsNone(self.wait_for_task_status(once_id, {"Review"}).get("schedule"), "Sending by hand ends a one-time schedule.")
         sent = len(self.fixture_user_prompts(executable))
@@ -1003,3 +1043,158 @@ class BridgeTestCases22:
         )[0])
         self.assertEqual((later["fired"], later["dropped"]), ([], []), "A started task's schedule sends nothing more.")
         self.assertEqual(len(self.fixture_user_prompts(executable)), sent)
+
+        # An existing conversation's scheduled message can be moved without restating it.
+        follow_up_at = fire_at + datetime.timedelta(hours=4)
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Send a scheduled follow-up.", "--once", self.schedule_iso(follow_up_at))[0])
+        self.assert_success(self.call_cli("task", "draft", once_id, "--text", "An unrelated draft.")[0])
+        moved_follow_up_at = follow_up_at + datetime.timedelta(hours=1)
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--once", self.schedule_iso(moved_follow_up_at))[0])
+        moved_follow_up = self.assert_success(self.call_cli("task", "get", once_id)[0])
+        self.assertEqual(moved_follow_up["schedule"]["scheduledAt"], self.schedule_iso(moved_follow_up_at))
+        self.assertEqual(moved_follow_up["schedule"]["prompt"], "Send a scheduled follow-up.", "Moving a scheduled message keeps its prompt.")
+        self.assertEqual(moved_follow_up["savedPrompt"], "An unrelated draft.", "Moving a scheduled message leaves the composer draft alone.")
+        self.assertEqual(moved_follow_up["status"], "Review")
+        self.assertEqual(len(self.fixture_user_prompts(executable)), sent, "Moving a scheduled message sends nothing.")
+        cancelled = self.assert_success(self.call_cli("schedule", "clear", once_id)[0])
+        self.assertIsNone(cancelled.get("schedule"))
+        self.assertEqual(cancelled["savedPrompt"], "An unrelated draft.", "Clearing a scheduled message keeps the composer draft already there.")
+        self.assertEqual(len(self.fixture_user_prompts(executable)), sent, "Clearing a scheduled message sends nothing.")
+
+    # case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images live in the provider thread, an earlier image is deferred the same way and read back from the thread. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
+    def test_conversation_history_defers_earlier_images(self):
+        claude = self.data_directory / "claude-fixture-deferred-images"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
+        claude.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        codex = self.data_directory / "codex-fixture-image-serial-success"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", codex)
+        codex.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude), "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex)}
+        first_image = self.data_directory / "first-turn.png"
+        first_image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        second_image = self.data_directory / "second-turn.jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(first_image), "--out", str(second_image)], check=True, capture_output=True)
+
+        task_id = self.create_task("Claude deferred images", roots=[self.primary])["id"]
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude")[0])
+        key = task_id.upper()
+
+        def reads(event):
+            return [entry for entry in self.diagnostic_events() if entry.get("event") == event and entry.get("taskID") == key]
+
+        def image_messages(history):
+            return [message for message in history["messages"] if message["imageDataURLs"] or message.get("imagesDeferred")]
+
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Say hello.", "--image", first_image, extra_environment=fixtures
+        )[0])
+        second = self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Long history turn 2.", "--image", second_image, "--defer-images",
+            extra_environment=fixtures,
+        )[0])
+        full = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=fixtures)[0])
+        first_message, second_message = image_messages(full)
+        self.assertEqual((first_message["text"], second_message["text"]), ("Say hello.", "Long history turn 2."))
+        self.assertTrue(first_message["imageDataURLs"][0].startswith("data:image/png;base64,"))
+        self.assertTrue(second_message["imageDataURLs"][0].startswith("data:image/jpeg;base64,"))
+        self.assertTrue(all("imagesDeferred" not in message for message in full["messages"]), "Plain history is complete and unmarked.")
+
+        def assert_first_deferred(history, context):
+            deferred, inline = image_messages(history)
+            self.assertEqual((deferred["id"], deferred["imageDataURLs"], deferred.get("imagesDeferred")), (first_message["id"], [], True), context)
+            self.assertEqual(inline, second_message, f"{context}: the newest turn keeps its image and is not marked.")
+
+        assert_first_deferred(second, "The history a send returns defers the earlier turn's image")
+        deferred = self.assert_success(self.call_cli("conversation", "history", task_id, "--defer-images", extra_environment=fixtures)[0])
+        assert_first_deferred(deferred, "Complete history defers the earlier turn's image")
+        self.assertEqual(
+            [{**message, "imageDataURLs": [], "imagesDeferred": None} for message in deferred["messages"]],
+            [{**message, "imageDataURLs": [], "imagesDeferred": None} for message in full["messages"]],
+            "Deferring changes nothing but the image data.",
+        )
+        page = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--defer-images", extra_environment=fixtures
+        )[0])
+        assert_first_deferred(page, "The newest page defers the earlier turn's image")
+        self.assertEqual(page["earlierMessageCount"], 0)
+        newest_read = reads("conversation.history.read")[-1]
+        self.assertEqual(
+            (newest_read["source"], newest_read["deferredImageMessageCount"], newest_read["hydratedImageMessageCount"]), ("stored-page", "1", "1")
+        )
+        earlier = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--before", second_message["id"], "--defer-images", extra_environment=fixtures
+        )[0])
+        self.assertEqual([(message["id"], message["imageDataURLs"], message.get("imagesDeferred")) for message in image_messages(earlier)],
+                         [(first_message["id"], [], True)], "An earlier page defers every image it holds.")
+        earlier_read = reads("conversation.history.read")[-1]
+        self.assertEqual((earlier_read["deferredImageMessageCount"], earlier_read["hydratedImageMessageCount"]), ("1", "0"))
+        plain_read_count = len(reads("conversation.history.read"))
+        self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=fixtures)[0])
+        plain_read = reads("conversation.history.read")[plain_read_count]
+        self.assertEqual((plain_read["deferredImageMessageCount"], plain_read["hydratedImageMessageCount"]), ("0", "2"))
+
+        imageless = next(message for message in full["messages"] if message["role"] == "assistant")
+        images = self.assert_success(self.call_cli(
+            "conversation", "images", task_id, "--message", second_message["id"], "--message", imageless["id"], "--message", first_message["id"],
+            extra_environment=fixtures,
+        )[0])
+        self.assertEqual({entry["id"]: entry["imageDataURLs"] for entry in images},
+                         {first_message["id"]: first_message["imageDataURLs"], second_message["id"]: second_message["imageDataURLs"]},
+                         "The named messages' exact images are returned, and nothing for a message without images.")
+        self.assertEqual({entry["id"]: entry.get("turnID") for entry in images},
+                         {first_message["id"]: first_message.get("turnID"), second_message["id"]: second_message.get("turnID")})
+        images_read = reads("conversation.images.read")[-1]
+        self.assertEqual((images_read["requestedMessageCount"], images_read["returnedMessageCount"], images_read["readProviderThread"]), ("3", "2", "false"))
+        self.assertEqual(self.assert_success(self.call_cli(
+            "conversation", "images", task_id, "--message", imageless["id"], "--message", "no-such-message", extra_environment=fixtures
+        )[0]), [])
+        self.assert_failure(self.call_cli("conversation", "images", task_id, expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli(
+            "conversation", "images", str(uuid.uuid4()), "--message", first_message["id"], expected_status=3
+        )[0], "not_found")
+
+        third = self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Say hello.", "--defer-images", extra_environment=fixtures
+        )[0])
+        self.assertEqual([(message["id"], message["imageDataURLs"], message.get("imagesDeferred")) for message in image_messages(third)],
+                         [(first_message["id"], [], True), (second_message["id"], [], True)],
+                         "Once a later turn starts, both earlier images are deferred.")
+        self.assertEqual(reads("conversation.history.read")[-1]["deferredImageMessageCount"], "2")
+        with sqlite3.connect(self.conversation_database(), timeout=30) as connection:
+            payloads = [row[0] for row in connection.execute("SELECT payload FROM conversation_messages WHERE task_id = ?", (key,))]
+        self.assertTrue(payloads)
+        self.assertFalse(any("imagesDeferred" in payload for payload in payloads), "The mark describes one read and is never stored.")
+        resumed = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=fixtures)[0])
+        self.assertEqual(image_messages(resumed), [first_message, second_message], "Plain history still carries every image after deferred reads.")
+
+        # Codex keeps a user's images in its thread, so a deferred one is read back from there.
+        codex_task = self.create_task("Codex deferred images", roots=[self.primary], provider="codex")["id"]
+        self.assert_success(self.call_cli("conversation", "send", codex_task, "--image", first_image, extra_environment=fixtures)[0])
+        self.assert_success(self.call_cli(
+            "conversation", "send", codex_task, "--message", "Continue using the earlier image as context.", extra_environment=fixtures
+        )[0])
+        codex_full = self.assert_success(self.call_cli("conversation", "history", codex_task, extra_environment=fixtures)[0])
+        codex_image_message, = image_messages(codex_full)
+        self.assertEqual(codex_image_message["role"], "user")
+        codex_key = codex_task.upper()
+
+        def codex_image_read():
+            images = self.assert_success(self.call_cli(
+                "conversation", "images", codex_task, "--message", codex_image_message["id"], extra_environment=fixtures
+            )[0])
+            self.assertEqual([(entry["id"], entry["imageDataURLs"]) for entry in images],
+                             [(codex_image_message["id"], codex_image_message["imageDataURLs"])])
+            read = [entry for entry in self.diagnostic_events()
+                    if entry.get("event") == "conversation.images.read" and entry.get("taskID") == codex_key][-1]
+            return read["returnedMessageCount"], read["readProviderThread"]
+
+        codex_deferred = self.assert_success(self.call_cli("conversation", "history", codex_task, "--defer-images", extra_environment=fixtures)[0])
+        self.assertEqual([(message["id"], message["imageDataURLs"], message.get("imagesDeferred")) for message in image_messages(codex_deferred)],
+                         [(codex_image_message["id"], [], True)], "A Codex thread's earlier image is deferred too.")
+        self.assertEqual(codex_image_read(), ("1", "true"), "A Codex image is read from its thread.")

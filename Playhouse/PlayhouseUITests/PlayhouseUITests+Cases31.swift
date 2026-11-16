@@ -520,7 +520,7 @@ extension PlayhouseUITests {
         app.typeKey(.escape, modifierFlags: [])
     }
 
-    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, the chosen name, placement and presentation with a note that the user can ask to change any of them, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions, which let the user change any of those choices, even the name; a changed name, placement and presentation names the unsaved draft's editor and is published under the same plugin ID on save; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
         let codexExecutable = dataDirectory.appendingPathComponent("codex-fixture-plugin-author-success")
@@ -588,6 +588,15 @@ extension PlayhouseUITests {
         XCTAssertEqual(boardTask["pluginPlacement"] as? String, "mainSidebar")
         XCTAssertFalse(element("empty-conversation-repository-title").exists, "The plugin editor has no repository title.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("model-prompt")), "Describe your plugin in the prompt below.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("plugin-detail-name")), "Name: Timer", "The empty state shows the chosen name.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("plugin-detail-placement")), "Placement: Main sidebar", "The empty state shows the chosen placement.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("plugin-detail-presentation")), "Opens as: Modal", "The empty state shows how the plugin opens.")
+        XCTAssertTrue(element("plugin-details-change-hint").exists, "The empty state says any detail can change by asking.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("plugin-details-change-hint")).contains("even the name"))
+        let pluginDetailsCapture = XCTAttachment(screenshot: element("plugin-details").screenshot())
+        pluginDetailsCapture.name = "Plugin editor chosen details"
+        pluginDetailsCapture.lifetime = .keepAlways
+        add(pluginDetailsCapture)
         XCTAssertTrue((element("message-composer").value as? String ?? "").isEmpty, "The user starts with an empty composer.")
         XCTAssertFalse(element("send-message-button").isEnabled, "Nothing is sent before the user describes the plugin.")
         attachScreenshot(named: "Plugin editor empty state")
@@ -618,6 +627,7 @@ extension PlayhouseUITests {
         let instructions = arguments[instructionsIndex + 1]
         XCTAssertTrue(instructions.contains("The chosen plugin name is Timer."))
         XCTAssertTrue(instructions.contains("The chosen presentation is modal."))
+        XCTAssertTrue(instructions.contains(Self.pluginChangeRule), "The agent may change every setup choice, even the name, on request.")
         XCTAssertTrue(instructions.contains(pluginID))
         XCTAssertGreaterThan(element("message-composer").frame.width, 0)
         XCTAssertGreaterThan(element("plugin-creation-preview").frame.width, 0)
@@ -695,8 +705,37 @@ extension PlayhouseUITests {
         app.typeText("?")
         XCTAssertTrue(waitUntil({ (previewComposer.value as? String)?.contains("?") == true }, timeout: 10))
 
-        // Editing an installed plugin creates its first editor session.
+        // Every setup choice can change later, even the name: the draft's manifest names its editor and wins on save.
         element("back-to-board-button").click()
+        let renamedAuthor = try runCLI(["plugin", "author", "--placement", "mainSidebar", "--name", "Countdown", "--presentation", "modal"])
+        let renamedPluginID = try XCTUnwrap(((renamedAuthor["result"] as? [String: Any])?["task"] as? [String: Any])?["authoredPluginID"] as? String)
+        let renamedDraft = pluginsFolder.appendingPathComponent(".drafts/plugins").appendingPathComponent(renamedPluginID)
+        try FileManager.default.createDirectory(at: renamedDraft, withIntermediateDirectories: true)
+        let renamedManifest: [String: Any] = ["id": renamedPluginID, "name": "Stopwatch", "icon": "stopwatch", "placement": "conversationToolbar", "presentation": "sidebar"]
+        try JSONSerialization.data(withJSONObject: renamedManifest).write(to: renamedDraft.appendingPathComponent("plugin.json"))
+        try Self.pluginContextSource.write(to: renamedDraft.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
+        _ = try runCLI(["plugin", "refresh"])
+        let pluginsMenu = app.menuBars.menuBarItems["Plugins"]
+        XCTAssertTrue(waitUntil({
+            pluginsMenu.click()
+            let found = pluginsMenu.menuItems["Stopwatch — Conversation sidebar toolbar (Unsaved)"].exists
+            if found { self.attachMenuScreenshot(pluginsMenu, named: "Renamed unsaved plugin draft in Plugins menu") }
+            self.app.typeKey(.escape, modifierFlags: [])
+            return found
+        }, timeout: 15), "An unsaved draft's editor is listed under the name the agent changed it to.")
+        _ = try runCLI(["plugin", "save", "--id", renamedPluginID])
+        XCTAssertTrue(waitUntil({
+            pluginsMenu.click()
+            let found = pluginsMenu.menuItems["Stopwatch — Conversation sidebar toolbar"].exists
+            if found { self.attachMenuScreenshot(pluginsMenu, named: "Renamed plugin published with its new placement") }
+            self.app.typeKey(.escape, modifierFlags: [])
+            return found
+        }, timeout: 15), "Saving publishes the changed name and placement.")
+        let publishedPlugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        let published = try XCTUnwrap(publishedPlugins.first { $0["id"] as? String == renamedPluginID })
+        XCTAssertEqual(published["presentation"] as? String, "sidebar", "Saving publishes the changed presentation.")
+
+        // Editing an installed plugin creates its first editor session.
         try writeInstalledPlugin("installed-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Installed editor")
         _ = try runCLI(["plugin", "refresh"])
         clickInstalledPluginAction("Edit…", pluginRow: "Installed editor — Main sidebar")
@@ -768,7 +807,18 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ (try? self.boardTaskRecords().contains { $0["id"] as? String == legacyDeleteID }) == false }, timeout: 10))
 
     }
-    // case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement and generated plugin identity in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
+    /// Menus dropped from the menu bar are outside the window crop of `attachScreenshot(named:)`.
+    func attachMenuScreenshot(_ menuBarItem: XCUIElement, named name: String) {
+        let capture = XCTAttachment(screenshot: menuBarItem.menus.firstMatch.screenshot())
+        capture.name = name
+        capture.lifetime = .keepAlways
+        add(capture)
+    }
+
+    /// `TaskThreadDeveloperInstructions.pluginChangeRule`: the editor's setup choices are a starting point.
+    static let pluginChangeRule = "When the user asks to change the plugin's name, icon, placement or presentation, update plugin.json to match and keep the plugin ID and folder"
+
+    // case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
     func test_plugin_authoring_codex_instructions_resume() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: true).path
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
@@ -792,7 +842,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Build a countdown timer." }, timeout: 20))
         let instructions = try XCTUnwrap(history()["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains("plugin render"), "Codex validates the persistent draft without publishing it.")
-        for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", pluginID] {
+        for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", Self.pluginChangeRule, pluginID] {
             XCTAssertTrue(instructions.contains(text), "Codex receives \(text) in thread instructions.")
         }
         let turns = try XCTUnwrap(history()["turns"] as? [[String: Any]])
@@ -814,7 +864,7 @@ extension PlayhouseUITests {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Make it blue." }, timeout: 20))
         let resumed = try XCTUnwrap((history()["threadResumeDeveloperInstructions"] as? [String])?.last)
-        for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", pluginID] {
+        for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", Self.pluginChangeRule, pluginID] {
             XCTAssertTrue(resumed.contains(text), "Resumed Codex instructions retain \(text).")
         }
     }

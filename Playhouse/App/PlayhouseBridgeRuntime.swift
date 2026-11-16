@@ -452,7 +452,9 @@ final class PlayhouseBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
                 _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
-                let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings)
+                let conversations = ConversationManager(
+                    tasks: taskManager, clients: clients, settingsManager: settings, defersHistoryImages: request.defersHistoryImages
+                )
                 let messageLimit = try request.optionalHistoryLimit("limit")
                 result = try Self.value(await conversations.history(
                     taskID: taskID,
@@ -463,6 +465,11 @@ final class PlayhouseBridgeRuntime {
                     messageLimit: messageLimit,
                     beforeMessageID: request.arguments["before"]?.string,
                     includesImageData: true
+                ))
+            case "conversation.images":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(await conversations.messageImages(
+                    taskID: request.requiredUUID("taskID"), messageIDs: request.arguments["messages"]?.strings ?? []
                 ))
             case "conversation.present-image":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)

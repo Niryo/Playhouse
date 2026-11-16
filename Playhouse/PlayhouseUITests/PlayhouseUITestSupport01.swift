@@ -501,6 +501,41 @@ extension PlayhouseUITests {
         XCTAssertTrue(hint.waitToExist(timeout: 5), "The schedule button should open its hint.")
         return hint
     }
+    /// A one-time schedule time on the 15th of June next year, so stepping its month or day up
+    /// in the hint can't wrap to an earlier time.
+    func stepSafeScheduleDate() -> Date {
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: Date()) + 1
+        return calendar.date(from: DateComponents(year: year, month: 6, day: 15, hour: 10)) ?? Date().addingTimeInterval(86_400 * 30)
+    }
+    /// Opens the schedule hint and steps its one-time date picker's first field (the month or
+    /// day) up by one. With `stepSafeScheduleDate()` that is a later time in any locale.
+    /// Returns the hint's summary for the new time.
+    func moveScheduledTimeInHint() -> String {
+        _ = openScheduleHint()
+        let summary = element("schedule-summary")
+        let original = accessibleLabelOrValue(of: summary)
+        let picker = element("schedule-date-picker")
+        XCTAssertTrue(picker.waitToExist(timeout: 5), "A one-time schedule shows its date picker.")
+        let pickerCount = app.datePickers.count
+        // A fixed offset from the left edge lands in the first field however wide the picker is.
+        picker.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 8, dy: 0)).click()
+        picker.typeKey(XCUIKeyboardKey.upArrow.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: summary) != original }, timeout: 5), "Stepping the date picker changes the hint's time.")
+        let stepped = accessibleLabelOrValue(of: summary)
+        // Clicking the field opens the picker's calendar above it, which would swallow the next
+        // click. The summary sits below the field, outside the calendar, so clicking it closes
+        // the calendar without picking a day.
+        summary.click()
+        XCTAssertTrue(waitUntil({ self.app.datePickers.count == pickerCount }, timeout: 5), "The picker's calendar closes.")
+        XCTAssertTrue(element("schedule-hint").exists, "Closing the calendar keeps the hint open.")
+        XCTAssertEqual(accessibleLabelOrValue(of: summary), stepped, "Closing the calendar keeps the stepped time.")
+        XCTAssertTrue(element("schedule-done-button").isHittable)
+        return stepped
+    }
+    func scheduledAt(taskID: String) -> Date? {
+        scheduleDate(((try? taskRecord(id: taskID))?["schedule"] as? [String: Any])?["scheduledAt"] as? String)
+    }
     func clickScheduledTaskMenuItem(taskID: String, item identifier: String, title: String) {
         let actions = element("scheduled-task-actions-\(taskID)")
         XCTAssertTrue(actions.waitToExist(timeout: 10), "The scheduled task row should have an actions menu.")

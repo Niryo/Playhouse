@@ -23,10 +23,9 @@ struct PluginCreationSetup: View {
                 .foregroundStyle(.secondary)
             if hasName {
                 Picker("How should it open?", selection: $presentation) {
-                    Text("Popover").tag(PluginPresentation.popover)
-                    Text("Modal").tag(PluginPresentation.modal)
-                    Text("Side panel").tag(PluginPresentation.sidebar)
-                    Text("Page").tag(PluginPresentation.page)
+                    ForEach([PluginPresentation.popover, .modal, .sidebar, .page], id: \.self) { option in
+                        Text(option.title).tag(option)
+                    }
                 }
                 .pickerStyle(.radioGroup)
                 .accessibilityIdentifier("plugin-creation-presentation")

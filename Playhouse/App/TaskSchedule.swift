@@ -11,6 +11,9 @@ struct TaskScheduleRequest {
     var imageDataURLs: [String] = []
     var mode: ConversationMode = .code
     var modelID: String?
+    /// Only moves an already scheduled task, keeping the prompt, images, mode and model it was
+    /// scheduled with; the payload fields above are ignored.
+    var keepsPayload = false
 }
 
 /// One run taken from a schedule, with everything needed to start it after the schedule's

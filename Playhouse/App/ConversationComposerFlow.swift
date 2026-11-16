@@ -272,9 +272,77 @@ extension TaskConversationView {
 
     func confirmScheduleHint() {
         guard scheduleDraft.validationMessage() == nil else { return }
-        composerSchedule = scheduleDraft
         isSchedulePopoverPresented = false
         composerDraft.focusRequest += 1
+        let schedule = scheduleDraft
+        guard let boardTask = task as? BoardTask, boardTask.scheduleKind != nil, canSchedule else {
+            composerSchedule = schedule
+            return
+        }
+        // Done on a task that is already scheduled saves the edit at once, so leaving the
+        // conversation keeps it. A task that hasn't started saves its draft as the prompt, as Send
+        // would. An existing conversation with an empty composer only moves its scheduled
+        // message; with a draft, Done arms Send to schedule that draft in its place.
+        let isEmptyDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty
+        if isExistingConversation && !isEmptyDraft {
+            composerSchedule = schedule
+            return
+        }
+        if !isExistingConversation { composerSchedule = schedule }
+        var request = schedule.request(
+            prompt: isEmptyDraft ? "" : draft,
+            imageDataURLs: isEmptyDraft ? [] : pendingImages.map(\.dataURL),
+            mode: conversationMode,
+            modelID: selectedModelID.isEmpty ? nil : selectedModelID
+        )
+        request.keepsPayload = isEmptyDraft
+        let taskID = boardTask.id
+        if !isEmptyDraft { draftAutosaveTask?.cancel() }
+        isSavingSchedule = true
+        Task { @MainActor in
+            defer { isSavingSchedule = false }
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).setSchedule(taskID, request)
+                if !isEmptyDraft { composerDraft.settledText = draft }
+                PlayhouseDiagnostics.record("ui.task.schedule_edited", fields: ["taskID": taskID.uuidString, "kind": schedule.kind.rawValue])
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Remove turns scheduling off. A schedule already saved on the task is cleared too, and an
+    /// existing conversation's scheduled message returns to an empty composer as its draft.
+    func removeSchedule() {
+        composerSchedule = nil
+        isSchedulePopoverPresented = false
+        composerDraft.focusRequest += 1
+        guard let boardTask = task as? BoardTask, boardTask.scheduleKind != nil else { return }
+        let taskID = boardTask.id
+        let restoresDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty
+        let typedDraft = draft
+        let typedImages = pendingImages.map(\.dataURL)
+        if !restoresDraft { draftAutosaveTask?.cancel() }
+        isSavingSchedule = true
+        Task { @MainActor in
+            defer { isSavingSchedule = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                // Save a typed draft first so clearing the schedule keeps it rather than putting
+                // the cancelled message back in its place.
+                if !restoresDraft {
+                    _ = try await manager.saveDraft(taskID, prompt: typedDraft, imageDataURLs: typedImages)
+                    composerDraft.settledText = typedDraft
+                }
+                let record = try await manager.clearSchedule(taskID)
+                if restoresDraft, draft.isEmpty, let prompt = record.savedPrompt {
+                    draft = prompt
+                    composerDraft.settledText = prompt
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     /// Send's action. A schedule armed in the hint schedules the task; with the schedule removed

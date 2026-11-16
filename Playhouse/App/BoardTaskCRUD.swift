@@ -210,9 +210,20 @@ extension BoardTaskManager {
         return BoardTaskRecord(task: chat)
     }
 
+    /// Plugin editor conversations; an editor's title and placement are its draft's current ones, not its setup-time choices.
     func pluginConversations() throws -> [BoardTaskRecord] {
         let sessions = try modelContext.fetch(FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)]))
-            .filter { $0.authoredPluginID != nil }.map { BoardTaskRecord(task: $0) }
+            .filter { $0.authoredPluginID != nil }.map { chat in
+                var record = BoardTaskRecord(task: chat)
+                // The agent can rename or move the plugin; its draft manifest wins over the setup-time choices.
+                if let folder = chat.pluginContextFolder, let id = chat.authoredPluginID, PluginLibrary.isValidID(id),
+                   FileManager.default.fileExists(atPath: URL(fileURLWithPath: folder).appendingPathComponent(id).appendingPathComponent("plugin.json").path),
+                   let draft = try? PluginLibrary(dataDirectory: URL(fileURLWithPath: folder).deletingLastPathComponent().path).plugin(id: id, validate: false) {
+                    if !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { record.title = draft.name }
+                    if PluginPlacement(rawValue: draft.placement) != nil { record.pluginPlacement = draft.placement }
+                }
+                return record
+            }
         let legacy = try modelContext.fetch(FetchDescriptor<BoardTask>())
             .filter { $0.authoredPluginID != nil && $0.repositoryWorktrees.isEmpty }
             .map { BoardTaskRecord(task: $0) }

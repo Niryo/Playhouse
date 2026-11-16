@@ -63,6 +63,16 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
     /// placements have room for one.
     case inline
 
+    var title: String {
+        switch self {
+        case .popover: "Popover"
+        case .modal: "Modal"
+        case .sidebar: "Side panel"
+        case .page: "Page"
+        case .inline: "Inline"
+        }
+    }
+
     /// The placements an inline plugin may sit in.
     static let inlinePlacements: Set<PluginPlacement> = [.conversationSidebar]
 

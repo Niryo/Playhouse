@@ -8,7 +8,9 @@ extension PlayhouseBridgeRuntime {
         conversationClients: () -> ConversationClients,
         eventHandler: @escaping (BridgeEvent) -> Void
     ) async throws -> BridgeValue {
-        let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+        let conversations = ConversationManager(
+            tasks: taskManager, clients: conversationClients(), settingsManager: settings, defersHistoryImages: request.defersHistoryImages
+        )
         switch request.command {
         case "conversation.queue":
             return try Self.value(conversations.queueMessage(
