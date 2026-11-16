@@ -271,7 +271,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: section overhead", "The native modal keeps its own state.")
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
     }
-    // case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
+    // case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks and each task card's bottom row shows an Add here icon, which Close removes; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
     func test_plugin_add_mode_toggles_and_shows_placeholders() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Plugin mode task", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
@@ -291,11 +291,18 @@ extension PlayhouseUITests {
         XCTAssertGreaterThan(boardPlaceholder.frame.width, 120, "The sidebar placeholder is a labeled button as wide as the sidebar.")
         XCTAssertGreaterThanOrEqual(boardPlaceholder.frame.minY, scheduled.frame.maxY - 1, "The placeholder sits below Scheduled Tasks.")
         XCTAssertLessThan(abs(boardPlaceholder.frame.minX - scheduled.frame.minX), 2, "The placeholder lines up with Scheduled Tasks.")
+        let modeTaskID = try taskID(named: "Plugin mode task")
+        let cardPlaceholder = element("task-card-plugins-\(modeTaskID)").descendants(matching: .any)["plugin-add-here-taskItem"]
+        XCTAssertTrue(cardPlaceholder.waitToExist(timeout: 5), "Each task card's bottom row shows its placeholder.")
+        XCTAssertEqual(cardPlaceholder.label, "Add here")
+        XCTAssertLessThan(cardPlaceholder.frame.width, 40, "The task card placeholder is only an icon.")
         attachScreenshot(named: "Add Plugin mode on the board: the bar and the sidebar's Add here")
+        attachElementScreenshot(element("task-card-\(modeTaskID)"), named: "Add Plugin mode: the task card's Add here")
 
         element("plugin-mode-close").click()
         XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner")), "Close leaves the mode.")
         XCTAssertTrue(waitForDisappearance(boardPlaceholder))
+        XCTAssertTrue(waitForDisappearance(cardPlaceholder), "Leaving the mode removes the task card's placeholder.")
         XCTAssertFalse(try pluginMode())
 
         // A collapsed task sidebar shows expanded while the mode is on, without changing the saved state.
@@ -900,14 +907,21 @@ extension PlayhouseUITests {
         XCTAssertTrue((composer.value as? String ?? "").contains("Continue working"), "The composer accepts the next request.")
         attachScreenshot(named: "Plugin editor after daemon restart")
     }
-    // case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation) before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
+    // case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation), then the task card's built-in Pull request mode and Pull requests plugins (inline at the taskItem placement), before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar or on the task card. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar or the task card is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
     func test_plugin_enable_disable_and_builtins() throws {
         func listed() throws -> [String: [String: Any]] {
             let plugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
             return Dictionary(plugins.compactMap { plugin in (plugin["id"] as? String).map { ($0, plugin) } }, uniquingKeysWith: { first, _ in first })
         }
         let initial = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
-        XCTAssertEqual(initial.map { $0["id"] as? String }, ["changes"], "Only the built-ins are listed before any plugin is installed.")
+        XCTAssertEqual(initial.map { $0["id"] as? String }, ["changes", "pull-request-mode", "pull-requests"], "Only the built-ins are listed before any plugin is installed.")
+        // The task card's built-ins: the mode pill and the pull request controls.
+        for cardPlugin in initial.dropFirst() {
+            XCTAssertEqual(cardPlugin["placement"] as? String, "taskItem", "\(cardPlugin)")
+            XCTAssertEqual(cardPlugin["presentation"] as? String, "inline", "\(cardPlugin)")
+            XCTAssertEqual(cardPlugin["builtIn"] as? Bool, true, "\(cardPlugin)")
+            XCTAssertEqual(cardPlugin["valid"] as? Bool, true, "\(cardPlugin)")
+        }
         let changes = try XCTUnwrap(initial.first)
         XCTAssertEqual(changes["builtIn"] as? Bool, true)
         XCTAssertEqual(changes["enabled"] as? Bool, true)
@@ -932,9 +946,11 @@ extension PlayhouseUITests {
         try writeInstalledPlugin("hello-board", source: savedPage, placement: "mainSidebar", presentation: "page", name: "Hello Board", icon: "hand.wave")
         try writeInstalledPlugin("workspace-probe", source: Self.pluginWorkspaceSource, placement: "conversationSidebar", presentation: "inline", name: "Workspace Probe", icon: "eye")
         try writeInstalledPlugin("inline-composer", source: hello, placement: "composerActions", presentation: "inline")
+        try writeInstalledPlugin("card-badge", source: hello, placement: "taskItem", presentation: "inline")
         launchApp(defaultParent: fixture.parent.path)
         let refreshed = try listedAfterRefresh()
         XCTAssertEqual(refreshed["workspace-probe"]?["valid"] as? Bool, true, "\(refreshed)")
+        XCTAssertEqual(refreshed["card-badge"]?["valid"] as? Bool, true, "An inline plugin is valid on the task card too.")
         XCTAssertEqual(refreshed["inline-composer"]?["valid"] as? Bool, false, "An inline plugin is valid only at the conversation sidebar.")
         XCTAssertTrue((refreshed["inline-composer"]?["errors"] as? [String] ?? []).contains { $0.contains("only in the conversation sidebar") })
 
@@ -962,6 +978,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(element("probe-status")), "save: ok")
         let probeState = try XCTUnwrap(try runCLI(["plugin", "state", "--id", "workspace-probe"])["result"] as? [String: Any])
         XCTAssertEqual(probeState["state"] as? [String: Int], ["clicks": 1], "The saved state is stored.")
+        XCTAssertEqual(probeState["enabled"] as? Bool, true, "Reading a plugin's state also says whether it is enabled.")
         // Changes keeps whether its section is collapsed in its plugin state.
         assertText("toggle-workspace-changes-section-button", equals: "Expanded")
         element("toggle-workspace-changes-section-button").click()
@@ -1027,7 +1044,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(probeRow.descendants(matching: .menuItem)["Edit…"].exists, "An installed plugin keeps Edit.")
         XCTAssertTrue(probeRow.descendants(matching: .menuItem)["Delete…"].exists, "An installed plugin keeps Delete.")
         attachScreenshot(named: "A disabled installed plugin offers Enable beside Edit and Delete")
-        enableProbe.click()
+        // A submenu held open across the screenshot can drop the click; choose Enable from a freshly opened menu.
+        menu.click()
+        clickInstalledPluginAction("Enable", pluginRow: "Workspace Probe — Conversation sidebar (Disabled)")
         XCTAssertTrue(probe.waitToExist(timeout: 10), "Enabling restores the inline plugin.")
 
         // Disabled plugins and plugin states persist across a relaunch.
@@ -1367,5 +1386,243 @@ extension PlayhouseUITests {
         attachScreenshot(named: "A plugin's fetch to a closed port rejected with network_error")
         press("fetch-file", expecting: "error: invalid_argument", "A file URL is refused.")
         attachScreenshot(named: "A plugin's fetch refused for a file URL")
+    }
+    static let taskCardPluginSource = #"""
+function Card() {
+  var props = Playhouse.useProps();
+  var log = React.useState([]);
+  var probes = React.useState(0);
+  var focusProbes = React.useState(0);
+  React.useEffect(function () {
+    var note = function (entry) { log[1](function (entries) { return entries.concat([entry]); }); };
+    var probe = Playhouse.throttle(function (reason) {
+      probes[1](function (count) { return count + 1; });
+      if (reason === "focus") focusProbes[1](function (count) { return count + 1; });
+      note("probe " + reason);
+    }, 10);
+    var offMove = Playhouse.on("task.statusChanged", function (event) { note(event.from + " to " + event.to); probe("move"); });
+    var offFocus = Playhouse.on("app.focus", function () { probe("focus"); });
+    var offState = Playhouse.on("plugin.stateChanged", function (event) { note("state " + event.key); offMove(); });
+    return function () { offMove(); offFocus(); offState(); };
+  }, []);
+  return h(Stack, { axis: "h", spacing: 4 },
+    h(Text, { size: 10, testID: "card-status" }, props.task ? props.task.status : "no task"),
+    h(Text, { size: 10, testID: "card-probes" }, "probes " + probes[0]),
+    h(Text, { size: 10, testID: "card-focus" }, "focus " + focusProbes[0]),
+    // The plugin keeps running as its card changes columns: show only its latest entries.
+    h(Text, { size: 10, testID: "card-log" }, log[0].slice(-3).join(", ")));
+}
+Playhouse.render(h(Card));
+"""#
+    static let taskCardButtonSource = #"""
+function CardButton() {
+  var props = Playhouse.useProps();
+  var result = React.useState("idle");
+  var id = props.task ? props.task.id : "none";
+  function act(testID, label, call) {
+    return h(Button, { testID: testID, style: "bordered", onPress: function () {
+      call().then(function () { result[1](label + ": ok"); }, function (error) { result[1](label + ": " + error.code); });
+    } }, h(Text, { size: 11 }, label));
+  }
+  return h(Stack, { spacing: 6, align: "leading" },
+    h(Text, { testID: "button-task" }, props.task ? props.task.title : "no task"),
+    h(Text, { size: 11, testID: "button-result" }, result[0]),
+    act("button-alert", "alert", function () { return Playhouse.ui.alert("Card plugin alert", "Raised from the task card."); }),
+    act("button-compose", "composer", function () { return Playhouse.ui.composer.setDraft("from the card"); }),
+    act("button-resolve", "resolveConflicts", function () { return Playhouse.ui.resolveConflicts(id); }),
+    act("button-move", "moveTask", function () { return Playhouse.ui.moveTask(id, "Review"); }));
+}
+Playhouse.render(h(CardButton));
+"""#
+    // case-contract: test_plugin_task_card_placement_events_and_throttle | A plugin installed at the taskItem placement (inline or as a button) is valid and runs with its card's task as `props.task`. Playhouse.on delivers app events to a plugin's listeners: task.statusChanged with {taskID, from, to} when its task moves between columns, app.focus when the app comes to the front, and plugin.stateChanged with {pluginID, key, value} when a saved value changes; `plugin render --event @<name>[:json]` reports how many listeners heard each, and the function Playhouse.on returns stops listening. Playhouse.throttle(fn, seconds) runs the first call at once and collapses the calls made within its cooldown into one trailing call with the latest arguments when the cooldown ends. `plugin event <name> [--payload <json>]` hands an app event to the built-in plugins' services; an unknown name is invalid_argument and a payload that is not a JSON object is a usage error. In the window, an installed task card plugin renders on every card, a Backlog card included (which has no built-in pull request controls yet), in the bottom row beside the built-in mode pill once the task has started, shows its task's status, hears the task move to Review and probes through its throttle, and probes through it again when the app comes back to the front (the window's app.focus), repeated focuses within its cooldown collapsing into at most two probes; a task card plugin with a button opens a popover showing its card's task. Only a task card's plugin may call ui.moveTask (which moves its task as dragging the card does), ui.resolveConflicts (which in the window opens its task and sends the conflict instruction) and ui.alert (which shows the board's alert); from the conversation sidebar or the board's sidebar they are unavailable, and so is the composer from a task card, the same in `plugin render`, which records each call in hostCalls, and in the window. The Plugins menu lists the card's built-ins, and disabling the built-in Pull request mode removes the card's mode pill while installed task card plugins stay, until it is enabled again. A turn's move of its task, on Codex and on Claude, is published to the services from the provider's own callbacks, and no move is dropped.
+    func test_plugin_task_card_placement_events_and_throttle() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        try writeInstalledPlugin("card-probe", source: Self.taskCardPluginSource, placement: "taskItem", presentation: "inline", name: "Card Probe", icon: "eye")
+        try writeInstalledPlugin("card-button", source: Self.taskCardButtonSource, placement: "taskItem", presentation: "popover", name: "Card Button", icon: "tag")
+        try writeInstalledPlugin("sidebar-button", source: Self.taskCardButtonSource, placement: "conversationSidebar", presentation: "popover", name: "Sidebar Button", icon: "tag")
+        try writeInstalledPlugin("board-button", source: Self.taskCardButtonSource, placement: "mainSidebar", presentation: "popover", name: "Board Button", icon: "tag")
+        let claudeEnvironment = try installClaudeFixture(named: "claude-fixture-ui-card-move")
+        launchApp(defaultParent: fixture.parent.path)
+        let refreshed = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        for (pluginID, presentation) in [("card-probe", "inline"), ("card-button", "popover")] {
+            let plugin = try XCTUnwrap(refreshed.first { $0["id"] as? String == pluginID })
+            XCTAssertEqual(plugin["placement"] as? String, "taskItem")
+            XCTAssertEqual(plugin["presentation"] as? String, presentation)
+            XCTAssertEqual(plugin["valid"] as? Bool, true, "\(plugin)")
+        }
+
+        // In a repository, so the started card has the built-in pull request controls.
+        _ = try runCLI(["task", "create", "--title", "Task card plugin", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])
+        let taskID = try taskID(named: "Task card plugin")
+        let card = element("task-card-\(taskID)")
+        XCTAssertTrue(card.waitToExist(timeout: 10))
+        let cardRow = element("task-card-plugins-\(taskID)")
+        let surface = cardRow.descendants(matching: .any)["plugin-surface-card-probe"]
+        let status = cardRow.descendants(matching: .any)["card-status"]
+        XCTAssertTrue(surface.waitToExist(timeout: 10), "An installed task card plugin shows on every card, a Backlog one too.")
+        XCTAssertTrue(waitUntil({ self.pluginText(status) == "Backlog" }, timeout: 10), "The Backlog card's plugin gets its task: \(pluginText(status))")
+        XCTAssertFalse(element("task-pr-mode-\(taskID)").exists, "A Backlog card has no built-in pull request controls yet.")
+        attachElementScreenshot(card, named: "Task card plugin on a Backlog card")
+        // Manual mode: the move to Review below opens no pull request.
+        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", taskID, "--value", #""manual""#])
+
+        // Started, the card's bottom row runs the plugin with its task.
+        XCTAssertEqual(
+            try runCLI([
+                "conversation", "send", taskID, "--message", "Please ask your questions.", "--mode", "plan",
+                "--answer", "color=Blue", "--answer", "token=fixture-secret"
+            ])["ok"] as? Bool,
+            true
+        )
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(surface.waitToExist(timeout: 10), "A started task's card renders the task card plugin in its bottom row.")
+        XCTAssertFalse(element("plugin-entry-card-probe").exists, "An inline task card plugin has no entry button.")
+        XCTAssertTrue(waitUntil({ self.pluginText(status) == "Waiting Response" }, timeout: 10), "The plugin gets its card's task: \(pluginText(status))")
+        XCTAssertGreaterThanOrEqual(surface.frame.minY, element("task-title-\(taskID)").frame.maxY, "The plugin row sits below the card's title.")
+        let modePill = cardRow.descendants(matching: .any)["task-pr-mode-\(taskID)"]
+        XCTAssertTrue(modePill.waitToExist(timeout: 10), "The started card shows the built-in mode pill.")
+        XCTAssertTrue(surface.frame.minY < modePill.frame.maxY && modePill.frame.minY < surface.frame.maxY,
+                      "The plugin sits in the same row as the built-in pull request controls: \(surface.frame) vs \(modePill.frame)")
+        XCTAssertTrue(card.frame.contains(modePill.frame) && card.frame.contains(surface.frame), "Both are inside the card.")
+        attachElementScreenshot(card, named: "Task card plugin in a Waiting Response card's bottom row")
+
+        // The card's controls are built-in plugins: disabling the mode pill's removes it, and the installed plugin stays.
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Pull requests — Task card"].waitToExist(timeout: 5), "The Plugins menu lists the card's built-ins.")
+        app.typeKey(.escape, modifierFlags: [])
+        clickInstalledPluginAction("Disable", pluginRow: "Pull request mode — Task card")
+        XCTAssertTrue(waitForDisappearance(modePill, timeout: 10), "Disabling the built-in Pull request mode removes the card's mode pill.")
+        XCTAssertTrue(surface.exists, "The installed task card plugin stays.")
+        attachElementScreenshot(card, named: "Task card with the Pull request mode built-in disabled")
+        _ = try runCLI(["plugin", "enable", "--id", "pull-request-mode"])
+        XCTAssertTrue(modePill.waitToExist(timeout: 10), "Enabling it brings the mode pill back.")
+
+        // A task card plugin with a button opens with its card's task.
+        let entry = cardRow.descendants(matching: .any)["plugin-entry-card-button"]
+        XCTAssertTrue(entry.waitToExist(timeout: 10), "A popover task card plugin has an entry button on the card.")
+        entry.click()
+        let buttonTask = element("button-task")
+        XCTAssertTrue(waitUntil({ buttonTask.exists && self.pluginText(buttonTask) == "Task card plugin" }, timeout: 10),
+                      "The popover gets its card's task: \(buttonTask.exists ? pluginText(buttonTask) : "absent")")
+        attachScreenshot(named: "Task card plugin opened from its card button")
+        // The board answers a card plugin's alert; a task card has no composer.
+        let buttonResult = element("button-result")
+        element("button-compose").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(buttonResult) == "composer: unavailable" }, timeout: 5), "A task card has no composer: \(pluginText(buttonResult))")
+        element("button-alert").click()
+        let alert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        XCTAssertTrue(alert.waitToExist(timeout: 10), "ui.alert from a card plugin shows the board's alert.")
+        XCTAssertTrue(alert.staticTexts["Card plugin alert"].exists)
+        XCTAssertTrue(alert.staticTexts.matching(NSPredicate(format: "value == %@", "Raised from the task card.")).firstMatch.exists)
+        attachScreenshot(named: "A task card plugin's ui.alert")
+        alert.buttons["OK"].click()
+        XCTAssertTrue(waitForDisappearance(alert))
+        // The board's alert can close the popover behind it; reopened, the plugin renders afresh.
+        let popoverStayed = buttonTask.exists
+        if !popoverStayed { entry.click() }
+        XCTAssertTrue(waitUntil({ buttonTask.exists && self.pluginText(buttonResult) == (popoverStayed ? "alert: ok" : "idle") }, timeout: 5), pluginText(buttonResult))
+
+        // ui.moveTask moves the card's task as dragging it does; the move to Review reaches the
+        // inline plugin as task.statusChanged, which probes through its throttle. The plugin keeps
+        // running as its card changes columns, so it counts on from the earlier moves' probes.
+        let probes = cardRow.descendants(matching: .any)["card-probes"]
+        func probeCount(_ element: XCUIElement) -> Int { Int(pluginText(element).split(separator: " ").last ?? "") ?? -1 }
+        let probesBeforeMove = probeCount(probes)
+        XCTAssertGreaterThanOrEqual(probesBeforeMove, 0, pluginText(probes))
+        element("button-move").click()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10), "ui.moveTask moves the card's task to Review.")
+        if buttonTask.exists { app.typeKey(.escape, modifierFlags: []) }
+        XCTAssertTrue(waitUntil({ !buttonTask.exists }, timeout: 5))
+        // The card now sits in the Review column, which may be scrolled off the board.
+        revealOnBoard(card)
+        let log = cardRow.descendants(matching: .any)["card-log"]
+        XCTAssertTrue(waitUntil({ self.pluginText(log).contains("Waiting Response to Review") }, timeout: 10),
+                      "The plugin hears its task move between columns: \(pluginText(log))")
+        XCTAssertTrue(waitUntil({ self.pluginText(status) == "Review" }, timeout: 10))
+        // An earlier move's probe may hold the 10-second cooldown; the move's call then runs when it ends.
+        XCTAssertTrue(waitUntil({ probeCount(probes) > probesBeforeMove }, timeout: 15), "The throttled probe ran: \(pluginText(probes))")
+        XCTAssertTrue(waitUntil({ self.pluginText(log).contains("Waiting Response to Review, probe move") }, timeout: 5), "\(pluginText(log))")
+        attachElementScreenshot(card, named: "Task card plugin heard the move to Review")
+        // Coming back to the front reaches the card's plugin as app.focus. Three focuses within the
+        // throttle's 10-second cooldown probe at most twice: once at once (unless the move's probe
+        // still holds the cooldown) and once, with the latest call, when the cooldown ends.
+        let focusCount = cardRow.descendants(matching: .any)["card-focus"]
+        func focusProbes() -> Int { probeCount(focusCount) }
+        let focusesBefore = focusProbes()
+        let focusStart = Date()
+        activateOtherAppThenReturn()
+        activateOtherAppThenReturn()
+        activateOtherAppThenReturn()
+        XCTAssertLessThan(Date().timeIntervalSince(focusStart), 10, "The three focuses land within one cooldown.")
+        XCTAssertTrue(waitUntil({ focusProbes() > focusesBefore }, timeout: 15), "The window hands app.focus to the card's plugin: \(pluginText(log))")
+        Thread.sleep(forTimeInterval: max(0, 11 - Date().timeIntervalSince(focusStart)))
+        XCTAssertLessThanOrEqual(focusProbes(), focusesBefore + 2, "The throttle collapses the three focuses: \(pluginText(log))")
+        XCTAssertGreaterThanOrEqual(focusProbes(), focusesBefore + 1)
+        attachElementScreenshot(card, named: "Task card plugin probed on focus through its throttle")
+        attachScreenshot(named: "Board with a task card plugin")
+
+        // Only a task card's plugin may move a task, resolve conflicts or raise an alert:
+        // from the board's sidebar and the conversation sidebar the window refuses them.
+        func assertCardOnlyCallsRefused(_ surface: XCUIElement, _ context: String) {
+            let result = surface.descendants(matching: .any)["button-result"]
+            for (button, label) in [("button-move", "moveTask"), ("button-resolve", "resolveConflicts"), ("button-alert", "alert")] {
+                surface.descendants(matching: .any)[button].click()
+                XCTAssertTrue(waitUntil({ self.pluginText(result) == "\(label): unavailable" }, timeout: 5), "\(context) refuses \(label): \(pluginText(result))")
+            }
+            XCTAssertFalse(app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch.exists, "\(context) raises no alert.")
+        }
+        let boardEntry = element("plugin-entry-board-button")
+        XCTAssertTrue(boardEntry.waitToExist(timeout: 10))
+        boardEntry.click()
+        let boardPopover = app.popovers.descendants(matching: .any)["plugin-surface-board-button"]
+        XCTAssertTrue(boardPopover.waitToExist(timeout: 10), "The board's sidebar plugin opens in a popover.")
+        XCTAssertTrue(waitForStableFrame(boardPopover))
+        assertCardOnlyCallsRefused(boardPopover, "The board's sidebar")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "The refused move moved nothing.")
+        attachElementScreenshot(boardPopover, named: "Card-only calls refused from the board's sidebar")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(boardPopover, timeout: 5))
+
+        // A card's ui.resolveConflicts opens its task and sends the conflict instruction.
+        entry.click()
+        XCTAssertTrue(waitUntil({ buttonTask.exists && self.pluginText(buttonTask) == "Task card plugin" }, timeout: 10))
+        element("button-resolve").click()
+        XCTAssertTrue(waitForDisappearance(buttonTask, timeout: 5), "Resolving closes the card's popover.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Task card plugin" }, timeout: 15),
+                      "ui.resolveConflicts opens the card's task.")
+        let conflictPrompt = element("conversation-scroll-view").descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "The PR has conflicts. Fix them, commit, and push.")).firstMatch
+        XCTAssertTrue(conflictPrompt.waitToExist(timeout: 10), "The opened task gets the conflict instruction.")
+        attachScreenshot(named: "A card plugin's ui.resolveConflicts opened its task with the conflict instruction")
+
+        let sidebarEntry = element("plugin-entry-sidebar-button")
+        XCTAssertTrue(sidebarEntry.waitToExist(timeout: 10))
+        sidebarEntry.click()
+        let sidebarPopover = app.popovers.descendants(matching: .any)["plugin-surface-sidebar-button"]
+        XCTAssertTrue(sidebarPopover.waitToExist(timeout: 10), "The conversation sidebar plugin opens in a popover.")
+        XCTAssertTrue(waitForStableFrame(sidebarPopover))
+        XCTAssertEqual(pluginText(sidebarPopover.descendants(matching: .any)["button-task"]), "Task card plugin")
+        assertCardOnlyCallsRefused(sidebarPopover, "The conversation sidebar")
+        attachElementScreenshot(sidebarPopover, named: "Card-only calls refused from the conversation sidebar")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(sidebarPopover, timeout: 5))
+
+        // A turn's end moves its task on whichever provider ran it, from the provider's
+        // own callbacks; each move still reaches the services, none dropped.
+        func published(_ id: String, to: String) throws -> Bool {
+            try diagnosticEvents().contains {
+                $0["event"] as? String == "plugin.event.published" && $0["name"] as? String == "task.statusChanged"
+                    && $0["taskID"] as? String == id && $0["to"] as? String == to
+            }
+        }
+        XCTAssertTrue(try published(taskID, to: "Waiting Response"), "The Codex turn's move is published to the services.")
+        let claudeTaskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Task card Claude move", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", claudeTaskID, "--message", "Tell me a story."], extraEnvironment: claudeEnvironment)
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: claudeTaskID)?["status"] as? String) == "Review" }, timeout: 30))
+        XCTAssertTrue(try published(claudeTaskID, to: "Review"), "The Claude turn's move to Review is published to the services.")
+        XCTAssertTrue(try diagnosticEvents().filter { $0["event"] as? String == "plugin.event.dropped" }.isEmpty, "No move is dropped for want of its request.")
     }
 }

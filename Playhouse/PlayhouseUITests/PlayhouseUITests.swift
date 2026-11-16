@@ -414,9 +414,12 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     /// The board's PR-check cooldown for cases that wait it out (the app defaults to 20 s).
+    /// The daemon reuses a shared probe's answer for a few seconds (3 s by default), which
+    /// would answer a probe after this short cooldown without asking GitHub; keep that
+    /// window shorter than the cooldown, as the app's 20 s cooldown keeps it.
     static let prCheckCooldown: TimeInterval = 3
     static var prCheckCooldownEnvironment: [String: String] {
-        ["PLAYHOUSE_E2E_PR_CHECK_COOLDOWN_SECONDS": String(Int(prCheckCooldown))]
+        ["PLAYHOUSE_E2E_PR_CHECK_COOLDOWN_SECONDS": String(Int(prCheckCooldown)), "PLAYHOUSE_E2E_PR_STATUS_CACHE_SECONDS": "1"]
     }
 
     /// PATH that resolves `git` to the staged hold wrapper first; see `GitHoldBarrier`.

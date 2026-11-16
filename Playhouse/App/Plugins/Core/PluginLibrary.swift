@@ -11,6 +11,8 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
     case conversationToolbar
     /// The composer's actions row, beside the Skills button.
     case composerActions
+    /// The bottom row of each task card on the board, beside its pull request controls.
+    case taskItem
 
     var title: String {
         switch self {
@@ -18,12 +20,13 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
         case .conversationSidebar: "Conversation sidebar"
         case .conversationToolbar: "Conversation sidebar toolbar"
         case .composerActions: "Chat input actions"
+        case .taskItem: "Task card"
         }
     }
 
     /// The entry and its "Add here" placeholder show only an icon here.
     var isIconOnly: Bool {
-        self == .conversationToolbar || self == .composerActions
+        self == .conversationToolbar || self == .composerActions || self == .taskItem
     }
 
     var hasTask: Bool { self != .mainSidebar }
@@ -34,7 +37,9 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
         case .mainSidebar:
             "Standalone: only `plugin` and `app` (no task)."
         case .conversationSidebar, .conversationToolbar:
-            "`plugin`, `app`, `task` ({id, title, status, provider, isStandaloneChat}), `repositories` ([{repositoryPath, worktreePath, branch}]) and `contextFolders` ([path])."
+            "`plugin`, `app`, `task` ({id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}), `repositories` ([{repositoryPath, worktreePath, branch, isPending, awaitsPullRequest, pullRequest: {number, url, merged} or null}]), `pastPullRequests` ([{repositoryPath, number, url, merged}], from worktrees the task has removed) and `contextFolders` ([path])."
+        case .taskItem:
+            "The same `plugin`, `app`, `task`, `repositories`, `pastPullRequests` and `contextFolders` as the conversation placements, for the card's task. The card is small: show an icon or a short label, and listen with `Playhouse.on(\"task.statusChanged\", …)` and `Playhouse.on(\"app.focus\", …)` for when to refresh what it shows."
         case .composerActions:
             "`plugin`, `app`, `task`, `repositories`, `contextFolders`, and `composer` ({draft, selection: {location, length, text}}), the composer's current draft and the text selected in it."
         }
@@ -74,10 +79,10 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
     }
 
     /// The placements an inline plugin may sit in.
-    static let inlinePlacements: Set<PluginPlacement> = [.conversationSidebar]
+    static let inlinePlacements: Set<PluginPlacement> = [.conversationSidebar, .taskItem]
 
     static func inlinePlacementError(_ placement: PluginPlacement) -> String {
-        "An inline plugin can't sit at the \(placement.title) placement; only in the conversation sidebar."
+        "An inline plugin can't sit at the \(placement.title) placement; only in the conversation sidebar or on the task card."
     }
 }
 
@@ -133,9 +138,18 @@ struct PluginRecord: Codable, Equatable, Sendable, Identifiable {
 enum BuiltInPlugins {
     /// The conversation sidebar's Changes section.
     static let changesID = "changes"
+    /// The task card's pull request mode pill: it owns each task's mode (its
+    /// state, keyed by task id) and, in its daemon service, what the mode does
+    /// when the task moves or the app comes to the front.
+    static let pullRequestModeID = "pull-request-mode"
+    /// The task card's pull request controls: create, links coloured by
+    /// health, the merged check and the resolve-conflicts button.
+    static let pullRequestsID = "pull-requests"
 
     static let manifests: [PluginManifest] = [
-        PluginManifest(id: changesID, name: "Changes", version: 1, icon: "plusminus", placement: PluginPlacement.conversationSidebar.rawValue, presentation: PluginPresentation.inline.rawValue)
+        PluginManifest(id: changesID, name: "Changes", version: 1, icon: "plusminus", placement: PluginPlacement.conversationSidebar.rawValue, presentation: PluginPresentation.inline.rawValue),
+        PluginManifest(id: pullRequestModeID, name: "Pull request mode", version: 1, icon: "arrow.triangle.branch", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
+        PluginManifest(id: pullRequestsID, name: "Pull requests", version: 1, icon: "arrow.triangle.pull", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue)
     ]
 
     static func isBuiltIn(_ id: String) -> Bool { manifests.contains { $0.id == id } }
@@ -158,10 +172,27 @@ enum BuiltInPlugins {
 /// The plain task details a placement's context is built from, so the core
 /// needs no app types.
 struct PluginTaskContext: Sendable {
+    struct PullRequest: Sendable, Equatable {
+        var number: Int
+        var url: String
+        var merged: Bool
+    }
+
     struct Repository: Sendable {
         var repositoryPath: String
         var worktreePath: String
         var branch: String
+        /// Not started yet: the task's first turn creates its worktree.
+        var isPending = false
+        /// Started, with no linked pull request and changes that may need one.
+        var awaitsPullRequest = false
+        var pullRequest: PullRequest?
+    }
+
+    /// A pull request of a worktree the task has since removed.
+    struct PastPullRequest: Sendable {
+        var repositoryPath: String
+        var pullRequest: PullRequest
     }
 
     var id: String
@@ -171,6 +202,9 @@ struct PluginTaskContext: Sendable {
     var isStandaloneChat: Bool
     var repositories: [Repository]
     var contextFolders: [String]
+    var pastPullRequests: [PastPullRequest] = []
+    /// The recurring schedule this task is a run of, if any.
+    var scheduleSourceTaskID: String?
 }
 
 /// The composer's draft and the text selected in it, in UTF-16 offsets.
@@ -234,14 +268,23 @@ enum PluginContext {
                 "title": .string(task.title),
                 "status": .string(task.status),
                 "provider": .string(task.provider),
-                "isStandaloneChat": .bool(task.isStandaloneChat)
+                "isStandaloneChat": .bool(task.isStandaloneChat),
+                "scheduleSourceTaskID": task.scheduleSourceTaskID.map(PluginValue.string) ?? .null
             ])
             props["repositories"] = .array(task.repositories.map {
                 .object([
                     "repositoryPath": .string($0.repositoryPath),
                     "worktreePath": .string($0.worktreePath),
-                    "branch": .string($0.branch)
+                    "branch": .string($0.branch),
+                    "isPending": .bool($0.isPending),
+                    "awaitsPullRequest": .bool($0.awaitsPullRequest),
+                    "pullRequest": $0.pullRequest.map(pullRequestValue) ?? .null
                 ])
+            })
+            props["pastPullRequests"] = .array(task.pastPullRequests.map {
+                var value = pullRequestValue($0.pullRequest).object ?? [:]
+                value["repositoryPath"] = .string($0.repositoryPath)
+                return .object(value)
             })
             props["contextFolders"] = .array(task.contextFolders.map(PluginValue.string))
         }
@@ -267,6 +310,10 @@ enum PluginContext {
             ])
         }
         return props
+    }
+
+    private static func pullRequestValue(_ pullRequest: PluginTaskContext.PullRequest) -> PluginValue {
+        .object(["number": .number(Double(pullRequest.number)), "url": .string(pullRequest.url), "merged": .bool(pullRequest.merged)])
     }
 
     /// The sample task a plugin is validated with.
@@ -558,7 +605,7 @@ struct PluginLibrary: Sendable {
 /// What a host refuses from a plugin, the same in the window and in
 /// `plugin render`, so the headless check matches what the user sees.
 enum PluginHostRules {
-    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
+    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
 
     /// Nil when the host should answer `call`. `placement` is nil for a plugin
     /// rendered from a file or a catalog page, which may call anything.
@@ -569,11 +616,15 @@ enum PluginHostRules {
             return name == "plugin.render" ? PluginHostError(code: "invalid_argument", message: "A plugin can't render plugins.") : nil
         case "ui":
             guard uiCalls.contains(name) else { return PluginHostError(code: "invalid_argument", message: "Unknown host call ui.\(name).") }
-            if name.hasPrefix("composer."), let placement, !placement.hasTask {
+            if name.hasPrefix("composer."), let placement, !placement.hasTask || placement == .taskItem {
                 return PluginHostError(code: "unavailable", message: "There is no composer at the \(placement.title) placement.")
             }
-            if name == "openDiff" || name == "refreshWorkspace", let placement, !placement.hasTask {
+            if ["openDiff", "refreshWorkspace"].contains(name), let placement, !placement.hasTask {
                 return PluginHostError(code: "unavailable", message: "There is no task's workspace at the \(placement.title) placement.")
+            }
+            // Only the board answers these, for the cards it shows.
+            if ["moveTask", "resolveConflicts", "alert"].contains(name), let placement, placement != .taskItem {
+                return PluginHostError(code: "unavailable", message: "Only a task card's plugin can call ui.\(name), not one at the \(placement.title) placement.")
             }
             return nil
         case "net":

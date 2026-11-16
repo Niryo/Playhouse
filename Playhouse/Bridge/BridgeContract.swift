@@ -61,7 +61,7 @@ enum BridgeContract {
     }
 }
 
-enum BridgeValue: Codable, Equatable {
+enum BridgeValue: Codable, Equatable, Sendable {
     case string(String)
     case integer(Int)
     case decimal(Double)
@@ -124,7 +124,7 @@ extension BridgeValue {
     }
 }
 
-struct BridgeRequest: Codable {
+struct BridgeRequest: Codable, Sendable {
     var version = BridgeContract.currentVersion
     var id = UUID().uuidString
     var command: String

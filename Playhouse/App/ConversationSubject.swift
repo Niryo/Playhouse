@@ -213,11 +213,6 @@ protocol ConversationSubject: AnyObject, Observable {
     var workspaceRootPaths: [String] { get }
     var repositoryWorktrees: [RepositoryWorktreeRecord] { get }
     var contextFolderPaths: [String] { get }
-    /// Whether moving this subject to Review should create its pull request(s)
-    /// automatically. Always false for a standalone chat, which has no repositories.
-    var autoCreatePullRequestOnReview: Bool { get }
-    /// Manual, PR, or autopilot. Always manual for a standalone chat.
-    var pullRequestMode: PullRequestMode { get }
 
     /// Which creature this is, derived from the model's type rather than stored on a row.
     ///
@@ -297,6 +292,10 @@ extension ConversationSubject {
             if previous == .inProgress, let startedAt = inProgressStartedAt {
                 totalInProgressSeconds += max(0, Date.now.timeIntervalSince(startedAt))
                 inProgressStartedAt = nil
+            }
+            // The column a board task leaves, until the move is saved and published.
+            if let task = self as? BoardTask, task.statusBeforeSave == nil {
+                task.statusBeforeSave = previous.rawValue
             }
             statusRawValue = newValue.rawValue
             lifecycleRevision += 1
@@ -420,8 +419,6 @@ extension StandaloneChat: ConversationSubject {
     var workspaceRootPaths: [String] { contextFolderPaths }
     var repositoryWorktrees: [RepositoryWorktreeRecord] { [] }
     var contextFolderPaths: [String] { pluginContextFolder.map { [$0] } ?? [] }
-    var autoCreatePullRequestOnReview: Bool { false }
-    var pullRequestMode: PullRequestMode { .manual }
     var isStandaloneChat: Bool { authoredPluginID == nil }
 }
 

@@ -75,9 +75,10 @@ extension ConversationManager {
                         message: BoardTaskManager.reviewSyncBlockedMessage(syncError)
                     )
                 } else {
-                    let reviewRecord = try await tasks.setLifecycleStatus(taskID, to: .review)
+                    _ = try await tasks.setLifecycleStatus(taskID, to: .review)
+                    // The pull request mode plugin opens the PRs the move asks for.
                     phase = "review-auto-pr"
-                    await tasks.createPullRequestsOnReviewIfNeeded(reviewRecord, clients: clients, settingsManager: settingsManager)
+                    await PluginServiceHost.settle(taskID: taskID)
                 }
             case .waitingResponse:
                 _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)

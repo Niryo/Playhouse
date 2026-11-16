@@ -391,6 +391,15 @@ extension PlayhouseUITests {
         }, timeout: 5), "The pill's \(mode) option should finish sliding in.")
         return option
     }
+    /// Chooses a task's pull request mode as its card's pill does: the `pull-request-mode` plugin's state.
+    func setPullRequestMode(_ mode: String?, taskID: String) throws {
+        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", taskID, "--value", mode.map { "\"\($0)\"" } ?? "null"])
+    }
+    /// The mode the `pull-request-mode` plugin keeps for a task, or nil for the default (PR).
+    func pullRequestMode(taskID: String) throws -> String? {
+        let result = try runCLI(["plugin", "state", "--id", "pull-request-mode"])["result"] as? [String: Any]
+        return (result?["state"] as? [String: Any])?[taskID] as? String
+    }
     func selectPullRequestMode(_ mode: String, taskID: String) throws {
         let pill = element("task-pr-mode-\(taskID)")
         XCTAssertTrue(pill.waitToExist(timeout: 5), "The task card should show its PR mode pill.")

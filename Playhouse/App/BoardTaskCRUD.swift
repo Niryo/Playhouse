@@ -56,7 +56,6 @@ extension BoardTaskManager {
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let normalizedRoots = try Self.normalizeRoots(workspaceRoots)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots, conversationProvider: provider)
-        task.autoCreatePullRequestOnReview = true
         modelContext.insert(task)
         try await saveTaskContext(taskID: task.id)
         PlayhouseDiagnostics.record("task.create.succeeded", fields: [
@@ -70,7 +69,7 @@ extension BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .pullRequest, prompt: String? = nil, pluginPlacement: String? = nil, authoredPluginID: String? = nil) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, prompt: String? = nil, pluginPlacement: String? = nil, authoredPluginID: String? = nil) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -88,9 +87,6 @@ extension BoardTaskManager {
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
-        task.autoCreatePullRequestOnReview = pullRequestMode != .manual
-        task.pullRequestAutopilot = pullRequestMode == .autopilot || pullRequestMode == .merge
-        task.pullRequestAutoMerge = pullRequestMode == .merge
         task.pluginPlacement = pluginPlacement
         task.authoredPluginID = authoredPluginID
         // A prompt given at creation has not been sent, so it is the composer's draft.

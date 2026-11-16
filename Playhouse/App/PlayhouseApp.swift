@@ -33,6 +33,18 @@ struct PlayhouseApp: App {
             runtime?.stop()
             cpuUsage?.stop()
         }
+        // The built-in plugins' services run in the daemon; a change this
+        // window saves itself (a card dragged to Review) reaches them there.
+        let eventClient = DaemonClient()
+        PluginServiceHost.forward = { event in
+            Task { @MainActor in
+                do {
+                    try await eventClient.call("plugin.event", ["name": .string(event.name), "payload": BridgeValue(plugin: .object(event.payload))])
+                } catch {
+                    PlayhouseDiagnostics.record("plugin.event.forward.failed", fields: ["name": event.name, "error": "\(error)"])
+                }
+            }
+        }
         #if DEBUG
         if let suiteName = environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"],
            let isolatedPreferences = UserDefaults(suiteName: suiteName) {

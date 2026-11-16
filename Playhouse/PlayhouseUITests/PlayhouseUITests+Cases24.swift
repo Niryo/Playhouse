@@ -637,7 +637,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(failed["hasUnsentDraft"] as? Bool, true, "The prompt waits as the draft for a retry.")
         attachScreenshot(named: "A scheduled run that couldn't start waits in Blocked")
     }
-    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task.
+    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is cleared a later run reaches Review in PR mode.
     func test_schedule_recurring_template_hidden_and_spawns_runs() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-recurring")
         launchApp(defaultParent: fixture.parent.path)
@@ -686,6 +686,16 @@ extension PlayhouseUITests {
 
         let template = try XCTUnwrap(taskRecord(id: templateID)?["schedule"] as? [String: Any])
         let firstRun = try XCTUnwrap(scheduleDate(template["scheduledAt"] as? String))
+        // A run has no mode of its own: the pull-request-mode plugin gives it the one its schedule was given.
+        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", templateID, "--value", #""manual""#])
+        func reviewModes(_ taskID: String) -> [String] {
+            ((try? diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == "plugin.pull_request_mode.review" && $0["taskID"] as? String == taskID
+            }.compactMap { $0["mode"] as? String }
+        }
+        func savedMode(_ taskID: String) -> Any? {
+            ((try? runCLI(["plugin", "state", "--id", "pull-request-mode"])["result"] as? [String: Any])?["state"] as? [String: Any])?[taskID]
+        }
         let fired = try XCTUnwrap(try runCLI(["schedule", "tick", "--now", scheduleISO(firstRun.addingTimeInterval(600))], extraEnvironment: environment)["result"] as? [String: Any])
         let runID = try XCTUnwrap((fired["fired"] as? [[String: Any]])?.first?["taskID"] as? String)
         XCTAssertNotEqual(runID, templateID, "Each run is a new task.")
@@ -695,6 +705,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(run["scheduleSourceTaskID"] as? String, templateID)
         XCTAssertEqual(run["contextFolders"] as? [String], try taskRecord(id: templateID)?["contextFolders"] as? [String], "A run takes the schedule's context folders.")
         XCTAssertTrue(claudeFixturePrompts().contains("Tell me a story."))
+        XCTAssertNil(savedMode(runID), "A run saves no mode of its own.")
+        XCTAssertTrue(waitUntil({ reviewModes(runID) == ["manual"] }, timeout: 15), "The run reached Review in its schedule's Manual mode: \(reviewModes(runID))")
         let advanced = try XCTUnwrap(scheduleDate((taskRecord(id: templateID)?["schedule"] as? [String: Any])?["scheduledAt"] as? String))
         XCTAssertEqual(advanced.timeIntervalSince(firstRun), 86400, accuracy: 3600, "A daily schedule advances by one day.")
 
@@ -710,11 +722,16 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: templateID)?["schedule"] as? [String: Any])?["paused"] as? Bool) == false }, timeout: 10))
         attachScreenshot(named: "Scheduled Tasks page after pausing and resuming")
 
+        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", templateID, "--value", "null"])
         clickScheduledTaskMenuItem(taskID: templateID, item: "scheduled-task-run-now-\(templateID)", title: "Run Now")
+        var nowRunID: String?
         XCTAssertTrue(waitUntil({
             let runs = ((try? self.runCLI(["task", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]]) ?? []
+            nowRunID = runs.first { $0["scheduleSourceTaskID"] as? String == templateID && $0["id"] as? String != runID }?["id"] as? String
             return runs.filter { $0["scheduleSourceTaskID"] as? String == templateID }.count == 2
         }, timeout: 20), "Run Now starts another run.")
+        let secondRunID = try XCTUnwrap(nowRunID)
+        XCTAssertTrue(waitUntil({ reviewModes(secondRunID) == ["pr"] }, timeout: 60), "With the schedule's mode cleared, a run is in PR mode: \(reviewModes(secondRunID))")
 
         element("scheduled-tasks-back-button").click()
         XCTAssertTrue(waitForDisappearance(element("scheduled-tasks-page"), timeout: 5))

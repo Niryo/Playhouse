@@ -168,6 +168,11 @@ enum PlayhouseBridgeDaemonMain {
             }
             _ = finished.wait(timeout: .now() + 15)
         }
+        // The built-in plugins' background halves hear app events here, whether
+        // or not a window is open.
+        MainActor.assumeIsolated {
+            PluginServiceHost.services = [PullRequestModeService()]
+        }
         startScheduleTicker(environment: environment)
         RunLoop.current.run()
     }

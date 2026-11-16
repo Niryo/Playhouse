@@ -708,7 +708,7 @@ extension PlayhouseUITests {
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
         attachScreenshot(named: "Done removes the worktree and keeps the branch")
     }
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the JavaScript task item composes it the same way, as a borderless 30-point button whose 10-point capsule overhangs it, labelled PR.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the button is the built-in pull requests plugin's, which `plugin list` reports as an enabled inline task card plugin.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -718,7 +718,7 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
-        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+        try setPullRequestMode("manual", taskID: taskID)
         XCTAssertEqual(created["status"] as? String, "Backlog")
         XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 5), "The backlog task card should render before checking its PR controls.")
         XCTAssertFalse(element("task-create-pr-\(taskID)").exists, "Backlog cards must not expose a PR action.")
@@ -745,6 +745,13 @@ extension PlayhouseUITests {
         let prInkWidth = try XCTUnwrap(inkWidth(of: activeCreateButton.screenshot().image, pointWidth: activeCreateButton.frame.width), "Could not read the PR button's pixels.")
         XCTAssertGreaterThanOrEqual(prInkWidth, prLabelWidth * 0.8, "The PR button should draw its full PR label, not a truncated ellipsis: \(prInkWidth) pt of ink for \(prLabelWidth) pt of text.")
         attachScreenshot(named: "Active card shows the full PR button")
+        // The button is the built-in pull requests plugin's, an inline task card plugin.
+        let listedPlugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        let pullRequestsPlugin = try XCTUnwrap(listedPlugins.first { $0["id"] as? String == "pull-requests" })
+        XCTAssertEqual(pullRequestsPlugin["placement"] as? String, "taskItem")
+        XCTAssertEqual(pullRequestsPlugin["presentation"] as? String, "inline")
+        XCTAssertEqual(pullRequestsPlugin["builtIn"] as? Bool, true)
+        XCTAssertEqual(pullRequestsPlugin["enabled"] as? Bool, true)
         // The control sits on its own last row, below the title and the time row, on the right; Backlog had no such row.
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-title-\(taskID)").frame.maxY, "The pull-request row should sit below the title.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-token-usage-counter-\(taskID)").frame.maxY, "The pull-request row should sit below the time row.")

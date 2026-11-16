@@ -99,6 +99,11 @@ final class WorkspaceSettingsManager {
         return state
     }
 
+    var legacyPullRequestModesImported: Bool {
+        get { defaults.bool(forKey: WorkspaceSettings.legacyPullRequestModesImportedKey) }
+        set { defaults.set(newValue, forKey: WorkspaceSettings.legacyPullRequestModesImportedKey) }
+    }
+
     /// Forgets a deleted plugin's values, so one installed again under its id starts fresh.
     func clearPluginState(_ id: String) {
         var states = pluginStates

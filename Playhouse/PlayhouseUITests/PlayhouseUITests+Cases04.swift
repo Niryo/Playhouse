@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode the previous task was left in; changing one task's mode never changes the default for later tasks. Toggling Auto PR for an unknown task is rejected.
+    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows the pull-request-mode plugin's compact mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. The mode is the plugin's own state keyed by task id, not a property of the task: a new task has no saved mode and is in PR mode, choosing PR clears the saved mode, every other choice is saved and reflected across a fresh read, and a saved value no mode knows reads as PR. When a turn completes in PR mode (including that unknown value), the plugin creates the task's pull request on the way to Review with no user click, exactly once. Choosing Merge for that task in Review is a change the plugin acts on at once: it merges the green pull request with no other command, and the task stays in Review. In Manual mode the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode another task was left in. Creating a pull request with --if-needed for an unknown task is rejected. A task saved before the mode was the plugin's keeps its old Manual, Green, or Merge choice: the bridge imports it once into the plugin's state at its next request (a mode already chosen in the plugin wins, and PR imports nothing), and its card's pill shows it.
     func test_task_auto_pr_toggle_creates_pull_request_on_review() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -53,9 +53,10 @@ extension PlayhouseUITests {
             }, timeout: 3), "The working time, grown from \(firstDuration), should keep its full width: \(self.pluginText(duration)) in \(duration.frame.width) pt")
             XCTAssertEqual(pill.value as? String, "pr", "The closed pill shows the current mode, defaulting to PR.")
             XCTAssertFalse(self.element("task-pr-mode-merge-\(taskID)").exists, "A closed pill shows only the current mode.")
-            XCTAssertTrue(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to on.")
-            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "pr")
-            self.attachScreenshot(named: "Working task shows the closed mode pill on PR", fullScreen: true)
+            XCTAssertNil(try self.taskRecord(id: taskID)?["pullRequestMode"], "The mode is the plugin's state, not a property of the task.")
+            XCTAssertNil(try self.pullRequestMode(taskID: taskID), "A new task has no saved mode, so it is in PR mode.")
+            self.attachScreenshot(named: "Working task shows the closed mode pill on PR")
+            self.attachElementScreenshot(self.element("task-card-\(taskID)"), named: "Closed mode pill on PR (card)")
 
             pill.click()
             for mode in ["manual", "pr", "autopilot", "merge"] {
@@ -65,25 +66,24 @@ extension PlayhouseUITests {
             }
             XCTAssertEqual(self.element("task-pr-mode-pr-\(taskID)").value as? String, "selected")
             _ = self.settledPillOption("merge", taskID: taskID)
-            self.attachScreenshot(named: "Clicking the pill slides out Manual, PR, Green, and Merge", fullScreen: true)
+            self.attachScreenshot(named: "Clicking the pill slides out Manual, PR, Green, and Merge")
+            self.attachElementScreenshot(self.element("task-card-\(taskID)"), named: "The open pill offers Manual, PR, Green, and Merge (card)")
             // Choosing the current mode again just folds the pill.
             self.settledPillOption("pr", taskID: taskID).click()
             XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "pr" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing the current mode should fold the pill.")
-            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "pr")
+            XCTAssertNil(try self.pullRequestMode(taskID: taskID), "Choosing the current mode saves nothing.")
 
             pill.click()
             self.settledPillOption("autopilot", taskID: taskID).click()
             XCTAssertTrue(self.waitUntil({
-                (try? self.taskRecord(id: taskID)?["pullRequestMode"] as? String) == "autopilot"
-            }, timeout: 5), "Choosing Green should persist immediately.")
+                (try? self.pullRequestMode(taskID: taskID)) == "autopilot"
+            }, timeout: 5), "Choosing Green should persist immediately in the plugin's state.")
             XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "autopilot" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing a mode should fold the pill back onto it.")
-            self.attachScreenshot(named: "Choosing Green folds the pill back onto Green", fullScreen: true)
+            self.attachScreenshot(named: "Choosing Green folds the pill back onto Green")
             try self.selectPullRequestMode("pr", taskID: taskID)
-            XCTAssertTrue(self.waitUntil({
-                (try? self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool) == true
-                    && (try? self.taskRecord(id: taskID)?["pullRequestMode"] as? String) == "pr"
-            }, timeout: 5), "Choosing PR should persist immediately.")
-            self.attachScreenshot(named: "Choosing PR in the mode control persists", fullScreen: true)
+            // PR is the default, so choosing it clears the saved mode.
+            XCTAssertTrue(self.waitUntil({ (try? self.pullRequestMode(taskID: taskID) == nil) == true }, timeout: 5), "Choosing PR should persist immediately.")
+            self.attachScreenshot(named: "Choosing PR in the mode control persists")
 
             let record = try XCTUnwrap((self.taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
             let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
@@ -98,6 +98,9 @@ extension PlayhouseUITests {
             try self.runGit(worktree, "push", "origin", "main")
             // GitHub rejects a pull request whose branch has no commits.
             try "Auto PR task change.\n".write(to: worktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
+            // A saved value no mode knows falls back to PR: the pill shows PR, and the task still gets its pull request on Review.
+            try self.setPullRequestMode("sometimes", taskID: taskID)
+            XCTAssertTrue(self.waitUntil({ (pill.value as? String) == "pr" }, timeout: 5), "An unknown saved mode reads as PR.")
 
             self.openTask(named: "Auto PR toggle UI")
         })
@@ -109,30 +112,34 @@ extension PlayhouseUITests {
         XCTAssertTrue(prLink.waitToExist(timeout: 10), "The auto-created PR number should appear on the card without the user clicking the PR button.")
         XCTAssertTrue(element("task-pr-mode-\(taskID)").exists, "The mode pill stays beside the linked PR so autopilot and merge remain switchable.")
         XCTAssertEqual(element("task-pr-mode-\(taskID)").value as? String, "pr")
-        attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review", fullScreen: true)
+        attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Auto PR created the pull request automatically once the task reached Review (card)")
+
+        // Choosing Merge for a task in Review is a change the plugin acts on at once:
+        // it follows the green pull request and merges it, with no other click.
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
+        try "501=unmerged\n501.checks=success\n501.threads=0\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        try selectPullRequestMode("merge", taskID: taskID)
+        XCTAssertTrue(element("task-complete-merged-pr-\(taskID)").waitToExist(timeout: 20), "Choosing Merge in Review merges the green pull request.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "Merging leaves the task in Review.")
+        attachScreenshot(named: "Choosing Merge in Review merged the green pull request")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Choosing Merge in Review merged the green pull request (card)")
 
         let defaultPR = try XCTUnwrap(try runCLI(["task", "create", "--title", "Default PR mode UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
-        XCTAssertEqual(defaultPR["autoCreatePullRequestOnReview"] as? Bool, true, "A new task should start in PR mode.")
-        XCTAssertEqual(defaultPR["pullRequestMode"] as? String, "pr")
         let pullRequestTaskID = try XCTUnwrap(defaultPR["id"] as? String)
-        let autopilot = try XCTUnwrap(try runCLI(["task", "pr", "mode", pullRequestTaskID, "autopilot"])["result"] as? [String: Any])
-        XCTAssertEqual(autopilot["pullRequestMode"] as? String, "autopilot")
-        XCTAssertEqual(autopilot["autoCreatePullRequestOnReview"] as? Bool, true, "Autopilot opens the pull request too.")
-        let invalidMode = try runCLI(["task", "pr", "mode", pullRequestTaskID, "sometimes"], expectedStatus: 2)
-        XCTAssertEqual((invalidMode["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
-        XCTAssertEqual(try taskRecord(id: pullRequestTaskID)?["pullRequestMode"] as? String, "autopilot", "A rejected mode must not change the task.")
-        _ = try runCLI(["task", "pr", "auto", pullRequestTaskID, "off"])
+        XCTAssertNil(try pullRequestMode(taskID: pullRequestTaskID), "A new task should start in PR mode.")
+        try setPullRequestMode("manual", taskID: pullRequestTaskID)
         let afterOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Default PR mode after off UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
-        XCTAssertEqual(afterOff["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after switching another task off should still start in PR mode.")
+        XCTAssertNil(try pullRequestMode(taskID: try XCTUnwrap(afterOff["id"] as? String)), "A task created after switching another task to Manual should still start in PR mode.")
+        XCTAssertEqual(try pullRequestMode(taskID: pullRequestTaskID), "manual")
 
         let manualCreated = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Manual PR toggle UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
             "--merge-target", "\(fixture.secondary.path)=main",
         ])["result"] as? [String: Any])
         let manualTaskID = try XCTUnwrap(manualCreated["id"] as? String)
-        XCTAssertEqual(manualCreated["autoCreatePullRequestOnReview"] as? Bool, true, "New tasks start in PR mode.")
-        _ = try runCLI(["task", "pr", "mode", manualTaskID, "manual"])
-        let missing = try runCLI(["task", "pr", "auto", "00000000-0000-0000-0000-000000000000", "on"], expectedStatus: 3)
+        try setPullRequestMode("manual", taskID: manualTaskID)
+        let missing = try runCLI(["task", "pr", "create", "00000000-0000-0000-0000-000000000000", "--if-needed"], expectedStatus: 3)
         XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
         openTask(named: "Manual PR toggle UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Manual PR toggle UI")
@@ -153,12 +160,49 @@ extension PlayhouseUITests {
         try runGit(manualWorktree, "push", "origin", "main")
         try "Manual PR task change.\n".write(to: manualWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
         revealOnBoard(manualButton)
-        attachScreenshot(named: "Review card shows the manual PR button", fullScreen: true)
+        attachScreenshot(named: "Review card shows the manual PR button")
         manualButton.click()
         let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
         XCTAssertTrue(manualPRLink.waitToExist(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
+
+        // A task saved before the mode was the plugin's kept Merge in its own columns: the bridge
+        // imports it once into the plugin's state at its next request, and the card's pill shows it.
+        let legacy = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Legacy PR mode UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let legacyID = try XCTUnwrap(legacy["id"] as? String)
+        XCTAssertTrue(terminateAppAndWait(app))
+        let seed = Process()
+        seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        seed.arguments = [dataDirectory.appendingPathComponent("Playhouse-v2.store").path,
+                          "UPDATE ZBOARDTASK SET ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 1, ZSTATUSRAWVALUE = 'In Progress' WHERE ZTITLE = 'Legacy PR mode UI'; SELECT changes();"]
+        let seedOutput = Pipe()
+        seed.standardOutput = seedOutput
+        seed.standardError = seedOutput
+        try seed.run()
+        seed.waitUntilExit()
+        let seeded = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(seed.terminationStatus, 0, seeded)
+        XCTAssertEqual(seeded.trimmingCharacters(in: .whitespacesAndNewlines), "1", "Seed the legacy Merge columns of the real SwiftData row, on a started task so its card shows the pill.")
+        // Forget the import the way the CLI case does: an external delete that the bridge, which
+        // already holds this case's path-named preferences suite, reads at its next request.
+        let forget = Process()
+        forget.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        forget.arguments = ["delete", preferencesSuiteName, "legacyPullRequestModesImported"]
+        try forget.run()
+        forget.waitUntilExit()
+        let imported = try runCLI(["plugin", "state", "--id", "pull-request-mode"])["result"] as? [String: Any]
+        XCTAssertEqual((imported?["state"] as? [String: Any])?[legacyID] as? String, "merge", "The legacy Merge columns import as the plugin's state.")
+        launchAppWithOpen(environmentOverrides: ghEnvironment)
+        waitForBoardOrAbortSuite()
+        XCTAssertEqual(try taskRecord(id: legacyID)?["status"] as? String, "In Progress")
+        let legacyPill = element("task-pr-mode-\(legacyID)")
+        XCTAssertTrue(legacyPill.waitToExist(timeout: 10), "The started legacy task shows the mode pill.")
+        XCTAssertTrue(waitUntil({ (legacyPill.value as? String) == "merge" }, timeout: 5), "The pill shows the imported Merge mode.")
+        revealOnBoard(legacyPill)
+        attachElementScreenshot(element("task-card-\(legacyID)"), named: "Imported legacy Merge mode on the card")
     }
-    // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop. A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order.
+    // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
     func test_task_pr_autopilot_fixes_red_pull_request_until_green() throws {
         let executable = try makeCodexFixture(emptyQuestions: false)
         codexFixtureExecutable = executable.path
@@ -206,20 +250,60 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
         XCTAssertTrue(terminateAppAndWait(app))
         try seedTaskPullRequest(taskID: taskID, number: 801, url: "https://github.com/playhouse-test/fixture/pull/801")
-        let inactive = try XCTUnwrap(try runCLI(["task", "pr", "autopilot", taskID])["result"] as? [String: Any])
-        XCTAssertEqual(inactive["action"] as? String, "inactive", "Autopilot must not act on a task whose mode is not autopilot.")
+
+        // A shared probe (as the card's plugins make on focus and on moves) shares a running
+        // probe and reuses its answer for a while; an explicit read always asks. The window
+        // is closed here so only these reads reach GitHub.
+        var cacheEnvironment = ghEnvironment
+        cacheEnvironment["PLAYHOUSE_E2E_PR_STATUS_CACHE_SECONDS"] = "60"
+        let probes = { (try? String(contentsOf: callLogURL, encoding: .utf8))?.components(separatedBy: "\n").filter { $0 == "801" }.count ?? 0 }
+        func health(_ arguments: [String]) throws -> String? {
+            (try runCLI(["task", "pr", "status", taskID] + arguments, extraEnvironment: cacheEnvironment)["result"] as? [[String: Any]])?.first?["health"] as? String
+        }
+        try Data().write(to: callLogURL, options: .atomic)
+        try setPullRequest("failure")
+        let together = DispatchGroup()
+        let healths = NSMutableArray()
+        for _ in 0..<2 {
+            DispatchQueue.global().async(group: together) {
+                let read = (try? self.runCLI(["task", "pr", "status", taskID, "--shared"], extraEnvironment: cacheEnvironment)["result"] as? [[String: Any]])?.first?["health"] as? String
+                objc_sync_enter(healths); healths.add(read ?? "none"); objc_sync_exit(healths)
+            }
+        }
+        XCTAssertEqual(together.wait(timeout: .now() + 60), .success)
+        XCTAssertEqual(healths as? [String], ["red", "red"])
+        XCTAssertEqual(probes(), 1, "Two shared probes at once ask GitHub once.")
+        try setPullRequest("success")
+        XCTAssertEqual(try health(["--shared"]), "red", "A shared probe within the cache's life reuses the answer.")
+        XCTAssertEqual(probes(), 1)
+        XCTAssertEqual(try health([]), "green", "An explicit read always asks GitHub.")
+        XCTAssertEqual(probes(), 2)
+        XCTAssertEqual(try health(["--shared"]), "red", "An explicit read leaves the shared answer alone.")
+        _ = try runCLI(["task", "pr", "create", taskID, "--if-needed"], extraEnvironment: cacheEnvironment)
+        XCTAssertEqual(try health(["--shared"]), "green", "Creating a task's pull requests forgets its shared answer.")
+        XCTAssertEqual(probes(), 3)
+        try setPullRequest("pending")
+        XCTAssertEqual((try runCLI(["task", "pr", "autopilot", taskID], extraEnvironment: cacheEnvironment)["result"] as? [String: Any])?["action"] as? String, "pending")
+        try FileManager.default.removeItem(at: stateURL)
+        let failed = try runCLI(["task", "pr", "status", taskID, "--shared"], expectedStatus: 1, extraEnvironment: cacheEnvironment)
+        XCTAssertEqual((failed["error"] as? [String: Any])?["code"] as? String, "operation_failed")
+        try setPullRequest("pending")
+        XCTAssertEqual(try health(["--shared"]), "pending", "A pass forgets the shared answer, and a failed probe isn't kept.")
+        XCTAssertTrue(try diagnosticEvents().contains { $0["event"] as? String == "task.pr.status.shared" && $0["taskID"] as? String == taskID }, "The reused answers are recorded.")
+        try Data().write(to: callLogURL, options: .atomic)
 
         // Pending checks: the PR number turns blue, and no fix turn is sent.
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let prLink = app.links["task-pr-link-\(taskID)-801"]
         XCTAssertTrue(prLink.waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 15), "Running checks should colour the PR number blue.")
-        XCTAssertFalse((try? String(contentsOf: callLogURL, encoding: .utf8))?.contains("threads 801") ?? false, "Only autopilot tasks read review threads.")
+        XCTAssertFalse((try? String(contentsOf: callLogURL, encoding: .utf8))?.contains("threads 801") ?? false, "A PR-mode card's probe leaves review threads alone.")
         let modePill = element("task-pr-mode-\(taskID)")
         XCTAssertTrue(modePill.waitToExist(timeout: 5), "A linked PR keeps the mode pill beside it.")
         XCTAssertEqual(modePill.value as? String, "pr", "The pill shows the task's own mode; every new task starts in PR mode.")
         XCTAssertGreaterThanOrEqual(modePill.frame.height, 30)
-        attachScreenshot(named: "Pending checks colour the PR number blue", fullScreen: true)
+        attachScreenshot(named: "Pending checks colour the PR number blue")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Pending checks colour the PR number blue (card)")
 
         // A rerun counts only by its latest run, as on GitHub.
         for (checks, state, failing) in [("rerun-success", "success", [String]()), ("rerun-failure", "failure", ["fixture-ci"]), ("workflows", "failure", ["build"]), ("workflows-failing", "failure", ["build"]), ("statuses", "success", [String]()), ("untimed", "success", [String]())] {
@@ -228,16 +312,28 @@ extension PlayhouseUITests {
             XCTAssertEqual(rerunStatus.first?["checks"] as? String, state, checks)
             XCTAssertEqual(rerunStatus.first?["failingChecks"] as? [String], failing, checks)
         }
+        try setPullRequest("failure", threads: 1)
+        let withThreads = try XCTUnwrap(try runCLI(["task", "pr", "status", taskID, "--review-threads"], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]])
+        XCTAssertEqual(withThreads.first?["unresolvedReviewThreads"] as? Int, 1, "--review-threads reads them.")
+        try Data().write(to: callLogURL, options: .atomic)
         try setPullRequest("pending")
 
         // Autopilot on while checks run: no fix turn, only the slow poll.
         try selectPullRequestMode("autopilot", taskID: taskID)
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["pullRequestMode"] as? String) == "autopilot" }, timeout: 5), "Turning autopilot on should persist.")
+        XCTAssertTrue(waitUntil({ (try? self.pullRequestMode(taskID: taskID)) == "autopilot" }, timeout: 5), "Turning autopilot on should persist in the plugin's state.")
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: callLogURL, encoding: .utf8))?.contains("threads 801") ?? false }, timeout: 15), "Autopilot reads the PR's review threads.")
         try Data().write(to: holdRelease, options: .atomic)
         XCTAssertFalse(waitUntil({ FileManager.default.fileExists(atPath: turnActive.path) }, timeout: 5), "Pending checks must not start a fix turn.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
         XCTAssertFalse(try lastUserMessage().hasPrefix("Playhouse autopilot:"))
+        // The plugin's service did this itself, on the mode change and then on its slow poll.
+        func follows(_ trigger: String) -> Int {
+            ((try? diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == "plugin.pull_request_mode.follow" && $0["taskID"] as? String == taskID && $0["trigger"] as? String == trigger
+            }.count
+        }
+        XCTAssertGreaterThanOrEqual(follows("mode"), 1, "Choosing Green in Review makes the plugin follow the task.")
+        XCTAssertTrue(waitUntil({ follows("poll") >= 1 }, timeout: 15), "Running checks are followed on the slow poll.")
 
         // Red: failing checks and unresolved threads, found by the poll, make autopilot send a fix turn.
         try setPullRequest("failure", threads: 2)
@@ -249,14 +345,15 @@ extension PlayhouseUITests {
             for expected in ["#801", "failing checks: fixture-ci", "2 unresolved review threads", "critically", "reply", "resolve", "waiting-response", "Jira"] {
                 XCTAssertTrue(prompt.contains(expected), "The fix prompt should mention \(expected): \(prompt)")
             }
-            self.attachScreenshot(named: "Autopilot moved the red PR's task back to In Progress with a fix turn", fullScreen: true)
+            self.attachScreenshot(named: "Autopilot moved the red PR's task back to In Progress with a fix turn")
+            self.attachElementScreenshot(self.element("task-card-\(taskID)"), named: "Failing checks colour the PR number red (card)")
             // The fix is pushed: the threads are answered and resolved, and CI reruns.
             try setPullRequest("pending")
         }
         assertTaskVisible("PR autopilot UI", inColumn: "Review")
         XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 20), "Rerunning checks after the fix should show blue.")
-        // CI passes; the poll, not a focus change, notices. Two review-thread reads follow:
-        // the poll's probe that finds green, then the daemon pass that resets the loop guard.
+        // CI passes; the plugin's slow poll, not a focus change, notices: its pass reads the
+        // review threads, finds the PR green and resets the loop guard.
         let threadReads = { (try? String(contentsOf: callLogURL, encoding: .utf8))?.components(separatedBy: "\n").filter { $0 == "threads 801" }.count ?? 0 }
         let readsBeforeGreen = threadReads()
         try setPullRequest("success")
@@ -266,21 +363,24 @@ extension PlayhouseUITests {
                 .filter { ($0["text"] as? String)?.hasPrefix("Playhouse autopilot:") == true }.count
         }
         let fixPrompts = try fixPromptCount()
-        attachScreenshot(named: "Autopilot fixed the PR and its number turned green", fullScreen: true)
+        attachScreenshot(named: "Autopilot fixed the PR and its number turned green")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "The PR number turned green (card)")
 
         // The same red state as the first fix returns after green; the focus probe picks it
         // up, green reset the loop guard so it is fixed again, and the model stops the loop.
-        // The guard reset is a daemon pass that reads review threads; let it finish first.
-        XCTAssertTrue(waitUntil({ threadReads() >= readsBeforeGreen + 2 }, timeout: 15), "Green should run the daemon pass that resets the loop guard.")
+        // The guard reset is that poll's pass, which reads review threads; let it finish first.
+        XCTAssertTrue(waitUntil({ threadReads() >= readsBeforeGreen + 1 }, timeout: 15), "Green should run the plugin's pass that resets the loop guard.")
         try setPullRequest("failure", threads: 2)
+        let focusFollows = follows("focus")
         activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({ follows("focus") > focusFollows }, timeout: 15), "Coming back to the app makes the plugin follow its Green task in Review.")
         try driveAutopilotFixTurn(outcome: "waiting-response") {
             XCTAssertEqual(try lastUserMessage().hasPrefix("Playhouse autopilot:"), true)
         }
         try FileManager.default.removeItem(at: holdRelease)
         assertTaskVisible("PR autopilot UI", inColumn: "Waiting Response")
         XCTAssertEqual(try fixPromptCount(), fixPrompts + 1, "A green PR needs no fix turn; only the red-again state sends one.")
-        attachScreenshot(named: "A fix turn that reports waiting-response stops the autopilot loop", fullScreen: true)
+        attachScreenshot(named: "A fix turn that reports waiting-response stops the autopilot loop")
 
         // The user sends the task back to Review: autopilot tries the still-red PR once
         // more, and when that fix changes nothing it stops with a reason.
@@ -293,6 +393,7 @@ extension PlayhouseUITests {
             try Data().write(to: holdRelease, options: .atomic)
         })
         element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ follows("review") >= 1 }, timeout: 15), "Reaching Review makes the plugin follow its Green task.")
         try driveAutopilotFixTurn(outcome: "completed") {}
         try FileManager.default.removeItem(at: holdRelease)
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 30), "An unchanged red state should stop autopilot in Waiting Response.")
@@ -300,9 +401,31 @@ extension PlayhouseUITests {
         XCTAssertTrue((reason ?? "").contains("nothing changed"), reason ?? "nil")
         XCTAssertEqual(try fixPromptCount(), fixPrompts + 2)
         assertTaskVisible("PR autopilot UI", inColumn: "Waiting Response")
-        attachScreenshot(named: "Autopilot stops with a reason when nothing changed since its last fix", fullScreen: true)
+        attachScreenshot(named: "Autopilot stops with a reason when nothing changed since its last fix")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Autopilot stops with a reason (card)")
+
+        // A pass the plugin started asks it again before it merges: with the mode no longer
+        // Merge, it merges nothing.
+        try setPullRequest("success")
+        XCTAssertEqual((try runCLI(["task", "move", taskID, "Review"], extraEnvironment: ghEnvironment)["result"] as? [String: Any])?["status"] as? String, "Review")
+        // The move to Review starts the plugin's own pass; until it lets go of the task, a
+        // second pass skips it without asking the plugin, so ask again until one is declined.
+        XCTAssertTrue(waitUntil({
+            let declined = (try? self.runCLI(["task", "pr", "autopilot", taskID, "--merge", "--confirm-with", "pull-request-mode"], extraEnvironment: ghEnvironment))?["result"] as? [String: Any]
+            XCTAssertEqual(declined?["action"] as? String, "inactive", "A Green task's merge pass merges nothing.")
+            return ((try? self.diagnosticEvents()) ?? []).contains {
+                $0["event"] as? String == "plugin.pull_request_mode.declined" && $0["taskID"] as? String == taskID && $0["action"] as? String == "merge"
+            }
+        }, timeout: 20), "The plugin declined the merge for a Green task.")
+        let declinedLink = app.links["task-pr-link-\(taskID)-801"]
+        XCTAssertTrue(declinedLink.waitToExist(timeout: 10), "The declined pass leaves the linked PR on the card.")
+        XCTAssertFalse(waitUntil({ (declinedLink.value as? String) == "merged" }, timeout: 3), "The declined pass merged nothing.")
+        let missingPlugin = try runCLI(["task", "pr", "autopilot", taskID, "--confirm-with"], expectedStatus: 2)
+        XCTAssertEqual((missingPlugin["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        assertTaskVisible("PR autopilot UI", inColumn: "Review")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "A Green task's merge pass merges nothing (card)")
     }
-    // case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
+    // case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode (a `task pr autopilot --merge` pass, which the pull-request-mode plugin runs for its Merge tasks) does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
     func test_task_pr_merge_mode_merges_green_pull_request() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: []).merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -348,10 +471,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(pill.waitToExist(timeout: 5))
         pill.click()
         let mergeOption = settledPillOption("merge", taskID: taskID)
-        attachScreenshot(named: "The open mode pill offers Merge beside the linked PR", fullScreen: true)
+        attachScreenshot(named: "The open mode pill offers Merge beside the linked PR")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "The open pill beside the linked PR (card)")
         mergeOption.click()
         XCTAssertTrue(waitUntil({ pill.exists && (pill.value as? String) == "merge" }, timeout: 5), "Choosing Merge should fold the pill onto Merge.")
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["pullRequestMode"] as? String) == "merge" }, timeout: 5))
+        XCTAssertTrue(waitUntil({ (try? self.pullRequestMode(taskID: taskID)) == "merge" }, timeout: 5))
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: callLogURL, encoding: .utf8))?.contains("threads 811") ?? false }, timeout: 15), "Merge mode reads review threads like autopilot.")
         XCTAssertFalse(waitUntil({ !merges().isEmpty }, timeout: 5), "Running checks must not be merged.")
         try commitHead(taskID)
@@ -361,7 +485,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "A freshly pushed head may not have registered its checks yet.")
         try (try String(contentsOf: stateURL, encoding: .utf8)).replacingOccurrences(of: "811.checks=none", with: "811.checks=pending")
             .write(to: stateURL, atomically: true, encoding: .utf8)
-        attachScreenshot(named: "Merge mode waits while checks run", fullScreen: true)
+        attachScreenshot(named: "Merge mode waits while checks run")
 
         try (try String(contentsOf: stateURL, encoding: .utf8)).replacingOccurrences(of: "811.checks=pending", with: "811.checks=success")
             .write(to: stateURL, atomically: true, encoding: .utf8)
@@ -369,7 +493,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(completeButton.waitToExist(timeout: 20), "Once green, merge mode should merge the PR and the card should offer completion.")
         XCTAssertEqual(merges().filter { $0.contains("\t811\t") }, ["merged\t811\t--squash"], "The PR is merged once with the first allowed method.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "Merging leaves the task in Review for the user to complete.")
-        attachScreenshot(named: "Merge mode merged the green PR and the card offers completion", fullScreen: true)
+        attachScreenshot(named: "Merge mode merged the green PR and the card offers completion")
 
         // Long past the grace with still no checks (a repository without CI): merge mode
         // still attempts the merge; GitHub refuses it, so the task stops with GitHub's reason.
@@ -380,7 +504,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(noCIReason.contains("couldn't merge pull request #812") && !noCIReason.contains("no checks"), noCIReason)
         XCTAssertEqual(merges().filter { $0.contains("\t812\t") }, ["merge-failed\t812\t--squash"], "No checks past the grace is still merged, with the first allowed method.")
         assertTaskVisible("PR merge refused UI", inColumn: "Waiting Response")
-        attachScreenshot(named: "Merge mode attempts the merge when GitHub reports no checks", fullScreen: true)
+        attachScreenshot(named: "Merge mode attempts the merge when GitHub reports no checks")
 
         // The user sends it back to Review; GitHub still refuses the merge. The
         // `repo.methods` line, written after #811 merged, disallows squash from here on.
@@ -395,7 +519,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(reason.contains("couldn't merge pull request #812") && reason.contains("a review is required"), reason)
         assertTaskVisible("PR merge refused UI", inColumn: "Waiting Response")
         XCTAssertEqual(merges().filter { $0.contains("\t812\t") }, ["merge-failed\t812\t--squash", "merge-failed\t812\t--merge"], "A refused merge is not retried within a pass.")
-        attachScreenshot(named: "A refused merge stops in Waiting Response with GitHub's reason", fullScreen: true)
+        attachScreenshot(named: "A refused merge stops in Waiting Response with GitHub's reason")
     }
     // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
     func test_task_pr_conflicts_detect_without_mutation() throws {
@@ -411,7 +535,7 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
-        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+        try setPullRequestMode("manual", taskID: taskID)
         _ = try XCTUnwrap((created["repositoryWorktrees"] as? [[String: Any]])?.first)
         openTask(named: "PR conflict choice UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR conflict choice UI")
@@ -494,7 +618,7 @@ extension PlayhouseUITests {
             activateOtherAppThenReturn()
             return resolveButton.waitToExist(timeout: Self.prCheckCooldown + 1)
         }, timeout: 20), "The linked conflicting PR should show the existing Fix Conflicts action.")
-        attachScreenshot(named: "A linked conflicting PR shows the Fix Conflicts action", fullScreen: true)
+        attachScreenshot(named: "A linked conflicting PR shows the Fix Conflicts action")
     }
     // case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, and a board probe that was already running when it moved raises no alert.
     func test_review_probe_failure_alerts_only_while_in_review() throws {
@@ -505,7 +629,7 @@ extension PlayhouseUITests {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
-        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+        try setPullRequestMode("manual", taskID: taskID)
         openTask(named: "Review probe failure UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review probe failure UI")
         element("back-to-board-button").click()
@@ -525,7 +649,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(alert.staticTexts["Pull request operation failed"].exists)
         XCTAssertTrue(alert.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "did not run in parallel")).firstMatch.exists,
                       "The alert names the probe's error.")
-        attachScreenshot(named: "A failed probe of a Review task raises the alert", fullScreen: true)
+        attachScreenshot(named: "A failed probe of a Review task raises the alert")
         alert.buttons["OK"].click()
         XCTAssertTrue(waitForDisappearance(alert))
         // A trailing probe may still be held; let it report (the task is still in Review, so it
@@ -547,7 +671,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !self.element("task-card-\(taskID)").exists }, timeout: 10), "The Done task leaves the board.")
         // The held probe fails about two seconds after it started; give its result time to land.
         XCTAssertFalse(waitUntil({ alert.exists }, timeout: 5), "A probe that failed after its task left Review raises no alert.")
-        attachScreenshot(named: "No alert for a probe that failed after the task moved to Done", fullScreen: true)
+        attachScreenshot(named: "No alert for a probe that failed after the task moved to Done")
     }
     // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint saying a follow-up reopens the task in a fresh worktree from the merge target, instead of a read-only notice; its changes read reports no changes rather than a Git error for the removed worktree, and switching its provider is rejected. A follow-up sent from a Done task moves it back to In Progress before the turn starts, so it shows in the board's In Progress column while the agent works, with a fresh worktree renewed for the removed one. The real provider turn runs in that fresh worktree and is told it as an active task worktree rather than that the task is archived; its completed outcome moves the task to Review, the removed worktree stays removed, and the follow-up and its reply persist in the history across fresh reads. A Done task with no worktree to renew (one with only a context root) reopens to In Progress for its follow-up the same way, keeps that root, and its completed outcome moves it to Review.
     func test_done_task_accepts_follow_up_conversation() throws {

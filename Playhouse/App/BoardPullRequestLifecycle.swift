@@ -2,43 +2,23 @@ import Foundation
 import SwiftData
 
 extension BoardTaskManager {
-    func createPullRequestsOnReviewIfNeeded(
-        _ record: BoardTaskRecord,
-        clients: ConversationClients,
-        settingsManager: WorkspaceSettingsManager?
-    ) async {
-        guard record.autoCreatePullRequestOnReview,
-              record.repositoryWorktrees.contains(where: \.awaitsPullRequest) else {
-            return
+    /// Carries each task's pull request mode, which the task kept before the
+    /// `pull-request-mode` plugin owned it, into the plugin's state, once. A
+    /// task created since reads as the default mode (`BoardTask.init`), so it
+    /// is skipped wherever it was created; the bridge runs this at the start of
+    /// every request.
+    func importLegacyPullRequestModes(into settings: WorkspaceSettingsManager) throws {
+        guard !settings.legacyPullRequestModesImported else { return }
+        let state = settings.pluginState(BuiltInPlugins.pullRequestModeID)
+        var imported = 0
+        for task in try modelContext.fetch(FetchDescriptor<BoardTask>()) {
+            let mode = task.legacyPullRequestMode
+            guard mode != PullRequestMode.defaultMode, state[task.id.uuidString] == nil else { continue }
+            settings.setPluginState(BuiltInPlugins.pullRequestModeID, key: task.id.uuidString, value: .string(mode.rawValue))
+            imported += 1
         }
-        do {
-            _ = try await createPullRequests(record.id, clients: clients, settingsManager: settingsManager)
-        } catch {
-            PlayhouseDiagnostics.record("task.review.auto_pr.failed", fields: [
-                "taskID": record.id.uuidString,
-                "error": error.localizedDescription
-            ])
-        }
-    }
-
-    func setAutoCreatePullRequestOnReview(_ id: UUID, enabled: Bool) async throws -> BoardTaskRecord {
-        try await setPullRequestMode(id, mode: enabled ? .pullRequest : .manual)
-    }
-
-    /// Choosing a mode restarts the autopilot loop guard, so re-enabling autopilot
-    /// on a PR it gave up on gets a fresh set of fix attempts.
-    func setPullRequestMode(_ id: UUID, mode: PullRequestMode) async throws -> BoardTaskRecord {
-        try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
-            task.autoCreatePullRequestOnReview = mode != .manual
-            task.pullRequestAutopilot = mode == .autopilot || mode == .merge
-            task.pullRequestAutoMerge = mode == .merge
-            task.pullRequestAutopilotFixAttempts = 0
-            task.pullRequestAutopilotLastFixSignature = nil
-            try await saveTaskContext(taskID: id)
-            PlayhouseDiagnostics.record("task.pr.mode.succeeded", fields: ["taskID": id.uuidString, "mode": mode.rawValue])
-            return BoardTaskRecord(task: task)
-        }
+        settings.legacyPullRequestModesImported = true
+        PlayhouseDiagnostics.record("plugin.pull_request_mode.imported", fields: ["count": String(imported)])
     }
 
     /// Autopilot gives up after this many fix turns that never got the PRs green,
@@ -130,21 +110,20 @@ extension BoardTaskManager {
 
     enum PullRequestMergeResult {
         case merged([Int])
-        /// The task left Review, a turn took it, or merge mode was turned off
-        /// while the PRs were being probed.
+        /// The task left Review or a turn took it while the PRs were being probed.
         case skipped
         case refused(String)
     }
 
     /// Merge mode's last step: merges every open linked PR at the head it was
     /// probed green at. It re-checks the task under the task operation lock, so a
-    /// turn or a mode change during the probe stops the merge. A merge GitHub
+    /// turn or a move out of Review during the probe stops the merge. A merge GitHub
     /// refuses (required reviews, branch protection) is not the model's to fix,
     /// so the task moves to Waiting Response with GitHub's reason.
     func mergeGreenPullRequests(_ id: UUID, states: [PullRequestReviewState]) async throws -> PullRequestMergeResult {
         let outcome: Result<[Int], BridgeCommandError>? = try await withTaskOperationLock(id) {
             let task = try requireTask(id)
-            guard task.status == .review, task.pullRequestAutoMerge, try !hasConversationTurnReservation(id) else { return nil }
+            guard task.status == .review, try !hasConversationTurnReservation(id) else { return nil }
             let heads = Dictionary(states.filter { !$0.merged }.map { ($0.repositoryPath, $0.headRefOid) }, uniquingKeysWith: { first, _ in first })
             let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && heads.keys.contains($0.repositoryPath) }
             let executable = try pullRequestService.resolveExecutable()
@@ -322,16 +301,16 @@ extension BoardTaskManager {
         }
     }
 
-    func reviewPullRequests(_ id: UUID) async throws -> [PullRequestReviewState] {
+    func reviewPullRequests(_ id: UUID, includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {
         let task = try requireTask(id)
-        return try await reviewPullRequests(task)
+        return try await reviewPullRequests(task, includeReviewThreads: includeReviewThreads)
     }
 
-    /// Autopilot tasks also read unresolved review threads; other modes skip
+    /// Autopilot also reads unresolved review threads; a plain status probe skips
     /// that GitHub request because nothing acts on it.
-    func reviewPullRequests(_ task: BoardTask) async throws -> [PullRequestReviewState] {
+    func reviewPullRequests(_ task: BoardTask, includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {
         let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
-        let states = try await reviewPullRequests(records, includeReviewThreads: task.pullRequestAutopilot)
+        let states = try await reviewPullRequests(records, includeReviewThreads: includeReviewThreads)
         try await recordPullRequestsMerged(task.id, repositoryPaths: states.filter(\.merged).map(\.repositoryPath))
         return states
     }
@@ -608,4 +587,13 @@ extension BoardTaskManager {
         }
     }
 
+}
+
+extension BoardTask {
+    /// The mode the task kept before the `pull-request-mode` plugin owned it;
+    /// read once to import it into the plugin's state.
+    var legacyPullRequestMode: PullRequestMode {
+        if pullRequestAutopilot { return pullRequestAutoMerge ? .merge : .autopilot }
+        return autoCreatePullRequestOnReview ? .pullRequest : .manual
+    }
 }

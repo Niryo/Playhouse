@@ -264,3 +264,171 @@ class BridgeTestCases23:
         self.assertFalse(call["thread"].is_alive(), "The CLI call should settle.")
         self.assertIsNone(call.get("failure"), f"The CLI call failed: {call.get('failure')}")
         return call["response"]
+    TASK_CARD_PLUGIN_SOURCE = """
+function Card() {
+  var props = Playhouse.useProps();
+  var log = React.useState([]);
+  var probes = React.useState(0);
+  React.useEffect(function () {
+    var note = function (entry) { log[1](function (entries) { return entries.concat([entry]); }); };
+    var probe = Playhouse.throttle(function (reason) {
+      probes[1](function (count) { return count + 1; });
+      note("probe " + reason);
+    }, 20);
+    var offMove = Playhouse.on("task.statusChanged", function (event) { note(event.from + " to " + event.to); probe("move"); });
+    var offFocus = Playhouse.on("app.focus", function () { probe("focus"); });
+    var offState = Playhouse.on("plugin.stateChanged", function (event) { note("state " + event.key); offMove(); });
+    return function () { offMove(); offFocus(); offState(); };
+  }, []);
+  return h(Stack, { axis: "h", spacing: 4 },
+    h(Text, { size: 10, testID: "card-status" }, props.task ? props.task.status : "no task"),
+    h(Text, { size: 10, testID: "card-probes" }, "probes " + probes[0]),
+    h(Text, { size: 10, testID: "card-log" }, log[0].join(", ")));
+}
+Playhouse.render(h(Card));
+"""
+    TASK_CARD_BUTTON_SOURCE = """
+function CardButton() {
+  var props = Playhouse.useProps();
+  var result = React.useState("idle");
+  var id = props.task ? props.task.id : "none";
+  function act(testID, label, call) {
+    return h(Button, { testID: testID, style: "bordered", onPress: function () {
+      call().then(function () { result[1](label + ": ok"); }, function (error) { result[1](label + ": " + error.code); });
+    } }, h(Text, { size: 11 }, label));
+  }
+  return h(Stack, { spacing: 6, align: "leading" },
+    h(Text, { testID: "button-task" }, props.task ? props.task.title : "no task"),
+    h(Text, { size: 11, testID: "button-result" }, result[0]),
+    act("button-alert", "alert", function () { return Playhouse.ui.alert("Card plugin alert", "Raised from the task card."); }),
+    act("button-compose", "composer", function () { return Playhouse.ui.composer.setDraft("from the card"); }),
+    act("button-resolve", "resolveConflicts", function () { return Playhouse.ui.resolveConflicts(id); }),
+    act("button-move", "moveTask", function () { return Playhouse.ui.moveTask(id, "Review"); }));
+}
+Playhouse.render(h(CardButton));
+"""
+    # case-contract: test_plugin_task_card_placement_events_and_throttle | A plugin installed at the taskItem placement (inline or as a button) is valid and runs with its card's task as `props.task`. Playhouse.on delivers app events to a plugin's listeners: task.statusChanged with {taskID, from, to} when its task moves between columns, app.focus when the app comes to the front, and plugin.stateChanged with {pluginID, key, value} when a saved value changes; `plugin render --event @<name>[:json]` reports how many listeners heard each, and the function Playhouse.on returns stops listening. Playhouse.throttle(fn, seconds) runs the first call at once and collapses the calls made within its cooldown into one trailing call with the latest arguments when the cooldown ends. `plugin event <name> [--payload <json>]` hands an app event to the built-in plugins' services; an unknown name is invalid_argument and a payload that is not a JSON object is a usage error. In the window, an installed task card plugin renders on every card, a Backlog card included (which has no built-in pull request controls yet), in the bottom row beside the built-in mode pill once the task has started, shows its task's status, hears the task move to Review and probes through its throttle, and probes through it again when the app comes back to the front (the window's app.focus), repeated focuses within its cooldown collapsing into at most two probes; a task card plugin with a button opens a popover showing its card's task. Only a task card's plugin may call ui.moveTask (which moves its task as dragging the card does), ui.resolveConflicts (which in the window opens its task and sends the conflict instruction) and ui.alert (which shows the board's alert); from the conversation sidebar or the board's sidebar they are unavailable, and so is the composer from a task card, the same in `plugin render`, which records each call in hostCalls, and in the window. The Plugins menu lists the card's built-ins, and disabling the built-in Pull request mode removes the card's mode pill while installed task card plugins stay, until it is enabled again. A turn's move of its task, on Codex and on Claude, is published to the services from the provider's own callbacks, and no move is dropped.
+    def test_plugin_task_card_placement_events_and_throttle(self):
+        task_id = "C0FFEE00-0000-4000-8000-0000000000AA"
+        move = json.dumps({"taskID": task_id, "from": "In Progress", "to": "Review"})
+        rendered = self.assert_success(self.render_plugin(
+            self.TASK_CARD_PLUGIN_SOURCE,
+            "--event", f"@task.statusChanged:{move}",
+            "--event", "@app.focus",
+            "--event", "@app.focus",
+        ))
+        self.assertEqual(rendered["errors"], [])
+        self.assertEqual([(event["name"], event["listeners"]) for event in rendered["emitted"]],
+                         [("task.statusChanged", 1), ("app.focus", 1), ("app.focus", 1)], "Each event reaches the plugin's one listener.")
+        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "card-log")), "In Progress to Review, probe move",
+                         "The move's payload reaches the listener, and the first probe runs at once.")
+        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "card-probes")), "probes 1",
+                         "Focus events within the cooldown don't probe again yet.")
+        steps = [commit["step"] for commit in rendered["commits"]]
+        self.assertIn("@task.statusChanged", steps, "The listener's update commits under its event.")
+
+        # The cooldown ends: the collapsed focus calls run once, then the next waits again.
+        cooled = self.assert_success(self.render_plugin(
+            self.TASK_CARD_PLUGIN_SOURCE,
+            "--event", f"@task.statusChanged:{move}",
+            "--event", "@app.focus",
+            "--event", "@app.focus",
+            "--event", "@app.focus",
+            "--event", "+20",
+            "--event", "@app.focus",
+            "--event", "+5",
+        ))
+        self.assertEqual(cooled["errors"], [])
+        self.assertEqual(self.plugin_text(self.plugin_node(cooled["tree"], "card-log")), "In Progress to Review, probe move, probe focus",
+                         "Three focus events in the cooldown collapse into one trailing probe.")
+        self.assertEqual(self.plugin_text(self.plugin_node(cooled["tree"], "card-probes")), "probes 2",
+                         "A focus right after the trailing probe waits for the next cooldown.")
+        later = self.assert_success(self.render_plugin(
+            self.TASK_CARD_PLUGIN_SOURCE, "--event", "@app.focus", "--event", "@app.focus", "--event", "+20", "--event", "+20",
+        ))
+        self.assertEqual(self.plugin_text(self.plugin_node(later["tree"], "card-probes")), "probes 2", "Once the cooldown ends, the trailing call runs; nothing more is left.")
+
+        # The function Playhouse.on returns stops listening.
+        state = json.dumps({"pluginID": "card-probe", "key": "seen", "value": True})
+        stopped = self.assert_success(self.render_plugin(
+            self.TASK_CARD_PLUGIN_SOURCE, "--event", f"@plugin.stateChanged:{state}", "--event", f"@task.statusChanged:{move}",
+        ))
+        self.assertEqual([(event["name"], event["listeners"]) for event in stopped["emitted"]], [("plugin.stateChanged", 1), ("task.statusChanged", 0)])
+        self.assertEqual(self.plugin_text(self.plugin_node(stopped["tree"], "card-log")), "state seen")
+        self.assert_failure(self.render_plugin(self.TASK_CARD_PLUGIN_SOURCE, "--event", "@app.focus:[1]", expected_status=2), "invalid_argument")
+
+        # Installed at the task card, it runs with its card's task.
+        self.write_installed_plugin("card-probe", self.TASK_CARD_PLUGIN_SOURCE, placement="taskItem", presentation="inline")
+        self.write_installed_plugin("card-button", self.TASK_CARD_BUTTON_SOURCE, placement="taskItem", presentation="popover")
+        refreshed = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"]}
+        for plugin_id, presentation in (("card-probe", "inline"), ("card-button", "popover")):
+            self.assertEqual((refreshed[plugin_id]["placement"], refreshed[plugin_id]["presentation"], refreshed[plugin_id]["valid"]),
+                             ("taskItem", presentation, True), refreshed[plugin_id]["errors"])
+        task = self.create_task(title="Task card plugin task")
+        on_card = self.assert_success(self.call_cli("plugin", "render", "--plugin", "card-probe", "--task", task["id"])[0])
+        self.assertEqual(on_card["errors"], [])
+        self.assertEqual(self.plugin_text(self.plugin_node(on_card["tree"], "card-status")), "Backlog", "The card's task is the plugin's props.task.")
+        from_button = self.assert_success(self.call_cli("plugin", "render", "--plugin", "card-button", "--task", task["id"])[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(from_button["tree"], "button-task")), "Task card plugin task",
+                         "A task card plugin opened from its button gets its card's task too.")
+
+        # Only a task card's plugin moves its task, resolves its conflicts or raises an alert, as the
+        # board answers those; a task card has no composer. Both hosts refuse by the same rules.
+        def press(plugin_id, button, with_task=True):
+            options = ["--task", task["id"]] if with_task else []
+            pressed = self.assert_success(self.call_cli("plugin", "render", "--plugin", plugin_id, *options, "--event", f"{button}:onPress")[0])
+            return self.plugin_text(self.plugin_node(pressed["tree"], "button-result")), pressed["hostCalls"][-1]
+        for button, name, arguments in (("button-move", "moveTask", {"taskID": task["id"], "status": "Review"}),
+                                         ("button-resolve", "resolveConflicts", {"taskID": task["id"]}),
+                                         ("button-alert", "alert", {"title": "Card plugin alert", "message": "Raised from the task card."})):
+            text, call = press("card-button", button)
+            self.assertEqual(text, f"{name}: ok")
+            self.assertEqual((call["kind"], call["name"], call["ok"], call["arguments"]), ("ui", name, True, arguments), "plugin render records the call.")
+        text, call = press("card-button", "button-compose")
+        self.assertEqual((text, call["error"]["code"]), ("composer: unavailable", "unavailable"), "A task card has no composer.")
+        self.write_installed_plugin("sidebar-button", self.TASK_CARD_BUTTON_SOURCE, placement="conversationSidebar", presentation="popover")
+        self.write_installed_plugin("board-button", self.TASK_CARD_BUTTON_SOURCE, placement="mainSidebar", presentation="popover")
+        self.assert_success(self.call_cli("plugin", "refresh")[0])
+        for plugin_id, with_task in (("sidebar-button", True), ("board-button", False)):
+            for button, name in (("button-move", "moveTask"), ("button-resolve", "resolveConflicts"), ("button-alert", "alert")):
+                text, call = press(plugin_id, button, with_task)
+                self.assertEqual((text, call["error"]["code"]), (f"{name}: unavailable", "unavailable"), f"{name} is the task card's alone, not {plugin_id}'s.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Backlog", "plugin render records a move; it doesn't make one.")
+
+        # The card's controls are built-in plugins that can be disabled and enabled again.
+        self.assert_success(self.call_cli("plugin", "disable", "--id", "pull-request-mode")[0])
+        listed = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"]}
+        self.assertEqual((listed["pull-request-mode"]["enabled"], listed["card-probe"]["enabled"]), (False, True))
+        self.assert_success(self.call_cli("plugin", "enable", "--id", "pull-request-mode")[0])
+        listed = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"]}
+        self.assertTrue(listed["pull-request-mode"]["enabled"])
+
+        # `plugin event` hands an app event to the built-in plugins' services.
+        delivered = self.assert_success(self.call_cli("plugin", "event", "app.focus")[0])
+        self.assertEqual(delivered["name"], "app.focus")
+        self.assertGreaterEqual(delivered["delivered"], 1, "The pull request mode plugin's service hears it.")
+        moved = json.dumps({"taskID": task["id"], "from": "Backlog", "to": "In Progress"})
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "event", "task.statusChanged", "--payload", moved)[0])["name"], "task.statusChanged")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Backlog", "An event reports a move; it doesn't make one.")
+        unknown = self.call_cli("plugin", "event", "task.exploded", expected_status=2)[0]
+        self.assert_failure(unknown, "invalid_argument")
+        self.assertIn("task.statusChanged", unknown["error"]["message"], "The error lists the events there are.")
+        self.assert_failure(self.call_cli("plugin", "event", "app.focus", "--payload", "[1]", expected_status=2)[0], "invalid_argument")
+
+        # A turn's end moves its task on whichever provider ran it, from the provider's
+        # own callbacks; each move still reaches the services, none dropped.
+        def published(task_id, to):
+            return [event for event in self.diagnostic_events() if event.get("event") == "plugin.event.published"
+                    and event.get("name") == "task.statusChanged" and event.get("taskID") == task_id and event.get("to") == to]
+        codex_task = self.create_task(title="Task card Codex move")
+        self.complete_fixture_turn(codex_task["id"])
+        self.assertTrue(published(codex_task["id"], "Review"), "A Codex turn reaching Review is published to the services.")
+        claude_task = self.create_task(title="Task card Claude move", provider="claude")
+        self.assert_success(self.call_cli(
+            "conversation", "send", claude_task["id"], "--message", "Tell me a story.",
+            extra_environment=self.install_claude_fixture("claude-fixture-card-move"),
+        )[0])
+        self.wait_for_task_status(claude_task["id"], {"Review"})
+        self.assertTrue(published(claude_task["id"], "Review"), "A Claude turn reaching Review is published to the services.")
+        self.assertEqual([event for event in self.diagnostic_events() if event.get("event") == "plugin.event.dropped"], [],
+                         "No move is dropped for want of its request.")

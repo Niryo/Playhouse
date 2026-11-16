@@ -13,7 +13,7 @@ extension PlayhouseCLI {
         }
     }
 
-    static let pluginPlacements = "mainSidebar|conversationSidebar|conversationToolbar|composerActions"
+    static let pluginPlacements = "mainSidebar|conversationSidebar|conversationToolbar|composerActions|taskItem"
 
     static func parseFlags(_ args: [String], valueFlags: Set<String>) throws -> [String: [String]] {
         var result: [String: [String]] = [:]
@@ -96,12 +96,11 @@ extension PlayhouseCLI {
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
       playhouse task move <task-id> Done --discard-changes
-      playhouse task pr create <task-id>
-      playhouse task pr status <task-id>
+      playhouse task pr create <task-id> [--if-needed]
+      playhouse task pr status <task-id> [--review-threads] [--shared]
       playhouse task pr verify <task-id>
       playhouse task pr sync <task-id>
-      playhouse task pr mode <task-id> <manual|pr|autopilot|merge>
-      playhouse task pr autopilot <task-id>
+      playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]
       playhouse task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       playhouse task progress custom <task-id> --label <label> [--detail <text>]
       playhouse task progress clear <task-id>
@@ -148,9 +147,10 @@ extension PlayhouseCLI {
       playhouse plugin enable --id <plugin-id>
       playhouse plugin disable --id <plugin-id>
       playhouse plugin state --id <plugin-id> [--key <key> --value <json>]
-      playhouse plugin author --placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>]
+      playhouse plugin event <task.statusChanged|app.focus|plugin.stateChanged> [--payload <json>]
+      playhouse plugin author --placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions|taskItem> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>]
       playhouse plugin sessions | edit --id <plugin-id>
-      playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]
+      playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>] | @<app-event>[:<json>] | +<seconds>...] [--advance <seconds>]
       playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>
       playhouse skills list [--task <task-id>] [--include-bundled true]
       playhouse skills get --skill <skill-id> [--task <task-id>]

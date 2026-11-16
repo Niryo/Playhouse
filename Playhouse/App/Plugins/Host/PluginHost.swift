@@ -18,6 +18,14 @@ struct PluginUIActions {
     var openDiff: ((WorkspaceChangeEntry) -> Void)? = nil
     /// Rereads the task's folders and bumps `props.workspace.revision`; nil where there is no task.
     var refreshWorkspace: (() -> Void)? = nil
+    /// Moves a task to another column as dragging its card does; nil where there
+    /// is no board. The flag says every linked pull request was just seen
+    /// merged, so a move to Done trusts that instead of asking GitHub again.
+    var moveTask: ((UUID, TaskStatus, Bool) -> Void)? = nil
+    /// Opens a task to resolve its pull request conflicts; nil where there is no board.
+    var resolveConflicts: ((UUID) -> Void)? = nil
+    /// Shows an alert with a title and a message over the window.
+    var alert: ((String, String) -> Void)? = nil
 }
 
 /// Answers a mounted plugin's host calls, `Playhouse.bridge`, `Playhouse.ui`
@@ -67,6 +75,32 @@ struct PluginHost {
                 return .failure(PluginHostError(code: "unavailable", message: "There is no task's workspace here."))
             }
             refreshWorkspace()
+        case ("ui", "moveTask"):
+            guard let moveTask = actions.moveTask else {
+                return .failure(PluginHostError(code: "unavailable", message: "There is no board here to move a task on."))
+            }
+            guard let id = arguments.object?["taskID"]?.string.flatMap(UUID.init(uuidString:)),
+                  let status = arguments.object?["status"]?.string.flatMap(TaskStatus.init(rawValue:)) else {
+                return .failure(PluginHostError(code: "invalid_argument", message: "moveTask needs a task ID and a board column (status)."))
+            }
+            // Only a built-in plugin's word that the pull requests merged is
+            // trusted (the merged check, right after its own probe): the move
+            // records them merged, so a JavaScript plugin's moves verify as
+            // dragging does.
+            moveTask(id, status, plugin.builtIn && arguments.object?["pullRequestsMerged"]?.bool == true)
+        case ("ui", "resolveConflicts"):
+            guard let resolveConflicts = actions.resolveConflicts else {
+                return .failure(PluginHostError(code: "unavailable", message: "There is no board here to open a task from."))
+            }
+            guard let id = arguments.object?["taskID"]?.string.flatMap(UUID.init(uuidString:)) else {
+                return .failure(PluginHostError(code: "invalid_argument", message: "resolveConflicts needs a task ID."))
+            }
+            resolveConflicts(id)
+        case ("ui", "alert"):
+            guard let alert = actions.alert else {
+                return .failure(PluginHostError(code: "unavailable", message: "This window can't show an alert."))
+            }
+            alert(arguments.object?["title"]?.string ?? "", arguments.object?["message"]?.string ?? "")
         case ("ui", let name) where name.hasPrefix("composer."):
             guard let composer = actions.composer else {
                 return .failure(PluginHostError(code: "unavailable", message: "There is no composer at this placement."))

@@ -711,6 +711,20 @@ final class BoardTaskManager {
             "hasChanges": String(modelContext.hasChanges)
         ]
         PlayhouseDiagnostics.record("persistence.write.started", fields: fields)
+        // The board tasks this save moves between columns, published once it's saved.
+        let moved = modelContext.changedModelsArray.compactMap { $0 as? BoardTask }.filter { $0.statusBeforeSave != nil }
+        defer {
+            // Published only when the save succeeded (nothing is left to save).
+            if !modelContext.hasChanges {
+                for task in moved {
+                    guard let from = task.statusBeforeSave else { continue }
+                    task.statusBeforeSave = nil
+                    if from != task.statusRawValue {
+                        PluginServiceHost.publish(.statusChanged(taskID: task.id.uuidString, from: from, to: task.statusRawValue))
+                    }
+                }
+            }
+        }
 
         let lockWaitStartedAt = DispatchTime.now().uptimeNanoseconds
         var lockWaitMilliseconds = 0

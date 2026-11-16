@@ -10,6 +10,17 @@ final class PlayhouseBridgeRuntime {
         _ request: BridgeRequest,
         eventHandler: @escaping (BridgeEvent) -> Void
     ) async -> BridgeResponse {
+        // A change this request saves raises plugin events whose services run
+        // their bridge commands as this request: same store, settings and fixtures.
+        await PluginServiceHost.$origin.withValue(request) {
+            await performRequest(request, eventHandler: eventHandler)
+        }
+    }
+
+    private func performRequest(
+        _ request: BridgeRequest,
+        eventHandler: @escaping (BridgeEvent) -> Void
+    ) async -> BridgeResponse {
         let requestStartedAt = DispatchTime.now().uptimeNanoseconds
         let requestFields = Self.diagnosticRequestFields(request)
         PlayhouseDiagnostics.record("bridge.request.started", fields: requestFields)
@@ -74,6 +85,7 @@ final class PlayhouseBridgeRuntime {
             let settings = WorkspaceSettingsManager(defaults: preferences)
             let workspaces = WorkspaceManager(taskManager: taskManager, settingsManager: settings)
             try await workspaces.reconcileDeferredRepositoryRemovals()
+            try taskManager.importLegacyPullRequestModes(into: settings)
 
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string
@@ -226,7 +238,6 @@ final class PlayhouseBridgeRuntime {
                 let prompt = try request.requiredString("prompt")
                 result = try Self.value(await taskManager.create(
                     title: title, repositories: repositories, contextFolders: roots, provider: provider,
-                    pullRequestMode: .pullRequest,
                     prompt: prompt
                 ))
             case "schedule.list":
@@ -334,7 +345,7 @@ final class PlayhouseBridgeRuntime {
                         allowDiscardingUncommittedChanges: request.arguments["allowDiscardingUncommittedChanges"]?.bool ?? false
                     ))
                 }
-            case "task.pr.auto", "task.pr.mode", "task.pr.autopilot", "task.pr.create",
+            case "task.pr.autopilot", "task.pr.create",
                  "task.pr.conflicts", "task.pr.status", "task.pr.verify", "task.pr.resolve", "task.pr.sync":
                 result = try await pullRequestOperation(
                     request, taskManager: taskManager, settings: settings,
@@ -555,7 +566,11 @@ final class PlayhouseBridgeRuntime {
                     catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
                 }
                 guard request.command == "plugin.state.set" else {
-                    result = .object(["pluginID": .string(id), "state": .object(settings.pluginState(id).mapValues(BridgeValue.init(plugin:)))])
+                    result = .object([
+                        "pluginID": .string(id),
+                        "state": .object(settings.pluginState(id).mapValues(BridgeValue.init(plugin:))),
+                        "enabled": .boolean(!settings.disabledPluginIDs.contains(id))
+                    ])
                     break
                 }
                 let key = try request.requiredString("key").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -564,6 +579,9 @@ final class PlayhouseBridgeRuntime {
                     throw BridgeCommandError(code: "invalid_argument", message: "plugin.state.set needs a value; null removes the key.")
                 }
                 let state = settings.setPluginState(id, key: key, value: PluginValue(bridge: value))
+                // The plugin's service hears the change, as the pull request
+                // mode starts following a task switched to Green in Review.
+                PluginServiceHost.publish(.stateChanged(pluginID: id, key: key, value: PluginValue(bridge: value)))
                 result = .object([
                     "pluginID": .string(id),
                     "state": .object(state.mapValues(BridgeValue.init(plugin:))),
@@ -582,6 +600,27 @@ final class PlayhouseBridgeRuntime {
                 let enabled = request.command == "plugin.enable"
                 settings.setPluginEnabled(id, enabled)
                 result = .object(["pluginID": .string(id), "enabled": .boolean(enabled), "revision": .integer(settings.bumpPluginsRevision())])
+            // An app event (`app.focus`, or a change a window saved itself) for
+            // the built-in plugins' services, which run here in the daemon.
+            case "plugin.event":
+                let name = try request.requiredString("name")
+                guard PluginEvent.names.contains(name) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Unknown plugin event \"\(name)\". Events: \(PluginEvent.names.joined(separator: ", ")).")
+                }
+                var payload: [String: PluginValue] = [:]
+                if let raw = request.arguments["payload"], raw != .null {
+                    guard let object = PluginValue(bridge: raw).object else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "A plugin event's payload must be a JSON object.")
+                    }
+                    payload = object
+                }
+                let event = PluginEvent(name: name, payload: payload)
+                PluginServiceHost.publish(event)
+                // A move's reactions (opening pull requests) finish before the answer.
+                if let taskID = payload["taskID"]?.string.flatMap(UUID.init(uuidString:)) {
+                    await PluginServiceHost.settle(taskID: taskID)
+                }
+                result = .object(["name": .string(name), "delivered": .integer(PluginServiceHost.services.count)])
             case "plugin.sessions":
                 result = .object(["sessions": try Self.value(taskManager.pluginConversations())])
             case "plugin.edit":
@@ -802,7 +841,6 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
@@ -893,7 +931,6 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
@@ -942,7 +979,6 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])

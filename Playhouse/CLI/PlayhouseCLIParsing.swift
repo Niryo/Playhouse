@@ -2,6 +2,23 @@ import Darwin
 import Foundation
 
 extension PlayhouseCLI {
+    /// `task pr autopilot`'s options, or nil when one is unknown or `--confirm-with` lacks its plugin id.
+    static func autopilotOptions(_ options: ArraySlice<String>) -> (merge: Bool, resetAttempts: Bool, confirmWith: String?)? {
+        var result: (merge: Bool, resetAttempts: Bool, confirmWith: String?) = (false, false, nil)
+        var iterator = options.makeIterator()
+        while let option = iterator.next() {
+            switch option {
+            case "--merge": result.merge = true
+            case "--reset-attempts": result.resetAttempts = true
+            case "--confirm-with":
+                guard let pluginID = iterator.next(), !pluginID.hasPrefix("--") else { return nil }
+                result.confirmWith = pluginID
+            default: return nil
+            }
+        }
+        return result
+    }
+
     static func parse(_ args: [String]) throws -> BridgeRequest {
         guard let group = args.first else { throw CLIError.usage("Missing command group.") }
         let rest = Array(args.dropFirst())
@@ -85,21 +102,30 @@ extension PlayhouseCLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|auto|mode|autopilot <task-id> [action]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [action]")
                 }
                 switch tail[0] {
-                case "auto" where tail.count == 3 && (tail[2] == "on" || tail[2] == "off"):
-                    return BridgeRequest(command: "task.pr.auto", arguments: ["taskID": .string(tail[1]), "enabled": .boolean(tail[2] == "on")])
-                case "mode" where tail.count == 3:
-                    return BridgeRequest(command: "task.pr.mode", arguments: ["taskID": .string(tail[1]), "mode": .string(tail[2])])
-                case "autopilot" where tail.count == 2:
-                    return BridgeRequest(command: "task.pr.autopilot", arguments: ["taskID": .string(tail[1])])
-                case "create" where tail.count == 2:
-                    return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
+                // One pass of the `pull-request-mode` plugin's Green mode, or Merge with `--merge`.
+                // `--confirm-with <plugin-id>` asks that plugin's service again before a merge or fix turn.
+                case "autopilot" where Self.autopilotOptions(tail.dropFirst(2)) != nil:
+                    let options = Self.autopilotOptions(tail.dropFirst(2)) ?? (false, false, nil)
+                    var arguments: [String: BridgeValue] = [
+                        "taskID": .string(tail[1]),
+                        "merge": .boolean(options.merge),
+                        "resetAttempts": .boolean(options.resetAttempts)
+                    ]
+                    if let confirmWith = options.confirmWith { arguments["confirmWith"] = .string(confirmWith) }
+                    return BridgeRequest(command: "task.pr.autopilot", arguments: arguments)
+                case "create" where tail.count == 2 || (tail.count == 3 && tail[2] == "--if-needed"):
+                    return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1]), "ifNeeded": .boolean(tail.count == 3)])
                 case "conflicts" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.conflicts", arguments: ["taskID": .string(tail[1])])
-                case "status" where tail.count == 2:
-                    return BridgeRequest(command: "task.pr.status", arguments: ["taskID": .string(tail[1])])
+                case "status" where Set(tail.dropFirst(2)).isSubset(of: ["--review-threads", "--shared"]):
+                    return BridgeRequest(command: "task.pr.status", arguments: [
+                        "taskID": .string(tail[1]),
+                        "reviewThreads": .boolean(tail.contains("--review-threads")),
+                        "shared": .boolean(tail.contains("--shared"))
+                    ])
                 case "verify" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve" where tail.count == 3:
@@ -107,7 +133,7 @@ extension PlayhouseCLI {
                 case "sync" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr auto <task-id> on|off, or playhouse task pr mode <task-id> manual|pr|autopilot|merge")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr create <task-id> --if-needed, playhouse task pr status <task-id> [--review-threads] [--shared], or playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: playhouse task progress publish|custom|clear <task-id> ...") }
@@ -382,8 +408,8 @@ extension PlayhouseCLI {
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
             ])
         case "plugin":
-            let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]"
-            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | sessions | edit --id <plugin-id> | delete --id <plugin-id> | enable --id <plugin-id> | disable --id <plugin-id> | state --id <plugin-id> [--key <key> --value <json>] | author --placement <\(pluginPlacements)> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>] | render …"
+            let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>] | @<app-event>[:<json>] | +<seconds>...] [--advance <seconds>]"
+            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | sessions | edit --id <plugin-id> | delete --id <plugin-id> | enable --id <plugin-id> | disable --id <plugin-id> | state --id <plugin-id> [--key <key> --value <json>] | event <name> [--payload <json>] | author --placement <\(pluginPlacements)> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>] | render …"
             switch rest.first {
             case "mode":
                 let options = Array(rest.dropFirst())
@@ -413,6 +439,17 @@ extension PlayhouseCLI {
                 default:
                     throw CLIError.usage("Use: playhouse plugin state --id <plugin-id> [--key <key> --value <json>]")
                 }
+            case "event":
+                guard rest.count >= 2, !rest[1].hasPrefix("--") else { throw CLIError.usage("Use: playhouse plugin event <name> [--payload <json>]") }
+                let flags = try parseFlags(Array(rest.dropFirst(2)), valueFlags: ["--payload"])
+                var payload = BridgeValue.object([:])
+                if let json = flags["--payload"]?.first {
+                    guard let value = try? JSONDecoder().decode(BridgeValue.self, from: Data(json.utf8)), value.object != nil else {
+                        throw CLIError.usage("--payload must be a JSON object.")
+                    }
+                    payload = value
+                }
+                return BridgeRequest(command: "plugin.event", arguments: ["name": .string(rest[1]), "payload": payload])
             case "restore":
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id", "--version"])
                 guard let version = Int(try requiredFlag("--version", flags: flags).first!) else { throw CLIError.usage("Version must be an integer.") }

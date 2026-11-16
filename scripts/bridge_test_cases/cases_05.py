@@ -2,9 +2,9 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases05:
-    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode the previous task was left in; changing one task's mode never changes the default for later tasks. Toggling Auto PR for an unknown task is rejected.
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows the pull-request-mode plugin's compact mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. The mode is the plugin's own state keyed by task id, not a property of the task: a new task has no saved mode and is in PR mode, choosing PR clears the saved mode, every other choice is saved and reflected across a fresh read, and a saved value no mode knows reads as PR. When a turn completes in PR mode (including that unknown value), the plugin creates the task's pull request on the way to Review with no user click, exactly once. Choosing Merge for that task in Review is a change the plugin acts on at once: it merges the green pull request with no other command, and the task stays in Review. In Manual mode the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode another task was left in. Creating a pull request with --if-needed for an unknown task is rejected. A task saved before the mode was the plugin's keeps its old Manual, Green, or Merge choice: the bridge imports it once into the plugin's state at its next request (a mode already chosen in the plugin wins, and PR imports nothing), and its card's pill shows it.
     def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
-        missing, _ = self.call_cli("task", "pr", "auto", str(uuid.uuid4()), "on", expected_status=3)
+        missing, _ = self.call_cli("task", "pr", "create", str(uuid.uuid4()), "--if-needed", expected_status=3)
         self.assert_failure(missing, "not_found")
 
         def remove_fixture_origin(repository, expected_url):
@@ -19,23 +19,48 @@ class BridgeTestCases05:
                 self.run_git(repository, "remote", "remove", "origin")
 
         task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
-        self.assertTrue(task["autoCreatePullRequestOnReview"], "A new task must start in PR mode.")
-        self.assertEqual(task["pullRequestMode"], "pr")
-        autopilot = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
-        self.assertEqual(autopilot["pullRequestMode"], "autopilot")
-        self.assertTrue(autopilot["autoCreatePullRequestOnReview"], "Autopilot opens the pull request too.")
-        merge = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "merge")[0])
-        self.assertEqual(merge["pullRequestMode"], "merge")
-        self.assertTrue(merge["autoCreatePullRequestOnReview"], "Merge mode opens the pull request too.")
-        invalid_mode, _ = self.call_cli("task", "pr", "mode", task["id"], "sometimes", expected_status=2)
-        self.assert_failure(invalid_mode, "invalid_argument")
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pullRequestMode"], "merge", "A rejected mode must not change the task.")
-        enabled = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "pr")[0])
-        self.assertTrue(enabled["autoCreatePullRequestOnReview"])
-        self.assertEqual(enabled["pullRequestMode"], "pr")
-        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
-        self.assertTrue(reread["autoCreatePullRequestOnReview"], "The toggle should persist across a fresh CLI connection.")
-        self.assertEqual(reread["pullRequestMode"], "pr")
+        self.assertNotIn("pullRequestMode", task, "The mode is the plugin's state, not a property of the task.")
+        self.assertIsNone(self.pull_request_mode(task["id"]), "A new task has no saved mode, so it is in PR mode.")
+
+        # Tasks saved before the mode was the plugin's kept it in their own columns. Seed those real
+        # SwiftData rows and forget that the import ran; the bridge imports them once, at the start of
+        # its next request. That request goes to the daemon that already holds this case's preferences:
+        # a second process on a path-named defaults suite (the tests' isolated preferences, not the app's)
+        # reads its own writes stale, which a real launch on the app's suite never does.
+        legacy_columns = {
+            "Legacy PR autopilot": ("ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 0", "autopilot"),
+            "Legacy PR merge": ("ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 1", "merge"),
+            "Legacy PR manual": ("ZAUTOCREATEPULLREQUESTONREVIEW = 0, ZPULLREQUESTAUTOPILOT = 0", "manual"),
+            "Legacy PR default": ("ZAUTOCREATEPULLREQUESTONREVIEW = 1, ZPULLREQUESTAUTOPILOT = 0", None),
+            "Legacy PR already chosen": ("ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 1", "manual"),
+        }
+        legacy_ids = {title: self.create_task(title=title)["id"] for title in legacy_columns}
+        self.set_pull_request_mode(legacy_ids["Legacy PR already chosen"], "manual")
+        with sqlite3.connect(self.data_directory / "Playhouse-v2.store") as database:
+            for title, (columns, _) in legacy_columns.items():
+                seeded = database.execute(f"UPDATE ZBOARDTASK SET {columns} WHERE ZTITLE = ?", (title,))
+                self.assertEqual(seeded.rowcount, 1, f"Seed the legacy mode columns of {title}.")
+        subprocess.run(["/usr/bin/defaults", "delete", self.defaults_suite, "legacyPullRequestModesImported"], check=False, capture_output=True)
+        self.assertFalse(self.default_exists("legacyPullRequestModesImported"))
+        imported_state = self.assert_success(self.call_cli("plugin", "state", "--id", "pull-request-mode")[0])["state"]
+        for title, (_, mode) in legacy_columns.items():
+            self.assertEqual(imported_state.get(legacy_ids[title]), mode, f"{title} imports as the plugin's state; a mode already chosen in the plugin wins.")
+        self.assertNotIn("pullRequestMode", self.assert_success(self.call_cli("task", "get", legacy_ids["Legacy PR merge"])[0]))
+        self.assertTrue(self.default_exists("legacyPullRequestModesImported"), "The import is recorded so it runs once.")
+        imports = [event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.imported" and event.get("count") == "3"]
+        self.assertEqual(len(imports), 1, "Three legacy modes were imported, in one pass.")
+        # A later choice in the plugin is not overwritten by the old columns on later requests.
+        self.set_pull_request_mode(legacy_ids["Legacy PR merge"], None)
+        self.assertIsNone(self.pull_request_mode(legacy_ids["Legacy PR merge"]))
+        self.assertEqual(len([event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.imported" and event.get("count") != "0"]), 1,
+                         "The import runs once.")
+        self.assertIsNone(self.pull_request_mode(self.create_task(title="Fresh after legacy import")["id"]), "A new task still starts in PR mode.")
+
+        for mode in ("autopilot", "merge", "pr"):
+            self.set_pull_request_mode(task["id"], mode)
+            self.assertEqual(self.pull_request_mode(task["id"]), mode, "The plugin keeps the chosen mode across a fresh CLI connection.")
+        # A saved value no mode knows falls back to PR: this task still gets its pull request on Review.
+        self.set_pull_request_mode(task["id"], "sometimes")
 
         remote_root = self.data_directory / "auto-pr-remotes"
         remote_root.mkdir()
@@ -132,19 +157,25 @@ class BridgeTestCases05:
             "Auto PR should create the pull request exactly once without the user clicking anything.",
         )
 
+        # Choosing Merge for a task in Review is a change the plugin acts on at once:
+        # it follows the green pull request and merges it, with no CLI command.
+        gh_state.write_text("701=unmerged\n701.checks=success\n701.threads=0\n", encoding="utf-8")
+        self.set_pull_request_mode(task["id"], "merge", extra_environment=gh_environment)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any(line.startswith("merged\t701") for line in create_log.read_text(encoding="utf-8").splitlines()):
+            time.sleep(0.2)
+        self.assertIn("merged\t701\t--squash", create_log.read_text(encoding="utf-8").splitlines(), "Choosing Merge in Review merges the green pull request.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review", "Merging leaves the task in Review.")
+
         default_task = self.create_task("Default PR mode")
-        self.assertTrue(default_task["autoCreatePullRequestOnReview"], "A new task should start in PR mode.")
-        self.assertEqual(default_task["pullRequestMode"], "pr")
-        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", default_task["id"], "off")[0])
-        self.assertFalse(turned_off["autoCreatePullRequestOnReview"])
+        self.assertIsNone(self.pull_request_mode(default_task["id"]), "A new task should start in PR mode.")
+        self.set_pull_request_mode(default_task["id"], "manual")
         after_off = self.create_task("Default PR mode after switching off")
-        self.assertTrue(after_off["autoCreatePullRequestOnReview"], "A new task should still start in PR mode after another task was switched off.")
-        self.assertEqual(after_off["pullRequestMode"], "pr")
+        self.assertIsNone(self.pull_request_mode(after_off["id"]), "A new task should still start in PR mode after another task was switched to Manual.")
+        self.assertEqual(self.pull_request_mode(default_task["id"]), "manual")
 
         manual_task = self.create_repo_task("Manual PR toggle", [self.secondary], merge_targets={self.secondary: "main"})
-        self.assertTrue(manual_task["autoCreatePullRequestOnReview"])
-        manual_task = self.assert_success(self.call_cli("task", "pr", "mode", manual_task["id"], "manual")[0])
-        self.assertFalse(manual_task["autoCreatePullRequestOnReview"])
+        self.set_pull_request_mode(manual_task["id"], "manual")
         self.complete_fixture_turn(manual_task["id"], executable_name="codex-fixture-manual-pr")
         manual_reviewed = self.assert_success(self.call_cli("task", "get", manual_task["id"])[0])
         self.assertEqual(manual_reviewed["status"], "Review")
@@ -172,7 +203,7 @@ class BridgeTestCases05:
             manual_created["repositoryWorktrees"][0]["pullRequestNumber"], 702,
             "The manual create flow must still work unchanged when Auto PR stays off.",
         )
-    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop. A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order.
+    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
     def test_task_pr_autopilot_fixes_red_pull_request_until_green(self):
         missing, _ = self.call_cli("task", "pr", "autopilot", str(uuid.uuid4()), expected_status=3)
         self.assert_failure(missing, "not_found")
@@ -204,11 +235,51 @@ class BridgeTestCases05:
         self.assertEqual(manual_status[0]["checks"], "failure")
         self.assertEqual(manual_status[0]["failingChecks"], ["fixture-ci"])
         self.assertEqual(manual_status[0]["health"], "red")
-        self.assertIsNone(manual_status[0].get("unresolvedReviewThreads"), "Only autopilot tasks read review threads.")
+        self.assertIsNone(manual_status[0].get("unresolvedReviewThreads"), "A plain status read leaves review threads alone.")
         self.assertNotIn("threads 801", gh_calls.read_text(encoding="utf-8").splitlines())
-        inactive = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
-        self.assertEqual(inactive["action"], "inactive", "Autopilot must not act on a task whose mode is not autopilot.")
-        self.assertEqual(inactive["taskStatus"], "Review")
+        with_threads = self.assert_success(self.call_cli("task", "pr", "status", task["id"], "--review-threads", extra_environment=gh_environment)[0])
+        self.assertEqual(with_threads[0]["unresolvedReviewThreads"], 1)
+        self.assertIn("threads 801", gh_calls.read_text(encoding="utf-8").splitlines())
+        gh_calls.write_text("", encoding="utf-8")
+
+        # A shared probe (as the card's plugins make on focus and on moves) shares a
+        # running probe and reuses its answer for a while; an explicit read always asks.
+        cache_environment = {**gh_environment, "PLAYHOUSE_E2E_PR_STATUS_CACHE_SECONDS": "60"}
+
+        def probes():
+            return gh_calls.read_text(encoding="utf-8").splitlines().count("801")
+
+        def shared_status():
+            return self.assert_success(self.call_cli("task", "pr", "status", task["id"], "--shared", extra_environment=cache_environment)[0])
+
+        set_pull_request("failure")
+        together = []
+        readers = [threading.Thread(target=lambda: together.append(shared_status())) for _ in range(2)]
+        for reader in readers:
+            reader.start()
+        for reader in readers:
+            reader.join()
+        self.assertEqual([states[0]["health"] for states in together], ["red", "red"])
+        self.assertEqual(probes(), 1, "Two shared probes at once ask GitHub once.")
+        set_pull_request("success")
+        self.assertEqual(shared_status()[0]["health"], "red", "A shared probe within the cache's life reuses the answer.")
+        self.assertEqual(probes(), 1)
+        self.assertEqual(self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=cache_environment)[0])[0]["health"], "green",
+                         "An explicit read always asks GitHub.")
+        self.assertEqual(probes(), 2)
+        self.assertEqual(shared_status()[0]["health"], "red", "An explicit read leaves the shared answer alone.")
+        self.assert_success(self.call_cli("task", "pr", "create", task["id"], "--if-needed", extra_environment=cache_environment)[0])
+        self.assertEqual(shared_status()[0]["health"], "green", "Creating a task's pull requests forgets its shared answer.")
+        self.assertEqual(probes(), 3)
+        set_pull_request("pending")
+        self.assertEqual(self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=cache_environment)[0])["action"], "pending")
+        gh_state.unlink()
+        self.assert_failure(self.call_cli("task", "pr", "status", task["id"], "--shared", expected_status=1, extra_environment=cache_environment)[0], "operation_failed")
+        set_pull_request("pending")
+        self.assertEqual(shared_status()[0]["health"], "pending", "A pass forgets the shared answer, and a failed probe isn't kept.")
+        self.assertTrue(any(event.get("event") == "task.pr.status.shared" and event.get("taskID") == task["id"] for event in self.diagnostic_events()),
+                        "The reused answers are recorded.")
+        gh_calls.write_text("", encoding="utf-8")
 
         # A rerun counts only by its latest run, as on GitHub.
         for checks, state, failing in (("rerun-success", "success", []), ("rerun-failure", "failure", ["fixture-ci"]), ("workflows", "failure", ["build"]), ("workflows-failing", "failure", ["build"]), ("statuses", "success", []), ("untimed", "success", [])):
@@ -217,7 +288,6 @@ class BridgeTestCases05:
             self.assertEqual(rerun_status[0]["checks"], state, checks)
             self.assertEqual(rerun_status[0]["failingChecks"], failing, checks)
 
-        self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
         set_pull_request("pending")
         user_messages_before = len(history_texts("user"))
         pending = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
@@ -286,14 +356,14 @@ class BridgeTestCases05:
         self.assertIn("nothing changed", current["statusMessage"])
         self.assertEqual(len(history_texts("user")), user_messages_before, "An unchanged red state must not be sent again.")
 
-        # Choosing the mode again restarts the streak; five fixes that never reach green
-        # exhaust it even though each one changed something.
-        self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
+        # Choosing the mode again restarts the streak (--reset-attempts, as the plugin
+        # passes); five fixes that never reach green exhaust it even though each one
+        # changed something.
         self.complete_fixture_turn(task["id"])
         for attempt in range(1, 6):
             set_pull_request("failure", threads=attempt)
             result = self.drive_held_fixture_command(
-                task["id"], ["task", "pr", "autopilot", task["id"]], "completed", extra_environment=gh_environment,
+                task["id"], ["task", "pr", "autopilot", task["id"], *(["--reset-attempts"] if attempt == 1 else [])], "completed", extra_environment=gh_environment,
             )
             self.assertEqual(result["action"], "fixed", f"Fix attempt {attempt} should run.")
         set_pull_request("failure", threads=6)
@@ -302,7 +372,65 @@ class BridgeTestCases05:
         capped_task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(capped_task["status"], "Waiting Response")
         self.assertIn("5 fix turns", capped_task["statusMessage"])
-    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
+
+        # The pull-request-mode plugin's service follows a Green task itself: when Green is
+        # chosen in Review, when it reaches Review, on a slow poll while checks run, and on
+        # focus through its throttle.
+        followed = self.create_repo_task("PR autopilot service", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True)
+        self.seed_done_task_pull_request(followed["id"], number=802)
+        gh_state.write_text("802=unmerged\n802.checks=pending\n", encoding="utf-8")
+        service_environment = {**gh_environment, "PLAYHOUSE_E2E_PR_AUTOPILOT_POLL_SECONDS": "2", "PLAYHOUSE_E2E_PR_CHECK_COOLDOWN_SECONDS": "3"}
+
+        def follows(trigger):
+            return [event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.follow"
+                    and event.get("taskID") == followed["id"] and event.get("trigger") == trigger]
+
+        def wait_for_follows(trigger, count, timeout=20):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and len(follows(trigger)) < count:
+                time.sleep(0.25)
+            self.assertGreaterEqual(len(follows(trigger)), count, f"The plugin follows the task on {trigger}.")
+
+        self.set_pull_request_mode(followed["id"], "autopilot", extra_environment=service_environment)
+        wait_for_follows("mode", 1)
+        self.assertEqual(follows("mode")[0]["mode"], "autopilot")
+        wait_for_follows("poll", 1)
+        # A turn that waits for the user leaves the task where the user moves it to Review.
+        self.complete_fixture_turn(followed["id"], executable_name="codex-fixture-follow", outcome="waiting-response",
+                                   expected_status="Waiting Response", extra_environment=service_environment)
+        self.assert_success(self.call_cli("task", "move", followed["id"], "Review", extra_environment=service_environment)[0])
+        wait_for_follows("review", 1)
+        for _ in range(3):
+            self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=service_environment)[0])
+        wait_for_follows("focus", 2)
+        time.sleep(4)
+        self.assertEqual(len(follows("focus")), 2, "Three focuses within the cooldown follow once at once and once when it ends.")
+
+        # Green ends the slow poll. A turn that completes moves the task to Review while it
+        # still holds the task, so that pass is skipped; the plugin looks again on the poll.
+        gh_state.write_text("802=unmerged\n802.checks=success\n", encoding="utf-8")
+        wait_for_follows("poll", len(follows("poll")) + 1)
+        time.sleep(3)
+        polls_when_green = len(follows("poll"))
+        time.sleep(3)
+        self.assertEqual(len(follows("poll")), polls_when_green, "A green PR isn't polled.")
+        self.complete_fixture_turn(followed["id"], executable_name="codex-fixture-follow-review", extra_environment=service_environment)
+        wait_for_follows("review", 2)
+        wait_for_follows("poll", polls_when_green + 1, timeout=15)
+
+        # A pass the plugin started asks it again before it merges: with the mode no longer
+        # Merge, it merges nothing.
+        gh_state.write_text("802=unmerged\n802.checks=success\n", encoding="utf-8")
+        declined = self.assert_success(self.call_cli(
+            "task", "pr", "autopilot", followed["id"], "--merge", "--confirm-with", "pull-request-mode", extra_environment=gh_environment,
+        )[0])
+        self.assertEqual(declined["action"], "inactive")
+        self.assertNotIn("merged\t802", (gh_directory / "create-calls").read_text(encoding="utf-8") if (gh_directory / "create-calls").exists() else "")
+        self.assertTrue(any(event.get("event") == "plugin.pull_request_mode.declined" and event.get("taskID") == followed["id"] and event.get("action") == "merge"
+                            for event in self.diagnostic_events()), "The plugin declined the merge.")
+        self.assert_failure(self.call_cli("task", "pr", "autopilot", followed["id"], "--confirm-with", expected_status=2)[0], "invalid_argument")
+        self.set_pull_request_mode(followed["id"], None)
+    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode (a `task pr autopilot --merge` pass, which the pull-request-mode plugin runs for its Merge tasks) does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
     def test_task_pr_merge_mode_merges_green_pull_request(self):
         task = self.create_repo_task("PR merge mode", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         refused = self.create_repo_task("PR merge refused", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True)
@@ -330,24 +458,21 @@ class BridgeTestCases05:
         def merges():
             return [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merge")] if merge_log.exists() else []
 
-        chosen = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "merge")[0])
-        self.assertEqual(chosen["pullRequestMode"], "merge")
-        self.assertTrue(chosen["autoCreatePullRequestOnReview"])
-        pending = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        pending = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(pending["action"], "pending")
         self.assertEqual(pending["states"][0]["unresolvedReviewThreads"], 0)
         self.assertIn("threads 811", gh_calls.read_text(encoding="utf-8").splitlines(), "Merge mode reads review threads like autopilot.")
         self.assertEqual(merges(), [], "Running checks must not be merged.")
         commit_head(task["repositoryWorktrees"][0]["worktreePath"])
         gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=pending", "811.checks=none"), encoding="utf-8")
-        no_checks = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        no_checks = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(no_checks["action"], "pending", "A freshly pushed head may not have registered its checks yet.")
         self.assertEqual(no_checks["taskStatus"], "Review")
         self.assertEqual(merges(), [], "A head with no checks reported yet must not be merged.")
         gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=none", "811.checks=pending"), encoding="utf-8")
 
         gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=pending", "811.checks=success"), encoding="utf-8")
-        merged = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        merged = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(merged["action"], "merged")
         self.assertEqual(merged["mergedPullRequests"], [811])
         self.assertTrue(merged["states"][0]["merged"])
@@ -356,7 +481,7 @@ class BridgeTestCases05:
         merge_call = [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merged\t811")]
         self.assertEqual(len(merge_call), 1)
         self.assertEqual(merged["taskStatus"], "Review", "Merging leaves the task in Review for the user to complete.")
-        again = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        again = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(again["action"], "merged")
         self.assertIsNone(again.get("mergedPullRequests"), "An already-merged PR is reported, not merged again.")
         self.assertEqual(len(merges()), 1, "An already-merged PR is not merged again.")
@@ -367,8 +492,7 @@ class BridgeTestCases05:
         # still attempts the merge. GitHub refuses it here (a required review), so the
         # task stops in Waiting Response with GitHub's reason.
         commit_head(refused["repositoryWorktrees"][0]["worktreePath"], committed_at="2020-01-01T00:00:00Z")
-        self.assert_success(self.call_cli("task", "pr", "mode", refused["id"], "merge")[0])
-        no_ci = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        no_ci = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(no_ci["action"], "stalled")
         no_ci_task = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
         self.assertEqual(no_ci_task["status"], "Waiting Response")
@@ -380,14 +504,14 @@ class BridgeTestCases05:
         # `repo.methods` line, written after #811 merged, disallows squash from here on.
         self.complete_fixture_turn(refused["id"])
         gh_state.write_text(gh_state.read_text(encoding="utf-8") + "repo.methods=merge,rebase\n", encoding="utf-8")
-        stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(stalled["action"], "stalled")
         current = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
         self.assertEqual(current["status"], "Waiting Response")
         self.assertIn("couldn't merge pull request #812", current["statusMessage"])
         self.assertIn("a review is required", current["statusMessage"])
         self.assertEqual(merges()[-1], "merge-failed\t812\t--merge")
-        idle = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        idle = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(idle["action"], "inactive", "A refused merge does not retry.")
     # case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, and a board probe that was already running when it moved raises no alert.
     def test_review_probe_failure_alerts_only_while_in_review(self):

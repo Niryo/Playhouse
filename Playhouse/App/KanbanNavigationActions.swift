@@ -243,8 +243,7 @@ extension KanbanBoardView {
                     title: "Untitled task",
                     repositories: [],
                     contextFolders: [],
-                    provider: settings.defaultConversationProvider,
-                    pullRequestMode: .pullRequest
+                    provider: settings.defaultConversationProvider
                 )
                 let newTask = try manager.taskModel(created.id)
                 presentScheduleOnOpen = presentingSchedule

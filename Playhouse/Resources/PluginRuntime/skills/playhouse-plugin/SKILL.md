@@ -22,13 +22,16 @@ message, for any the request leaves open. Don't guess:
   - `conversationSidebar`: a section of the task sidebar.
   - `conversationToolbar`: an icon beside the Terminal button.
   - `composerActions`: an icon beside the composer's Skills button.
+  - `taskItem`: the bottom row of each task's card on the board, beside
+    its pull request controls once the task has started. Room for an icon or a short label.
 - **Presentation**: how it opens. Pick one of:
   - `popover`: anchored to the button. Best for small tools.
   - `modal`: a sheet.
   - `sidebar`: a panel that slides in from the right.
   - `page`: a full page over the board or the conversation.
-  - `inline`: only at `conversationSidebar`. No button: the plugin renders in
-    place as a section of the task sidebar, like the built-in Changes.
+  - `inline`: only at `conversationSidebar` or `taskItem`. No button: the
+    plugin renders in place, as a section of the task sidebar like the
+    built-in Changes, or in the task card's row like its pull request controls.
 - **Name and icon**: a short name and an SF Symbol name for its button.
 
 The name, placement and presentation the user picked when the editor opened are
@@ -68,7 +71,7 @@ It uses these globals:
   | Placement | Context |
   | --- | --- |
   | Every placement | `plugin` (`{id, name, placement, presentation}`), `app` (`{appearance}`) and `state` (the plugin's saved values, see `Playhouse.setState`) |
-  | Conversation placements | Add `task` (`{id, title, status, provider, isStandaloneChat}`), `repositories` (`[{repositoryPath, worktreePath, branch}]`) and `contextFolders` |
+  | Conversation placements and `taskItem` | Add `task` (`{id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}`), `repositories` (`[{repositoryPath, worktreePath, branch, isPending, awaitsPullRequest, pullRequest: {number, url, merged} or null}]`), `pastPullRequests` (`[{repositoryPath, number, url, merged}]`) and `contextFolders` |
   | `composerActions` | Adds `composer` (`{draft, selection: {location, length, text}}`) |
   | `conversationSidebar` | Adds `workspace` (`{revision, openDiff: {repository, path, group} or null}`; `revision` grows whenever the task's files may have changed) and `sidebar` (`{collapsed}`, true on the hidden sidebar's narrow rail) |
 
@@ -101,6 +104,20 @@ It uses these globals:
     `"task.changes.list"`, and `refreshWorkspace()` tells the window the
     task's files changed, which bumps `workspace.revision`. Both work in
     conversation placements only.
+  - `moveTask(taskID, status)` moves a task to a board column as dragging its
+    card does, `resolveConflicts(taskID)` starts resolving its pull request's
+    conflicts, and `alert(title, message)` shows an alert. They work only from
+    `taskItem`; elsewhere they reject with `unavailable`.
+- `Playhouse.on(name, listener)` listens for an app event and returns a
+  function that stops listening: `"task.statusChanged"` (`{taskID, from, to}`,
+  when the plugin's task moves between board columns), `"app.focus"` (`{}`,
+  when Playhouse comes to the front) and `"plugin.stateChanged"`
+  (`{pluginID, key, value}`, when a saved value changes). Subscribe in a
+  `React.useEffect` and return the stop function from it.
+- `Playhouse.throttle(fn, seconds)` returns a function that runs `fn` at once,
+  then collapses the calls made while it runs or within `seconds` into one
+  trailing call with the latest arguments. Wrap anything an event triggers
+  that reaches a rate-limited service, such as GitHub, in it.
 - `fetch(url, {method, headers, body, timeout})`, like the web's, for `http`
   and `https` URLs from any placement. It resolves with a response that has
   `ok`, `status`, `statusText`, `url`, `redirected`, `headers.get(name)`,
@@ -151,6 +168,10 @@ Playhouse.render(h(WordCount));
 ## 3. Check the draft
 
 Run `playhouse-cli plugin render --file <draft-folder>/<plugin-id>/index.js` and
-fix errors. The editor previews the draft automatically. Tell the user how the
+fix errors. To check how it reacts to app events, add
+`--event '@task.statusChanged:{"taskID":"…","from":"In Progress","to":"Review"}'`,
+`--event @app.focus` or `--event +<seconds>` (which advances the clock); the
+output's `emitted` says how many listeners heard each event. The editor
+previews the draft automatically. Tell the user how the
 plugin works and let them choose Save in the editor to publish it. Do not edit
 the installed plugin or use `plugin refresh` to publish draft changes.

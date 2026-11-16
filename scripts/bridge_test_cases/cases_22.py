@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases22:
-    # case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
+    # case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks and each task card's bottom row shows an Add here icon, which Close removes; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
     def test_plugin_add_mode_toggles_and_shows_placeholders(self):
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "Add Plugin mode starts off.")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode", "--on")[0]), {"enabled": True})
@@ -388,7 +388,7 @@ class BridgeTestCases22:
         texts, _ = self.history_texts(created["id"], environment)
         self.assertEqual(texts.count("After restart."), 1)
         self.assertTrue(marker.exists(), "No task outcome nudge was sent.")
-    # case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation) before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
+    # case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation), then the task card's built-in Pull request mode and Pull requests plugins (inline at the taskItem placement), before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar or on the task card. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar or the task card is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
     def test_plugin_enable_disable_and_builtins(self):
         def listed():
             return self.assert_success(self.call_cli("plugin", "list")[0])
@@ -399,7 +399,11 @@ class BridgeTestCases22:
         changes = initial["plugins"][0]
         self.assertEqual((changes["id"], changes["name"], changes["placement"], changes["presentation"]), ("changes", "Changes", "conversationSidebar", "inline"))
         self.assertEqual((changes["builtIn"], changes["valid"], changes["enabled"], changes["errors"]), (True, True, True, []))
-        self.assertEqual([plugin["id"] for plugin in initial["plugins"]], ["changes"], "Only the built-ins are listed before any plugin is installed.")
+        self.assertEqual([plugin["id"] for plugin in initial["plugins"]], ["changes", "pull-request-mode", "pull-requests"], "Only the built-ins are listed before any plugin is installed.")
+        # The task card's built-ins: the mode pill and the pull request controls.
+        for card_plugin in initial["plugins"][1:]:
+            self.assertEqual((card_plugin["placement"], card_plugin["presentation"], card_plugin["builtIn"], card_plugin["valid"], card_plugin["enabled"]),
+                             ("taskItem", "inline", True, True, True), card_plugin)
 
         hello = 'Playhouse.render(h(Text, { testID: "hello" }, "Hello"));'
         self.write_installed_plugin("hello-board", hello, placement="mainSidebar", presentation="page")
@@ -407,16 +411,19 @@ class BridgeTestCases22:
         self.write_installed_plugin("board-probe", self.PLUGIN_WORKSPACE_SOURCE, placement="mainSidebar", presentation="page")
         self.write_installed_plugin("inline-composer", hello, placement="composerActions", presentation="inline")
         self.write_installed_plugin("changes", hello, placement="conversationSidebar", presentation="inline")
+        self.write_installed_plugin("card-badge", hello, placement="taskItem", presentation="inline")
         refreshed = self.assert_success(self.call_cli("plugin", "refresh")[0])
-        self.assertEqual([plugin["id"] for plugin in refreshed["plugins"]], ["changes", "board-probe", "changes", "hello-board", "inline-composer", "workspace-probe"],
+        self.assertEqual([plugin["id"] for plugin in refreshed["plugins"]],
+                         ["changes", "pull-request-mode", "pull-requests", "board-probe", "card-badge", "changes", "hello-board", "inline-composer", "workspace-probe"],
                          "The built-ins come first, then the installed plugins by id.")
-        self.assertTrue(refreshed["plugins"][0]["builtIn"])
-        shadow = refreshed["plugins"][2]
+        self.assertTrue(all(plugin["builtIn"] for plugin in refreshed["plugins"][:3]))
+        shadow = refreshed["plugins"][5]
         self.assertFalse(shadow["builtIn"])
         self.assertFalse(shadow["valid"])
         self.assertTrue(any("is a built-in plugin's id" in error for error in shadow["errors"]), shadow["errors"])
-        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"][3:]}
+        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"][3:] if plugin is not shadow}
         self.assertTrue(plugins["workspace-probe"]["valid"], plugins["workspace-probe"]["errors"])
+        self.assertTrue(plugins["card-badge"]["valid"], "An inline plugin is valid on the task card too.")
         self.assertFalse(plugins["inline-composer"]["valid"])
         self.assertTrue(any("only in the conversation sidebar" in error for error in plugins["inline-composer"]["errors"]), plugins["inline-composer"]["errors"])
         self.assertTrue(all(plugin["enabled"] and not plugin["builtIn"] for plugin in plugins.values()))
@@ -461,7 +468,7 @@ class BridgeTestCases22:
         self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in saved["hostCalls"]], [("bridge", "plugin.state.set", True)])
         self.assertEqual(saved["hostCalls"][0]["arguments"], {"pluginID": "workspace-probe", "key": "clicks", "value": 1})
         self.assertEqual(self.plugin_text(self.plugin_node(saved["tree"], "probe-status")), "save: ok")
-        self.assertEqual(self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe")[0]), {"pluginID": "workspace-probe", "state": {"clicks": 1}})
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe")[0]), {"pluginID": "workspace-probe", "state": {"clicks": 1}, "enabled": True})
         self.assertEqual(by_id(listed())["workspace-probe"]["state"], {"clicks": 1}, "plugin list reports each plugin's state.")
         reread = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"])[0])
         self.assertEqual(self.plugin_text(self.plugin_node(reread["tree"], "probe-state")), "saved 1", "A new run of the plugin gets its saved state.")
@@ -547,7 +554,7 @@ class BridgeTestCases22:
     # case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports only the built-in plugins at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
     def test_plugin_install_refresh_and_delete(self):
         empty = self.assert_success(self.call_cli("plugin", "list")[0])
-        self.assertEqual([(plugin["id"], plugin["builtIn"]) for plugin in empty["plugins"]], [("changes", True)], "Only the built-ins are listed at first.")
+        self.assertEqual([(plugin["id"], plugin["builtIn"]) for plugin in empty["plugins"]], [("changes", True), ("pull-request-mode", True), ("pull-requests", True)], "Only the built-ins are listed at first.")
         self.assertSamePath(empty["directory"], self.plugins_folder())
         self.assertEqual(empty["revision"], 0)
 
@@ -626,9 +633,12 @@ class BridgeTestCases22:
         props = json.loads(self.plugin_text(self.plugin_node(dumped["tree"], "props")))
         self.assertEqual(props["plugin"], {"id": "props-dump", "name": "Props Dump", "version": 0, "placement": "conversationSidebar", "presentation": "sidebar"})
         self.assertEqual(props["app"], {"appearance": "dark"})
-        self.assertEqual(props["task"], {"id": task["id"], "title": "Plugin context task", "status": "Backlog", "provider": task["conversationProvider"], "isStandaloneChat": False})
+        self.assertEqual(props["task"], {"id": task["id"], "title": "Plugin context task", "status": "Backlog", "provider": task["conversationProvider"], "isStandaloneChat": False,
+                                         "scheduleSourceTaskID": None})
         self.assertEqual(props["contextFolders"], [])
+        self.assertEqual(props["pastPullRequests"], [])
         self.assertEqual([os.path.realpath(repository["repositoryPath"]) for repository in props["repositories"]], [os.path.realpath(self.primary)])
+        self.assertEqual([repository["pullRequest"] for repository in props["repositories"]], [None], "A task not started yet has no pull request.")
         self.assertNotIn("composer", props, "Only the composer placement gets the draft.")
 
         board = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-board", "--task", task["id"])[0])
@@ -926,7 +936,7 @@ class BridgeTestCases22:
         self.assertIn("Claude Code wasn't found", failed["statusMessage"], "The message names why the run couldn't start.")
         self.assertEqual(failed["savedPrompt"], "Tell me a story.")
         self.assertTrue(failed["hasUnsentDraft"], "The prompt waits as the draft for a retry.")
-    # case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task.
+    # case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is cleared a later run reaches Review in PR mode.
     def test_schedule_recurring_template_hidden_and_spawns_runs(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-recurring")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -945,6 +955,11 @@ class BridgeTestCases22:
         self.assertNotIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A recurring template isn't a board task.")
         self.assertEqual([task["id"] for task in self.assert_success(self.call_cli("schedule", "list")[0])["tasks"]], [template_id])
 
+        # A run has no mode of its own: the pull-request-mode plugin gives it the one its schedule was given.
+        self.set_pull_request_mode(template_id, "manual")
+        def review_modes(task_id):
+            return [event.get("mode") for event in self.diagnostic_events()
+                    if event.get("event") == "plugin.pull_request_mode.review" and event.get("taskID") == task_id]
         first_run_at = self.parse_schedule_iso(template["schedule"]["scheduledAt"])
         fired = self.assert_success(self.call_cli(
             "schedule", "tick", "--now", self.schedule_iso(first_run_at + datetime.timedelta(minutes=10)), extra_environment=environment
@@ -959,6 +974,8 @@ class BridgeTestCases22:
         self.assertTrue(run["contextFolders"])
         self.assertIsNone(run.get("schedule"))
         self.assertIn("Tell me a story.", self.fixture_user_prompts(executable))
+        self.assertIsNone(self.pull_request_mode(run_id), "A run saves no mode of its own.")
+        self.wait_for(lambda: review_modes(run_id) == ["manual"], "The run reached Review in its schedule's Manual mode.")
         self.assertIn(run_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A run is followed on the board.")
         after = self.assert_success(self.call_cli("task", "get", template_id)[0])
         self.assertEqual(after["schedule"]["lastRunTaskID"], run_id)
@@ -974,10 +991,12 @@ class BridgeTestCases22:
         resumed = self.assert_success(self.call_cli("schedule", "resume", template_id)[0])
         self.assertFalse(resumed["schedule"]["paused"])
 
+        self.set_pull_request_mode(template_id, None)
         now_run = self.assert_success(self.call_cli("schedule", "run-now", template_id, extra_environment=environment)[0])
         self.assertFalse(now_run["dropped"])
         self.assertNotIn(now_run["taskID"], {run_id, template_id})
         self.wait_for_task_status(now_run["taskID"], {"Review"})
+        self.wait_for(lambda: review_modes(now_run["taskID"]) == ["pr"], "With the schedule's mode cleared, a run is in PR mode.")
 
         cleared = self.assert_success(self.call_cli("schedule", "clear", template_id)[0])
         self.assertIsNone(cleared.get("schedule"))

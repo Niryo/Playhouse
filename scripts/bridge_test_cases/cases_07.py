@@ -857,7 +857,7 @@ class BridgeTestCases07:
             task = self.create_repo_task("Remote branch-from", [self.primary])
             task_id = task["id"]
             # PR mode would publish the branch on Review, and publishing sets the upstream this case checks.
-            self.assert_success(self.call_cli("task", "pr", "mode", task_id, "manual")[0])
+            self.set_pull_request_mode(task_id, "manual")
             changed, _ = self.call_cli(
                 "task", "repository", "edit", task_id,
                 "--repo", self.primary,
@@ -935,7 +935,7 @@ class BridgeTestCases07:
             task = self.create_repo_task("Default branch-from from origin", [self.primary])
             task_id = task["id"]
             # Publishing on Review would set the branch's upstream itself and hide a tracked base.
-            self.assert_success(self.call_cli("task", "pr", "mode", task_id, "manual")[0])
+            self.set_pull_request_mode(task_id, "manual")
             pending = task["repositoryWorktrees"][0]
             self.assertTrue(pending["isPending"])
             self.assertEqual(pending["branchFrom"], "origin/main")
@@ -976,7 +976,7 @@ class BridgeTestCases07:
 
             offline = self.create_repo_task("Default branch-from while offline", [self.primary])
             offline_id = offline["id"]
-            self.assert_success(self.call_cli("task", "pr", "mode", offline_id, "manual")[0])
+            self.set_pull_request_mode(offline_id, "manual")
             self.assertEqual(offline["repositoryWorktrees"][0]["branchFrom"], "origin/main")
             self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
             self.complete_fixture_turn(offline_id)

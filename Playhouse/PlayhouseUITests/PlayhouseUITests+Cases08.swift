@@ -49,7 +49,7 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any]
         let taskID = try XCTUnwrap(created?["id"] as? String)
         // Publishing on Review would set the branch's upstream itself and hide a tracked base.
-        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+        try setPullRequestMode("manual", taskID: taskID)
         let pending = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         XCTAssertEqual(pending["isPending"] as? Bool, true)
         XCTAssertEqual(pending["branchFrom"] as? String, "origin/main")
@@ -102,7 +102,7 @@ extension PlayhouseUITests {
             "task", "create", "--title", offlineTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
         ])["result"] as? [String: Any]
         let offlineID = try XCTUnwrap(offline?["id"] as? String)
-        _ = try runCLI(["task", "pr", "mode", offlineID, "manual"])
+        try setPullRequestMode("manual", taskID: offlineID)
         XCTAssertEqual(try repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "origin/main")
         try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
         openTask(named: offlineTitle)

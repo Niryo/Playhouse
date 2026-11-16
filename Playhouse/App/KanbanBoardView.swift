@@ -168,28 +168,18 @@ struct KanbanBoardView: View {
     @State var archiveHasMore = true
     @State var isLoadingArchivePage = false
     @State var taskCreatingPullRequests = Set<UUID>()
-    @State var mergedReviewTaskIDs = Set<UUID>()
-    @State var conflictedReviewTaskIDs = Set<UUID>()
     @State var conflictResolutionTaskID: UUID?
     /// Prompts that tasks opened by the Skills page's Fix with Agent send when they appear.
     @State var skillFixPrompts: [UUID: String] = [:]
-    @State var checkingMergedPullRequests = false
-    @State var mergedPullRequestCheckPending = false
-    @State var mergedPullRequestCheckTimerScheduled = false
-    @State var lastMergedPullRequestCheckAt: Date?
     @State var taskAwaitingUnmergedConfirmation: UUID?
     @State var taskAwaitingDiscardConfirmation: UUID?
     @State var discardConfirmationMessage = ""
-    @State var syncingReviewTaskIDs = Set<UUID>()
-    @State var attemptedReviewSyncSignatures: [UUID: String] = [:]
-    /// Last probed check colour of each linked PR, keyed by task then PR number.
-    @State var pullRequestHealth: [UUID: [Int: PullRequestHealth]] = [:]
-    /// Autopilot tasks the daemon is probing or fixing right now.
-    @State var autopilotRunningTaskIDs = Set<UUID>()
-    /// Autopilot tasks whose PRs were last seen with checks still running.
-    @State var autopilotPendingTaskIDs = Set<UUID>()
-    @State var autopilotPollScheduled = false
     @State var pullRequestError: String?
+    /// An alert a task card's plugin raised with `ui.alert`.
+    @State var pluginAlert: PluginAlert?
+    /// A modal, sidebar or page plugin opened from a task card, and that card's task.
+    @State var openTaskItemPlugin: PluginRecord?
+    @State var openTaskItemPluginTask: BoardTask?
     @State var doneMoveError: String?
     @State var reviewMoveError: String?
     @State var isShowingBoardSearch = false
@@ -229,10 +219,7 @@ struct KanbanBoardView: View {
             conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
             skillFixPrompt: skillFixPrompts[selectedTask.id],
             presentScheduleOnAppear: presentScheduleOnOpen,
-            onConflictResolutionChecked: { resolved in
-                if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
-                else { conflictedReviewTaskIDs.insert(selectedTask.id) }
-            },
+            onConflictResolutionChecked: { _ in },
             onOpenTask: openTask(_:sending:)
         ) {
             self.skillFixPrompts[selectedTask.id] = nil
@@ -308,7 +295,6 @@ struct KanbanBoardView: View {
             // The board renders from its own @Query, not the board.list path, so it has to
             // convert a chat still stored as a hidden task itself or that row shows as a card.
             try? BoardTaskManager(modelContext: modelContext).migrateLegacyStandaloneChatTasks()
-            checkReviewPullRequests()
             let retained = PlayhouseStore.takeLifecycleResetNotice(
                 dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]
             )
@@ -335,10 +321,8 @@ struct KanbanBoardView: View {
             isBoardSearchFocused = true
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            checkReviewPullRequests()
-        }
-        .task(id: reviewPullRequestSignature) {
-            checkReviewPullRequests()
+            // The built-in plugins' daemon services hear the focus too.
+            PluginServiceHost.publish(PluginEvent(name: PluginEvent.appFocus))
         }
         .sheet(isPresented: Binding(
             get: { taskBeingRenamed != nil },
@@ -644,6 +628,14 @@ struct KanbanBoardView: View {
             props: { PluginContext.props(plugin: $0, appearance: appearance, task: nil, composer: nil) },
             actions: boardPluginActions
         )
+        .background {
+            Color.clear.pluginPresentation(
+                $openTaskItemPlugin,
+                props: { PluginContext.props(plugin: $0, appearance: appearance, task: openTaskItemPluginTask.map { PluginTaskContext(task: $0) }, composer: nil) },
+                actions: taskItemPluginActions
+            )
+            .modifier(PluginAlertModifier(alert: $pluginAlert))
+        }
         .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
             guard isShowingDoneArchive else { return }
             if archiveTasks.isEmpty && archiveHasMore { loadNextArchivePage() }
@@ -717,16 +709,12 @@ struct KanbanBoardView: View {
                 task.status == status && (boardSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || task.title.localizedCaseInsensitiveContains(boardSearchText.trimmingCharacters(in: .whitespacesAndNewlines)))
             },
             onMoveTask: { id, status in moveTask(id: id, to: status) },
-            onCreatePullRequests: { createPullRequests(for: $0) },
-            onSetPullRequestMode: { task, mode in setPullRequestMode(for: task, mode: mode) },
-            onResolveConflicts: {
-                conflictResolutionTaskID = $0.id
-                selectedTask = $0
+            pluginActions: taskItemPluginActions,
+            onOpenPlugin: { plugin, task in
+                openTaskItemPluginTask = task
+                openTaskItemPlugin = plugin
             },
-            creatingPullRequestTaskIDs: taskCreatingPullRequests,
-            mergedReviewTaskIDs: mergedReviewTaskIDs,
-            conflictedReviewTaskIDs: conflictedReviewTaskIDs,
-            pullRequestHealth: pullRequestHealth,
+            onAddPlugin: startPluginTask,
             onAddTask: openNewTask,
             onOpenTask: { selectedTask = $0 },
             onRenameTask: { taskBeingRenamed = $0 },
@@ -942,6 +930,22 @@ struct KanbanBoardView: View {
         })
     }
 
+    /// What a task card's plugins can do: the board's actions, plus moving a
+    /// card, opening it to resolve conflicts, and raising an alert.
+    var taskItemPluginActions: PluginUIActions {
+        var actions = boardPluginActions
+        actions.close = { openTaskItemPlugin = nil }
+        actions.moveTask = { id, status, merged in moveTask(id: id, to: status, skipMergeVerification: merged) }
+        actions.resolveConflicts = { id in
+            guard let task = tasks.first(where: { $0.id == id }) else { return }
+            openTaskItemPlugin = nil
+            conflictResolutionTaskID = id
+            selectedTask = task
+        }
+        actions.alert = { title, message in pluginAlert = PluginAlert(title: title, message: message) }
+        return actions
+    }
+
     /// An Add Plugin mode placeholder was pressed: the new task's agent builds
     /// a plugin for that placement, and the mode ends.
 
@@ -1006,4 +1010,27 @@ extension Notification.Name {
     static let playhouseStartPluginCreation = Notification.Name("playhouseStartPluginCreation")
     static let playhouseEditPlugin = Notification.Name("playhouseEditPlugin")
     static let playhousePreparePluginEdit = Notification.Name("playhousePreparePluginEdit")
+}
+
+/// An alert a plugin raised with `ui.alert`.
+struct PluginAlert: Equatable {
+    let title: String
+    let message: String
+}
+
+struct PluginAlertModifier: ViewModifier {
+    @Binding var alert: PluginAlert?
+
+    func body(content: Content) -> some View {
+        content.alert(alert?.title ?? "", isPresented: Binding(
+            get: { alert != nil },
+            set: { if !$0 { alert = nil } }
+        )) {
+            Button("OK", role: .cancel) { alert = nil }
+                .buttonHoverPointer()
+                .nativeHelp("Dismiss")
+        } message: {
+            Text(alert?.message ?? "")
+        }
+    }
 }

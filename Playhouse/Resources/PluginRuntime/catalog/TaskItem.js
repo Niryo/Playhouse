@@ -1,7 +1,9 @@
 // The task item, composed in JavaScript from the same atoms the native
 // TaskItemView (Playhouse/App/TaskItemView.swift) uses, from the same
 // display model (Playhouse.props.task). Below it, controls whose state
-// changes show which nodes each commit touches.
+// changes show which nodes each commit touches. The card's bottom row holds
+// its task card plugins (the built-in pull request controls and mode pill),
+// which are plugins of their own, not part of this composite.
 
 function shortDuration(seconds) {
   if (seconds < 60) return Math.floor(seconds) + "s";
@@ -36,50 +38,6 @@ function menuItems(task) {
   items.push({ id: "stats", title: "Token Stats…", icon: "chart.bar", testID: "token-stats-task-menu-item" });
   items.push({ id: "delete", title: "Delete Task", icon: "trash", destructive: true, testID: "delete-task-menu-item" });
   return items;
-}
-
-function PullRequestControls(props) {
-  var task = props.task, pr = task.pullRequests, on = props.on, id = task.id;
-  var controls = [];
-  if (pr.create) {
-    controls.push(h(Button, {
-      key: "create", style: "borderless", emphasis: 10, disabled: pr.create.busy,
-      testID: "task-create-pr-" + id, label: pr.create.label, help: pr.create.help, width: 30, height: 30,
-      onPress: on.createPullRequests
-    }, pr.create.busy ? h(Spinner, { size: "mini" }) : h(Text, { size: 10, weight: "semibold" }, pr.create.title)));
-  }
-  if (pr.mergedCheck) {
-    // The capsule hugs the small check and the 30 pt slot centers it.
-    controls.push(h(Stack, { key: "merged", axis: "h", width: 30, height: 30 }, h(Button, {
-      style: "borderless", emphasis: 10, overhang: true,
-      testID: "task-complete-merged-pr-" + id, label: "Green checkmark. Complete task, all linked pull requests merged",
-      help: "Complete task: all linked pull requests have merged",
-      onPress: on.moveToDone
-    }, h(Icon, { name: "checkmark", size: 11, weight: "bold", color: "green" }))));
-    return controls;
-  }
-  if (pr.conflictsHelp) {
-    controls.push(h(Button, {
-      key: "conflicts", style: "borderless", emphasis: 10,
-      testID: "task-resolve-pr-conflicts-" + id, label: "Resolve pull request conflicts", help: pr.conflictsHelp,
-      onPress: on.resolveConflicts
-    }, h(Icon, { asset: "ConflictIndicator", color: "orange", testID: "task-resolve-pr-conflicts-icon-" + id, width: 16, height: 16 })));
-  }
-  if (pr.showModePill) {
-    controls.push(h(PillPicker, {
-      key: "mode", options: pr.modes, selected: pr.mode,
-      testID: "task-pr-mode-" + id, label: "Pull request mode",
-      help: "How Playhouse handles this task's pull request. {help}. Click to choose another mode.",
-      onChange: on.setPullRequestMode
-    }));
-  }
-  pr.links.forEach(function (link, index) {
-    controls.push(h(Link, {
-      key: "pr-" + index, url: link.url, emphasis: 5,
-      testID: "task-pr-link-" + id + "-" + link.number, value: link.health, help: link.help, minWidth: 30, minHeight: 30
-    }, h(Text, { size: 10, weight: "semibold", design: "monospaced", color: link.color }, "#" + link.number)));
-  });
-  return controls;
 }
 
 function TaskItem(props) {
@@ -119,32 +77,23 @@ function TaskItem(props) {
           testID: "task-token-usage-counter-" + id, label: task.tokens.description, hint: "Open Token Stats",
           help: task.tokens.description + ". Click for Token Stats", paddingX: 4,
           onPress: on.showTokenStats
-        }, h(Text, { size: 10, weight: "medium", design: "monospaced", color: task.tokens.color, numeric: true }, task.tokens.compact)) : null),
-      task.pullRequests ? h(Stack, { axis: "h", spacing: 8, minHeight: 30 },
-        h(Spacer, { minLength: 8 }),
-        h(Stack, { axis: "h", spacing: 5 }, h(PullRequestControls, { task: task, on: on }))) : null));
+        }, h(Text, { size: 10, weight: "medium", design: "monospaced", color: task.tokens.color, numeric: true }, task.tokens.compact)) : null)));
 }
 
 function Example() {
   var sample = Playhouse.props;
   var blocked = React.useState(false);
-  var mode = React.useState(sample.task.pullRequests.mode);
   var opened = React.useState(0);
   var lastAction = React.useState("none");
 
   var task = Object.assign({}, sample.task, {
     statusMessage: blocked[0] ? sample.blockedStatusMessage : sample.task.statusMessage,
-    statusIsBlocked: blocked[0],
-    pullRequests: Object.assign({}, sample.task.pullRequests, { mode: mode[0] })
+    statusIsBlocked: blocked[0]
   });
   var on = {
     open: function () { opened[1](function (count) { return count + 1; }); },
     menu: function (item) { lastAction[1]("menu " + item); },
-    showTokenStats: function () { lastAction[1]("token stats"); },
-    createPullRequests: function () { lastAction[1]("create pull requests"); },
-    setPullRequestMode: function (value) { mode[1](value); lastAction[1]("mode " + value); },
-    moveToDone: function () { lastAction[1]("move to done"); },
-    resolveConflicts: function () { lastAction[1]("resolve conflicts"); }
+    showTokenStats: function () { lastAction[1]("token stats"); }
   };
 
   return h(Stack, { axis: "v", spacing: 12, align: "leading" },
