@@ -372,15 +372,14 @@ def serve_unix_socket(runtime, path):
         if argument.startswith("--listen="):
             continue
         child_arguments.append(argument)
-    child = runtime.subprocess.Popen([runtime.sys.executable, runtime.sys.argv[0], *child_arguments, "--listen", "stdio://"],
-                             stdin=runtime.subprocess.PIPE, stdout=runtime.subprocess.PIPE)
-    signal.signal(signal.SIGTERM, lambda *_: (child.kill(), runtime.os._exit(0)))
     log_path = runtime.Path(str(runtime.sys.argv[0]) + ".socket-log")
 
     def log(entry):
         with open(log_path, "a", encoding="utf-8") as handle:
             handle.write(runtime.json.dumps({"time": runtime.time.time(), **entry}) + "\n")
 
+    # Listen before starting the stdio child: Popen waits for the child's exec, which can stall
+    # under load past the app's connect timeout, and clients simply queue until the loop accepts.
     try:
         runtime.os.unlink(path)
     except FileNotFoundError:
@@ -390,6 +389,9 @@ def serve_unix_socket(runtime, path):
     runtime.os.chmod(path, 0o600)
     server.listen(8)
     log({"event": "listening", "pid": runtime.os.getpid()})
+    child = runtime.subprocess.Popen([runtime.sys.executable, runtime.sys.argv[0], *child_arguments, "--listen", "stdio://"],
+                             stdin=runtime.subprocess.PIPE, stdout=runtime.subprocess.PIPE)
+    signal.signal(signal.SIGTERM, lambda *_: (child.kill(), runtime.os._exit(0)))
 
     class Connection:
         counter = 0
