@@ -694,18 +694,23 @@ extension PlayhouseCLI {
             case "list":
                 return BridgeRequest(command: "schedule.list")
             case "set":
-                let usage = "Use: playhouse schedule set <task-id> --prompt <text> (--once <ISO8601> | --repeat <hourly|daily|weekdays|weekly> [--time HH:MM] [--minute MM] [--weekday mon]) [--title <title>] [--image <path>...] [--mode default|plan] [--model <id>]"
+                let usage = "Use: playhouse schedule set <task-id> [--prompt <text>] (--once <ISO8601> | --repeat <hourly|daily|weekdays|weekly> [--time HH:MM] [--minute MM] [--weekday mon]) [--title <title>] [--image <path>...] [--mode default|plan] [--model <id>]"
                 guard let id = tail.first, !id.hasPrefix("--") else { throw CLIError.usage(usage) }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: [
                     "--prompt", "--once", "--repeat", "--time", "--minute", "--weekday", "--title", "--image", "--mode", "--model"
                 ])
                 guard (flags["--once"] == nil) != (flags["--repeat"] == nil) else { throw CLIError.usage(usage) }
+                // Without --prompt the task is only rescheduled and keeps its saved payload, so
+                // the payload's own flags would have nothing to change.
+                if flags["--prompt"] == nil, ["--image", "--mode", "--model"].contains(where: { flags[$0] != nil }) {
+                    throw CLIError.usage("--image, --mode and --model need --prompt; without it, schedule set only moves an existing schedule.")
+                }
                 var arguments: [String: BridgeValue] = [
                     "taskID": .string(id),
                     "kind": .string(flags["--once"] != nil ? "once" : "recurring"),
-                    "prompt": .string(flags["--prompt"]?.first ?? ""),
                     "images": .array(try (flags["--image"] ?? []).map(draftImageDataURL))
                 ]
+                if let prompt = flags["--prompt"]?.first { arguments["prompt"] = .string(prompt) }
                 let names = ["--once": "at", "--repeat": "repeat", "--time": "time", "--minute": "minute", "--weekday": "weekday", "--title": "title", "--mode": "mode", "--model": "model"]
                 for (flag, name) in names {
                     if let value = flags[flag]?.first { arguments[name] = .string(value) }

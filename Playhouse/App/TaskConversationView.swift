@@ -296,10 +296,15 @@ struct TaskConversationView: View {
         !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isStopLandingOnOwnSend || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
     }
 
-    /// A new task can use either schedule; an existing conversation can schedule a one-time message.
+    /// A new task can use either schedule, and a recurring template can be edited; an existing
+    /// conversation can schedule a one-time message.
     var canSchedule: Bool {
-        guard let boardTask = task as? BoardTask, !isReadOnly, !boardTask.isRecurringScheduleTemplate else { return false }
-        return true
+        task is BoardTask && !isReadOnly
+    }
+
+    /// The schedule saved on the task, which the hint edits.
+    var savedSchedule: ComposerSchedule? {
+        (task as? BoardTask).flatMap(ComposerSchedule.init(task:))
     }
 
     var isExistingConversation: Bool {
@@ -578,7 +583,9 @@ struct TaskConversationView: View {
                let mode = ConversationMode(rawValue: savedMode) {
                 conversationMode = mode
             }
-            if let boardTask = task as? BoardTask, let schedule = ComposerSchedule(task: boardTask) {
+            // A task that hasn't started reopens with Send in schedule mode. An existing
+            // conversation's scheduled message stays apart from the composer, so Send still sends.
+            if let schedule = savedSchedule, !isExistingConversation {
                 composerSchedule = schedule
                 scheduleDraft = schedule
             }

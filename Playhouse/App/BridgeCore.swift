@@ -883,7 +883,9 @@ extension BridgeRequest {
             prompt: arguments["prompt"]?.string ?? "",
             imageDataURLs: arguments["images"]?.strings ?? [],
             mode: mode,
-            modelID: modelID
+            modelID: modelID,
+            // Without a prompt the task is only rescheduled.
+            keepsPayload: arguments["prompt"] == nil && (arguments["images"]?.strings ?? []).isEmpty
         )
     }
 }

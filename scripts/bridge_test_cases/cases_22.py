@@ -917,7 +917,7 @@ class BridgeTestCases22:
         self.assertIsNone(cleared.get("schedule"))
         self.assertIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "Clearing the schedule puts the task on the board.")
         self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
-    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, Send still sends ordinary messages while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove returns it to an empty composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     def test_scheduled_task_edit_and_page_management(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-edit")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -951,6 +951,24 @@ class BridgeTestCases22:
         once_id = self.create_task("Sent by hand", provider="claude")["id"]
         fire_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
         self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at))[0])
+        # Without a prompt, a scheduled task is only moved: its saved prompt and mode stay.
+        moved_at = fire_at + datetime.timedelta(hours=2)
+        payload_flag, _ = self.call_cli("schedule", "set", once_id, "--once", self.schedule_iso(moved_at), "--mode", "plan", expected_status=2)
+        self.assert_failure(payload_flag, "invalid_argument")
+        blank, _ = self.call_cli("schedule", "set", once_id, "--prompt", "  ", "--once", self.schedule_iso(moved_at), expected_status=2)
+        self.assert_failure(blank, "invalid_argument")
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--once", self.schedule_iso(moved_at))[0])
+        moved = self.assert_success(self.call_cli("task", "get", once_id)[0])
+        self.assertEqual(moved["schedule"]["scheduledAt"], self.schedule_iso(moved_at), "Rescheduling persists the new time across fresh reads.")
+        self.assertEqual(moved["schedule"]["prompt"], "Tell me a story.", "Rescheduling keeps the scheduled prompt.")
+        self.assertEqual(moved["schedule"]["mode"], "default", "Rescheduling keeps the scheduled mode.")
+        self.assertEqual(moved["savedPrompt"], "Tell me a story.")
+        self.assertEqual(moved["status"], "Backlog")
+        self.assertEqual(self.fixture_user_prompts(executable), [], "Rescheduling starts no turn.")
+        unscheduled_id = self.create_task("Never scheduled", provider="claude")["id"]
+        no_prompt, _ = self.call_cli("schedule", "set", unscheduled_id, "--once", self.schedule_iso(moved_at), expected_status=2)
+        self.assert_failure(no_prompt, "invalid_argument")
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unscheduled_id)[0]).get("schedule"), "A task with no schedule still needs a prompt.")
         self.assert_success(self.call_cli("conversation", "send", once_id, "--message", "Tell me a story.", extra_environment=environment)[0])
         self.assertIsNone(self.wait_for_task_status(once_id, {"Review"}).get("schedule"), "Sending by hand ends a one-time schedule.")
         sent = len(self.fixture_user_prompts(executable))
@@ -959,6 +977,24 @@ class BridgeTestCases22:
         )[0])
         self.assertEqual((later["fired"], later["dropped"]), ([], []), "A started task's schedule sends nothing more.")
         self.assertEqual(len(self.fixture_user_prompts(executable)), sent)
+
+        # An existing conversation's scheduled message can be moved without restating it.
+        follow_up_at = fire_at + datetime.timedelta(hours=4)
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Send a scheduled follow-up.", "--once", self.schedule_iso(follow_up_at))[0])
+        self.assert_success(self.call_cli("task", "draft", once_id, "--text", "An unrelated draft.")[0])
+        moved_follow_up_at = follow_up_at + datetime.timedelta(hours=1)
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--once", self.schedule_iso(moved_follow_up_at))[0])
+        moved_follow_up = self.assert_success(self.call_cli("task", "get", once_id)[0])
+        self.assertEqual(moved_follow_up["schedule"]["scheduledAt"], self.schedule_iso(moved_follow_up_at))
+        self.assertEqual(moved_follow_up["schedule"]["prompt"], "Send a scheduled follow-up.", "Moving a scheduled message keeps its prompt.")
+        self.assertEqual(moved_follow_up["savedPrompt"], "An unrelated draft.", "Moving a scheduled message leaves the composer draft alone.")
+        self.assertEqual(moved_follow_up["status"], "Review")
+        self.assertEqual(len(self.fixture_user_prompts(executable)), sent, "Moving a scheduled message sends nothing.")
+        cancelled = self.assert_success(self.call_cli("schedule", "clear", once_id)[0])
+        self.assertIsNone(cancelled.get("schedule"))
+        self.assertEqual(cancelled["savedPrompt"], "An unrelated draft.", "Clearing a scheduled message keeps the composer draft already there.")
+        self.assertEqual(len(self.fixture_user_prompts(executable)), sent, "Clearing a scheduled message sends nothing.")
+
     # case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images live in the provider thread, an earlier image is deferred the same way and read back from the thread. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
     def test_conversation_history_defers_earlier_images(self):
         claude = self.data_directory / "claude-fixture-deferred-images"

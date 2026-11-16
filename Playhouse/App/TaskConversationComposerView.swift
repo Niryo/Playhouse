@@ -77,8 +77,8 @@ extension TaskConversationView {
                 selectedEffort: pickerEffort.rawValue
             ),
             schedule: canSchedule ? .init(
-                on: composerSchedule != nil,
-                help: composerSchedule != nil ? "Change the schedule" : "Schedule this task",
+                on: composerSchedule != nil || savedSchedule != nil,
+                help: composerSchedule != nil || savedSchedule != nil ? "Change the schedule" : "Schedule this task",
                 open: isSchedulePopoverPresented
             ) : nil,
             primary: primary
@@ -208,7 +208,7 @@ extension TaskConversationView {
                 if isSchedulePopoverPresented {
                     isSchedulePopoverPresented = false
                 } else {
-                    scheduleDraft = composerSchedule ?? defaultScheduleDraft(kind: .once)
+                    scheduleDraft = composerSchedule ?? savedSchedule ?? defaultScheduleDraft(kind: .once)
                     isSchedulePopoverPresented = true
                 }
             },
@@ -228,8 +228,9 @@ extension TaskConversationView {
 
     // MARK: Scheduling
 
-    /// The hint for choosing when the task runs. Done only arms Send's schedule mode; the
-    /// schedule is saved when Send is pressed.
+    /// The hint for choosing when the task runs. For a task that isn't scheduled yet, Done only
+    /// arms Send's schedule mode and Send saves the schedule; for a task that is already
+    /// scheduled, Done saves the edited schedule at once.
     var scheduleHint: some View {
         let validation = scheduleDraft.validationMessage()
         return VStack(alignment: .leading, spacing: 12) {
@@ -311,14 +312,10 @@ extension TaskConversationView {
                 .accessibilityIdentifier("schedule-summary")
 
             HStack {
-                if composerSchedule != nil {
-                    Button("Remove") {
-                        composerSchedule = nil
-                        isSchedulePopoverPresented = false
-                        composerDraft.focusRequest += 1
-                    }
+                if composerSchedule != nil || savedSchedule != nil {
+                    Button("Remove", action: removeSchedule)
                     .buttonHoverPointer()
-                    .nativeHelp("Stop scheduling; Send runs the task now")
+                    .nativeHelp(isExistingConversation ? "Cancel the scheduled message" : "Stop scheduling; Send runs the task now")
                     .accessibilityIdentifier("schedule-remove-button")
                 }
                 Spacer()
@@ -327,7 +324,7 @@ extension TaskConversationView {
                     .keyboardShortcut(.defaultAction)
                     .disabled(validation != nil)
                     .buttonHoverPointer()
-                    .nativeHelp("Use this schedule; Send then schedules the task")
+                    .nativeHelp(savedSchedule != nil ? "Save this schedule" : "Use this schedule; Send then schedules the task")
                     .accessibilityIdentifier("schedule-done-button")
             }
         }
