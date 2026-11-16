@@ -774,7 +774,197 @@ extension PlayhouseUITests {
         XCTAssertTrue((composer.value as? String ?? "").contains("Continue working"), "The composer accepts the next request.")
         attachScreenshot(named: "Plugin editor after daemon restart")
     }
-    // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
+    // case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation) before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
+    func test_plugin_enable_disable_and_builtins() throws {
+        func listed() throws -> [String: [String: Any]] {
+            let plugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+            return Dictionary(plugins.compactMap { plugin in (plugin["id"] as? String).map { ($0, plugin) } }, uniquingKeysWith: { first, _ in first })
+        }
+        let initial = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        XCTAssertEqual(initial.map { $0["id"] as? String }, ["changes"], "Only the built-ins are listed before any plugin is installed.")
+        let changes = try XCTUnwrap(initial.first)
+        XCTAssertEqual(changes["builtIn"] as? Bool, true)
+        XCTAssertEqual(changes["enabled"] as? Bool, true)
+        XCTAssertEqual(changes["valid"] as? Bool, true)
+        XCTAssertEqual(changes["placement"] as? String, "conversationSidebar")
+        XCTAssertEqual(changes["presentation"] as? String, "inline")
+
+        // A task whose root has one real change.
+        let repository = runDirectory.appendingPathComponent("inline-plugin-changes", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try "Baseline.\n".write(to: repository.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "init", "--initial-branch=main")
+        try runGit(repository, "config", "user.name", "Playhouse UI Test")
+        try runGit(repository, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(repository, "add", "notes.txt")
+        try runGit(repository, "commit", "-m", "Baseline")
+        try "Edited by the fixture.\n".write(to: repository.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        _ = try runCLI(["task", "create", "--title", "Inline plugin task", "--prompt", "Fixture task description.", "--root", repository.path])
+
+        let hello = #"Playhouse.render(h(Text, { testID: "hello" }, "Hello"));"#
+        let savedPage = #"function Saved() { var props = Playhouse.useProps(); return h(Text, { testID: "page-state" }, "page saved " + ((props.state || {}).clicks || 0)); } Playhouse.render(h(Saved));"#
+        try writeInstalledPlugin("hello-board", source: savedPage, placement: "mainSidebar", presentation: "page", name: "Hello Board", icon: "hand.wave")
+        try writeInstalledPlugin("workspace-probe", source: Self.pluginWorkspaceSource, placement: "conversationSidebar", presentation: "inline", name: "Workspace Probe", icon: "eye")
+        try writeInstalledPlugin("inline-composer", source: hello, placement: "composerActions", presentation: "inline")
+        launchApp(defaultParent: fixture.parent.path)
+        let refreshed = try listedAfterRefresh()
+        XCTAssertEqual(refreshed["workspace-probe"]?["valid"] as? Bool, true, "\(refreshed)")
+        XCTAssertEqual(refreshed["inline-composer"]?["valid"] as? Bool, false, "An inline plugin is valid only at the conversation sidebar.")
+        XCTAssertTrue((refreshed["inline-composer"]?["errors"] as? [String] ?? []).contains { $0.contains("only in the conversation sidebar") })
+
+        // An installed inline plugin renders in place beside the built-in Changes section.
+        openTask(named: "Inline plugin task")
+        XCTAssertTrue(element("workspace-changes-title").waitToExist(timeout: 10), "The built-in Changes section shows.")
+        XCTAssertTrue(element("workspace-change-unviewed-notes.txt").waitToExist(timeout: 10))
+        let probe = element("plugin-surface-workspace-probe")
+        XCTAssertTrue(probe.waitToExist(timeout: 10), "The inline plugin renders as a section of the task sidebar.")
+        XCTAssertFalse(element("plugin-entry-workspace-probe").exists, "An inline plugin has no entry button.")
+        XCTAssertFalse(probe.descendants(matching: .any)["plugin-surface-title"].exists, "An inline plugin has no surface header.")
+        XCTAssertEqual(pluginText(element("probe-rail")), "expanded")
+        XCTAssertEqual(pluginText(element("probe-open")), "no diff")
+        let revisionText = pluginText(element("probe-revision"))
+        let startRevision = try XCTUnwrap(Int(revisionText.replacingOccurrences(of: "revision ", with: "")), revisionText)
+        element("probe-refresh").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("probe-status")) == "refresh: ok" }, timeout: 10))
+        XCTAssertTrue(waitUntil({ (Int(self.pluginText(self.element("probe-revision")).replacingOccurrences(of: "revision ", with: "")) ?? 0) > startRevision }, timeout: 10),
+                      "refreshWorkspace raises the workspace revision: \(pluginText(element("probe-revision")))")
+        attachScreenshot(named: "An installed inline plugin below the built-in Changes section")
+        // A plugin's saved values come back as props.state.
+        assertText("probe-state", equals: "saved 0")
+        element("probe-save").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("probe-state")) == "saved 1" }, timeout: 10), "Playhouse.setState comes back as props.state.")
+        XCTAssertEqual(pluginText(element("probe-status")), "save: ok")
+        let probeState = try XCTUnwrap(try runCLI(["plugin", "state", "--id", "workspace-probe"])["result"] as? [String: Any])
+        XCTAssertEqual(probeState["state"] as? [String: Int], ["clicks": 1], "The saved state is stored.")
+        // Changes keeps whether its section is collapsed in its plugin state.
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
+        element("toggle-workspace-changes-section-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-notes.txt").waitForNonExistence(timeout: 5), "Collapsing Changes hides its list.")
+        XCTAssertTrue(waitUntil({ ((try? listed())?["changes"]?["state"] as? [String: Bool]) == ["collapsed": true] }, timeout: 10),
+                      "Changes saves its collapsed state as its plugin state.")
+        element("probe-open-diff").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitToExist(timeout: 10), "openDiff opens the window's diff view.")
+        assertText("workspace-diff-title", equals: "notes.txt")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("probe-open")) == "open notes.txt" }, timeout: 10), "The open diff reaches the plugin's props.")
+        XCTAssertEqual(pluginText(element("probe-status")), "openDiff: ok")
+        attachScreenshot(named: "An inline plugin's openDiff opens the diff view")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(element("workspace-diff-overlay").waitForNonExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("probe-open")) == "no diff" }, timeout: 10))
+        element("hide-task-sidebar-button").click()
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5))
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("probe-rail")) == "rail" }, timeout: 10), "On the hidden sidebar's rail the plugin reads that it is on the rail.")
+        element("show-task-sidebar-button").click()
+        XCTAssertTrue(element("workspace-changes-title").waitToExist(timeout: 10))
+        assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
+        element("toggle-workspace-changes-section-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-notes.txt").waitToExist(timeout: 10), "Expanding Changes shows its list again.")
+
+        // The Plugins menu: a built-in offers only Disable.
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Built-in Plugins"].waitToExist(timeout: 5), "The Plugins menu has a Built-in Plugins section.")
+        let changesRow = menu.menuItems["Changes — Conversation sidebar"]
+        XCTAssertTrue(changesRow.waitToExist(timeout: 5))
+        XCTAssertTrue(waitForStableFrame(changesRow))
+        changesRow.hover()
+        let disableChanges = changesRow.descendants(matching: .menuItem)["Disable"]
+        XCTAssertTrue(waitUntil({ disableChanges.isHittable }, timeout: 5), "A built-in's submenu offers Disable.")
+        XCTAssertFalse(changesRow.descendants(matching: .menuItem)["Delete…"].exists, "A built-in can't be deleted.")
+        XCTAssertFalse(changesRow.descendants(matching: .menuItem)["Edit…"].exists, "A built-in can't be edited.")
+        attachScreenshot(named: "The Built-in Plugins section offers Disable for Changes")
+        disableChanges.click()
+        XCTAssertTrue(waitForDisappearance(element("workspace-changes-title"), timeout: 10), "Disabling Changes removes its section.")
+        XCTAssertTrue(probe.exists, "Other inline plugins stay.")
+        XCTAssertEqual(try listed()["changes"]?["enabled"] as? Bool, false, "The disabled state is stored.")
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Changes — Conversation sidebar (Disabled)"].waitToExist(timeout: 5), "The menu labels a disabled plugin.")
+        attachScreenshot(named: "A disabled built-in is labeled in the Plugins menu and its section is gone")
+        app.typeKey(.escape, modifierFlags: [])
+        clickInstalledPluginAction("Enable", pluginRow: "Changes — Conversation sidebar (Disabled)")
+        XCTAssertTrue(element("workspace-changes-title").waitToExist(timeout: 10), "Enabling Changes brings its section back.")
+        XCTAssertTrue(element("workspace-change-unviewed-notes.txt").waitToExist(timeout: 10))
+        XCTAssertEqual(try listed()["changes"]?["enabled"] as? Bool, true)
+
+        // An installed plugin offers Disable beside Edit and Delete.
+        openTask(named: "Inline plugin task")
+        clickInstalledPluginAction("Disable", pluginRow: "Workspace Probe — Conversation sidebar")
+        XCTAssertTrue(waitForDisappearance(probe, timeout: 10), "Disabling an installed inline plugin removes its section.")
+        XCTAssertTrue(element("workspace-changes-title").exists)
+        menu.click()
+        let probeRow = menu.menuItems["Workspace Probe — Conversation sidebar (Disabled)"]
+        XCTAssertTrue(probeRow.waitToExist(timeout: 5))
+        XCTAssertTrue(waitForStableFrame(probeRow))
+        probeRow.hover()
+        let enableProbe = probeRow.descendants(matching: .menuItem)["Enable"]
+        XCTAssertTrue(waitUntil({ enableProbe.isHittable }, timeout: 5))
+        XCTAssertTrue(probeRow.descendants(matching: .menuItem)["Edit…"].exists, "An installed plugin keeps Edit.")
+        XCTAssertTrue(probeRow.descendants(matching: .menuItem)["Delete…"].exists, "An installed plugin keeps Delete.")
+        attachScreenshot(named: "A disabled installed plugin offers Enable beside Edit and Delete")
+        enableProbe.click()
+        XCTAssertTrue(probe.waitToExist(timeout: 10), "Enabling restores the inline plugin.")
+
+        // Disabled plugins and plugin states persist across a relaunch.
+        _ = try runCLI(["plugin", "state", "--id", "changes", "--key", "collapsed", "--value", "true"])
+        clickInstalledPluginAction("Disable", pluginRow: "Changes — Conversation sidebar")
+        XCTAssertTrue(waitForDisappearance(element("workspace-changes-title"), timeout: 10))
+        relaunchApp()
+        openTask(named: "Inline plugin task")
+        XCTAssertTrue(probe.waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("probe-state")) == "saved 1" }, timeout: 10), "A plugin's saved state survives a relaunch.")
+        XCTAssertFalse(element("workspace-changes-title").exists, "A disabled built-in stays hidden after a relaunch.")
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Changes — Conversation sidebar (Disabled)"].waitToExist(timeout: 5), "The menu still labels it Disabled after a relaunch.")
+        attachScreenshot(named: "After a relaunch Changes stays disabled and the plugin keeps its saved state")
+        app.typeKey(.escape, modifierFlags: [])
+        clickInstalledPluginAction("Enable", pluginRow: "Changes — Conversation sidebar (Disabled)")
+        XCTAssertTrue(element("workspace-changes-title").waitToExist(timeout: 10))
+        assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
+        XCTAssertFalse(element("workspace-change-unviewed-notes.txt").exists, "Changes comes back collapsed, as its state saved.")
+        assertText("collapsed-workspace-changes-section-count", equals: "Changes to review: 1")
+        attachScreenshot(named: "Enabled again after a relaunch, Changes comes back collapsed")
+        element("toggle-workspace-changes-section-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-notes.txt").waitToExist(timeout: 10))
+
+        element("back-to-board-button").click()
+        let boardEntry = element("plugin-entry-hello-board")
+        XCTAssertTrue(boardEntry.waitToExist(timeout: 10))
+        // An open surface closes when its plugin is disabled.
+        boardEntry.click()
+        let boardSurface = element("plugin-surface-hello-board")
+        XCTAssertTrue(boardSurface.waitToExist(timeout: 10), "The plugin's page opens.")
+        assertText("page-state", equals: "page saved 0")
+        _ = try runCLI(["plugin", "state", "--id", "hello-board", "--key", "clicks", "--value", "2"])
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("page-state")) == "page saved 2" }, timeout: 10), "An open page receives its newly saved state.")
+        XCTAssertTrue(boardSurface.exists, "Saving state keeps the page open.")
+        _ = try runCLI(["plugin", "disable", "--id", "hello-board"])
+        XCTAssertTrue(waitForDisappearance(boardSurface, timeout: 10), "Disabling a plugin closes its open surface.")
+        XCTAssertTrue(waitForDisappearance(boardEntry, timeout: 10), "A plugin disabled through the CLI loses its button.")
+        _ = try runCLI(["plugin", "enable", "--id", "hello-board"])
+        XCTAssertTrue(boardEntry.waitToExist(timeout: 10), "Enabling it through the CLI restores its button.")
+
+        assertCLIError(try runCLI(["plugin", "delete", "--id", "changes"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["plugin", "edit", "--id", "changes"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["plugin", "render", "--plugin", "changes"], expectedStatus: 2), code: "invalid_argument")
+        _ = try runCLI(["plugin", "disable", "--id", "workspace-probe"])
+        assertCLIError(try runCLI(["plugin", "render", "--plugin", "workspace-probe"], expectedStatus: 1), code: "unavailable")
+        assertCLIError(try runCLI(["plugin", "disable", "--id", "no-such-plugin"], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["plugin", "enable", "--id", "../plugins"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["plugin", "state", "--id", "no-such-plugin"], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["plugin", "state", "--id", "workspace-probe", "--key", " ", "--value", "1"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["plugin", "author", "--placement", "composerActions", "--name", "Inline", "--presentation", "inline"], expectedStatus: 2), code: "invalid_argument")
+        _ = try runCLI(["plugin", "delete", "--id", "workspace-probe"])
+        try writeInstalledPlugin("workspace-probe", source: Self.pluginWorkspaceSource, placement: "conversationSidebar", presentation: "inline", name: "Workspace Probe", icon: "eye")
+        let reinstalled = try XCTUnwrap(try listedAfterRefresh()["workspace-probe"])
+        XCTAssertEqual(reinstalled["enabled"] as? Bool, true, "A deleted plugin installed again starts enabled.")
+        XCTAssertEqual((reinstalled["state"] as? [String: Any])?.isEmpty, true, "A deleted plugin installed again has no saved state.")
+    }
+    /// `plugin refresh`'s plugins by id.
+    private func listedAfterRefresh() throws -> [String: [String: Any]] {
+        let plugins = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        return Dictionary(plugins.compactMap { plugin in (plugin["id"] as? String).map { ($0, plugin) } }, uniquingKeysWith: { first, _ in first })
+    }
+    // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports only the built-in plugins at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
     func test_plugin_install_refresh_and_delete() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertTrue(element("scheduled-tasks-button").waitToExist(timeout: 15))
@@ -805,6 +995,8 @@ extension PlayhouseUITests {
         attachScreenshot(named: "The Plugins menu lists installed plugins with their placement")
 
         // Hovering opens the submenu; a click followed by Right Arrow can instead move on to the next menu bar menu.
+        // The menu is still opening; a pointer aimed at the row's first frame can miss it.
+        XCTAssertTrue(waitForStableFrame(helloItem))
         helloItem.hover()
         let editAction = helloItem.descendants(matching: .menuItem)["Edit…"]
         let deleteAction = helloItem.descendants(matching: .menuItem)["Delete…"]
@@ -819,6 +1011,8 @@ extension PlayhouseUITests {
         menu.click()
 
         let invalidMenuItem = menu.menuItems["Throws — Chat input actions"]
+        XCTAssertTrue(invalidMenuItem.waitToExist(timeout: 5))
+        XCTAssertTrue(waitForStableFrame(invalidMenuItem))
         invalidMenuItem.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).hover()
         let pluginError = invalidMenuItem.descendants(matching: .menuItem)
             .matching(NSPredicate(format: "title CONTAINS %@", "Plugin exploded")).firstMatch
@@ -835,6 +1029,8 @@ extension PlayhouseUITests {
 
         menu.click()
         let currentHelloItem = menu.menuItems["Hello Board — Main sidebar"]
+        XCTAssertTrue(currentHelloItem.waitToExist(timeout: 5))
+        XCTAssertTrue(waitForStableFrame(currentHelloItem))
         currentHelloItem.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).hover()
         let currentDeleteAction = currentHelloItem.descendants(matching: .menuItem)["Delete…"]
         XCTAssertTrue(waitUntil({ currentDeleteAction.isHittable }, timeout: 5),
@@ -1018,7 +1214,7 @@ extension PlayhouseUITests {
         try writeInstalledPlugin("fetcher", source: source, placement: "mainSidebar", presentation: "page", name: "Fetcher", icon: "network")
         launchApp(defaultParent: fixture.parent.path)
         let plugins = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
-        XCTAssertEqual(plugins.map { $0["valid"] as? Bool }, [true], "A plugin that fetches on mount stays valid: \(plugins)")
+        XCTAssertEqual(plugins.filter { $0["builtIn"] as? Bool != true }.map { $0["valid"] as? Bool }, [true], "A plugin that fetches on mount stays valid: \(plugins)")
 
         let entry = element("plugin-entry-fetcher")
         XCTAssertTrue(entry.waitToExist(timeout: 15))

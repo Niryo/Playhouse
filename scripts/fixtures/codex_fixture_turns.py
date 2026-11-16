@@ -1,10 +1,13 @@
 """Turn setup and scenario dispatch for the Codex fixture."""
 
+import codex_fixture_protocol as _protocol
 import codex_fixture_turn_control as _control
 import codex_fixture_turn_scenarios as _scenarios
 
 
 def start_turn(runtime, _session_state, message):
+    # The message was sent but Codex hasn't acknowledged the turn, so it has no turn ID yet.
+    _protocol.wait_for_release(runtime, "turn-start", "Codex received turn/start and has not answered it.")
     if _session_state.mode.endswith(("-context-compaction", "-auto-threshold")):
         order_history = _session_state.serial_history()
         order_history.setdefault("rpcOrder", []).append({"method": "turn/start"})

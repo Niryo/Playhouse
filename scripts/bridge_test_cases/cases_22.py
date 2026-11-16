@@ -301,10 +301,166 @@ class BridgeTestCases22:
         texts, _ = self.history_texts(created["id"], environment)
         self.assertEqual(texts.count("After restart."), 1)
         self.assertTrue(marker.exists(), "No task outcome nudge was sent.")
-    # case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
+    # case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation) before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
+    def test_plugin_enable_disable_and_builtins(self):
+        def listed():
+            return self.assert_success(self.call_cli("plugin", "list")[0])
+        def by_id(response):
+            return {plugin["id"]: plugin for plugin in response["plugins"]}
+
+        initial = listed()
+        changes = initial["plugins"][0]
+        self.assertEqual((changes["id"], changes["name"], changes["placement"], changes["presentation"]), ("changes", "Changes", "conversationSidebar", "inline"))
+        self.assertEqual((changes["builtIn"], changes["valid"], changes["enabled"], changes["errors"]), (True, True, True, []))
+        self.assertEqual([plugin["id"] for plugin in initial["plugins"]], ["changes"], "Only the built-ins are listed before any plugin is installed.")
+
+        hello = 'Playhouse.render(h(Text, { testID: "hello" }, "Hello"));'
+        self.write_installed_plugin("hello-board", hello, placement="mainSidebar", presentation="page")
+        self.write_installed_plugin("workspace-probe", self.PLUGIN_WORKSPACE_SOURCE, placement="conversationSidebar", presentation="inline")
+        self.write_installed_plugin("board-probe", self.PLUGIN_WORKSPACE_SOURCE, placement="mainSidebar", presentation="page")
+        self.write_installed_plugin("inline-composer", hello, placement="composerActions", presentation="inline")
+        self.write_installed_plugin("changes", hello, placement="conversationSidebar", presentation="inline")
+        refreshed = self.assert_success(self.call_cli("plugin", "refresh")[0])
+        self.assertEqual([plugin["id"] for plugin in refreshed["plugins"]], ["changes", "board-probe", "changes", "hello-board", "inline-composer", "workspace-probe"],
+                         "The built-ins come first, then the installed plugins by id.")
+        self.assertTrue(refreshed["plugins"][0]["builtIn"])
+        shadow = refreshed["plugins"][2]
+        self.assertFalse(shadow["builtIn"])
+        self.assertFalse(shadow["valid"])
+        self.assertTrue(any("is a built-in plugin's id" in error for error in shadow["errors"]), shadow["errors"])
+        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"][3:]}
+        self.assertTrue(plugins["workspace-probe"]["valid"], plugins["workspace-probe"]["errors"])
+        self.assertFalse(plugins["inline-composer"]["valid"])
+        self.assertTrue(any("only in the conversation sidebar" in error for error in plugins["inline-composer"]["errors"]), plugins["inline-composer"]["errors"])
+        self.assertTrue(all(plugin["enabled"] and not plugin["builtIn"] for plugin in plugins.values()))
+        (self.plugins_folder() / "changes" / "plugin.json").unlink()
+        (self.plugins_folder() / "changes" / "index.js").unlink()
+        (self.plugins_folder() / "changes").rmdir()
+
+        # A built-in is compiled in: it can only be disabled.
+        for command in (("delete",), ("edit",)):
+            refused = self.call_cli("plugin", *command, "--id", "changes", expected_status=2)[0]
+            self.assert_failure(refused, "invalid_argument")
+            self.assertIn("built-in", refused["error"]["message"])
+        self.assert_failure(self.call_cli("plugin", "render", "--plugin", "changes", expected_status=2)[0], "invalid_argument")
+
+        # An inline conversation sidebar plugin gets the workspace and the sidebar, and its calls are recorded.
+        self.prepare_workspace_changes()
+        task = self.create_task(title="Inline plugin task", roots=[self.changes])
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"])[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-revision")), "revision 0")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-open")), "no diff")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-rail")), "expanded")
+        opened_props = json.dumps({"workspace": {"revision": 3, "openDiff": {"repository": str(self.changes), "path": "shared.txt", "group": "unviewed"}}, "sidebar": {"collapsed": True}})
+        railed = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--props", opened_props)[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(railed["tree"], "probe-revision")), "revision 3")
+        self.assertEqual(self.plugin_text(self.plugin_node(railed["tree"], "probe-open")), "open shared.txt")
+        self.assertEqual(self.plugin_text(self.plugin_node(railed["tree"], "probe-rail")), "rail")
+        refreshed_call = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--event", "probe-refresh:onPress")[0])
+        self.assertEqual(refreshed_call["hostCalls"], [{"kind": "ui", "name": "refreshWorkspace", "arguments": {}, "ok": True, "result": None}])
+        self.assertEqual(self.plugin_text(self.plugin_node(refreshed_call["tree"], "probe-status")), "refresh: ok")
+        diffed = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--event", "probe-open-diff:onPress")[0])
+        self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in diffed["hostCalls"]], [("bridge", "task.changes.list", True), ("ui", "openDiff", True)])
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task["id"])[0])
+        self.assertEqual(diffed["hostCalls"][1]["arguments"]["path"], inventory["unviewed"][0]["path"], "openDiff gets the listed entry.")
+        self.assertEqual(self.plugin_text(self.plugin_node(diffed["tree"], "probe-status")), "openDiff: ok")
+
+        # Each plugin keeps its own saved values, which come back as props.state.
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-state")), "saved 0")
+        self.assertEqual(by_id(listed())["workspace-probe"]["state"], {})
+        saved = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--event", "probe-save:onPress")[0])
+        self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in saved["hostCalls"]], [("bridge", "plugin.state.set", True)])
+        self.assertEqual(saved["hostCalls"][0]["arguments"], {"pluginID": "workspace-probe", "key": "clicks", "value": 1})
+        self.assertEqual(self.plugin_text(self.plugin_node(saved["tree"], "probe-status")), "save: ok")
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe")[0]), {"pluginID": "workspace-probe", "state": {"clicks": 1}})
+        self.assertEqual(by_id(listed())["workspace-probe"]["state"], {"clicks": 1}, "plugin list reports each plugin's state.")
+        reread = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"])[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(reread["tree"], "probe-state")), "saved 1", "A new run of the plugin gets its saved state.")
+        revision = listed()["revision"]
+        stored = self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "theme", "--value", '{"accent": "blue"}')[0])
+        self.assertEqual(stored, {"pluginID": "workspace-probe", "state": {"clicks": 1, "theme": {"accent": "blue"}}, "revision": revision + 1},
+                         "Saving bumps the plugins revision, so windows hand mounted plugins the new state.")
+        removed = self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "theme", "--value", "null")[0])
+        self.assertEqual(removed["state"], {"clicks": 1}, "null removes a key.")
+        collapsed = self.assert_success(self.call_cli("plugin", "state", "--id", "changes", "--key", "collapsed", "--value", "true")[0])
+        self.assertEqual(collapsed["state"], {"collapsed": True}, "A built-in keeps its state the same way.")
+        self.assertEqual(listed()["plugins"][0]["state"], {"collapsed": True})
+        self.assert_success(self.call_cli("plugin", "state", "--id", "changes", "--key", "collapsed", "--value", "false")[0])
+        before = listed()["revision"]
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "no-such-plugin", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "no-such-plugin", "--key", "a", "--value", "1", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", " ", "--value", "1", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "a", "--value", "{not json", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "a", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(listed()["revision"], before, "A refused state change does not bump the revision.")
+        self.assertEqual(by_id(listed())["workspace-probe"]["state"], {"clicks": 1})
+
+        board = self.assert_success(self.call_cli("plugin", "render", "--plugin", "board-probe")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(board["tree"], "probe-revision")), "no workspace", "Only the conversation sidebar gets the workspace.")
+        self.assertEqual(self.plugin_text(self.plugin_node(board["tree"], "probe-rail")), "no sidebar")
+        for event, label in (("probe-refresh", "refresh"), ("probe-open-diff", "openDiff")):
+            refused = self.assert_success(self.call_cli("plugin", "render", "--plugin", "board-probe", "--event", f"{event}:onPress")[0])
+            self.assertEqual(self.plugin_text(self.plugin_node(refused["tree"], "probe-status")), f"{label}: unavailable")
+            self.assertEqual(refused["hostCalls"][-1]["error"]["code"], "unavailable")
+
+        # Disabling persists, hides nothing from the list, and stops the plugin from running.
+        revision = listed()["revision"]
+        disabled = self.assert_success(self.call_cli("plugin", "disable", "--id", "workspace-probe")[0])
+        self.assertEqual(disabled, {"pluginID": "workspace-probe", "enabled": False, "revision": revision + 1})
+        self.assertFalse(by_id(listed())["workspace-probe"]["enabled"], "A fresh CLI process reads the disabled state.")
+        self.assert_failure(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], expected_status=1)[0], "unavailable")
+        self.assert_success(self.call_cli("plugin", "disable", "--id", "hello-board")[0])
+        self.write_installed_plugin("hello-board", 'throw new Error("Disabled plugins never run");', placement="mainSidebar", presentation="page")
+        quiet = by_id(self.assert_success(self.call_cli("plugin", "refresh")[0]))["hello-board"]
+        self.assertEqual((quiet["valid"], quiet["enabled"], quiet["errors"]), (True, False, []), "A disabled plugin is not run when plugins are refreshed.")
+        enabled = self.assert_success(self.call_cli("plugin", "enable", "--id", "hello-board")[0])
+        self.assertEqual((enabled["pluginID"], enabled["enabled"]), ("hello-board", True))
+        loud = by_id(self.assert_success(self.call_cli("plugin", "refresh")[0]))["hello-board"]
+        self.assertFalse(loud["valid"], "Enabled again, it runs and its error shows.")
+        self.assertTrue(any("Disabled plugins never run" in error for error in loud["errors"]), loud["errors"])
+        self.assert_success(self.call_cli("plugin", "enable", "--id", "workspace-probe")[0])
+        again = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"])[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(again["tree"], "probe-revision")), "revision 0", "Enabling restores the plugin.")
+
+        built_in = self.assert_success(self.call_cli("plugin", "disable", "--id", "changes")[0])
+        self.assertEqual((built_in["pluginID"], built_in["enabled"]), ("changes", False))
+        self.assertFalse(listed()["plugins"][0]["enabled"])
+        # A fresh daemon (as after a relaunch) reads the disabled ids and states back from settings.
+        environment = self.restart_service_environment("claude", "/usr/bin/false")
+        try:
+            fresh = by_id(self.assert_success(self.call_cli("plugin", "list", extra_environment=environment)[0]))
+            self.assertFalse(fresh["changes"]["enabled"])
+            self.assertEqual(fresh["workspace-probe"]["state"], {"clicks": 1})
+            self.assertTrue(fresh["hello-board"]["enabled"])
+        finally:
+            self.kill_daemon(environment)
+        self.assert_success(self.call_cli("plugin", "enable", "--id", "changes")[0])
+        self.assertTrue(listed()["plugins"][0]["enabled"])
+
+        # Authoring refuses an inline plugin where it can't sit.
+        refused = self.call_cli("plugin", "author", "--placement", "composerActions", "--name", "Inline", "--presentation", "inline", expected_status=2)[0]
+        self.assert_failure(refused, "invalid_argument")
+        self.assertIn("only in the conversation sidebar", refused["error"]["message"])
+
+        before = listed()["revision"]
+        self.assert_failure(self.call_cli("plugin", "disable", "--id", "no-such-plugin", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "enable", "--id", "../plugins", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "disable", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(listed()["revision"], before, "A refused enable or disable does not bump the revision.")
+
+        # A deleted plugin installed again starts enabled, with no saved state.
+        self.assert_success(self.call_cli("plugin", "disable", "--id", "board-probe")[0])
+        self.assert_success(self.call_cli("plugin", "state", "--id", "board-probe", "--key", "clicks", "--value", "4")[0])
+        self.assert_success(self.call_cli("plugin", "delete", "--id", "board-probe")[0])
+        self.write_installed_plugin("board-probe", self.PLUGIN_WORKSPACE_SOURCE, placement="mainSidebar", presentation="page")
+        reinstalled = by_id(self.assert_success(self.call_cli("plugin", "refresh")[0]))["board-probe"]
+        self.assertEqual((reinstalled["enabled"], reinstalled["state"]), (True, {}))
+    # case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports only the built-in plugins at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
     def test_plugin_install_refresh_and_delete(self):
         empty = self.assert_success(self.call_cli("plugin", "list")[0])
-        self.assertEqual(empty["plugins"], [])
+        self.assertEqual([(plugin["id"], plugin["builtIn"]) for plugin in empty["plugins"]], [("changes", True)], "Only the built-ins are listed at first.")
         self.assertSamePath(empty["directory"], self.plugins_folder())
         self.assertEqual(empty["revision"], 0)
 
@@ -322,7 +478,7 @@ class BridgeTestCases22:
 
         refreshed = self.assert_success(self.call_cli("plugin", "refresh")[0])
         self.assertEqual(refreshed["revision"], 1, "A refresh tells the window to reload.")
-        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"]}
+        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"] if not plugin["builtIn"]}
         self.assertEqual(sorted(plugins), ["bad-placement", "bad-presentation", "hello-board", "no-manifest", "no-script", "throws", "unknown-atom", "wrong-id"],
                          "Every plugin folder is listed, and a stray file is not.")
         board = plugins["hello-board"]
@@ -448,7 +604,7 @@ class BridgeTestCases22:
         base, closed = self.start_plugin_fetch_server()
         source = f'var BASE = "{base}";\nvar CLOSED = "{closed}";\n' + self.PLUGIN_FETCH_SOURCE
         self.write_installed_plugin("fetcher", source, placement="mainSidebar", presentation="page")
-        plugins = self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"]
+        plugins = [plugin for plugin in self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"] if not plugin["builtIn"]]
         self.assertEqual([(plugin["id"], plugin["valid"], plugin["errors"]) for plugin in plugins], [("fetcher", True, [])],
                          "A plugin that fetches on mount stays valid.")
 
@@ -782,3 +938,140 @@ class BridgeTestCases22:
         )[0])
         self.assertEqual((later["fired"], later["dropped"]), ([], []), "A started task's schedule sends nothing more.")
         self.assertEqual(len(self.fixture_user_prompts(executable)), sent)
+    # case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images live in the provider thread, an earlier image is deferred the same way and read back from the thread. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
+    def test_conversation_history_defers_earlier_images(self):
+        claude = self.data_directory / "claude-fixture-deferred-images"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
+        claude.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        codex = self.data_directory / "codex-fixture-image-serial-success"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", codex)
+        codex.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude), "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex)}
+        first_image = self.data_directory / "first-turn.png"
+        first_image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        second_image = self.data_directory / "second-turn.jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(first_image), "--out", str(second_image)], check=True, capture_output=True)
+
+        task_id = self.create_task("Claude deferred images", roots=[self.primary])["id"]
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude")[0])
+        key = task_id.upper()
+
+        def reads(event):
+            return [entry for entry in self.diagnostic_events() if entry.get("event") == event and entry.get("taskID") == key]
+
+        def image_messages(history):
+            return [message for message in history["messages"] if message["imageDataURLs"] or message.get("imagesDeferred")]
+
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Say hello.", "--image", first_image, extra_environment=fixtures
+        )[0])
+        second = self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Long history turn 2.", "--image", second_image, "--defer-images",
+            extra_environment=fixtures,
+        )[0])
+        full = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=fixtures)[0])
+        first_message, second_message = image_messages(full)
+        self.assertEqual((first_message["text"], second_message["text"]), ("Say hello.", "Long history turn 2."))
+        self.assertTrue(first_message["imageDataURLs"][0].startswith("data:image/png;base64,"))
+        self.assertTrue(second_message["imageDataURLs"][0].startswith("data:image/jpeg;base64,"))
+        self.assertTrue(all("imagesDeferred" not in message for message in full["messages"]), "Plain history is complete and unmarked.")
+
+        def assert_first_deferred(history, context):
+            deferred, inline = image_messages(history)
+            self.assertEqual((deferred["id"], deferred["imageDataURLs"], deferred.get("imagesDeferred")), (first_message["id"], [], True), context)
+            self.assertEqual(inline, second_message, f"{context}: the newest turn keeps its image and is not marked.")
+
+        assert_first_deferred(second, "The history a send returns defers the earlier turn's image")
+        deferred = self.assert_success(self.call_cli("conversation", "history", task_id, "--defer-images", extra_environment=fixtures)[0])
+        assert_first_deferred(deferred, "Complete history defers the earlier turn's image")
+        self.assertEqual(
+            [{**message, "imageDataURLs": [], "imagesDeferred": None} for message in deferred["messages"]],
+            [{**message, "imageDataURLs": [], "imagesDeferred": None} for message in full["messages"]],
+            "Deferring changes nothing but the image data.",
+        )
+        page = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--defer-images", extra_environment=fixtures
+        )[0])
+        assert_first_deferred(page, "The newest page defers the earlier turn's image")
+        self.assertEqual(page["earlierMessageCount"], 0)
+        newest_read = reads("conversation.history.read")[-1]
+        self.assertEqual(
+            (newest_read["source"], newest_read["deferredImageMessageCount"], newest_read["hydratedImageMessageCount"]), ("stored-page", "1", "1")
+        )
+        earlier = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--before", second_message["id"], "--defer-images", extra_environment=fixtures
+        )[0])
+        self.assertEqual([(message["id"], message["imageDataURLs"], message.get("imagesDeferred")) for message in image_messages(earlier)],
+                         [(first_message["id"], [], True)], "An earlier page defers every image it holds.")
+        earlier_read = reads("conversation.history.read")[-1]
+        self.assertEqual((earlier_read["deferredImageMessageCount"], earlier_read["hydratedImageMessageCount"]), ("1", "0"))
+        plain_read_count = len(reads("conversation.history.read"))
+        self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=fixtures)[0])
+        plain_read = reads("conversation.history.read")[plain_read_count]
+        self.assertEqual((plain_read["deferredImageMessageCount"], plain_read["hydratedImageMessageCount"]), ("0", "2"))
+
+        imageless = next(message for message in full["messages"] if message["role"] == "assistant")
+        images = self.assert_success(self.call_cli(
+            "conversation", "images", task_id, "--message", second_message["id"], "--message", imageless["id"], "--message", first_message["id"],
+            extra_environment=fixtures,
+        )[0])
+        self.assertEqual({entry["id"]: entry["imageDataURLs"] for entry in images},
+                         {first_message["id"]: first_message["imageDataURLs"], second_message["id"]: second_message["imageDataURLs"]},
+                         "The named messages' exact images are returned, and nothing for a message without images.")
+        self.assertEqual({entry["id"]: entry.get("turnID") for entry in images},
+                         {first_message["id"]: first_message.get("turnID"), second_message["id"]: second_message.get("turnID")})
+        images_read = reads("conversation.images.read")[-1]
+        self.assertEqual((images_read["requestedMessageCount"], images_read["returnedMessageCount"], images_read["readProviderThread"]), ("3", "2", "false"))
+        self.assertEqual(self.assert_success(self.call_cli(
+            "conversation", "images", task_id, "--message", imageless["id"], "--message", "no-such-message", extra_environment=fixtures
+        )[0]), [])
+        self.assert_failure(self.call_cli("conversation", "images", task_id, expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli(
+            "conversation", "images", str(uuid.uuid4()), "--message", first_message["id"], expected_status=3
+        )[0], "not_found")
+
+        third = self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Say hello.", "--defer-images", extra_environment=fixtures
+        )[0])
+        self.assertEqual([(message["id"], message["imageDataURLs"], message.get("imagesDeferred")) for message in image_messages(third)],
+                         [(first_message["id"], [], True), (second_message["id"], [], True)],
+                         "Once a later turn starts, both earlier images are deferred.")
+        self.assertEqual(reads("conversation.history.read")[-1]["deferredImageMessageCount"], "2")
+        with sqlite3.connect(self.conversation_database(), timeout=30) as connection:
+            payloads = [row[0] for row in connection.execute("SELECT payload FROM conversation_messages WHERE task_id = ?", (key,))]
+        self.assertTrue(payloads)
+        self.assertFalse(any("imagesDeferred" in payload for payload in payloads), "The mark describes one read and is never stored.")
+        resumed = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=fixtures)[0])
+        self.assertEqual(image_messages(resumed), [first_message, second_message], "Plain history still carries every image after deferred reads.")
+
+        # Codex keeps a user's images in its thread, so a deferred one is read back from there.
+        codex_task = self.create_task("Codex deferred images", roots=[self.primary], provider="codex")["id"]
+        self.assert_success(self.call_cli("conversation", "send", codex_task, "--image", first_image, extra_environment=fixtures)[0])
+        self.assert_success(self.call_cli(
+            "conversation", "send", codex_task, "--message", "Continue using the earlier image as context.", extra_environment=fixtures
+        )[0])
+        codex_full = self.assert_success(self.call_cli("conversation", "history", codex_task, extra_environment=fixtures)[0])
+        codex_image_message, = image_messages(codex_full)
+        self.assertEqual(codex_image_message["role"], "user")
+        codex_key = codex_task.upper()
+
+        def codex_image_read():
+            images = self.assert_success(self.call_cli(
+                "conversation", "images", codex_task, "--message", codex_image_message["id"], extra_environment=fixtures
+            )[0])
+            self.assertEqual([(entry["id"], entry["imageDataURLs"]) for entry in images],
+                             [(codex_image_message["id"], codex_image_message["imageDataURLs"])])
+            read = [entry for entry in self.diagnostic_events()
+                    if entry.get("event") == "conversation.images.read" and entry.get("taskID") == codex_key][-1]
+            return read["returnedMessageCount"], read["readProviderThread"]
+
+        codex_deferred = self.assert_success(self.call_cli("conversation", "history", codex_task, "--defer-images", extra_environment=fixtures)[0])
+        self.assertEqual([(message["id"], message["imageDataURLs"], message.get("imagesDeferred")) for message in image_messages(codex_deferred)],
+                         [(codex_image_message["id"], [], True)], "A Codex thread's earlier image is deferred too.")
+        self.assertEqual(codex_image_read(), ("1", "true"), "A Codex image is read from its thread.")

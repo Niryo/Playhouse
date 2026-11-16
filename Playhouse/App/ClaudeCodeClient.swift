@@ -461,6 +461,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         runner.finalMessageHandler = onFinalMessage
         runner.progressMessageHandler = onProgressMessage
         runner.steerMessageHandler = onSteerMessage
+        runner.turnStartedHandler = onTurnStarted
         runner.activityHandler = onActivity
         runner.actionRequestHandler = onActionRequest
         runner.userInputHandler = onUserInput

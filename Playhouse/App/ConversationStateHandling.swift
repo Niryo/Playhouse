@@ -704,15 +704,35 @@ extension TaskConversationView {
         userInputOtherSelected = []
     }
 
-    func showLocalSteer(_ text: String, imageDataURLs: [String] = []) {
+    /// Shows a steer in the transcript right away, before the provider has it.
+    func showLocalSteer(_ steer: PendingLocalSteer) {
         // The steer follows the text that streamed before it.
         flushStreamedTextDeltas()
-        if let index = unconfirmedStreamedSteers.firstIndex(where: { MentionText.sameUserText($0, text) }) {
+        if let index = unconfirmedStreamedSteers.firstIndex(where: { MentionText.sameUserText($0, steer.text) }) {
             unconfirmedStreamedSteers.remove(at: index)
             return
         }
-        unechoedLocalSteers.append(text)
-        messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
+        pendingLocalSteers.append(steer)
+        unechoedLocalSteers.append(steer.text)
+        messages.append(ConversationMessage(id: steer.id, role: .user, text: steer.text, imageDataURLs: steer.imageDataURLs))
+    }
+
+    /// The provider has the steer, or it was withdrawn: history owns it from here.
+    func settleLocalSteer(_ steer: PendingLocalSteer, delivered: Bool) {
+        pendingLocalSteers.removeAll { $0.id == steer.id }
+        guard !delivered else { return }
+        messages.removeAll { $0.id == steer.id }
+        if let index = unechoedLocalSteers.firstIndex(of: steer.text) { unechoedLocalSteers.remove(at: index) }
+    }
+
+    /// Delivers steers to the daemon after the ones before them, so they reach the agent in
+    /// the order the user sent them while the composer stays free.
+    func deliverSteerInOrder(_ delivery: @escaping @MainActor () async -> Void) {
+        let previous = steerDeliveryTail
+        steerDeliveryTail = Task { @MainActor in
+            await previous?.value
+            await delivery()
+        }
     }
 
     /// Autosaves typed text while the agent responds as well as between turns. Composer
@@ -878,25 +898,74 @@ extension TaskConversationView {
         providerNotice = parts.joined(separator: " ")
     }
 
+    /// Stops the response. The window shows the stop immediately; the daemon and the provider
+    /// catch up in the background, however long the turn takes to wind down.
     func pauseResponse() {
-        guard isResponding, !isPausingResponse else { return }
+        guard !isPausingResponse else { return }
+        // Text that streamed before the click is part of what was stopped.
+        flushStreamedTextDeltas()
         isPausingResponse = true
+        isResponding = false
+        hasPausedResponse = true
+        interruptsInFlight += 1
+        let generation = sendGeneration
         Task { @MainActor in
             do {
-                let interrupted = try await conversationManager.interrupt(taskID: task.id)
-                guard interrupted else {
-                    isPausingResponse = false
-                    return
+                var interrupted = try await conversationManager.interrupt(taskID: task.id)
+                // This window's send may not have reached the daemon when the stop did.
+                var remainingAttempts = 50
+                while !interrupted, remainingAttempts > 0, isPausingResponse,
+                      sendGeneration == generation, sendsInFlight > 0 {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    remainingAttempts -= 1
+                    interrupted = try await conversationManager.interrupt(taskID: task.id)
                 }
+                interruptsInFlight -= 1
+                guard sendGeneration == generation, isPausingResponse else { return }
+                if !interrupted {
+                    // Nothing was left to stop: the turn ended on its own first.
+                    await conversationRuntime.refresh()
+                    guard sendGeneration == generation, isPausingResponse else { return }
+                    if !conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
+                        hasPausedResponse = false
+                    }
+                    // A turn that is still running, or a send of this window's that the stop
+                    // never caught up with, goes back to showing Stop.
+                    if providerTurnIsActive || sendsInFlight > 0 {
+                        isPausingResponse = false
+                        isResponding = true
+                        hasPausedResponse = false
+                        return
+                    }
+                }
+                settleLocalStopIfDone()
             } catch {
+                interruptsInFlight -= 1
+                guard sendGeneration == generation, isPausingResponse else { return }
+                // The turn is still running, so the window goes back to showing it.
                 isPausingResponse = false
+                hasPausedResponse = false
+                isResponding = sendsInFlight > 0 || providerTurnIsActive
                 errorMessage = error.localizedDescription
             }
         }
     }
 
+    /// Ends the local stop once the daemon answered it and the stopped turn is over, so a
+    /// later turn shows its Stop button again.
+    func settleLocalStopIfDone() {
+        guard isPausingResponse, interruptsInFlight == 0, sendsInFlight == 0, !providerTurnIsActive else { return }
+        isPausingResponse = false
+    }
+
+    /// The user stopped a message this window has not handed to the daemon yet. A new message
+    /// waits until it is handed over, so it can neither overtake the stop nor be stopped by it.
+    var isStopLandingOnOwnSend: Bool {
+        isPausingResponse && sendsAwaitingDispatch > 0
+    }
+
     func continueResponse() {
-        guard hasPausedResponse else { return }
+        guard hasPausedResponse, !isStopLandingOnOwnSend else { return }
         sendMessage(overrideText: "Continue with the same request from where you left off.")
     }
 

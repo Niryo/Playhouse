@@ -10,7 +10,7 @@ struct AtomStack<Content: View>: View {
     var body: some View {
         if !props.hasSurface {
             stack
-                .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true)
+                .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true)
         } else if props.capsule == true {
             surfaced(Capsule())
         } else {
@@ -57,7 +57,7 @@ struct AtomStack<Content: View>: View {
                     .allowsHitTesting(false)
                 }
             }
-            .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, frame: false)
+            .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true, frame: false)
     }
 
     /// Where the children sit inside the surface: at the start of the axis and
@@ -101,6 +101,7 @@ struct AtomText: View {
         let string = props.text ?? children
         Text(verbatim: string)
             .lineSpacing(CGFloat(props.lineSpacing ?? 0))
+            .multilineTextAlignment(alignment)
             .atomFont(AtomFont.font(size: props.size, weight: props.weight, design: props.design, monospacedDigits: props.monospacedDigits == true))
             .tracking(CGFloat(props.tracking ?? 0))
             .atomForeground(props.color)
@@ -117,6 +118,14 @@ struct AtomText: View {
         case "head": .head
         case "middle": .middle
         default: .tail
+        }
+    }
+
+    private var alignment: TextAlignment {
+        switch props.align {
+        case "center": .center
+        case "trailing": .trailing
+        default: .leading
         }
     }
 }

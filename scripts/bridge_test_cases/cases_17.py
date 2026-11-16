@@ -685,7 +685,7 @@ class BridgeTestCases17:
         finally:
             hold.unlink(missing_ok=True)
             ready.unlink(missing_ok=True)
-    # case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event.
+    # case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event. A long turn that compacts twice shows each compaction where it happened: the first after the text and tool call written before it and before the summary message Claude Code continues from, the second between the messages written after the first and its own summary, never stacked after the turn's last message. Compaction rows stored without the message they follow are placed the same way, by when each compaction finished.
     def test_claude_compaction_shows_one_row(self):
         def compaction_rows(task_id, environment):
             history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
@@ -706,6 +706,55 @@ class BridgeTestCases17:
         self.assertEqual(rows[0]["status"], "completed")
         self.assertEqual((rows[0]["compaction"]["preTokens"], rows[0]["compaction"]["postTokens"]), (210000, 6000))
         self.assertEqual(len(self.assert_success(self.call_cli("task", "token-usage", threshold_task)[0])["contextCompactions"]), 1)
+
+        # A long turn that compacts twice keeps each row where it happened, not stacked after its last message.
+        def assert_compactions_in_turn_order(task_id):
+            history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+            turn_id = next(message["turnID"] for message in history["messages"] if message["text"] == "compact twice mid turn")
+            timeline = sorted(
+                [(message["timelineOrder"], message["text"]) for message in history["messages"] if message.get("turnID") == turn_id]
+                + [(row["timelineOrder"], f"compaction {row['compaction']['preTokens']}") for row in history["activities"]
+                   if row.get("isContextCompaction") and row.get("turnID") == turn_id]
+            )
+            entries = [entry for _, entry in timeline]
+            self.assertEqual(len(entries), len(set(order for order, _ in timeline)), f"Every row has its own place: {timeline}")
+            self.assertEqual(entries[:3], [
+                "compact twice mid turn", "Reading the build log before the first compaction.", "compaction 170000",
+            ], f"The first compaction follows the text written before it: {timeline}")
+            self.assertIn("Continued after the first compaction.", entries[3])
+            self.assertEqual(entries[4:6], ["Checking the log again between compactions.", "compaction 168000"],
+                             f"The second compaction sits between the messages it came between: {timeline}")
+            self.assertIn("Continued after the second compaction.", entries[6])
+            self.assertGreater(len(entries), 7, f"The turn's answer follows its last compaction: {timeline}")
+            self.assertEqual([row["status"] for row in compaction_rows(task_id, environment)], ["completed", "completed"])
+
+        long_tasks = []
+        for title in ("Compaction mid turn", "Stored compaction mid turn"):
+            long_tasks.append(self.assert_success(self.call_cli(
+                "task", "create", "--title", title, "--prompt", "Fixture task description.",
+                "--root", str(self.primary), "--provider", "claude"
+            )[0])["id"])
+            self.assert_success(self.call_cli(
+                "conversation", "send", long_tasks[-1], "--message", "compact twice mid turn", extra_environment=environment
+            )[0])
+        assert_compactions_in_turn_order(long_tasks[0])
+        # Rows stored before compactions recorded the message they follow are placed by when each compaction finished.
+        with sqlite3.connect(self.conversation_database(), timeout=30) as connection:
+            stored = connection.execute(
+                "SELECT turn_id, id, payload FROM conversation_activities WHERE task_id = ?", (long_tasks[1].upper(),)
+            ).fetchall()
+            stripped = 0
+            for turn_id, row_id, payload in stored:
+                activity = json.loads(payload)
+                if activity.get("isContextCompaction"):
+                    self.assertIsNotNone(activity.pop("afterMessageID", None), "A new compaction row records the message it follows.")
+                    connection.execute(
+                        "UPDATE conversation_activities SET payload = ? WHERE task_id = ? AND turn_id = ? AND id = ?",
+                        (json.dumps(activity), long_tasks[1].upper(), turn_id, row_id),
+                    )
+                    stripped += 1
+        self.assertEqual(stripped, 2)
+        assert_compactions_in_turn_order(long_tasks[1])
 
         executable = self.install_provider_fixture("claude", "claude-fixture-reattach-compaction")
         restart_environment = self.restart_service_environment("claude", executable)

@@ -62,6 +62,56 @@ final class WorkspaceSettingsManager {
 
     var pluginsRevision: Int { defaults.integer(forKey: WorkspaceSettings.pluginsRevisionKey) }
 
+    /// The plugins the user disabled: listed, but neither shown nor run.
+    var disabledPluginIDs: Set<String> { Set(defaults.stringArray(forKey: WorkspaceSettings.disabledPluginIDsKey) ?? []) }
+
+    func setPluginEnabled(_ id: String, _ enabled: Bool) {
+        var disabled = disabledPluginIDs
+        if enabled { disabled.remove(id) } else { disabled.insert(id) }
+        defaults.set(disabled.sorted(), forKey: WorkspaceSettings.disabledPluginIDsKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "pluginEnabled", "plugin": id, "value": String(enabled)])
+    }
+
+    /// Each plugin's own saved values, by plugin id: what `plugin.state.set` stored,
+    /// reported as `Playhouse.props.state`.
+    var pluginStates: [String: [String: PluginValue]] {
+        var states = defaults.data(forKey: WorkspaceSettings.pluginStatesKey)
+            .flatMap { try? JSONDecoder().decode([String: [String: PluginValue]].self, from: $0) } ?? [:]
+        // The Changes section's collapsed state, from before Changes was a built-in plugin.
+        if states[BuiltInPlugins.changesID]?["collapsed"] == nil,
+           defaults.object(forKey: WorkspaceSettings.workspaceChangesSectionCollapsedKey) != nil {
+            states[BuiltInPlugins.changesID, default: [:]]["collapsed"] = .bool(defaults.bool(forKey: WorkspaceSettings.workspaceChangesSectionCollapsedKey))
+        }
+        return states
+    }
+
+    func pluginState(_ id: String) -> [String: PluginValue] { pluginStates[id] ?? [:] }
+
+    /// Stores one of a plugin's values; null removes it. Returns the plugin's whole state.
+    @discardableResult
+    func setPluginState(_ id: String, key: String, value: PluginValue) -> [String: PluginValue] {
+        var states = pluginStates
+        var state = states[id] ?? [:]
+        state[key] = value == .null ? nil : value
+        states[id] = state.isEmpty ? nil : state
+        writePluginStates(states)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "pluginState", "plugin": id, "key": key])
+        return state
+    }
+
+    /// Forgets a deleted plugin's values, so one installed again under its id starts fresh.
+    func clearPluginState(_ id: String) {
+        var states = pluginStates
+        guard states.removeValue(forKey: id) != nil else { return }
+        writePluginStates(states)
+    }
+
+    private func writePluginStates(_ states: [String: [String: PluginValue]]) {
+        defaults.set(try? JSONEncoder().encode(states), forKey: WorkspaceSettings.pluginStatesKey)
+        // The legacy key is carried over once it is written.
+        defaults.removeObject(forKey: WorkspaceSettings.workspaceChangesSectionCollapsedKey)
+    }
+
     /// Tells every window to reload the installed plugins.
     @discardableResult
     func bumpPluginsRevision() -> Int {

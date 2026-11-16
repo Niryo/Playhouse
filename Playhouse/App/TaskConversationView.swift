@@ -18,6 +18,13 @@ struct TaskConversationView: View {
         let image: NSImage
     }
 
+    /// A steer the window shows before the provider has confirmed it.
+    struct PendingLocalSteer: Identifiable {
+        let id = UUID().uuidString
+        let text: String
+        let imageDataURLs: [String]
+    }
+
     /// An outlined pencil with a wide body, drawn on a 24-point grid. The SF Symbol pencil
     /// stays a thin stick at small sizes, which does not read as an edit button.
     struct EditPencilShape: Shape {
@@ -37,12 +44,6 @@ struct TaskConversationView: View {
             path.addLine(to: point(16.5, 11))
             return path
         }
-    }
-
-    struct ChangeRepositoryGroup: Identifiable {
-        let repository: String
-        let entries: [WorkspaceChangeEntry]
-        var id: String { repository }
     }
 
     struct GoalAchievementTimelineEntry: Codable, Identifiable, Equatable {
@@ -158,6 +159,11 @@ struct TaskConversationView: View {
     // window that starts here and runs to the newest message; opening a
     // conversation starts the window at the latest user turn.
     @State var oldestRenderedMessageID: String?
+    /// Images of messages whose history page left them out, by `deferredImageKey`,
+    /// read as their rows come up. An empty entry is a message that turned out to have none.
+    @State var deferredMessageImages: [String: [String]] = [:]
+    @State var deferredImageRequests: Set<String> = []
+    @State var deferredImageLoads: Set<String> = []
     /// An older page of history is being read to reveal above the window.
     @State var isLoadingEarlierConversationMessages = false
     /// Messages older than `messages` that the daemon still holds. History is
@@ -191,8 +197,9 @@ struct TaskConversationView: View {
     @State var subagentHistory: ConversationHistory?
     @State var isLoadingSubagent = false
     @State var subagentError: String?
-    @State var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [], mergingRepositories: [])
-    @State var isViewedSectionExpanded = false
+    /// `props.workspace.revision` for the conversation sidebar's plugins (Changes is one),
+    /// bumped whenever the task's folders may have changed.
+    @State var workspaceRevision = 0
     @AppStorage(WorkspaceSettings.taskSidebarCollapsedKey, store: WorkspaceSettings.preferencesStore) var isTaskSidebarCollapsed = false
     /// Add Plugin mode shows the sidebar expanded, so its placements are visible, without
     /// changing the saved collapsed preference it returns to.
@@ -203,19 +210,15 @@ struct TaskConversationView: View {
     @State var openConversationPlugin: PluginRecord?
     @State var isStartingPluginTask = false
     var isTaskSidebarShownCollapsed: Bool { isTaskSidebarCollapsed && !isPluginAddModeOn }
-    @AppStorage(WorkspaceSettings.workspaceChangesSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) var isChangesSectionCollapsed = false
-    /// The loading placeholder is for the first read only; later watcher refreshes keep the
-    /// current list (or empty state) on screen instead of flashing the spinner.
-    @State var hasLoadedChanges = false
-    @State var isLoadingChanges = false
-    @State var changesNeedRefresh = false
+    /// The open diff is rechecked one refresh at a time; a refresh asked for meanwhile runs once after.
+    @State var isRefreshingOpenDiff = false
+    @State var openDiffNeedsRefresh = false
     @State var changeWatcher: WorkspaceChangeWatcher?
     @State var isTerminalPresented = false
     @AppStorage(TerminalPanelLayout.widthKey, store: WorkspaceSettings.preferencesStore)
     var terminalPanelWidth = Double(TerminalPanelLayout.defaultWidth)
     @State var terminalResizeStartWidth: CGFloat?
     @StateObject var terminalSession = TaskTerminalSession()
-    @State var changesError: String?
     @State var selectedChange: WorkspaceChangeEntry?
     @State var selectedDiff: WorkspaceFileDiff?
     @State var isDiffPresented = false
@@ -235,12 +238,29 @@ struct TaskConversationView: View {
     @State var isPreparingSubmittedMessage = false
     @State var conflictResolutionAttempt = 0
     @State var hasPausedResponse = false
+    /// The user stopped the response. The window shows the stop at once and keeps showing it
+    /// while the provider winds the turn down (or finishes launching it, only to stop it), so
+    /// until that turn is really over its activity doesn't bring the Stop button back.
     @State var isPausingResponse = false
+    @State var interruptsInFlight = 0
+    /// Identifies this window's newest send. An older send still unwinding after a stop leaves
+    /// the composer state to the newer one.
+    @State var sendGeneration = 0
+    @State var sendsInFlight = 0
+    /// Sends of this window still saving their prompt, before the daemon has them.
+    @State var sendsAwaitingDispatch = 0
     @State var queuedMessages: [QueuedConversationMessage] = []
     /// A `.dispatching` follow-up is claimed for delivery: either reserved for a
     /// steer, or sent as its own turn and kept in the store until that whole turn
     /// ends. Only the others are still waiting for the user.
-    var waitingFollowUps: [QueuedConversationMessage] { queuedMessages.filter { $0.state != .dispatching } }
+    var waitingFollowUps: [QueuedConversationMessage] {
+        queuedMessages.filter { $0.state != .dispatching && !steeringQueuedMessageIDs.contains($0.id) }
+    }
+    /// Steers shown in the transcript that the provider hasn't confirmed yet. They are
+    /// delivered in the background, one at a time and in order.
+    @State var pendingLocalSteers: [PendingLocalSteer] = []
+    @State var steeringQueuedMessageIDs: Set<UUID> = []
+    @State var steerDeliveryTail: Task<Void, Never>?
     @State var isSubmittingLiveMessage = false
     @State var userInputRequest: ConversationUserInputRequest?
     // The live snapshot can still carry a request this window just answered.
@@ -276,7 +296,7 @@ struct TaskConversationView: View {
     @FocusState var isComposerFocused: Bool
 
     var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isStopLandingOnOwnSend || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
     }
 
     /// A new task can use either schedule; an existing conversation can schedule a one-time message.
@@ -305,11 +325,6 @@ struct TaskConversationView: View {
     var conversationRuntime: ConversationRuntimeModel {
         guard let runtimeModel else { preconditionFailure("The conversation runtime model is not in the environment.") }
         return runtimeModel
-    }
-
-    var canPauseResponse: Bool {
-        guard let threadID = task.activeConversationID else { return false }
-        return conversationRuntime.canInterruptActiveTurn(threadID: threadID)
     }
 
     var provider: ConversationProvider { task.conversationProvider }
@@ -343,10 +358,6 @@ struct TaskConversationView: View {
     var startImplementingUnavailableReason: String? {
         guard !task.isStandaloneChat else { return nil }
         return PlanImplementationHandoff.unavailableReason(workspaceRootPaths: task.workspaceRootPaths)
-    }
-
-    var isConversationTurnActive: Bool {
-        conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "")
     }
 
     var archivedFollowUpHint: String {
@@ -426,20 +437,13 @@ struct TaskConversationView: View {
     /// Messages read per history request: the newest page on open, then one
     /// more page each time the rendered window reaches the oldest loaded one.
     static let historyPageSize = 80
-    /// Above this many changed files the sidebar shows a notice instead of the list, which would stall layout.
-    static let maxRenderedChangeCount = 1000
 
     /// First message of the newest user turn. Opening a conversation renders
     /// this message and everything after it, so the latest question sits at the
     /// top of the viewport with its answer below.
     var latestConversationTurnStartID: String? {
         let allMessages = conversationMessages
-        // Prompts Playhouse sends on its own are not a turn the user started: anchoring the
-        // window there would hide the conversation the recovery is continuing.
-        // When redaction has replaced every user message, the placeholders are all there is to anchor on.
-        return allMessages.last(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) && !$0.isPlayhouseSent })?.id
-            ?? allMessages.last(where: { $0.role == .user })?.id
-            ?? allMessages.last?.id
+        return ConversationMessage.latestTurnStartIndex(in: allMessages).map { allMessages[$0].id }
     }
 
     /// The window runs from `oldestRenderedMessageID` to the newest message.
@@ -695,6 +699,15 @@ struct TaskConversationView: View {
             if !isTurnActive, !isReadOnly {
                 refreshQueuedMessages()
             }
+            // A stop already shows. The stopped turn winding down, or starting late only to
+            // be stopped, changes nothing until it is over.
+            if isPausingResponse {
+                settleLocalStopIfDone()
+                return
+            }
+            // A send made right after a stop owns the responding state while the stopped
+            // turn's send is still unwinding.
+            if sendsInFlight > 1 { return }
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
                 && (task.status == .inProgress || task.status == .waitingResponse)
             guard let taskThreadID = task.activeConversationID else {
@@ -714,7 +727,8 @@ struct TaskConversationView: View {
             // The daemon clears the submitted prompt after the turn ends, which can be after
             // this window saw it end. A turn parked on a question is not over, even while the
             // runtime snapshot lags, so leave the answer flow to settle it.
-            if cleared, isResponding, !providerTurnIsActive,
+            if cleared { settleLocalStopIfDone() }
+            if cleared, isResponding, !providerTurnIsActive, sendsInFlight == 0,
                userInputRequest == nil, providerPendingUserInputRequest == nil,
                !conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "") {
                 isResponding = false
@@ -773,7 +787,13 @@ struct TaskConversationView: View {
                 persistGoalAchievementTimeline()
             }
         }
-        .task(id: task.workspaceRootPaths) {
+        .task(id: WorkspaceWatchKey(roots: task.workspaceRootPaths, isWatched: !pluginRegistry.inlinePlugins(for: .conversationSidebar).isEmpty)) {
+            // Only a sidebar plugin reads the folders, so with none (Changes disabled) nothing watches them.
+            guard !pluginRegistry.inlinePlugins(for: .conversationSidebar).isEmpty else {
+                changeWatcher?.stop()
+                changeWatcher = nil
+                return
+            }
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
             guard !Task.isCancelled else { return }
             changeWatcher?.stop()
@@ -908,4 +928,11 @@ extension View {
             .accessibilityLabel(label)
             .accessibilityIdentifier(id)
     }
+}
+
+/// What the task's folder watcher watches: the task's folders, and only while a conversation
+/// sidebar plugin reads them.
+struct WorkspaceWatchKey: Hashable {
+    let roots: [String]
+    let isWatched: Bool
 }

@@ -9,13 +9,40 @@ extension ConversationManager {
 
     func interrupt(taskID: UUID) async throws -> Bool {
         PlayhouseDiagnostics.record("conversation.interrupt.started", fields: ["taskID": taskID.uuidString])
+        // A send this daemon accepted that doesn't own the turn yet (it is on its way to the
+        // turn reservation, or waiting behind the turn being stopped) is stopped with it: it
+        // gives up at its first launch checkpoint instead of starting a turn after the stop.
+        let stoppedWaitingSend = ConversationTurnLaunch.requestStopOfWaitingSends(taskID)
+        // A turn that is still launching (preparing worktrees, starting its thread or its
+        // provider process) has nothing to interrupt yet. The stop is recorded so the launch
+        // gives up at its next checkpoint, or, once the provider turn exists, is interrupted
+        // below. Either way the task leaves In Progress now.
+        var launchPauseRevision: Int?
+        if stoppedWaitingSend || (ConversationTurnLaunch.isLaunching(taskID) && !canInterruptProviderTurn(taskID)) {
+            launchPauseRevision = try await tasks.transitionLifecycleStatus(
+                taskID,
+                from: .inProgress,
+                to: .waitingResponse
+            )
+            if ConversationTurnLaunch.isLaunching(taskID), !canInterruptProviderTurn(taskID) {
+                ConversationTurnLaunch.requestStop(taskID)
+                guard await ConversationTurnLaunch.settled(taskID) == .turnStarted else {
+                    PlayhouseDiagnostics.record("conversation.interrupt.finished", fields: [
+                        "taskID": taskID.uuidString,
+                        "interrupted": "true",
+                        "stoppedBeforeTurnStarted": "true"
+                    ])
+                    return true
+                }
+            }
+        }
         let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else {
             PlayhouseDiagnostics.record("conversation.interrupt.skipped", fields: [
                 "taskID": taskID.uuidString,
                 "reason": "no_thread"
             ])
-            return false
+            return stoppedWaitingSend
         }
         let providerClient = client(for: task)
         guard providerClient.isTurnActive(threadID: threadID)
@@ -24,7 +51,7 @@ extension ConversationManager {
                 "taskID": taskID.uuidString,
                 "reason": "no_active_turn"
             ])
-            return false
+            return stoppedWaitingSend
         }
         // A user-requested stop is a resumable pause. Persist that intent before
         // asking the provider so the task leaves In Progress as soon as Stop is
@@ -34,8 +61,21 @@ extension ConversationManager {
             taskID,
             from: .inProgress,
             to: .waitingResponse
-        )
-        let interrupted: Bool
+        ) ?? launchPauseRevision
+        // A stop already on its way to the provider covers this turn; asking again would
+        // only reach the provider after the turn is gone. This stop shares that one's outcome,
+        // unless it already stopped a message of its own that was waiting.
+        guard ConversationTurnLaunch.beginProviderStop(taskID) else {
+            let joined = stoppedWaitingSend ? true : await ConversationTurnLaunch.providerStopOutcome(taskID)
+            PlayhouseDiagnostics.record("conversation.interrupt.finished", fields: [
+                "taskID": taskID.uuidString,
+                "interrupted": String(joined),
+                "joinedStopInFlight": "true"
+            ])
+            return joined
+        }
+        var interrupted = false
+        defer { ConversationTurnLaunch.endProviderStop(taskID, interrupted: interrupted) }
         do {
             interrupted = try await providerClient.interruptActiveTurn(threadID: threadID)
         } catch {
@@ -46,7 +86,7 @@ extension ConversationManager {
             }
             throw error
         }
-        if !interrupted, let pauseRevision {
+        if !interrupted, !stoppedWaitingSend, let pauseRevision {
             _ = try await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: pauseRevision)
         }
         PlayhouseDiagnostics.record("conversation.interrupt.finished", fields: [
@@ -55,7 +95,7 @@ extension ConversationManager {
             "provider": task.conversationProvider.rawValue,
             "interrupted": String(interrupted)
         ])
-        return interrupted
+        return interrupted || stoppedWaitingSend
     }
 
     func steer(taskID: UUID, text: String, imageDataURLs: [String] = []) async throws -> Bool {
@@ -64,11 +104,40 @@ extension ConversationManager {
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
+        // A steer sent while the turn is still launching is delivered as soon as the provider
+        // turn exists, instead of missing it and running as a turn of its own.
+        await waitForAcceptedSendToLaunch(taskID)
+        if ConversationTurnLaunch.isLaunching(taskID), !canInterruptProviderTurn(taskID) {
+            switch await ConversationTurnLaunch.settled(taskID) {
+            case .turnStarted: break
+            // The user stopped the message this steer was meant for, so it must not go on
+            // to run as a turn of its own.
+            case .stopped: throw ConversationTurnLaunch.stoppedBeforeStart
+            case .ended: return false
+            }
+        }
         let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else { return false }
         let steeredText = await expandMentions(normalizedText, for: task)
         // The running turn records and streams the steered input itself.
         return try await client(for: task).steerActiveTurn(threadID: threadID, text: steeredText, imageDataURLs: imageDataURLs)
+    }
+
+    /// Whether the task's provider already has a turn that takes an interrupt or a steer.
+    private func canInterruptProviderTurn(_ taskID: UUID) -> Bool {
+        guard let task = try? tasks.conversationSubject(taskID), let threadID = task.activeConversationID else { return false }
+        return client(for: task).canInterruptActiveTurn(threadID: threadID)
+    }
+
+    /// A send this daemon accepted reaches its launch within moments; a stop or steer that
+    /// arrives in between waits for it instead of finding no turn at all.
+    private func waitForAcceptedSendToLaunch(_ taskID: UUID) async {
+        var remainingChecks = 100
+        while remainingChecks > 0, ConversationTurnLaunch.hasWaitingSend(taskID),
+              !ConversationTurnLaunch.isLaunching(taskID), !ConversationTurnEvents.isActive(taskID) {
+            try? await Task.sleep(for: .milliseconds(20))
+            remainingChecks -= 1
+        }
     }
 
     /// `text` with the context block that tells the provider what its `@` mentions refer to.
@@ -244,6 +313,12 @@ extension ConversationManager {
             ConversationTurnEvents.publish(taskID, update)
         }
         defer { Self.bumpVisibleRevision(taskID) }
+        activeSendTaskIDs.insert(taskID)
+        defer { activeSendTaskIDs.remove(taskID) }
+        ConversationTurnLaunch.sendWaiting(taskID)
+        PlayhouseDiagnostics.recordAndFlush("conversation.send.accepted", fields: ["taskID": taskID.uuidString])
+        var ownsTurnReservation = false
+        defer { if !ownsTurnReservation { ConversationTurnLaunch.sendStoppedWaiting(taskID, ownsTurn: false) } }
         let task = try tasks.conversationSubject(taskID)
         if !task.isStandaloneChat, !isPlayhouseNudge, !text.hasPrefix(Self.pullRequestAutopilotPromptMarker) {
             try await tasks.clearPullRequestAutopilotSignature(taskID)
@@ -259,8 +334,6 @@ extension ConversationManager {
         let operationClient = client(for: task)
         operationClient.beginConversationOperation()
         defer { operationClient.finishConversationOperation() }
-        activeSendTaskIDs.insert(taskID)
-        defer { activeSendTaskIDs.remove(taskID) }
         let isStandaloneChat = task.isStandaloneChat
         let standaloneChatManager = isStandaloneChat ? try? tasks.standaloneChatManager() : nil
         // Capture the signal after this send owns the turn reservation. Capturing before
@@ -271,6 +344,10 @@ extension ConversationManager {
             history = try await tasks.withConversationTurnReservation(taskID) {
                 ConversationTurnEvents.begin(taskID)
                 defer { ConversationTurnEvents.end(taskID) }
+                ConversationTurnLaunch.begin(taskID)
+                defer { ConversationTurnLaunch.end(taskID) }
+                ownsTurnReservation = true
+                ConversationTurnLaunch.sendStoppedWaiting(taskID, ownsTurn: true)
                 // Only the reservation holder owns the applying marker: take it for
                 // a recovery, or drop one a crashed recovery left behind.
                 try self.transcripts.mutate(taskID, turns: .none) { transcript in
@@ -379,8 +456,9 @@ extension ConversationManager {
                 }
             }
         } catch {
-            if retainQueuedMessagesOnFailure, let threadID = try? tasks.conversationSubject(taskID).activeConversationID {
-                try? tasks.retainQueuedMessagesForUserAction(taskID: taskID, threadID: threadID)
+            // Follow-ups queued before the conversation was named have no conversation ID.
+            if retainQueuedMessagesOnFailure, let subject = try? tasks.conversationSubject(taskID) {
+                try? tasks.retainQueuedMessagesForUserAction(taskID: taskID, threadID: subject.activeConversationID ?? "")
                 onUpdate(ConversationUpdate(type: "queue_changed"))
             }
             throw error
@@ -401,4 +479,107 @@ extension ConversationManager {
     /// Goes back to the turns that were running when this service's previous daemon exited:
     /// agents keep running across a daemon restart, so each such turn is followed again by this
     /// daemon, and a turn whose agent is gone is settled as interrupted.
+}
+
+/// A task's turn from the moment its send owns the turn reservation until the provider has a
+/// turn to control. A stop or steer requested in that window is held here, so it is never
+/// dropped just because the provider turn doesn't exist yet.
+@MainActor
+enum ConversationTurnLaunch {
+    private static var launching: Set<UUID> = []
+    private static var stopRequests: Set<UUID> = []
+    /// Sends accepted for a task that don't own its turn reservation yet, and how many of
+    /// them a stop arrived for.
+    private static var waitingSends: [UUID: Int] = [:]
+    private static var stoppedWaitingSends: [UUID: Int] = [:]
+    private static var waiters: [UUID: [CheckedContinuation<End, Never>]] = [:]
+    /// Tasks whose running turn a stop is asking the provider to interrupt right now.
+    private static var providerStops: Set<UUID> = []
+    private static var providerStopWaiters: [UUID: [CheckedContinuation<Bool, Never>]] = [:]
+
+    /// How a launch ended: with a provider turn, by the user's stop, or by the send ending
+    /// for any other reason.
+    enum End { case turnStarted, stopped, ended }
+
+    static func isLaunching(_ taskID: UUID) -> Bool { launching.contains(taskID) }
+
+    static func begin(_ taskID: UUID) { launching.insert(taskID) }
+
+    /// The provider turn exists: held stops and steers go to it now.
+    static func turnStarted(_ taskID: UUID) { settle(taskID, turnStarted: true) }
+
+    /// Whether a send accepted for the task has yet to take its turn reservation. Shared by
+    /// every bridge request, each of which runs on a manager of its own.
+    static func hasWaitingSend(_ taskID: UUID) -> Bool { waitingSends[taskID, default: 0] > 0 }
+
+    /// The send is over, with or without a provider turn.
+    static func end(_ taskID: UUID) { settle(taskID, turnStarted: false) }
+
+    static func sendWaiting(_ taskID: UUID) { waitingSends[taskID, default: 0] += 1 }
+
+    /// A waiting send took the turn reservation (`ownsTurn`) or gave up. One a stop arrived
+    /// for starts its launch already stopped.
+    static func sendStoppedWaiting(_ taskID: UUID, ownsTurn: Bool) {
+        let waiting = waitingSends[taskID, default: 0] - 1
+        waitingSends[taskID] = waiting > 0 ? waiting : nil
+        let stopped = stoppedWaitingSends[taskID, default: 0]
+        guard stopped > 0 else { return }
+        stoppedWaitingSends[taskID] = stopped > 1 ? stopped - 1 : nil
+        if ownsTurn, launching.contains(taskID) { stopRequests.insert(taskID) }
+    }
+
+    /// Marks every send still waiting for the task's turn as stopped; false when none waits.
+    static func requestStopOfWaitingSends(_ taskID: UUID) -> Bool {
+        guard let waiting = waitingSends[taskID], waiting > 0 else { return false }
+        stoppedWaitingSends[taskID] = waiting
+        return true
+    }
+
+    /// Claims the provider interrupt for the task's running turn; false when another stop
+    /// already holds it.
+    static func beginProviderStop(_ taskID: UUID) -> Bool { providerStops.insert(taskID).inserted }
+
+    /// The provider answered the stop, or refused it: stops that joined it get the same outcome.
+    static func endProviderStop(_ taskID: UUID, interrupted: Bool) {
+        providerStops.remove(taskID)
+        for waiter in providerStopWaiters.removeValue(forKey: taskID) ?? [] { waiter.resume(returning: interrupted) }
+    }
+
+    /// Whether the stop already on its way to the provider interrupted the turn.
+    static func providerStopOutcome(_ taskID: UUID) async -> Bool {
+        guard providerStops.contains(taskID) else { return true }
+        return await withCheckedContinuation { providerStopWaiters[taskID, default: []].append($0) }
+    }
+
+    static func requestStop(_ taskID: UUID) {
+        if launching.contains(taskID) { stopRequests.insert(taskID) }
+    }
+
+    /// Thrown from a launch checkpoint once the user asked to stop the turn it is preparing.
+    static func checkStop(_ taskID: UUID) throws {
+        if stopRequests.contains(taskID) { throw stoppedBeforeStart }
+    }
+
+    static let stoppedBeforeStartCode = "turn_stopped"
+    static var stoppedBeforeStart: BridgeCommandError {
+        BridgeCommandError(code: stoppedBeforeStartCode, message: "The message was stopped before the agent started on it.")
+    }
+
+    static func isStoppedBeforeStart(_ error: Error) -> Bool {
+        (error as? BridgeCommandError)?.code == stoppedBeforeStartCode
+    }
+
+    /// Waits for the launching turn to start or for its send to end without one. A task that
+    /// isn't launching reports a started turn, so callers go on to ask the provider.
+    static func settled(_ taskID: UUID) async -> End {
+        guard launching.contains(taskID) else { return .turnStarted }
+        return await withCheckedContinuation { waiters[taskID, default: []].append($0) }
+    }
+
+    private static func settle(_ taskID: UUID, turnStarted: Bool) {
+        guard launching.remove(taskID) != nil else { return }
+        let stopped = stopRequests.remove(taskID) != nil
+        let end: End = turnStarted ? .turnStarted : stopped ? .stopped : .ended
+        for waiter in waiters.removeValue(forKey: taskID) ?? [] { waiter.resume(returning: end) }
+    }
 }

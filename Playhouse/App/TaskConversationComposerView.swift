@@ -9,11 +9,13 @@ extension TaskConversationView {
         if composerSchedule != nil, canSchedule {
             let label = isExistingConversation ? "Schedule message" : "Schedule task"
             primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? label, label: label, value: composerSchedule?.summary() ?? "", testID: "send-message-button")
-        } else if isDisplayingActiveResponse
+        // Stop works from the moment a message is sent: a turn that is still launching is
+        // stopped before it starts. Once clicked it gives way to Continue at once.
+        } else if !isPausingResponse, isDisplayingActiveResponse
             || (providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
-            primary = .init(kind: "stop", disabled: isPausingResponse || !canPauseResponse, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
+            primary = .init(kind: "stop", disabled: false, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
         } else if hasPausedResponse {
-            primary = .init(kind: "continue", disabled: false, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
+            primary = .init(kind: "continue", disabled: isStopLandingOnOwnSend, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
         } else if composerSchedule != nil, canSchedule {
             primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task", label: "Schedule task", value: composerSchedule?.summary() ?? "", testID: "send-message-button")
         } else {
@@ -89,7 +91,13 @@ extension TaskConversationView {
         let selection = composerDraft.selection
         return PluginContext.props(
             plugin: plugin, appearance: pluginAppearance, task: PluginTaskContext(task: task),
-            composer: PluginComposerContext(draft: composerDraft.text, selectionLocation: selection.location, selectionLength: selection.length)
+            composer: PluginComposerContext(draft: composerDraft.text, selectionLocation: selection.location, selectionLength: selection.length),
+            workspace: PluginWorkspaceContext(
+                revision: workspaceRevision,
+                // Closing the diff keeps `selectedChange` for its dismissal animation.
+                openDiff: isDiffPresented ? selectedChange.map { .init(repository: $0.repository, path: $0.path, group: $0.group.rawValue) } : nil,
+                sidebarCollapsed: isTaskSidebarShownCollapsed
+            )
         )
     }
 
@@ -100,7 +108,9 @@ extension TaskConversationView {
                 openConversationPlugin = nil
                 onOpenTask(id, "")
             },
-            composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) }
+            composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) },
+            openDiff: { openDiff($0) },
+            refreshWorkspace: { Task { await refreshWorkspaceChanges() } }
         )
     }
 
@@ -145,7 +155,8 @@ extension TaskConversationView {
                 }
             },
             steer: {
-                if isResponding, isConversationTurnActive {
+                // A turn that is still launching takes the steer as soon as it starts.
+                if isResponding {
                     steerCurrentTurn()
                 }
             },

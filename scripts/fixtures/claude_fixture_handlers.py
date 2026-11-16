@@ -284,6 +284,14 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
+    elif "hold for a steer" in user_text.lower():
+        # The turn stays active until Playhouse steers it, then answers the steer.
+        runtime.Path(str(runtime.sys.argv[0]) + ".steer-ready").write_text("The turn is waiting for a steer.\n", encoding="utf-8")
+        steered, steered_uuid = runtime.read_steered_input("the held turn")
+        runtime.wait_for_release("steer-answer", "The steer arrived and its answer is pending.")
+        runtime.text("msg_held_steer_answer", f"STEERED: {steered}")
+        runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        runtime.complete_command(steered_uuid)
     elif "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
         # Report one in-progress tool use before holding, so a user-initiated Stop
         # with no final answer still keeps the window's activity section mounted,

@@ -51,6 +51,9 @@ def held_interrupt(runtime, _session_state, message):
     }})
     _session_state.active = runtime.Path(str(runtime.sys.argv[0]) + ".interrupt-ready")
     _session_state.active.write_text("The fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
+    # Lets a test count the turns that reached this fixture, including ones it interrupted.
+    with open(str(runtime.sys.argv[0]) + ".held-turns", "a", encoding="utf-8") as _held_turns:
+        _held_turns.write(runtime.TURN_ID + "\n")
     _session_state.deadline = runtime.time.monotonic() + 30
     _session_state.received_interrupt = False
     while runtime.time.monotonic() < _session_state.deadline:
@@ -258,6 +261,8 @@ def serial_steer(runtime, _session_state, message):
                 else:
                     _session_state.steer_requests.append(_session_state.params)
                     runtime.write({"jsonrpc": "2.0", "id": _session_state.steer_request["id"], "result": {"turnId": runtime.TURN_ID}})
+                    # Lets a test see how many steers the held turn has taken so far.
+                    runtime.Path(str(runtime.sys.argv[0]) + ".steers-received").write_text(str(len(_session_state.steer_requests)), encoding="utf-8")
             elif not _session_state.answer_read_while_held(_session_state.steer_request):
                 runtime.write({"jsonrpc": "2.0", "id": _session_state.steer_request.get("id"), "error": {"code": -32601, "message": "Unsupported fixture request."}})
     if not _session_state.resume.exists():
@@ -268,6 +273,12 @@ def serial_steer(runtime, _session_state, message):
         _session_state.saved_history = _session_state.serial_history()
         _session_state.saved_history["steerRequests"] = _session_state.saved_history.get("steerRequests", []) + _session_state.steer_requests
         _session_state.saved_history["rejectedSteerRequests"] = _session_state.saved_history.get("rejectedSteerRequests", []) + _session_state.rejected_steer_requests
+        # Codex keeps input steered into a turn in that turn's history, as user messages.
+        if _session_state.steer_requests and _session_state.saved_history.get("messages"):
+            _session_state.saved_history["messages"][-1]["steers"] = [
+                "\n".join(item.get("text", "") for item in request.get("input", []) if item.get("type") == "text")
+                for request in _session_state.steer_requests
+            ]
         _session_state.history_path.write_text(runtime.json.dumps(_session_state.saved_history), encoding="utf-8")
     runtime.write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
         "threadId": runtime.THREAD_ID,

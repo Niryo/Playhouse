@@ -88,16 +88,37 @@ extension TaskConversationView {
     /// messages this window already loaded above it; a complete history is
     /// trimmed back to the messages already loaded, so a reload never pulls
     /// the whole conversation into memory.
+    /// A steer shown before the provider has it isn't in history yet, so a history read that
+    /// lands meanwhile keeps its bubble. One the latest turn already holds is left to history.
+    func keepPendingLocalSteers() {
+        guard !pendingLocalSteers.isEmpty else { return }
+        let latestTurnID = messages.last?.turnID
+        var persisted = messages.filter { $0.role == .user && (latestTurnID == nil || $0.turnID == latestTurnID) }
+        for steer in pendingLocalSteers where !messages.contains(where: { $0.id == steer.id }) {
+            if let index = persisted.firstIndex(where: { MentionText.sameUserText($0.text, steer.text) }) {
+                persisted.remove(at: index)
+                continue
+            }
+            messages.append(ConversationMessage(id: steer.id, role: .user, text: steer.text, imageDataURLs: steer.imageDataURLs))
+        }
+    }
+
     func applyHistoryMessages(_ history: ConversationHistory, _ incoming: [ConversationMessage]? = nil) {
         // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
         flushStreamedTextDeltas()
         let renderedCount = establishedRenderedMessageCount
         let presentedQuestion = latestSentQuestion
+        let windowStart = conversationMessages.first { $0.id == oldestRenderedMessageID }
         defer {
+            keepPendingLocalSteers()
             mergeTimelineActivities(history.timelineActivities)
-            keepTranscriptPosition(renderedCount: renderedCount, presentedQuestion: presentedQuestion)
+            keepTranscriptPosition(renderedCount: renderedCount, windowStart: windowStart, presentedQuestion: presentedQuestion)
         }
         let incoming = incoming ?? history.messages
+        // Images this window already shows stay with it when the new read defers them.
+        for message in messages where !message.imageDataURLs.isEmpty {
+            deferredMessageImages[Self.deferredImageKey(message)] = message.imageDataURLs
+        }
         if let earlierCount = history.earlierMessageCount {
             if let first = incoming.first, let overlap = messages.firstIndex(where: { $0.id == first.id }) {
                 messages = Array(messages[..<overlap]) + incoming
@@ -167,11 +188,17 @@ extension TaskConversationView {
     /// History names messages by its own IDs, which replace the ones a live turn gave them.
     /// Keeps the rendered window and the question already presented pointing at the same
     /// messages, so a turn that ends never moves a reader or counts as a new question.
-    func keepTranscriptPosition(renderedCount: Int?, presentedQuestion: ConversationMessage?) {
+    func keepTranscriptPosition(renderedCount: Int?, windowStart: ConversationMessage?, presentedQuestion: ConversationMessage?) {
         let allMessages = conversationMessages
         if let renderedCount, let windowStartID = oldestRenderedMessageID, !allMessages.isEmpty,
            !allMessages.contains(where: { $0.id == windowStartID }) {
-            oldestRenderedMessageID = allMessages[max(0, allMessages.count - renderedCount)].id
+            // A window that starts at the user's message keeps starting there, however many
+            // messages followed it before this history arrived; the count only stands in
+            // when that message can't be found.
+            let renamedStart = windowStart.flatMap { start in
+                start.role == .user ? allMessages.last { $0.role == .user && MentionText.sameUserText($0.text, start.text) } : nil
+            }
+            oldestRenderedMessageID = renamedStart?.id ?? allMessages[max(0, allMessages.count - renderedCount)].id
         }
         if let presentedQuestion, presentedQuestion.id == lastScrolledUserMessageID,
            let question = latestSentQuestion, question.id != presentedQuestion.id,
@@ -257,7 +284,8 @@ extension TaskConversationView {
         return rendered.map { message in
             var hasher = Hasher()
             hasher.combine(message.text.utf16.count)
-            hasher.combine(message.imageDataURLs.count)
+            hasher.combine(transcriptImageDataURLs(for: message).count)
+            hasher.combine(message.imagesDeferred == true && deferredMessageImages[Self.deferredImageKey(message)] == nil)
             hasher.combine(message.asyncQuestions != nil)
             hasher.combine(context.inlineTools[message.id]?.count ?? 0)
             hasher.combine(context.boundariesByAnchorID[message.id]?.count ?? 0)

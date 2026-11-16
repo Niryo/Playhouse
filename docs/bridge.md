@@ -42,7 +42,8 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `settings set-parent <path>` / `settings clear-parent` | Change the default parent folder |
 | `task create ... [--provider <codex\|claude>]` | Create a task with a specific conversation provider instead of the default |
 | `settings set-default-provider <codex\|claude>` | Change the provider new tasks start with |
-| `conversation history <task-id>` | Load the task's transcript, including turns from every provider it has used |
+| `conversation history <task-id> [--limit <messages>] [--before <message-id>] [--defer-images]` | Load the task's transcript, including turns from every provider it has used. With `--defer-images` (also accepted by `conversation send`), only the newest user turn carries its image data; earlier messages with images are marked `imagesDeferred` instead |
+| `conversation images <task-id> --message <message-id> [--message ...]` | Read the image data of the named messages, for a reader that deferred them |
 | `conversation send <task-id> --message <text>` | Send a turn to the task's current provider and stream JSON event lines |
 | `conversation answer-user-input <task-id> <request-id> --answer <question-id>=<answer> [--answer ...]` | Answer a saved structured question, resuming the task's provider session when its original process has ended |
 | `conversation runtime [--watch]` | Report which conversations have a running, interruptible, or paused turn and which questions are pending; `--watch` keeps streaming a snapshot on every change until interrupted |
