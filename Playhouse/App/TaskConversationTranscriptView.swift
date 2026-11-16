@@ -306,7 +306,25 @@ extension TaskConversationView {
             .element
     }
 
+    @ViewBuilder
     var activityList: some View {
+        let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
+            .union(inlineToolCalls.ids)
+        let expandedActivities = activities.filter {
+            !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
+                && !(task.isStandaloneChat && $0.recalledChatPageID != nil)
+        }
+        let completedAgentActivities = activities.filter { $0.isSubagent && !$0.isActive }
+        if isDisplayingActiveResponse && progressMessages.isEmpty && expandedActivities.isEmpty
+            && completedAgentActivities.isEmpty && activeProcess == nil && activeSubagents.isEmpty
+            && liveChatPageRecalls.isEmpty {
+            thinkingRow
+        } else {
+            activityDisclosure(expandedActivities: expandedActivities, completedAgentActivities: completedAgentActivities)
+        }
+    }
+
+    func activityDisclosure(expandedActivities: [ConversationActivity], completedAgentActivities: [ConversationActivity]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
@@ -329,19 +347,7 @@ extension TaskConversationView {
                 .accessibilityLabel("Separator between work duration and response")
 
             if isActivityExpanded {
-                let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
-                    .union(inlineToolCalls.ids)
-                let expandedActivities = activities.filter {
-                    !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
-                        && !(task.isStandaloneChat && $0.recalledChatPageID != nil)
-                }
-                let completedAgentActivities = activities.filter { $0.isSubagent && !$0.isActive }
                 VStack(alignment: .leading, spacing: 7) {
-                    if isDisplayingActiveResponse && progressMessages.isEmpty && expandedActivities.isEmpty
-                        && completedAgentActivities.isEmpty && activeProcess == nil && activeSubagents.isEmpty
-                        && liveChatPageRecalls.isEmpty {
-                        thinkingRow
-                    }
                     if !progressMessages.isEmpty {
                         Text("Progress")
                             .font(.system(size: 10, weight: .semibold))
@@ -378,7 +384,7 @@ extension TaskConversationView {
         }
     }
 
-    /// Shown inside an open Working for until the turn reports its first progress or activity.
+    /// Stands in for Working for until the turn reports its first progress or activity.
     var thinkingRow: some View {
         HStack(spacing: 7) {
             ProgressView()

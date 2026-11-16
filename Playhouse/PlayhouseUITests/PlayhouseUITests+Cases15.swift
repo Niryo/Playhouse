@@ -298,7 +298,7 @@ extension PlayhouseUITests {
                           "The saved Claude title should appear on the board.")
         }
     }
-    // case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running. The held conversation first completes a turn with a tool call. Before the held turn reports anything, its mid-turn history has only its question after that turn, with no assistant message or activity of its own, and its open Working for shows a Thinking row with a spinner instead of an empty list, despite the earlier turn's tool call; once the turn settles, opening its Worked for shows no Thinking row.
+    // case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running. The held conversation first completes a turn with a tool call. Before the held turn reports anything, its mid-turn history has only its question after that turn, with no assistant message or activity of its own, and it shows only a Thinking row with a spinner in place of an empty Working for, despite the earlier turn's tool call; once the turn settles, opening its Worked for shows no Thinking row.
     func test_conversation_runs_concurrent_claude_sends_in_parallel() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-sends")
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
@@ -345,12 +345,11 @@ extension PlayhouseUITests {
         composer.typeText(firstPrompt)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The first Claude turn should be active before the second conversation starts.")
-        // Nothing has been reported yet, so the open Working for shows Thinking instead of an empty list.
+        // Nothing has been reported yet, so Thinking stands in for an empty Working for.
         let thinking = element("codex-activity-thinking")
-        XCTAssertTrue(thinking.waitToExist(timeout: 10), "A held turn with no progress yet should show Thinking inside Working for.")
+        XCTAssertTrue(thinking.waitToExist(timeout: 10), "A held turn with no progress yet should show Thinking.")
         XCTAssertEqual(thinking.label, "Thinking…")
-        XCTAssertEqual(element("codex-activity-disclosure").value as? String, "Expanded, down chevron")
-        XCTAssertTrue(element("codex-activity-disclosure").label.hasPrefix("Working for"), "Thinking should sit under the live Working for header.")
+        XCTAssertFalse(element("codex-activity-disclosure").exists, "An empty Working for should not render beside Thinking.")
         let heldHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
         let heldMessages = heldHistory["messages"] as? [[String: Any]] ?? []
         let heldQuestionIndex = try XCTUnwrap(heldMessages.lastIndex { ($0["role"] as? String) == "user" && ($0["text"] as? String) == firstPrompt })
