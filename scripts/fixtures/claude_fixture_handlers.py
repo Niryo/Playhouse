@@ -464,6 +464,21 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.text("msg_comments", answer)
     elif user_text.rstrip().endswith("What happened earlier?"):
         runtime.text("msg_recovered", runtime.SIMPLE_ANSWER)
+    elif anchor_page := runtime.re.search(r"anchor-page:([A-Za-z0-9-]+):(\d+)\s*$", user_text):
+        # A standalone chat turn that opens its own titled page (a message ending with
+        # "anchor-page:<Title>:<replies>", hyphens for spaces) and answers with that many
+        # messages, so a few turns build a chat of many pages to jump between.
+        slug, replies = anchor_page.groups()
+        title = slug.replace("-", " ")
+        close_turn = runtime.report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            command = close_turn.replace("--continues true", f"--continues false --new-title {runtime.shlex.quote(title)}")
+            commands.append({"command": command,
+                             "output": runtime.run_tool(f"toolu_anchor_page_{slug}", "Bash", {"command": command}, command)})
+        for index in range(1, int(replies) + 1):
+            # A long page ends on a reply wide enough to wrap.
+            wide = " The tide is in and the bay is calm, so we can go on and map it all out for you as far as the eye can see." if index == int(replies) > 1 else ""
+            runtime.text(f"msg_anchor_page_{slug}_{index}", f"{title} reply {index}.{wide}")
     elif "recall-earlier-pages" in user_text.lower():
         # A standalone chat looking back: it reads each earlier page named in the
         # message ("page-id:<id>") with the real `chat page read` command, then answers.

@@ -6,6 +6,8 @@ extension TaskConversationView {
     func loadConversation() async {
         isLoadingHistory = true
         oldestRenderedMessageID = nil
+        renderedWindowEndID = nil
+        chatPageJumpCount += 1
         errorMessage = nil
         let draftAtLoadStart = draft
         // A turn this window didn't send streams once the loaded history is in place.
@@ -28,6 +30,7 @@ extension TaskConversationView {
             flushStreamedTextDeltas()
             messages = history.messages
             earlierStoredMessageCount = history.earlierMessageCount ?? 0
+            historyGap = nil
             // Resolve the window as soon as the messages land. The assignment
             // at the end of the load repeats it once progress collapsing has
             // settled which rows the transcript renders.
@@ -382,7 +385,7 @@ extension TaskConversationView {
             // A provider may not list a running turn's items yet, so mid-turn history can
             // hold less than this window already shows; applying it would blank the turn.
             let historyCount = history.messages.count + (history.earlierMessageCount ?? 0)
-            if keepingShownTurn, historyCount < messages.count + earlierStoredMessageCount { return }
+            if keepingShownTurn, historyCount < messages.count + earlierStoredMessageCount + (historyGap?.storedMessageCount ?? 0) { return }
             applyHistoryMessages(history)
             activities = history.activities
             providerBoundaries = history.providerBoundaries
@@ -468,9 +471,12 @@ extension TaskConversationView {
     func refreshChatPageStatus() {
         guard let chatManager = try? StandaloneChatManager(dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]) else {
             chatPagesByTurnID = [:]
+            chatPageAnchors.clear()
             return
         }
         chatPagesByTurnID = (try? chatManager.pageAssignmentsByTurnID()) ?? [:]
+        chatPageAnchors.reload(from: chatManager)
+        markCurrentChatPage()
     }
     func persistPendingAnnotations() {
         let data = PersistedAnnotations.encode(annotations.filter { !inFlightAnnotationIDs.contains($0.id) })

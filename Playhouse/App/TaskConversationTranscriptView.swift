@@ -6,6 +6,8 @@ extension TaskConversationView {
     var conversation: some View {
         GeometryReader { viewport in
             let scroll = transcriptScroll
+            let showsPageAnchors = showsChatPageAnchors(transcriptWidth: viewport.size.width)
+            let isBrowsingEarlier = isBrowsingEarlierMessages
             ScrollView {
                 let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
                 // Worked out once per pass rather than once per row: each walks the whole transcript, and
@@ -47,13 +49,17 @@ extension TaskConversationView {
                                 })
                             }
                         )
-                        ForEach(liveChatPageRecalls) { activity in
-                            if let pageID = activity.recalledChatPageID {
-                                ChatPageRecallRow(activityID: activity.id, pageID: pageID)
+                        // What belongs to the newest turn waits below an earlier chat page
+                        // the reader jumped to.
+                        if !isBrowsingEarlier {
+                            ForEach(liveChatPageRecalls) { activity in
+                                if let pageID = activity.recalledChatPageID {
+                                    ChatPageRecallRow(activityID: activity.id, pageID: pageID)
+                                }
                             }
-                        }
-                        if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
-                            activityList
+                            if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
+                                activityList
+                            }
                         }
                     } else {
                         if activeGoal?.status != "complete" && !isLoadingHistory {
@@ -70,38 +76,47 @@ extension TaskConversationView {
                                 .id(entry.id)
                         }
                     }
-                    if let request = userInputRequest, request.threadID == task.activeConversationID {
-                        userInputForm(request)
-                            .frame(maxWidth: 620, alignment: .leading)
-                            .accessibilityIdentifier("conversation-user-input-request")
-                    }
+                    if !isBrowsingEarlier {
+                        if let request = userInputRequest, request.threadID == task.activeConversationID {
+                            userInputForm(request)
+                                .frame(maxWidth: 620, alignment: .leading)
+                                .accessibilityIdentifier("conversation-user-input-request")
+                        }
 
-                    if let activeProcess {
-                        activityRow(activeProcess, compact: true)
-                    }
-                    ForEach(activeSubagents) { activity in
-                        subagentTimelineRow(activity)
-                    }
-                    ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
-                        contextCompactionTimelineRow(activity)
+                        if let activeProcess {
+                            activityRow(activeProcess, compact: true)
+                        }
+                        ForEach(activeSubagents) { activity in
+                            subagentTimelineRow(activity)
+                        }
+                        ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
+                            contextCompactionTimelineRow(activity)
+                        }
                     }
                 }
-                .padding(.horizontal, 28)
+                // The chat's page labels take the room on the rows' leading side.
+                .padding(.leading, showsPageAnchors ? ChatPageAnchorsLayout.rowInset(transcriptWidth: viewport.size.width) : 0)
+                .padding(.horizontal, ChatPageAnchorsLayout.transcriptPadding)
                 .padding(.vertical, Self.conversationVerticalPadding)
-                .frame(maxWidth: 820)
+                .frame(maxWidth: ChatPageAnchorsLayout.transcriptMaxWidth)
                 .frame(maxWidth: .infinity)
                 .hoverRevealScrollers()
                 .transcriptScroll(
                     scroll,
                     layoutTop: Self.conversationVerticalPadding,
                     latestTurnMargin: Self.latestTurnTopMargin,
+                    rendersTranscriptEnd: !isBrowsingEarlier,
                     handlers: transcriptScrollHandlers
                 )
             }
             .accessibilityIdentifier("conversation-scroll-view")
             .accessibilityValue(hasLoadedConversation
-                ? "Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count + earlierStoredMessageCount) messages"
+                ? "Showing \(isBrowsingEarlier ? "earlier" : "latest") \(renderedConversationMessages.count) of \(storedConversationMessageCount) messages"
                 : "Loading conversation history")
+            .overlay(alignment: .topLeading) {
+                chatPageAnchorsOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
+            }
+            .overlay(alignment: .bottom) { jumpToLatestButton }
             .onChange(of: isLoadingHistory) { _, isLoading in
                 // Every completed history load reopens on the newest turn,
                 // including reloads that leave the messages unchanged.
@@ -118,6 +133,7 @@ extension TaskConversationView {
                 // The question form sits below the latest message; bring it into view
                 // whether it arrives with the history or later from the daemon.
                 guard requestID != nil, !isLoadingHistory else { return }
+                if isBrowsingEarlierMessages { returnToLatestMessages() }
                 scroll.pin(.bottom, animated: true)
             }
         }
@@ -584,6 +600,7 @@ extension TaskConversationView {
             }
 
             ComposerView(model: composerModel, actions: composerActions, header: {
+        recalledChatPageChips
         let pendingCommentCount = annotations.filter(\.pending).count
         if pendingCommentCount > 0 {
             AtomPanel(

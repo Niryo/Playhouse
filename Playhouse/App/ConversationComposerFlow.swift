@@ -449,6 +449,11 @@ extension TaskConversationView {
         // An annotation can point at text from an earlier page; that page travels with this
         // turn so the agent sees the quoted context without reloading the whole chat.
         let annotationPageIDs = standaloneChatPageIDs(for: pendingAnnotations)
+        // So does each earlier page the user recalled from its title in the transcript.
+        let recalledPages = usesComposerDraft && task.isStandaloneChat ? recalledChatPages : []
+        let contextPageIDs = annotationPageIDs + recalledPages.map(\.id).filter {
+            !annotationPageIDs.contains($0) && $0 != activeChatPageID
+        }
         let resolutionAttempt = conflictResolutionAttempt
         if usesComposerDraft && pendingAnnotations.isEmpty && text == "/plan" {
             activatePlanMode()
@@ -504,6 +509,7 @@ extension TaskConversationView {
         if usesComposerDraft {
             composerDraft.settledText = ""
             draft = ""
+            recalledChatPages = []
         }
         let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
         if usesComposerDraft { pendingImages = [] }
@@ -548,6 +554,7 @@ extension TaskConversationView {
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                 if usesComposerDraft {
                     draft = freeformText
+                    recalledChatPages = recalledPages
                     pendingImages = imageDataURLs.compactMap { dataURL in
                         guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                         return PendingImage(dataURL: dataURL, image: image)
@@ -572,7 +579,7 @@ extension TaskConversationView {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
                 awaitsDispatch = false
                 sendsAwaitingDispatch -= 1
-                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: annotationPageIDs, onTurnStarting: {
+                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: contextPageIDs, onTurnStarting: {
                     // A turn the user already stopped, or one a newer send replaced, starts
                     // only to be stopped.
                     if sendGeneration == generation, !isPausingResponse { isResponding = true }
@@ -654,6 +661,9 @@ extension TaskConversationView {
                     if usesComposerDraft {
                         // A steer stopped with this message may have returned to the composer already.
                         draft = [freeformText, draft].filter { !$0.isEmpty }.joined(separator: "\n")
+                        for page in recalledPages where !recalledChatPages.contains(where: { $0.id == page.id }) {
+                            recalledChatPages.append(page)
+                        }
                         pendingImages = imageDataURLs.compactMap { dataURL in
                             guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                             return PendingImage(dataURL: dataURL, image: image)

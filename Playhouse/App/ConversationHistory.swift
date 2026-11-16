@@ -12,14 +12,37 @@ extension ConversationManager {
         restoringEarlierChatPages: Bool = false,
         messageLimit: Int? = nil,
         beforeMessageID: String? = nil,
+        afterMessageID: String? = nil,
+        chatPageID: String? = nil,
         includesImageData: Bool = false
     ) async throws -> ConversationHistory {
         if let messageLimit, messageLimit < 1 {
             throw BridgeCommandError(code: "invalid_argument", message: "The history limit must be a positive number of messages.")
         }
+        // A forward window starts at a chat page or right after a message and runs toward the newest.
+        let readsForward = afterMessageID != nil || chatPageID != nil
+        if readsForward, beforeMessageID != nil || (afterMessageID != nil && chatPageID != nil) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Read history before a message, after a message, or from a chat page; choose one.")
+        }
         var source = "composed"
         var history: ConversationHistory
-        if let messageLimit, sensitiveUserInputAnswerValues.isEmpty,
+        if readsForward {
+            history = try await composedHistory(
+                taskID: taskID,
+                onActionRequest: onActionRequest,
+                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                restoringEarlierChatPages: restoringEarlierChatPages
+            )
+            let start = try forwardWindowStart(taskID: taskID, in: history.messages, after: afterMessageID, chatPageID: chatPageID)
+            let end = messageLimit.map { min(history.messages.count, start + $0) } ?? history.messages.count
+            history.earlierMessageCount = start
+            history.laterMessageCount = history.messages.count - end
+            history.messages = Array(history.messages[start..<end])
+            history.timelineActivities = ConversationActivity.visibleTimelineActivities(
+                history.timelineActivities, visibleMessageIDs: Set(history.messages.map(\.id)), excludedTurnIDs: []
+            )
+            source = "composed-forward"
+        } else if let messageLimit, sensitiveUserInputAnswerValues.isEmpty,
            let page = try storedTranscriptPage(taskID: taskID, messageLimit: messageLimit, beforeMessageID: beforeMessageID) {
             history = page
             source = "stored-page"
@@ -34,6 +57,7 @@ extension ConversationManager {
                 let end = try Self.pageEnd(of: history.messages, before: beforeMessageID)
                 let start = messageLimit.map { max(0, end - $0) } ?? 0
                 history.earlierMessageCount = start
+                history.laterMessageCount = history.messages.count - end
                 history.messages = Array(history.messages[start..<end])
                 history.timelineActivities = ConversationActivity.visibleTimelineActivities(
                     history.timelineActivities, visibleMessageIDs: Set(history.messages.map(\.id)), excludedTurnIDs: []
@@ -48,7 +72,7 @@ extension ConversationManager {
             // their images can be tens of megabytes that the reader may never show.
             // An earlier page holds no part of that turn, so all of its images wait.
             let inlineStart = !defersHistoryImages ? 0
-                : beforeMessageID != nil ? history.messages.count
+                : beforeMessageID != nil || readsForward ? history.messages.count
                 : ConversationMessage.latestTurnStartIndex(in: history.messages) ?? 0
             let store = try transcripts
             let deferredTurns = try store.turnsWithImages(taskID, messageIDs: Set(history.messages[..<inlineStart].compactMap {
@@ -85,6 +109,8 @@ extension ConversationManager {
             "source": source,
             "messageLimit": messageLimit.map(String.init) ?? "none",
             "beforeMessageProvided": String(beforeMessageID != nil),
+            "afterMessageProvided": String(afterMessageID != nil),
+            "chatPageProvided": String(chatPageID != nil),
             "returnedMessageCount": String(history.messages.count),
             "earlierMessageCount": history.earlierMessageCount.map(String.init) ?? "none",
             "hydratedImageMessageCount": String(hydratedImageMessages),
@@ -126,6 +152,27 @@ extension ConversationManager {
         guard let messageID else { return messages.count }
         guard let index = messages.firstIndex(where: { $0.id == messageID }) else {
             throw BridgeCommandError(code: "not_found", message: "That message is not in this conversation's history.")
+        }
+        return index
+    }
+
+    /// Where a forward window starts: right after `messageID`, or at the first message of the
+    /// standalone chat page `chatPageID`.
+    func forwardWindowStart(
+        taskID: UUID, in messages: [ConversationMessage], after messageID: String?, chatPageID: String?
+    ) throws -> Int {
+        if let messageID {
+            guard let index = messages.firstIndex(where: { $0.id == messageID }) else {
+                throw BridgeCommandError(code: "not_found", message: "That message is not in this conversation's history.")
+            }
+            return index + 1
+        }
+        guard try tasks.conversationSubject(taskID).isStandaloneChat else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Only the standalone chat has pages to read history from.")
+        }
+        let pageByTurnID = try tasks.standaloneChatManager().pageAssignmentsByTurnID()
+        guard let index = messages.firstIndex(where: { $0.turnID.flatMap { pageByTurnID[$0]?.id } == chatPageID }) else {
+            throw BridgeCommandError(code: "not_found", message: "That chat page has no messages in this conversation's history.")
         }
         return index
     }
@@ -215,7 +262,8 @@ extension ConversationManager {
             answeredAsyncQuestionIDs: try tasks.answeredAsyncQuestionIDs(taskID: taskID),
             pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: state),
             providerBoundaries: [],
-            earlierMessageCount: start
+            earlierMessageCount: start,
+            laterMessageCount: messageIDs.count - end
         )
     }
 
