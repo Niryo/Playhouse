@@ -7,7 +7,13 @@ extension BoardTaskManager {
     /// Every scheduled task: one-time schedules still waiting to fire and recurring
     /// templates, soonest first.
     func scheduledTasks() throws -> [BoardTaskRecord] {
-        try listModels()
+        Self.scheduledTaskRecords(try listModels())
+    }
+
+    /// The scheduled tasks among `tasks`, soonest first: `schedule.list` and the
+    /// board's `props.schedules` both read them through this.
+    static func scheduledTaskRecords(_ tasks: [BoardTask]) -> [BoardTaskRecord] {
+        tasks
             .filter { $0.scheduleKind != nil }
             .sorted { ($0.scheduledAt ?? .distantFuture) < ($1.scheduledAt ?? .distantFuture) }
             .map { BoardTaskRecord(task: $0, includeDraftImages: false) }

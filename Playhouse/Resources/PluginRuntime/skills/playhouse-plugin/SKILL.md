@@ -18,7 +18,8 @@ message, for any the request leaves open. Don't guess:
 - **What it does**: the plugin's purpose and what it shows or changes.
 - **Placement**: where its button goes. The task's instructions name the
   placement the user picked. If none was picked, ask which of these:
-  - `mainSidebar`: the board's sidebar. It gets no task context.
+  - `mainSidebar`: the board's sidebar, beside the built-in Scheduled Tasks.
+    It gets no task context, but gets the scheduled tasks.
   - `mainSidebarBottom`: a collapsible section at the bottom of the board's
     sidebar, like the built-in Agents info. Its presentation is always
     `section`.
@@ -80,6 +81,7 @@ It uses these globals:
   | Every placement | `plugin` (`{id, name, placement, presentation}`), `app` (`{appearance}`) and `state` (the plugin's saved values, see `Playhouse.setState`) |
   | Conversation placements and `taskItem` | Add `task` (`{id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}`), `repositories` (`[{repositoryPath, worktreePath, branch, isPending, awaitsPullRequest, pullRequest: {number, url, merged} or null}]`), `pastPullRequests` (`[{repositoryPath, number, url, merged}]`) and `contextFolders` |
   | `composerActions` | Adds `composer` (`{draft, selection: {location, length, text}}`) |
+  | `mainSidebar` | Adds `schedules` (`{tasks, needsLoginItemsApproval}`): `tasks` is what `"schedule.list"` returns (every scheduled task, soonest first; each task's `schedule` is `{kind: "once" or "recurring", scheduledAt, summary, prompt, paused, lastRunTaskID, …}`), kept live; `needsLoginItemsApproval` is true while macOS waits for the user to allow Playhouse in Login Items |
   | `mainSidebarBottom` | Adds `agents` (`{usage, runningTasks}`): `usage` is what `"usage.get"` returns (`{generatedAt, providers: [{provider, installed, loggedIn, account, plan, loginInProgress, snapshot}]}`), kept live, or null before the first read; `runningTasks` is `{claude, codex}`, each provider's count of running tasks |
   | `conversationSidebar` | Adds `workspace` (`{revision, openDiff: {repository, path, group} or null}`; `revision` grows whenever the task's files may have changed) and `sidebar` (`{collapsed}`, true on the hidden sidebar's narrow rail) |
 
@@ -103,7 +105,7 @@ It uses these globals:
 - `Playhouse.ui`, for what only the window can do. Each call returns a
   Promise:
   - `close()` closes the surface.
-  - `openTask(taskID)` opens a task.
+  - `openTask(taskID)` opens a task. A page stays open behind it, so closing the task returns to the page.
   - `composer.setDraft(text)`, `composer.insertText(text)`,
     `composer.replaceSelection(text)` and `composer.focus()` work on the
     composer, in conversation placements. From `mainSidebar` they reject with
@@ -122,6 +124,10 @@ It uses these globals:
     `unavailable`.
   - `openURL(url)` opens an `http` or `https` link in the browser, from any
     placement; any other URL rejects with `invalid_argument`.
+  - `newTask({schedule})` opens a new task; with `schedule` `"recurring"` or
+    `"once"` its schedule picker is already up. `openLoginItems()` opens Login
+    Items in System Settings, where the user allows scheduled runs. Both work
+    on the board only; elsewhere they reject with `unavailable`.
 - `Playhouse.on(name, listener)` listens for an app event and returns a
   function that stops listening: `"task.statusChanged"` (`{taskID, from, to}`,
   when the plugin's task moves between board columns), `"app.focus"` (`{}`,

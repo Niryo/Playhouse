@@ -415,6 +415,13 @@
             confirm: options.confirm == null ? "OK" : String(options.confirm), destructive: options.destructive === true
           });
         },
+        // Opens a new task; with {schedule: "recurring" or "once"} its schedule picker is up. Only on the board.
+        newTask: function (options) {
+          options = options || {};
+          return hostCall("ui", "newTask", { schedule: options.schedule == null ? null : String(options.schedule) });
+        },
+        // Opens Login Items in System Settings, where the user allows scheduled runs. Only on the board.
+        openLoginItems: function () { return hostCall("ui", "openLoginItems", {}); },
         composer: {
           setDraft: function (text) { return hostCall("ui", "composer.setDraft", { text: String(text) }); },
           insertText: function (text) { return hostCall("ui", "composer.insertText", { text: String(text) }); },

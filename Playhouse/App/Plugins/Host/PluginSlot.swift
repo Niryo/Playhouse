@@ -13,6 +13,8 @@ struct PluginSlot: View {
     var open: (PluginRecord) -> Void = { _ in }
     /// The "Add here" placeholder was pressed.
     var add: (PluginPlacement) -> Void = { _ in }
+    /// The plugin `open` presented, whose entry shows as selected.
+    var openPluginID: String?
     @Environment(PluginRegistry.self) private var registry
     @AppStorage(WorkspaceSettings.pluginAddModeKey, store: WorkspaceSettings.preferencesStore) private var isAddModeOn = false
 
@@ -21,7 +23,7 @@ struct PluginSlot: View {
         if !plugins.isEmpty || isAddModeOn {
             AtomStack(props: StackProps(axis: placement.isIconOnly ? "h" : "v", spacing: placement.isIconOnly ? 4 : 6), common: AtomCommon(fillWidth: placement.isIconOnly ? nil : true)) {
                 ForEach(plugins) { plugin in
-                    PluginEntryButton(plugin: plugin, placement: placement, props: props, actions: actions, open: open)
+                    PluginEntryButton(plugin: plugin, placement: placement, props: props, actions: actions, open: open, isOpen: plugin.id == openPluginID)
                 }
                 if isAddModeOn {
                     placeholder
@@ -54,9 +56,12 @@ private struct PluginEntryButton: View {
     let props: (PluginRecord) -> [String: PluginValue]
     let actions: PluginUIActions
     let open: (PluginRecord) -> Void
+    /// Its modal, sidebar or page is presented.
+    let isOpen: Bool
     @State private var isPopoverPresented = false
 
     var body: some View {
+        let isSelected = isPopoverPresented || isOpen
         AtomButton(
             common: AtomCommon(testID: "plugin-entry-\(plugin.id)", label: plugin.name, help: plugin.name, fillWidth: placement.isIconOnly ? nil : true),
             action: {
@@ -64,9 +69,9 @@ private struct PluginEntryButton: View {
             }
         ) {
             if placement.isIconOnly {
-                AtomIcon(props: IconProps(name: plugin.icon, size: 12, weight: "medium", color: isPopoverPresented ? "accent" : "secondary"), common: AtomCommon(width: 26, height: 24))
+                AtomIcon(props: IconProps(name: plugin.icon, size: 12, weight: "medium", color: isSelected ? "accent" : "secondary"), common: AtomCommon(width: 26, height: 24))
             } else {
-                AtomStack(props: StackProps(align: "leading", fill: "accent", fillOpacity: isPopoverPresented ? 0.14 : 0, cornerRadius: 8), common: AtomCommon(fillWidth: true, paddingX: 12, paddingY: 9)) {
+                AtomStack(props: StackProps(align: "leading", fill: "accent", fillOpacity: isSelected ? 0.14 : 0, cornerRadius: 8), common: AtomCommon(fillWidth: true, paddingX: 12, paddingY: 9)) {
                     AtomLabel(props: LabelProps(text: plugin.name, icon: plugin.icon, size: 12, weight: "medium"))
                 }
             }
@@ -120,7 +125,8 @@ struct PluginModeBanner: View {
 /// A modal, sidebar or page plugin opened from a placement, composed from the
 /// Modal, SidePanel and Page presentation atoms over the view that owns the
 /// placement: a sheet, a panel sliding in from the trailing edge, or a page
-/// over the whole view. The plugin's own header closes it.
+/// over the whole view. An installed plugin's header closes it; a built-in
+/// plugin draws its own chrome and closes with `ui.close`.
 struct PluginPresentationModifier: ViewModifier {
     @Binding var plugin: PluginRecord?
     let props: (PluginRecord) -> [String: PluginValue]
@@ -165,7 +171,11 @@ struct PluginPresentationModifier: ViewModifier {
             var surfaceActions = actions
             let _ = surfaceActions.close = { self.plugin = nil }
             PluginPropsScope {
-                PluginSurfaceView(plugin: plugin, props: props(plugin), actions: surfaceActions)
+                if plugin.builtIn {
+                    BuiltInPluginView(plugin: plugin, props: props(plugin), actions: surfaceActions)
+                } else {
+                    PluginSurfaceView(plugin: plugin, props: props(plugin), actions: surfaceActions)
+                }
             }
         }
     }

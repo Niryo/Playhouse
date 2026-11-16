@@ -30,7 +30,7 @@
 		A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F306 /* KanbanColumnSection.swift */; };
 		A1000000000000000000F307 /* DoneArchiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F307 /* DoneArchiveView.swift */; };
 		A1000000000000000000F401 /* TaskSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F401 /* TaskSchedule.swift */; };
-		A1000000000000000000F402 /* ScheduledTasksPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F402 /* ScheduledTasksPageView.swift */; };
+		A1000000000000000000F402 /* SchedulerAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F402 /* SchedulerAgent.swift */; };
 		A1000000000000000000F201 /* AgentUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F201 /* AgentUsageStore.swift */; };
 		A1000000000000000000F101 /* AgentUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F101 /* AgentUsage.swift */; };
 		A100000000000000000000E2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000004 /* SwiftTerm */; };
@@ -215,7 +215,7 @@
 		A2000000000000000000F306 /* KanbanColumnSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanColumnSection.swift; sourceTree = "<group>"; };
 		A2000000000000000000F307 /* DoneArchiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoneArchiveView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F401 /* TaskSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSchedule.swift; sourceTree = "<group>"; };
-		A2000000000000000000F402 /* ScheduledTasksPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduledTasksPageView.swift; sourceTree = "<group>"; };
+		A2000000000000000000F402 /* SchedulerAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerAgent.swift; sourceTree = "<group>"; };
 		A2000000000000000000F201 /* AgentUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentUsageStore.swift; sourceTree = "<group>"; };
 		A2000000000000000000F101 /* AgentUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentUsage.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* Playhouse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Playhouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -507,7 +507,7 @@
 				A2000000000000000000F306 /* KanbanColumnSection.swift */,
 				A2000000000000000000F307 /* DoneArchiveView.swift */,
 				A2000000000000000000F401 /* TaskSchedule.swift */,
-				A2000000000000000000F402 /* ScheduledTasksPageView.swift */,
+				A2000000000000000000F402 /* SchedulerAgent.swift */,
 				A2000000000000000000F201 /* AgentUsageStore.swift */,
 				A2000000000000000000F101 /* AgentUsage.swift */,
 				A20000000000000000000008 /* TaskConversationView.swift */,
@@ -991,7 +991,7 @@
 				A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */,
 				A1000000000000000000F307 /* DoneArchiveView.swift in Sources */,
 				A1000000000000000000F401 /* TaskSchedule.swift in Sources */,
-				A1000000000000000000F402 /* ScheduledTasksPageView.swift in Sources */,
+				A1000000000000000000F402 /* SchedulerAgent.swift in Sources */,
 				A1000000000000000000F201 /* AgentUsageStore.swift in Sources */,
 				A1000000000000000000F101 /* AgentUsage.swift in Sources */,
 				A10000000000000000000006 /* TaskConversationView.swift in Sources */,

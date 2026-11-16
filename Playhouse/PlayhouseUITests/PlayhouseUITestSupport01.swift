@@ -491,7 +491,7 @@ extension PlayhouseUITests {
         element("back-to-board-button").click()
         XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the task conversation.")
         XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 10), "Going back returns to the empty Scheduled Tasks page.")
-        XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The page should finish sliding back in.")
+        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The page should finish sliding back in.")
     }
     func openScheduleHint() -> XCUIElement {
         let button = element("schedule-task-button")
@@ -891,6 +891,14 @@ extension PlayhouseUITests {
         row.hover()
         let item = row.descendants(matching: .menuItem)[action]
         XCTAssertTrue(waitUntil({ item.isHittable }, timeout: 5), "The \(pluginRow) submenu offers \(action).", file: file, line: line)
+        // The submenu is still opening too; a click on its first frame can miss the item.
+        XCTAssertTrue(waitForStableFrame(item), "The \(action) item should settle before it is clicked.", file: file, line: line)
+        // A diagonal path from the row to the item crosses other rows, which swaps in
+        // their submenu, so the click lands on another plugin's item. Enter the
+        // submenu's column level with the row, then move straight down or up it.
+        let itemLeading = item.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 6, dy: 0))
+        itemLeading.withOffset(CGVector(dx: 0, dy: row.frame.midY - item.frame.minY)).hover()
+        itemLeading.withOffset(CGVector(dx: 0, dy: item.frame.height / 2)).hover()
         item.click()
     }
     func pluginMode() throws -> Bool {

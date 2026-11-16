@@ -637,7 +637,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(failed["hasUnsentDraft"] as? Bool, true, "The prompt waits as the draft for a retry.")
         attachScreenshot(named: "A scheduled run that couldn't start waits in Blocked")
     }
-    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is cleared a later run reaches Review in PR mode.
+    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is cleared a later run reaches Review in PR mode. The template's last run is the latest run, and the Scheduled Tasks page's Open Last Run closes the page and opens that run, so going back from it returns to the board.
     func test_schedule_recurring_template_hidden_and_spawns_runs() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-recurring")
         launchApp(defaultParent: fixture.parent.path)
@@ -674,10 +674,10 @@ extension PlayhouseUITests {
             code: "invalid_argument"
         )
 
-        element("scheduled-tasks-button").click()
-        XCTAssertTrue(element("scheduled-tasks-page").waitToExist(timeout: 10), "The sidebar button opens the Scheduled Tasks page.")
+        element("plugin-entry-scheduled-tasks").click()
+        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10), "The sidebar button opens the Scheduled Tasks page.")
         // The page slides in over the board; clicks before it settles land on the board.
-        XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The Scheduled Tasks page should finish sliding in.")
+        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should finish sliding in.")
         let row = element("scheduled-task-row-\(templateID)")
         XCTAssertTrue(row.waitToExist(timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("scheduled-task-title-\(templateID)")), "Daily standup")
@@ -734,9 +734,23 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ reviewModes(secondRunID) == ["pr"] }, timeout: 60), "With the schedule's mode cleared, a run is in PR mode: \(reviewModes(secondRunID))")
 
         element("scheduled-tasks-back-button").click()
-        XCTAssertTrue(waitForDisappearance(element("scheduled-tasks-page"), timeout: 5))
+        XCTAssertTrue(waitForDisappearance(element("plugin-surface-scheduled-tasks"), timeout: 5))
         XCTAssertTrue(element("task-card-\(runID)").waitToExist(timeout: 10), "A run is followed on the board.")
         attachScreenshot(named: "Recurring runs appear on the board as ordinary tasks")
+
+        // Open Last Run closes the page for the run, an ordinary task.
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: templateID)?["schedule"] as? [String: Any])?["lastRunTaskID"] as? String) == secondRunID }, timeout: 10))
+        element("plugin-entry-scheduled-tasks").click()
+        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10))
+        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should finish sliding in.")
+        clickScheduledTaskMenuItem(taskID: templateID, item: "scheduled-task-last-run-\(templateID)", title: "Open Last Run")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Daily standup" }, timeout: 15), "Open Last Run opens the run.")
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "The run's conversation is open.")
+        attachScreenshot(named: "Open Last Run opens the schedule's latest run")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the run.")
+        XCTAssertTrue(element("task-card-\(secondRunID)").waitToExist(timeout: 10), "Going back from the run returns to the board.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The page closed for the run.")
         _ = try runCLI(["schedule", "clear", templateID])
         XCTAssertTrue(element("task-card-\(templateID)").waitToExist(timeout: 10), "Clearing the schedule puts the task on the board.")
     }
@@ -744,10 +758,10 @@ extension PlayhouseUITests {
     func test_scheduled_task_edit_and_page_management() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-edit")
         launchApp(defaultParent: fixture.parent.path)
-        element("scheduled-tasks-button").click()
-        XCTAssertTrue(element("scheduled-tasks-page").waitToExist(timeout: 10))
+        element("plugin-entry-scheduled-tasks").click()
+        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10))
         // The page slides in over the board; clicks before it settles land on the board.
-        XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The Scheduled Tasks page should finish sliding in.")
+        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should finish sliding in.")
         XCTAssertTrue(element("scheduled-tasks-empty").exists, "An empty page says so plainly.")
         XCTAssertTrue(element("scheduled-tasks-empty-new-task-button").exists, "The empty page offers New Task.")
         attachScreenshot(named: "Scheduled Tasks page with no schedules")
@@ -823,9 +837,10 @@ extension PlayhouseUITests {
         XCTAssertEqual(claudeFixturePrompts(), [], "A recurring template never runs itself.")
 
         clickScheduledTaskMenuItem(taskID: taskID, item: "scheduled-task-delete-\(taskID)", title: "Delete…")
-        let confirm = element("confirm-delete-scheduled-task-button")
-        let confirmButton = confirm.waitToExist(timeout: 5) ? confirm : app.buttons["Delete"]
-        confirmButton.click()
+        // The built-in plugin asks with the board's `ui.confirm` dialog.
+        let confirm = element("plugin-confirm-button")
+        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Delete asks with the board's confirmation dialog.")
+        confirm.click()
         XCTAssertTrue(waitForDisappearance(element("scheduled-task-row-\(taskID)"), timeout: 10), "Deleting removes the row.")
         XCTAssertEqual(((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count, 0)
         XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 5))
@@ -956,7 +971,7 @@ extension PlayhouseUITests {
         if element("back-to-board-button").exists { element("back-to-board-button").click() }
         // A task opened from the Scheduled Tasks page returns to that page, which covers the board.
         if element("scheduled-tasks-back-button").waitToExist(timeout: 3) { element("scheduled-tasks-back-button").click() }
-        XCTAssertTrue(waitForDisappearance(element("scheduled-tasks-page")), "The Scheduled Tasks page should close before opening another task.")
+        XCTAssertTrue(waitForDisappearance(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should close before opening another task.")
         XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The board should show before opening the cleared-schedule task.")
         openTask(named: "Cleared schedule")
         XCTAssertTrue(waitUntil({
