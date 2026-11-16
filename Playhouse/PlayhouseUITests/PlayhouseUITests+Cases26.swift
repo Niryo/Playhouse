@@ -423,6 +423,109 @@ extension PlayhouseUITests {
         let usage = try XCTUnwrap(try runCLI(["task", "token-usage", taskID], extraEnvironment: environment)["result"] as? [String: Any])
         XCTAssertEqual((usage["contextCompactions"] as? [[String: Any]])?.count, 1, "The compaction is recorded once.")
     }
+    // case-contract: test_claude_long_automatic_notice_is_compact | A Claude Code synthetic notice longer than the automatic message preview stays whole: the streamed steered message and fresh CLI/XPC history carry every line of it under the Claude Code notice marker, between the turn's answer and Claude's reply, and a short notice is recorded unchanged too. In the transcript the long notice renders as an automatic message from Claude Code collapsed to an eight-line preview ending in an ellipsis, with a Show more control whose accessibility label names expanding the automatic message; expanding the streamed notice while its turn still runs reveals all of its text and survives the reload that gives it its history id and the reload after a later turn, and collapsing restores the preview. A short notice shows in full with no control or preview, the user's own prompts never get one, the bubble's accessibility label keeps the full text, and reopening the task shows the long notice collapsed again. The preview is Playhouse-owned presentation shared by every automatic message whatever the provider, and only Claude Code injects a synthetic message inside a turn, so Claude is the representative provider.
+    func test_claude_long_automatic_notice_is_compact() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-ui-long-notice")
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-ui-long-notice")
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Long handoff notice", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let longPrompt = "Hand off with a long Claude Code notice."
+        let shortPrompt = "Hand off with a short Claude Code notice."
+        let shortNotice = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+        func historyMessageID(_ predicate: ([String: Any]) -> Bool) throws -> String {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+            return try XCTUnwrap((history["messages"] as? [[String: Any]] ?? []).last(where: predicate)?["id"] as? String)
+        }
+        func sendTurn(_ prompt: String, count: Int) {
+            sendFromComposer(prompt)
+            XCTAssertTrue(waitUntil({
+                self.fixtureTurnCount(executable, containing: prompt) == count && self.noTurnIsRunning()
+            }, timeout: 30), "The turn \(prompt) should finish.")
+        }
+
+        // A short notice, loaded from history: whole, with no preview and no control.
+        _ = try runCLI(["conversation", "send", taskID, "--message", shortPrompt], extraEnvironment: environment)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Long handoff notice")
+        let toggles = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "automatic-message-toggle-"))
+        try assertAutomaticMessageBubble(taskID: taskID, containing: shortNotice, sender: "Claude Code")
+        let shortID = try historyMessageID { ($0["text"] as? String ?? "").contains(shortNotice) }
+        XCTAssertTrue(waitUntil({ !self.element("automatic-message-preview-\(shortID)").exists }, timeout: 5),
+                      "A notice that fits the preview shows in full, with no misleading ellipsis.")
+        XCTAssertFalse(element("automatic-message-toggle-\(shortID)").exists, "A short notice has no expand control.")
+
+        // A long notice, streamed into the open task while its turn still runs: collapsed to its preview.
+        let hold = executable.path + ".handoff-notice"
+        touch(hold + "-pause")
+        sendFromComposer(longPrompt)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: hold + "-ready") }, timeout: 20), "The fixture holds the turn after the notice.")
+        let streamedToggle = toggles.firstMatch
+        let streamedPreview = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "automatic-message-preview-")).firstMatch
+        XCTAssertTrue(streamedToggle.waitToExist(timeout: 10), "The streamed long notice offers an expand control.")
+        XCTAssertTrue(streamedPreview.exists, "The streamed long notice starts collapsed to its preview.")
+        XCTAssertEqual(streamedToggle.label, "Expand automatic message to show all text")
+        XCTAssertEqual(streamedToggle.value as? String, "collapsed")
+        // Eight 16-point lines with their spacing, never the notice's 25 lines.
+        XCTAssertGreaterThan(streamedPreview.frame.height, 120, "The preview shows several lines: \(streamedPreview.frame)")
+        XCTAssertLessThan(streamedPreview.frame.height, 240, "The preview stops at eight lines: \(streamedPreview.frame)")
+        attachScreenshot(named: "long-notice-1-collapsed-while-streaming")
+        let streamedToggleID = streamedToggle.identifier
+        streamedToggle.click()
+        XCTAssertTrue(waitUntil({ !streamedPreview.exists && (streamedToggle.value as? String) == "expanded" }, timeout: 5),
+                      "Expanding the streamed notice shows all of it.")
+        attachScreenshot(named: "long-notice-2-expanded-while-streaming")
+
+        // Releasing the turn ends it; the reload gives the notice its history id and keeps it expanded.
+        touch(hold + "-release")
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: longPrompt) == 1 && self.noTurnIsRunning()
+        }, timeout: 30), "The long notice turn should finish.")
+        for suffix in ["-pause", "-ready", "-release"] { try? FileManager.default.removeItem(atPath: hold + suffix) }
+        let longBubble = try assertAutomaticMessageBubble(taskID: taskID, containing: "Handoff context ends here.", sender: "Claude Code")
+        let longID = try historyMessageID { ($0["text"] as? String ?? "").contains("Handoff context ends here.") }
+        XCTAssertTrue(longBubble.label.contains("Handoff context line 01:") && longBubble.label.contains("Handoff context ends here."),
+                      "The bubble's accessibility label keeps the whole notice: \(longBubble.label)")
+        XCTAssertFalse(transcriptContains("Claude Code automatic notice:"), "The notice's marker line is never shown.")
+        let preview = element("automatic-message-preview-\(longID)")
+        let toggle = element("automatic-message-toggle-\(longID)")
+        XCTAssertTrue(toggle.waitToExist(timeout: 10), "The reloaded notice keeps its control.")
+        XCTAssertNotEqual(streamedToggleID, "automatic-message-toggle-\(longID)", "The notice was expanded under its streamed id, before history gave it its own.")
+        XCTAssertEqual(toggle.value as? String, "expanded", "Expanding the streamed notice survives the turn's reload.")
+        XCTAssertEqual(toggle.label, "Collapse automatic message")
+        XCTAssertFalse(preview.exists)
+        let expandedHeight = longBubble.frame.height
+        attachElementScreenshot(longBubble, named: "long-notice-3-expanded-bubble")
+
+        toggle.click()
+        XCTAssertTrue(waitUntil({ preview.exists && (toggle.value as? String) == "collapsed" }, timeout: 5), "Collapsing restores the preview.")
+        XCTAssertEqual(toggle.label, "Expand automatic message to show all text")
+        XCTAssertLessThan(longBubble.frame.height, expandedHeight - 250, "The collapsed notice hides most of its lines.")
+        XCTAssertLessThan(preview.frame.height, 240, "The preview stops at eight lines: \(preview.frame)")
+        attachElementScreenshot(longBubble, named: "long-notice-4-collapsed-bubble")
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !preview.exists && (toggle.value as? String) == "expanded" }, timeout: 5))
+
+        // A later turn reloads the transcript; the reader's expansion survives it.
+        sendTurn(shortPrompt, count: 2)
+        let latestPromptID = try historyMessageID { ($0["role"] as? String) == "user" && ($0["text"] as? String) == shortPrompt }
+        XCTAssertTrue(element("user-message-\(latestPromptID)").waitToExist(timeout: 10), "The user's prompt renders as their own bubble.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
+        XCTAssertEqual(toggle.value as? String, "expanded", "The expanded notice stays expanded across the reload.")
+        XCTAssertFalse(preview.exists)
+        XCTAssertEqual(toggles.count, 1, "Only the long notice has a control; prompts and short notices never do.")
+        attachScreenshot(named: "long-notice-5-expanded-after-later-turn")
+
+        // Reopening the task, left expanded, starts the notice collapsed again. The reopened
+        // transcript lands on the latest turn, so scroll back up to the notice.
+        returnToBoard()
+        openTask(named: "Long handoff notice")
+        XCTAssertTrue(scrollTranscriptUntilExists(preview), "A reopened task shows the long notice collapsed.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "collapsed")
+        attachScreenshot(named: "long-notice-6-collapsed-after-reopen")
+    }
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     func test_settings_token_usage_color_max_round_trip() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")

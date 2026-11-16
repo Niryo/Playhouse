@@ -77,6 +77,19 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.write({"type": "user", "parent_tool_use_id": None, "isSynthetic": True, "uuid": "fixture-no-visible-output-notice",
                "message": {"role": "user", "content": [{"type": "text", "text": runtime.NO_VISIBLE_OUTPUT_NOTICE}]}})
         runtime.text("msg_chat_notice_reply", runtime.CHAT_NOTICE_REPLY)
+    elif user_text.rstrip().endswith((runtime.LONG_NOTICE_PROMPT, runtime.SHORT_NOTICE_PROMPT)):
+        # The turn reports its outcome, then Claude Code adds its own synthetic message and
+        # Claude answers it, as a real handoff notice arrives inside a turn.
+        is_long = user_text.rstrip().endswith(runtime.LONG_NOTICE_PROMPT)
+        suffix = "long" if is_long else "short"
+        runtime.text(f"msg_notice_handoff_answer_{suffix}", runtime.NOTICE_HANDOFF_ANSWER)
+        outcome = runtime.report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome, "output": runtime.run_tool(f"toolu_notice_handoff_{suffix}", "Bash", {"command": outcome}, outcome)})
+        runtime.write({"type": "user", "parent_tool_use_id": None, "isSynthetic": True, "uuid": f"fixture-handoff-notice-{suffix}",
+               "message": {"role": "user", "content": [{"type": "text", "text": runtime.LONG_HANDOFF_NOTICE if is_long else runtime.NO_VISIBLE_OUTPUT_NOTICE}]}})
+        runtime.wait_for_release("handoff-notice", "The handoff notice streamed; the turn is still running.")
+        runtime.text(f"msg_notice_handoff_reply_{suffix}", runtime.NOTICE_HANDOFF_REPLY)
     elif runtime.PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
         question_input = {
             "questions": [{
