@@ -477,6 +477,14 @@ struct ConversationTurnDiff: Codable, Equatable {
     }
 }
 
+/// The images of one transcript message, read apart from its history page.
+struct ConversationMessageImages: Codable, Equatable {
+    let id: String
+    /// The turn holding the message; message IDs are unique only within a turn.
+    let turnID: String?
+    let imageDataURLs: [String]
+}
+
 struct ConversationHistory: Codable, Equatable {
     var messages: [ConversationMessage]
     let activities: [ConversationActivity]

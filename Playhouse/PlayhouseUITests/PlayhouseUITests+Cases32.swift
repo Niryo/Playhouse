@@ -640,4 +640,214 @@ extension PlayhouseUITests {
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "schedule-hint").firstMatch.waitToExist(timeout: 5), "Its popover shows the native hint's stand-in.")
         attachScreenshot(named: "Composer: the schedule popover")
     }
+
+    // case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images live in the provider thread, an earlier image is deferred the same way and read back from the thread. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
+    func test_conversation_history_defers_earlier_images() throws {
+        let claude = dataDirectory.appendingPathComponent("claude-fixture-deferred-images")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claude)
+        let codex = dataDirectory.appendingPathComponent("codex-fixture-image-serial-success")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: codex)
+        for (executable, owner, contents) in [
+            (claude, ".playhouse-claude-fixture-owner", "Playhouse test owns this Claude Code protocol fixture (v1).\n"),
+            (codex, ".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n"),
+        ] {
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            try Data(contents.utf8).write(to: dataDirectory.appendingPathComponent(owner))
+        }
+        claudeFixtureExecutable = claude.path
+        codexFixtureExecutable = codex.path
+        launchApp(defaultParent: fixture.parent.path)
+
+        func writeImage(_ name: String, red: CGFloat, green: CGFloat, blue: CGFloat) throws -> String {
+            let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 48, pixelsHigh: 48, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            let color = NSColor(deviceRed: red, green: green, blue: blue, alpha: 1)
+            for x in 0..<48 { for y in 0..<48 { bitmap.setColor(color, atX: x, y: y) } }
+            let url = dataDirectory.appendingPathComponent(name)
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url)
+            return url.path
+        }
+        let firstImage = try writeImage("first-turn.png", red: 0.1, green: 0.6, blue: 0.7)
+        let secondImage = try writeImage("second-turn.png", red: 0.9, green: 0.5, blue: 0.1)
+        func result(_ arguments: [String]) throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(arguments)["result"] as? [String: Any])
+        }
+        func messages(_ history: [String: Any]) -> [[String: Any]] { history["messages"] as? [[String: Any]] ?? [] }
+        func imageURLs(_ message: [String: Any]) -> [String] { message["imageDataURLs"] as? [String] ?? [] }
+        func imageMessages(_ history: [String: Any]) -> [[String: Any]] {
+            messages(history).filter { !imageURLs($0).isEmpty || $0["imagesDeferred"] as? Bool == true }
+        }
+        /// Each message holding or deferring images, as "id:image count:deferred".
+        func imageStates(_ history: [String: Any]) -> [String] {
+            imageMessages(history).map { "\($0["id"] as? String ?? ""):\(imageURLs($0).count):\($0["imagesDeferred"] as? Bool == true)" }
+        }
+        func reads(_ event: String, taskID: String) throws -> [[String: Any]] {
+            try diagnosticEvents().filter { $0["event"] as? String == event && $0["taskID"] as? String == taskID.uppercased() }
+        }
+
+        let taskID = try XCTUnwrap(try result([
+            "task", "create", "--title", "Claude deferred images", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["id"] as? String)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Say hello.", "--image", firstImage])
+        let second = try result(["conversation", "send", taskID, "--message", "Long history turn 2.", "--image", secondImage, "--defer-images"])
+        let full = try result(["conversation", "history", taskID])
+        let fullImageMessages = imageMessages(full)
+        XCTAssertEqual(fullImageMessages.map { $0["text"] as? String }, ["Say hello.", "Long history turn 2."])
+        let firstMessage = fullImageMessages[0], secondMessage = fullImageMessages[1]
+        let firstID = try XCTUnwrap(firstMessage["id"] as? String), secondID = try XCTUnwrap(secondMessage["id"] as? String)
+        XCTAssertTrue(fullImageMessages.allSatisfy { imageURLs($0).count == 1 && imageURLs($0)[0].hasPrefix("data:image/png;base64,") })
+        XCTAssertNotEqual(imageURLs(firstMessage), imageURLs(secondMessage))
+        XCTAssertTrue(messages(full).allSatisfy { $0["imagesDeferred"] == nil }, "Plain history is complete and unmarked.")
+
+        func assertFirstDeferred(_ history: [String: Any], _ context: String) {
+            XCTAssertEqual(imageStates(history), ["\(firstID):0:true", "\(secondID):1:false"], context)
+            XCTAssertEqual(imageMessages(history).last.map { $0 as NSDictionary }, secondMessage as NSDictionary,
+                           "\(context): the newest turn keeps its image and is not marked.")
+        }
+        assertFirstDeferred(second, "The history a send returns defers the earlier turn's image")
+        let deferred = try result(["conversation", "history", taskID, "--defer-images"])
+        assertFirstDeferred(deferred, "Complete history defers the earlier turn's image")
+        func withoutImages(_ history: [String: Any]) -> NSArray {
+            messages(history).map { message -> [String: Any] in
+                var message = message
+                message["imageDataURLs"] = [String]()
+                message["imagesDeferred"] = nil
+                return message
+            } as NSArray
+        }
+        XCTAssertEqual(withoutImages(deferred), withoutImages(full), "Deferring changes nothing but the image data.")
+        let page = try result(["conversation", "history", taskID, "--limit", "80", "--defer-images"])
+        assertFirstDeferred(page, "The newest page defers the earlier turn's image")
+        XCTAssertEqual(page["earlierMessageCount"] as? Int, 0)
+        let newestRead = try XCTUnwrap(try reads("conversation.history.read", taskID: taskID).last)
+        XCTAssertEqual(["source", "deferredImageMessageCount", "hydratedImageMessageCount"].map { newestRead[$0] as? String }, ["stored-page", "1", "1"])
+        let earlier = try result(["conversation", "history", taskID, "--limit", "80", "--before", secondID, "--defer-images"])
+        XCTAssertEqual(imageStates(earlier), ["\(firstID):0:true"], "An earlier page defers every image it holds.")
+        let earlierRead = try XCTUnwrap(try reads("conversation.history.read", taskID: taskID).last)
+        XCTAssertEqual(["deferredImageMessageCount", "hydratedImageMessageCount"].map { earlierRead[$0] as? String }, ["1", "0"])
+        let plainReadCount = try reads("conversation.history.read", taskID: taskID).count
+        _ = try result(["conversation", "history", taskID, "--limit", "80"])
+        let plainRead = try reads("conversation.history.read", taskID: taskID)[plainReadCount]
+        XCTAssertEqual(["deferredImageMessageCount", "hydratedImageMessageCount"].map { plainRead[$0] as? String }, ["0", "2"])
+
+        let imageless = try XCTUnwrap(messages(full).first { $0["role"] as? String == "assistant" }?["id"] as? String)
+        func images(_ arguments: [String]) throws -> [[String: Any]] {
+            try XCTUnwrap(try runCLI(["conversation", "images"] + arguments)["result"] as? [[String: Any]])
+        }
+        let read = try images([taskID, "--message", secondID, "--message", imageless, "--message", firstID])
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: read.map { ($0["id"] as? String ?? "", imageURLs($0)) }),
+                       [firstID: imageURLs(firstMessage), secondID: imageURLs(secondMessage)],
+                       "The named messages' exact images are returned, and nothing for a message without images.")
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: read.map { ($0["id"] as? String ?? "", $0["turnID"] as? String) }),
+                       [firstID: firstMessage["turnID"] as? String, secondID: secondMessage["turnID"] as? String])
+        let imagesRead = try XCTUnwrap(try reads("conversation.images.read", taskID: taskID).last)
+        XCTAssertEqual(["requestedMessageCount", "returnedMessageCount", "readProviderThread"].map { imagesRead[$0] as? String }, ["3", "2", "false"])
+        XCTAssertEqual(try images([taskID, "--message", imageless, "--message", "no-such-message"]).count, 0)
+        assertCLIError(try runCLI(["conversation", "images", taskID], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["conversation", "images", UUID().uuidString, "--message", firstID], expectedStatus: 3), code: "not_found")
+
+        let third = try result(["conversation", "send", taskID, "--message", "Say hello.", "--defer-images"])
+        XCTAssertEqual(imageStates(third), ["\(firstID):0:true", "\(secondID):0:true"], "Once a later turn starts, both earlier images are deferred.")
+        XCTAssertEqual(try reads("conversation.history.read", taskID: taskID).last?["deferredImageMessageCount"] as? String, "2")
+        let payloads = try conversationRows("SELECT payload FROM conversation_messages WHERE task_id = '\(taskID.uppercased())'").compactMap { $0[0] }
+        XCTAssertFalse(payloads.isEmpty)
+        XCTAssertFalse(payloads.contains { $0.contains("imagesDeferred") }, "The mark describes one read and is never stored.")
+        let resumed = try result(["conversation", "history", taskID])
+        XCTAssertEqual(imageMessages(resumed) as NSArray, [firstMessage, secondMessage] as NSArray, "Plain history still carries every image after deferred reads.")
+
+        // Codex keeps a user's images in its thread, so a deferred one is read back from there.
+        let codexTask = try XCTUnwrap(try result([
+            "task", "create", "--title", "Codex deferred images", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
+        ])["id"] as? String)
+        _ = try runCLI(["conversation", "send", codexTask, "--image", firstImage])
+        _ = try runCLI(["conversation", "send", codexTask, "--message", "Continue using the earlier image as context."])
+        let codexImageMessages = imageMessages(try result(["conversation", "history", codexTask]))
+        XCTAssertEqual(codexImageMessages.map { $0["role"] as? String }, ["user"])
+        let codexImageID = try XCTUnwrap(codexImageMessages.first?["id"] as? String)
+        func codexImageRead() throws -> [String?] {
+            let codexImages = try images([codexTask, "--message", codexImageID])
+            XCTAssertEqual(codexImages.map { $0["id"] as? String }, [codexImageID])
+            XCTAssertEqual(codexImages.first.map(imageURLs), codexImageMessages.first.map(imageURLs))
+            let read = try XCTUnwrap(try reads("conversation.images.read", taskID: codexTask).last)
+            return ["returnedMessageCount", "readProviderThread"].map { read[$0] as? String }
+        }
+        XCTAssertEqual(imageStates(try result(["conversation", "history", codexTask, "--defer-images"])), ["\(codexImageID):0:true"],
+                       "A Codex thread's earlier image is deferred too.")
+        XCTAssertEqual(try codexImageRead(), ["1", "true"], "A Codex image is read from its thread.")
+
+        // The app defers images itself: opening the conversation reads none of the earlier ones.
+        let latestQuestionID = try XCTUnwrap(messages(third).last {
+            $0["role"] as? String == "user" && $0["text"] as? String == "Say hello."
+        }?["id"] as? String)
+        let historyReadsBeforeOpen = try reads("conversation.history.read", taskID: taskID).count
+        let imageReadsBeforeOpen = try reads("conversation.images.read", taskID: taskID).count
+        func imageReadsSinceOpen() -> [[String: Any]] {
+            Array(((try? reads("conversation.images.read", taskID: taskID)) ?? []).dropFirst(imageReadsBeforeOpen))
+        }
+        openTask(named: "Claude deferred images")
+        let scrollView = element("conversation-scroll-view")
+        let latestQuestion = element("user-message-\(latestQuestionID)")
+        XCTAssertTrue(waitUntil({ latestQuestion.exists && latestQuestion.isHittable }, timeout: 20), "The latest question is visible on open.")
+        XCTAssertTrue(waitUntil({
+            ((try? reads("conversation.history.read", taskID: taskID)) ?? []).dropFirst(historyReadsBeforeOpen).contains {
+                $0["deferredImageMessageCount"] as? String == "2" && $0["hydratedImageMessageCount"] as? String == "0"
+            }
+        }, timeout: 10), "Opening reads the newest page with both earlier images deferred.")
+        let firstChatImage = element("chat-image-\(firstID)-0")
+        let secondChatImage = element("chat-image-\(secondID)-0")
+        XCTAssertFalse(firstChatImage.exists || secondChatImage.exists, "No earlier image is shown before the reader scrolls up.")
+        XCTAssertEqual(imageReadsSinceOpen().count, 0, "Opening the conversation reads no deferred image data.")
+        attachScreenshot(named: "Deferred images: conversation opens on the latest turn without reading earlier images")
+
+        func isVisible(_ candidate: XCUIElement) -> Bool {
+            candidate.exists && scrollView.frame.intersects(candidate.frame)
+        }
+        func scrollUp(until condition: () -> Bool) {
+            for _ in 0..<60 where !condition() {
+                scrollView.scroll(byDeltaX: 0, deltaY: 400)
+                _ = waitUntil(condition, timeout: 1)
+            }
+        }
+        XCTAssertEqual(imageReadsSinceOpen().count, 0, "No image data is read while the reader stays on the latest turn.")
+        scrollUp(until: { isVisible(secondChatImage) })
+        XCTAssertTrue(waitUntil({ isVisible(secondChatImage) }, timeout: 10), "The second turn's image loads once its message scrolls into view.")
+        XCTAssertFalse(element("deferred-chat-image-\(secondID)").exists, "The loaded image replaces its placeholder.")
+        attachScreenshot(named: "Deferred images: the second turn's image loaded on scroll")
+        scrollUp(until: { isVisible(firstChatImage) })
+        XCTAssertTrue(waitUntil({ isVisible(firstChatImage) }, timeout: 10), "The first turn's image loads once its message scrolls into view.")
+        attachScreenshot(named: "Deferred images: the first turn's image loaded on scroll")
+        let loaded = imageReadsSinceOpen()
+        XCTAssertEqual(loaded.compactMap { Int($0["returnedMessageCount"] as? String ?? "") }.reduce(0, +), 2,
+                       "Each earlier image is read once, when its message comes into view.")
+        XCTAssertTrue(loaded.allSatisfy { $0["readProviderThread"] as? String == "false" })
+
+        // A turn sent from the composer brings back history with the images deferred again; the loaded ones stay.
+        let historyReadsBeforeSend = try reads("conversation.history.read", taskID: taskID).count
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Say hello again.")
+        element("send-message-button").click()
+        func sentTurnAnswered() -> Bool {
+            guard let history = try? result(["conversation", "history", taskID]) else { return false }
+            let ordinary = ordinaryMessages(messages(history))
+            return ordinary.dropLast().last?["text"] as? String == "Say hello again." && ordinary.last?["role"] as? String == "assistant"
+        }
+        XCTAssertTrue(waitUntil({ sentTurnAnswered() && self.noTurnIsRunning() }, timeout: 60), "The new turn and its status nudges should finish.")
+        // The test's own polls read complete history without a limit; only the window reads the newest 80.
+        XCTAssertTrue(waitUntil({
+            ((try? reads("conversation.history.read", taskID: taskID)) ?? []).dropFirst(historyReadsBeforeSend).contains {
+                $0["messageLimit"] as? String == "80" && $0["deferredImageMessageCount"] as? String == "2"
+                    && $0["hydratedImageMessageCount"] as? String == "0"
+            }
+        }, timeout: 10), "The history the window receives for the completed turn defers the earlier images again.")
+        XCTAssertFalse(try reads("conversation.history.read", taskID: taskID).dropFirst(historyReadsBeforeSend).contains {
+            $0["messageLimit"] as? String == "80" && $0["hydratedImageMessageCount"] as? String != "0"
+        }, "No history the window receives after the send carries earlier image data.")
+        scrollUp(until: { isVisible(secondChatImage) })
+        XCTAssertTrue(waitUntil({ isVisible(secondChatImage) }, timeout: 10), "The second turn's image stays loaded after a later turn.")
+        scrollUp(until: { isVisible(firstChatImage) })
+        XCTAssertTrue(waitUntil({ isVisible(firstChatImage) }, timeout: 10), "The first turn's image stays loaded after a later turn.")
+        XCTAssertEqual(imageReadsSinceOpen().count, loaded.count, "Images already loaded are not read again after a later turn.")
+        attachScreenshot(named: "Deferred images: loaded images kept after a later turn")
+    }
 }

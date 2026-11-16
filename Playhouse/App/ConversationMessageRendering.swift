@@ -216,7 +216,8 @@ extension TaskConversationView {
                     .accessibilityIdentifier("assistant-provider-\(message.id)")
             }
 
-            ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
+            deferredImagesPlaceholder(for: message)
+            ForEach(Array(transcriptImageDataURLs(for: message).enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
                     Button { selectedChatImage = image } label: {
                         Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
@@ -244,12 +245,77 @@ extension TaskConversationView {
         .frame(maxWidth: 620, alignment: .leading)
     }
 
+    /// A message's images: its own, or those read since its history page deferred them.
+    func transcriptImageDataURLs(for message: ConversationMessage) -> [String] {
+        guard message.imageDataURLs.isEmpty, message.imagesDeferred == true else { return message.imageDataURLs }
+        return deferredMessageImages[Self.deferredImageKey(message)] ?? []
+    }
+
+    static func deferredImageKey(_ message: ConversationMessage) -> String {
+        "\(message.turnID ?? "")/\(message.id)"
+    }
+
+    /// Stands in for images the history page left out, and reads them once its row is rendered.
+    @ViewBuilder
+    func deferredImagesPlaceholder(for message: ConversationMessage) -> some View {
+        if message.imageDataURLs.isEmpty, message.imagesDeferred == true,
+           deferredMessageImages[Self.deferredImageKey(message)] == nil {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Loading image…")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 220, height: 96)
+            .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading attached image")
+            .accessibilityIdentifier("deferred-chat-image-\(message.id)")
+            .onAppear { requestDeferredImages(for: message) }
+        }
+    }
+
+    /// Queues a message whose placeholder was rendered. Rows that render together are read with one request.
+    func requestDeferredImages(for message: ConversationMessage) {
+        let key = Self.deferredImageKey(message)
+        guard deferredMessageImages[key] == nil, !deferredImageLoads.contains(key) else { return }
+        let startsRead = deferredImageRequests.isEmpty
+        guard deferredImageRequests.insert(key).inserted, startsRead else { return }
+        // Not the row's own task: a row scrolled away mid-read must not drop the others' images.
+        Task { @MainActor in
+            await Task.yield()
+            await loadRequestedDeferredImages()
+        }
+    }
+
+    func loadRequestedDeferredImages() async {
+        let waiting = conversationMessages.filter {
+            let key = Self.deferredImageKey($0)
+            return deferredImageRequests.contains(key) && deferredMessageImages[key] == nil
+        }
+        let keys = Set(waiting.map(Self.deferredImageKey))
+        deferredImageRequests.removeAll()
+        guard !waiting.isEmpty else { return }
+        deferredImageLoads.formUnion(keys)
+        defer { deferredImageLoads.subtract(keys) }
+        // A failed read leaves the placeholders up; they ask again when next rendered.
+        guard let images = try? await conversationManager.messageImages(
+            taskID: task.id, messageIDs: Array(Set(waiting.map(\.id)))
+        ) else { return }
+        for message in waiting {
+            let entries = images.filter { $0.id == message.id }
+            let match = entries.first(where: { $0.turnID == message.turnID }) ?? (entries.count == 1 ? entries.first : nil)
+            deferredMessageImages[Self.deferredImageKey(message)] = match?.imageDataURLs ?? []
+        }
+    }
+
     func userBubble(_ message: ConversationMessage) -> some View {
         let isPlayhouseSent = message.isPlayhouseSent
         let accessibleText = isPlayhouseSent ? PlayhouseSentMessage.displayText(message.text) : Self.displayableUserText(message.text)
         return ZStack(alignment: .topLeading) {
             VStack(alignment: .trailing, spacing: 8) {
-                ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
+                deferredImagesPlaceholder(for: message)
+                ForEach(Array(transcriptImageDataURLs(for: message).enumerated()), id: \.offset) { index, dataURL in
                     if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
                         Button { selectedChatImage = image } label: {
                             Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)

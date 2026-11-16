@@ -62,7 +62,8 @@ struct RemoteConversationManager {
         beforeMessageID: String? = nil,
         onActionRequest: @escaping () -> Void = {}
     ) async throws -> ConversationHistory {
-        var arguments: [String: BridgeValue] = ["taskID": id(taskID)]
+        // The window loads earlier messages' images as it shows them (`messageImages`).
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "deferImages": .boolean(true)]
         if let messageLimit { arguments["limit"] = .string(String(messageLimit)) }
         if let beforeMessageID { arguments["before"] = .string(beforeMessageID) }
         let result = try await daemon.call("conversation.history", arguments) { event in
@@ -70,6 +71,21 @@ struct RemoteConversationManager {
         }
         await runtime.refresh()
         return try result.decoded(ConversationHistory.self)
+    }
+
+    /// The images of messages a history read marked `imagesDeferred`.
+    func messageImages(taskID: UUID, messageIDs: [String]) async throws -> [ConversationMessageImages] {
+        let result = try await daemon.call("conversation.images", [
+            "taskID": id(taskID), "messages": .array(messageIDs.map(BridgeValue.string)),
+        ])
+        // Read in place: decoding through JSON would copy megabytes of image data on the main actor.
+        guard case .array(let entries) = result else { return [] }
+        return entries.compactMap { entry in
+            guard let id = entry.object?["id"]?.string else { return nil }
+            return ConversationMessageImages(
+                id: id, turnID: entry.object?["turnID"]?.string, imageDataURLs: entry.object?["imageDataURLs"]?.strings ?? []
+            )
+        }
     }
 
     func send(
@@ -93,6 +109,7 @@ struct RemoteConversationManager {
             // The window keeps its own paged transcript, so the finished turn
             // only needs to bring back the newest page rather than everything.
             "historyLimit": .string(String(TaskConversationView.historyPageSize)),
+            "deferImages": .boolean(true),
         ]
         if let modelID { arguments["model"] = .string(modelID) }
         if let statusBeforeSubmission { arguments["statusBeforeSubmission"] = .string(statusBeforeSubmission.rawValue) }
@@ -225,6 +242,7 @@ struct RemoteConversationManager {
             "itemID": .string(question.id),
             "answers": .array(answers.map(BridgeValue.string)),
             "historyLimit": .string(String(TaskConversationView.historyPageSize)),
+            "deferImages": .boolean(true),
         ])
         let history = try result.object?["history"].map { try $0.decoded(ConversationHistory.self) }
         return (result.object?["text"]?.string ?? "", result.object?["queued"]?.bool ?? false, history)

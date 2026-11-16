@@ -186,7 +186,8 @@ extension PlayhouseCLI {
       playhouse task raw-input-export <task-id> [--agent <id>] [--request <n>] [--format text|json]
       playhouse task raw-input-text <task-id> --item <n> [--agent <id>] [--offset <n>] [--length <n>]
       playhouse task cpu-usage <task-id>
-      playhouse conversation history <task-id> [--limit <messages>] [--before <message-id>]
+      playhouse conversation history <task-id> [--limit <messages>] [--before <message-id>] [--defer-images]
+      playhouse conversation images <task-id> --message <message-id> [--message <message-id>]...
       playhouse conversation present-image <task-id> --image <path> [--caption <text>]
       playhouse conversation queue <task-id> --message <text> [--image <path>]...
       playhouse conversation queue-list <task-id>
@@ -214,7 +215,7 @@ extension PlayhouseCLI {
       playhouse conversation side-chat <task-id> --message <text> (--selection <text> [--source <json>] | --side-chat <side-chat-id>) [--model <model-id>] [--effort <low|medium|high|xhigh>]
       playhouse conversation side-chats <task-id>
       playhouse conversation side-chat-close <task-id> <side-chat-id>
-      playhouse conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]...
+      playhouse conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]... [--defer-images]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     Conversation commands use the task's provider; tasks without one use Codex.
