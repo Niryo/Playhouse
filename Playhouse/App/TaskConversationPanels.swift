@@ -387,11 +387,6 @@ extension TaskConversationView {
                         }
                     }
 
-                    Spacer(minLength: 8)
-
-                    if !task.isStandaloneChat {
-                        repositoryBadges
-                    }
                 }
 
                 if !task.isStandaloneChat {
@@ -417,6 +412,10 @@ extension TaskConversationView {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 0)
+
+            if !task.isStandaloneChat {
+                repositoryBadges
+            }
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 15)
