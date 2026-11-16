@@ -301,10 +301,166 @@ class BridgeTestCases22:
         texts, _ = self.history_texts(created["id"], environment)
         self.assertEqual(texts.count("After restart."), 1)
         self.assertTrue(marker.exists(), "No task outcome nudge was sent.")
-    # case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
+    # case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation) before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
+    def test_plugin_enable_disable_and_builtins(self):
+        def listed():
+            return self.assert_success(self.call_cli("plugin", "list")[0])
+        def by_id(response):
+            return {plugin["id"]: plugin for plugin in response["plugins"]}
+
+        initial = listed()
+        changes = initial["plugins"][0]
+        self.assertEqual((changes["id"], changes["name"], changes["placement"], changes["presentation"]), ("changes", "Changes", "conversationSidebar", "inline"))
+        self.assertEqual((changes["builtIn"], changes["valid"], changes["enabled"], changes["errors"]), (True, True, True, []))
+        self.assertEqual([plugin["id"] for plugin in initial["plugins"]], ["changes"], "Only the built-ins are listed before any plugin is installed.")
+
+        hello = 'Playhouse.render(h(Text, { testID: "hello" }, "Hello"));'
+        self.write_installed_plugin("hello-board", hello, placement="mainSidebar", presentation="page")
+        self.write_installed_plugin("workspace-probe", self.PLUGIN_WORKSPACE_SOURCE, placement="conversationSidebar", presentation="inline")
+        self.write_installed_plugin("board-probe", self.PLUGIN_WORKSPACE_SOURCE, placement="mainSidebar", presentation="page")
+        self.write_installed_plugin("inline-composer", hello, placement="composerActions", presentation="inline")
+        self.write_installed_plugin("changes", hello, placement="conversationSidebar", presentation="inline")
+        refreshed = self.assert_success(self.call_cli("plugin", "refresh")[0])
+        self.assertEqual([plugin["id"] for plugin in refreshed["plugins"]], ["changes", "board-probe", "changes", "hello-board", "inline-composer", "workspace-probe"],
+                         "The built-ins come first, then the installed plugins by id.")
+        self.assertTrue(refreshed["plugins"][0]["builtIn"])
+        shadow = refreshed["plugins"][2]
+        self.assertFalse(shadow["builtIn"])
+        self.assertFalse(shadow["valid"])
+        self.assertTrue(any("is a built-in plugin's id" in error for error in shadow["errors"]), shadow["errors"])
+        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"][3:]}
+        self.assertTrue(plugins["workspace-probe"]["valid"], plugins["workspace-probe"]["errors"])
+        self.assertFalse(plugins["inline-composer"]["valid"])
+        self.assertTrue(any("only in the conversation sidebar" in error for error in plugins["inline-composer"]["errors"]), plugins["inline-composer"]["errors"])
+        self.assertTrue(all(plugin["enabled"] and not plugin["builtIn"] for plugin in plugins.values()))
+        (self.plugins_folder() / "changes" / "plugin.json").unlink()
+        (self.plugins_folder() / "changes" / "index.js").unlink()
+        (self.plugins_folder() / "changes").rmdir()
+
+        # A built-in is compiled in: it can only be disabled.
+        for command in (("delete",), ("edit",)):
+            refused = self.call_cli("plugin", *command, "--id", "changes", expected_status=2)[0]
+            self.assert_failure(refused, "invalid_argument")
+            self.assertIn("built-in", refused["error"]["message"])
+        self.assert_failure(self.call_cli("plugin", "render", "--plugin", "changes", expected_status=2)[0], "invalid_argument")
+
+        # An inline conversation sidebar plugin gets the workspace and the sidebar, and its calls are recorded.
+        self.prepare_workspace_changes()
+        task = self.create_task(title="Inline plugin task", roots=[self.changes])
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"])[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-revision")), "revision 0")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-open")), "no diff")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-rail")), "expanded")
+        opened_props = json.dumps({"workspace": {"revision": 3, "openDiff": {"repository": str(self.changes), "path": "shared.txt", "group": "unviewed"}}, "sidebar": {"collapsed": True}})
+        railed = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--props", opened_props)[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(railed["tree"], "probe-revision")), "revision 3")
+        self.assertEqual(self.plugin_text(self.plugin_node(railed["tree"], "probe-open")), "open shared.txt")
+        self.assertEqual(self.plugin_text(self.plugin_node(railed["tree"], "probe-rail")), "rail")
+        refreshed_call = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--event", "probe-refresh:onPress")[0])
+        self.assertEqual(refreshed_call["hostCalls"], [{"kind": "ui", "name": "refreshWorkspace", "arguments": {}, "ok": True, "result": None}])
+        self.assertEqual(self.plugin_text(self.plugin_node(refreshed_call["tree"], "probe-status")), "refresh: ok")
+        diffed = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--event", "probe-open-diff:onPress")[0])
+        self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in diffed["hostCalls"]], [("bridge", "task.changes.list", True), ("ui", "openDiff", True)])
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task["id"])[0])
+        self.assertEqual(diffed["hostCalls"][1]["arguments"]["path"], inventory["unviewed"][0]["path"], "openDiff gets the listed entry.")
+        self.assertEqual(self.plugin_text(self.plugin_node(diffed["tree"], "probe-status")), "openDiff: ok")
+
+        # Each plugin keeps its own saved values, which come back as props.state.
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "probe-state")), "saved 0")
+        self.assertEqual(by_id(listed())["workspace-probe"]["state"], {})
+        saved = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], "--event", "probe-save:onPress")[0])
+        self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in saved["hostCalls"]], [("bridge", "plugin.state.set", True)])
+        self.assertEqual(saved["hostCalls"][0]["arguments"], {"pluginID": "workspace-probe", "key": "clicks", "value": 1})
+        self.assertEqual(self.plugin_text(self.plugin_node(saved["tree"], "probe-status")), "save: ok")
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe")[0]), {"pluginID": "workspace-probe", "state": {"clicks": 1}})
+        self.assertEqual(by_id(listed())["workspace-probe"]["state"], {"clicks": 1}, "plugin list reports each plugin's state.")
+        reread = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"])[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(reread["tree"], "probe-state")), "saved 1", "A new run of the plugin gets its saved state.")
+        revision = listed()["revision"]
+        stored = self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "theme", "--value", '{"accent": "blue"}')[0])
+        self.assertEqual(stored, {"pluginID": "workspace-probe", "state": {"clicks": 1, "theme": {"accent": "blue"}}, "revision": revision + 1},
+                         "Saving bumps the plugins revision, so windows hand mounted plugins the new state.")
+        removed = self.assert_success(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "theme", "--value", "null")[0])
+        self.assertEqual(removed["state"], {"clicks": 1}, "null removes a key.")
+        collapsed = self.assert_success(self.call_cli("plugin", "state", "--id", "changes", "--key", "collapsed", "--value", "true")[0])
+        self.assertEqual(collapsed["state"], {"collapsed": True}, "A built-in keeps its state the same way.")
+        self.assertEqual(listed()["plugins"][0]["state"], {"collapsed": True})
+        self.assert_success(self.call_cli("plugin", "state", "--id", "changes", "--key", "collapsed", "--value", "false")[0])
+        before = listed()["revision"]
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "no-such-plugin", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "no-such-plugin", "--key", "a", "--value", "1", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", " ", "--value", "1", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "a", "--value", "{not json", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "state", "--id", "workspace-probe", "--key", "a", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(listed()["revision"], before, "A refused state change does not bump the revision.")
+        self.assertEqual(by_id(listed())["workspace-probe"]["state"], {"clicks": 1})
+
+        board = self.assert_success(self.call_cli("plugin", "render", "--plugin", "board-probe")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(board["tree"], "probe-revision")), "no workspace", "Only the conversation sidebar gets the workspace.")
+        self.assertEqual(self.plugin_text(self.plugin_node(board["tree"], "probe-rail")), "no sidebar")
+        for event, label in (("probe-refresh", "refresh"), ("probe-open-diff", "openDiff")):
+            refused = self.assert_success(self.call_cli("plugin", "render", "--plugin", "board-probe", "--event", f"{event}:onPress")[0])
+            self.assertEqual(self.plugin_text(self.plugin_node(refused["tree"], "probe-status")), f"{label}: unavailable")
+            self.assertEqual(refused["hostCalls"][-1]["error"]["code"], "unavailable")
+
+        # Disabling persists, hides nothing from the list, and stops the plugin from running.
+        revision = listed()["revision"]
+        disabled = self.assert_success(self.call_cli("plugin", "disable", "--id", "workspace-probe")[0])
+        self.assertEqual(disabled, {"pluginID": "workspace-probe", "enabled": False, "revision": revision + 1})
+        self.assertFalse(by_id(listed())["workspace-probe"]["enabled"], "A fresh CLI process reads the disabled state.")
+        self.assert_failure(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"], expected_status=1)[0], "unavailable")
+        self.assert_success(self.call_cli("plugin", "disable", "--id", "hello-board")[0])
+        self.write_installed_plugin("hello-board", 'throw new Error("Disabled plugins never run");', placement="mainSidebar", presentation="page")
+        quiet = by_id(self.assert_success(self.call_cli("plugin", "refresh")[0]))["hello-board"]
+        self.assertEqual((quiet["valid"], quiet["enabled"], quiet["errors"]), (True, False, []), "A disabled plugin is not run when plugins are refreshed.")
+        enabled = self.assert_success(self.call_cli("plugin", "enable", "--id", "hello-board")[0])
+        self.assertEqual((enabled["pluginID"], enabled["enabled"]), ("hello-board", True))
+        loud = by_id(self.assert_success(self.call_cli("plugin", "refresh")[0]))["hello-board"]
+        self.assertFalse(loud["valid"], "Enabled again, it runs and its error shows.")
+        self.assertTrue(any("Disabled plugins never run" in error for error in loud["errors"]), loud["errors"])
+        self.assert_success(self.call_cli("plugin", "enable", "--id", "workspace-probe")[0])
+        again = self.assert_success(self.call_cli("plugin", "render", "--plugin", "workspace-probe", "--task", task["id"])[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(again["tree"], "probe-revision")), "revision 0", "Enabling restores the plugin.")
+
+        built_in = self.assert_success(self.call_cli("plugin", "disable", "--id", "changes")[0])
+        self.assertEqual((built_in["pluginID"], built_in["enabled"]), ("changes", False))
+        self.assertFalse(listed()["plugins"][0]["enabled"])
+        # A fresh daemon (as after a relaunch) reads the disabled ids and states back from settings.
+        environment = self.restart_service_environment("claude", "/usr/bin/false")
+        try:
+            fresh = by_id(self.assert_success(self.call_cli("plugin", "list", extra_environment=environment)[0]))
+            self.assertFalse(fresh["changes"]["enabled"])
+            self.assertEqual(fresh["workspace-probe"]["state"], {"clicks": 1})
+            self.assertTrue(fresh["hello-board"]["enabled"])
+        finally:
+            self.kill_daemon(environment)
+        self.assert_success(self.call_cli("plugin", "enable", "--id", "changes")[0])
+        self.assertTrue(listed()["plugins"][0]["enabled"])
+
+        # Authoring refuses an inline plugin where it can't sit.
+        refused = self.call_cli("plugin", "author", "--placement", "composerActions", "--name", "Inline", "--presentation", "inline", expected_status=2)[0]
+        self.assert_failure(refused, "invalid_argument")
+        self.assertIn("only in the conversation sidebar", refused["error"]["message"])
+
+        before = listed()["revision"]
+        self.assert_failure(self.call_cli("plugin", "disable", "--id", "no-such-plugin", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "enable", "--id", "../plugins", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "disable", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(listed()["revision"], before, "A refused enable or disable does not bump the revision.")
+
+        # A deleted plugin installed again starts enabled, with no saved state.
+        self.assert_success(self.call_cli("plugin", "disable", "--id", "board-probe")[0])
+        self.assert_success(self.call_cli("plugin", "state", "--id", "board-probe", "--key", "clicks", "--value", "4")[0])
+        self.assert_success(self.call_cli("plugin", "delete", "--id", "board-probe")[0])
+        self.write_installed_plugin("board-probe", self.PLUGIN_WORKSPACE_SOURCE, placement="mainSidebar", presentation="page")
+        reinstalled = by_id(self.assert_success(self.call_cli("plugin", "refresh")[0]))["board-probe"]
+        self.assertEqual((reinstalled["enabled"], reinstalled["state"]), (True, {}))
+    # case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports only the built-in plugins at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
     def test_plugin_install_refresh_and_delete(self):
         empty = self.assert_success(self.call_cli("plugin", "list")[0])
-        self.assertEqual(empty["plugins"], [])
+        self.assertEqual([(plugin["id"], plugin["builtIn"]) for plugin in empty["plugins"]], [("changes", True)], "Only the built-ins are listed at first.")
         self.assertSamePath(empty["directory"], self.plugins_folder())
         self.assertEqual(empty["revision"], 0)
 
@@ -322,7 +478,7 @@ class BridgeTestCases22:
 
         refreshed = self.assert_success(self.call_cli("plugin", "refresh")[0])
         self.assertEqual(refreshed["revision"], 1, "A refresh tells the window to reload.")
-        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"]}
+        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"] if not plugin["builtIn"]}
         self.assertEqual(sorted(plugins), ["bad-placement", "bad-presentation", "hello-board", "no-manifest", "no-script", "throws", "unknown-atom", "wrong-id"],
                          "Every plugin folder is listed, and a stray file is not.")
         board = plugins["hello-board"]
@@ -448,7 +604,7 @@ class BridgeTestCases22:
         base, closed = self.start_plugin_fetch_server()
         source = f'var BASE = "{base}";\nvar CLOSED = "{closed}";\n' + self.PLUGIN_FETCH_SOURCE
         self.write_installed_plugin("fetcher", source, placement="mainSidebar", presentation="page")
-        plugins = self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"]
+        plugins = [plugin for plugin in self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"] if not plugin["builtIn"]]
         self.assertEqual([(plugin["id"], plugin["valid"], plugin["errors"]) for plugin in plugins], [("fetcher", True, [])],
                          "A plugin that fetches on mount stays valid.")
 
@@ -517,7 +673,7 @@ class BridgeTestCases22:
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
         self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],
                          "Every other atom, including a Button or Link that holds children, is a leaf.")
-    # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+# case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, and sends the due message to that same task and conversation, preserving its Claude session or Codex thread identifier. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     def test_schedule_one_time_task_fires_when_due(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-once")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -580,15 +736,32 @@ class BridgeTestCases22:
         finished = self.wait_for_task_status(task_id, {"Review"})
         self.assertIsNone(finished.get("schedule"), "Firing clears the schedule.")
         self.assertIn("Tell me a story.", self.fixture_user_prompts(executable), "The scheduled prompt reaches the provider.")
+        original_session_id = finished["claudeSessionID"]
 
         again = self.assert_success(self.call_cli(
             "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=40)), extra_environment=environment
         )[0])
         self.assertEqual((again["fired"], again["dropped"]), ([], []), "A run happens once.")
-        started, _ = self.call_cli(
-            "schedule", "set", task_id, "--prompt", "Again", "--once", self.schedule_iso(fire_at + datetime.timedelta(days=1)), expected_status=1
+        follow_up_at = fire_at + datetime.timedelta(days=1)
+        follow_up = self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Send a scheduled follow-up.", "--once", self.schedule_iso(follow_up_at)
+        )[0])
+        self.assertEqual(follow_up["status"], "Review", "Scheduling a follow-up keeps the existing conversation's lifecycle state.")
+        self.assertEqual(follow_up["schedule"]["prompt"], "Send a scheduled follow-up.")
+        recurring_follow_up, _ = self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Repeat this", "--repeat", "daily", "--title", "Repeated follow-up", expected_status=1
         )
-        self.assert_failure(started, "invalid_transition")
+        self.assert_failure(recurring_follow_up, "invalid_transition")
+        follow_up_run = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(follow_up_at + datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual([run["taskID"] for run in follow_up_run["fired"]], [task_id], "The one-time message runs in the existing task.")
+        self.wait_for(
+            lambda: "Send a scheduled follow-up." in self.fixture_user_prompts(executable),
+            "The scheduled follow-up should reach the existing conversation.",
+        )
+        after_follow_up = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(after_follow_up["claudeSessionID"], original_session_id, "The follow-up stays in the original Claude session.")
 
         contents = Path(self.cli).resolve().parent.parent
         bundle_identifier = plistlib.loads((contents / "Info.plist").read_bytes())["CFBundleIdentifier"]

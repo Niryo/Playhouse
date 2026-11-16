@@ -850,4 +850,346 @@ extension PlayhouseUITests {
         XCTAssertEqual(imageReadsSinceOpen().count, loaded.count, "Images already loaded are not read again after a later turn.")
         attachScreenshot(named: "Deferred images: loaded images kept after a later turn")
     }
+
+    // case-contract: test_codex_stop_during_turn_launch_stops_before_agent_starts | A Stop that arrives while Codex is still starting the thread moves the task out of In Progress at once, before Codex answers. Nothing of the message is sent: the send ends with turn_stopped, no turn starts, the prompt returns to the draft with no failure reason, and the task returns to the status it had before the send. A steer sent for that message before the Stop is stopped with it: it ends with turn_stopped, is not queued and never runs as a turn of its own. A follow-up queued during that launch stays in the queue, marked as needing the user's action, and does not run. A Stop that arrives after turn/start was sent but before Codex acknowledged the turn also leaves In Progress at once, and Codex's turn/interrupt follows as soon as the turn has its ID, leaving the task in Waiting Response. In the window Stop is enabled as soon as the message is sent, and clicking it replaces Stop at once while the provider is still held; the stopped steer's bubble leaves the transcript and its text returns to the composer with the stopped message, without an error.
+    func test_codex_stop_during_turn_launch_stops_before_agent_starts() throws {
+        let title = "Codex stop during launch"
+        let prompt = "Hold until stopped."
+        let steerText = "Steer the message that is about to be stopped."
+        let followUpText = "Run this follow-up after the stopped message."
+        let executable = try prepareLaunchFixture(provider: "codex", name: "codex-fixture-hold-interrupt")
+        let taskID = try createLaunchTask(title: title, provider: "codex")
+        let priorStatus = try XCTUnwrap(try taskRecord(id: taskID)?["status"] as? String)
+
+        // Stopped while the thread is starting: nothing was sent yet.
+        try writeLaunchMarker(executable, "thread-start-pause")
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText(prompt)
+        let sentText = try XCTUnwrap(composer.value as? String)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "thread-start-ready") }, timeout: 15), "Codex should be held while starting the thread.")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(stop.waitToExist(timeout: 5), "Send should turn into Stop as soon as the message is sent.")
+        XCTAssertTrue(stop.isEnabled, "Stop should work while Codex is still starting the thread.")
+        composer.click()
+        composer.typeText(steerText)
+        composer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(transcriptMessage(steerText).waitToExist(timeout: 2), "The steer should join the transcript at once.")
+        composer.click()
+        composer.typeText(followUpText)
+        composer.typeKey(.return, modifierFlags: [])
+        var followUpID = ""
+        XCTAssertTrue(waitUntil({
+            let rows = (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []
+            followUpID = rows.first(where: { $0["text"] as? String == followUpText })?["id"] as? String ?? ""
+            return !followUpID.isEmpty
+        }, timeout: 5), "Return should queue a follow-up while Codex is still starting the conversation.")
+        XCTAssertTrue(element("queued-message-text-\(followUpID)").waitToExist(timeout: 2))
+        attachScreenshot(named: "Codex launch: Stop is available while the thread starts")
+        attachElementScreenshot(stop, named: "Codex launch: the Stop button while the thread starts")
+        stop.click()
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2), "Stop should be replaced as soon as it is clicked, while Codex is still held.")
+        XCTAssertTrue(element("continue-response-button").exists || element("send-message-button").exists, "Stop gives way to Continue or Send.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) != "In Progress" }, timeout: 5), "Stop should move the task out of In Progress while Codex is still starting.")
+        attachScreenshot(named: "Codex launch: stopped at once while the thread starts")
+        try? FileManager.default.removeItem(atPath: executable + ".thread-start-pause")
+        try writeLaunchMarker(executable, "thread-start-release")
+        XCTAssertTrue(waitUntil({
+            let value = composer.value as? String ?? ""
+            return value.contains(sentText) && value.contains(steerText)
+        }, timeout: 15), "The stopped message and its stopped steer should return to the composer.")
+        let returnedText = try XCTUnwrap(composer.value as? String)
+        XCTAssertEqual(returnedText.count, sentText.count + steerText.count + 1, "Each stopped text returns once.")
+        XCTAssertTrue(element("send-message-button").waitToExist(timeout: 5), "A message stopped before it was sent leaves nothing to continue.")
+        let keptRows = try XCTUnwrap(try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])
+        XCTAssertEqual(keptRows.compactMap { $0["id"] as? String }, [followUpID], "The stopped steer must not be queued; only the queued follow-up stays.")
+        XCTAssertEqual(keptRows.first?["state"] as? String, "needsAction", "A follow-up queued for a stopped message waits for the user instead of running.")
+        XCTAssertTrue(element("queued-message-needs-action-\(followUpID)").waitToExist(timeout: 5), "The kept follow-up should show that it needs the user's action.")
+        XCTAssertEqual(app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@", "user-message-")).count, 0, "A message stopped before it was sent should leave the transcript.")
+        attachScreenshot(named: "Codex launch: the queued follow-up waits for the user after the stop")
+        element("remove-queued-message-\(followUpID)").click()
+        XCTAssertTrue(waitUntil({ ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.count ?? 1) == 0 }, timeout: 5), "The kept follow-up can be removed.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A user's stop is not an error.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, priorStatus, "A message stopped before it was sent leaves the task where it was.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == returnedText }, timeout: 5), "The returned text is saved as the draft.")
+        XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user's stop leaves no failure reason.")
+        XCTAssertFalse(launchMarkerExists(executable, "interrupt-ready"), "No Codex turn may start for a message stopped before it was sent.")
+        attachScreenshot(named: "Codex launch: the stopped message is back in the composer")
+
+        // Stopped after turn/start was sent, before Codex acknowledged the turn.
+        try writeLaunchMarker(executable, "turn-start-pause")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "turn-start-ready") }, timeout: 15), "Codex should hold its turn/start answer.")
+        XCTAssertTrue(stop.waitToExist(timeout: 5))
+        XCTAssertTrue(stop.isEnabled, "Stop should work before Codex acknowledges the turn.")
+        stop.click()
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 2), "Continue should replace Stop at once, before Codex acknowledges the turn.")
+        XCTAssertFalse(element("pause-response-button").exists)
+        attachScreenshot(named: "Codex launch: Continue before Codex acknowledged the turn")
+        attachElementScreenshot(element("continue-response-button"), named: "Codex launch: the Continue button before the turn is acknowledged")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 5))
+        XCTAssertFalse(launchMarkerExists(executable, "interrupt-received"), "Codex cannot be interrupted before the turn has an ID.")
+        try writeLaunchMarker(executable, "turn-start-release")
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "interrupt-received") }, timeout: 15), "The interrupt should follow as soon as the turn has its ID.")
+        XCTAssertFalse(element("pause-response-button").exists, "The stopped turn starting late must not bring Stop back.")
+        try writeLaunchMarker(executable, "interrupt-release")
+        XCTAssertTrue(waitUntil({ (try? self.runCLI(["conversation", "runtime"])["result"] as? [String: Any])?["activeThreadIDs"] as? [String] == [] }, timeout: 15), "The stopped turn should settle.")
+        XCTAssertTrue(element("continue-response-button").exists, "The stopped turn stays resumable.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String)
+    }
+
+    // case-contract: test_claude_stop_during_turn_launch_interrupts_once_started | A Stop that arrives while Claude Code is still starting the session moves the task to Waiting Response at once, before the session answers. The control interrupt follows as soon as the turn has started, the send settles as stopped without a failure reason, and the task stays in Waiting Response. In the window Stop is enabled as soon as the message is sent, and clicking it replaces Stop with Continue at once while the session is still starting.
+    func test_claude_stop_during_turn_launch_interrupts_once_started() throws {
+        let title = "Claude stop during launch"
+        let executable = try prepareLaunchFixture(provider: "claude", name: "claude-fixture-ui")
+        let taskID = try createLaunchTask(title: title, provider: "claude")
+        try writeLaunchMarker(executable, "launch-pause")
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "launch-ready") }, timeout: 15), "Claude Code should be held while starting the session.")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(stop.waitToExist(timeout: 5), "Send should turn into Stop as soon as the message is sent.")
+        XCTAssertTrue(stop.isEnabled, "Stop should work while Claude Code is still starting the session.")
+        attachScreenshot(named: "Claude launch: Stop is available while the session starts")
+        attachElementScreenshot(stop, named: "Claude launch: the Stop button while the session starts")
+        stop.click()
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 2), "Continue should replace Stop at once, while the session is still starting.")
+        attachElementScreenshot(element("continue-response-button"), named: "Claude launch: the Continue button while the session starts")
+        XCTAssertFalse(element("pause-response-button").exists)
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 5), "Stop should move the task to Waiting Response while the session is still starting.")
+        XCTAssertFalse(launchMarkerExists(executable, "interrupt-received"), "A session that has not started cannot be interrupted yet.")
+        attachScreenshot(named: "Claude launch: stopped at once while the session starts")
+        try? FileManager.default.removeItem(atPath: executable + ".launch-pause")
+        try writeLaunchMarker(executable, "launch-release")
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "interrupt-received") }, timeout: 15), "The interrupt should follow as soon as the turn has started.")
+        XCTAssertFalse(element("pause-response-button").exists, "The stopped turn starting late must not bring Stop back.")
+        try writeLaunchMarker(executable, "interrupt-release")
+        XCTAssertTrue(waitUntil({ (try? self.runCLI(["conversation", "runtime"])["result"] as? [String: Any])?["activeThreadIDs"] as? [String] == [] }, timeout: 15), "The stopped turn should settle.")
+        XCTAssertTrue(element("continue-response-button").exists, "The stopped turn stays resumable.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A user's stop is not an error.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user's stop leaves no failure reason.")
+    }
+
+    // case-contract: test_codex_steer_during_turn_launch_reaches_started_turn | A steer sent while Codex is still starting the thread waits for the turn instead of missing it: once the turn has its ID the steer reaches that turn through turn/steer and is not queued for a turn of its own. A follow-up can be queued during the same launch, before Codex has named the conversation; steered, it reaches that turn the same way and leaves the queue. One left in the queue runs once as a turn of its own after that turn ends. In the window the steer's bubble joins the transcript and the composer clears at once, a follow-up typed with Return joins the queue at once without an error, and its row gives way to its bubble at once when steered, while Codex is still held and has not received either.
+    func test_codex_steer_during_turn_launch_reaches_started_turn() throws {
+        let title = "Codex steer during launch"
+        let steerText = "Steer the turn that is still starting."
+        let rowText = "Steer this queued follow-up into the starting turn."
+        let laterText = "Run this follow-up after the starting turn."
+        let executable = try prepareLaunchFixture(provider: "codex", name: "codex-fixture-steer-queue-serial-success-wait")
+        let taskID = try createLaunchTask(title: title, provider: "codex")
+        try writeLaunchMarker(executable, "thread-start-pause")
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("Start a turn slowly.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "thread-start-ready") }, timeout: 15), "Codex should be held while starting the thread.")
+        composer.click()
+        composer.typeText(steerText)
+        composer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(transcriptMessage(steerText).waitToExist(timeout: 2), "The steer should join the transcript at once, while Codex is still held.")
+        XCTAssertEqual(composer.value as? String, "", "The composer should clear as soon as the steer is sent.")
+        XCTAssertFalse(launchMarkerExists(executable, "resolve-ready"), "Codex has not started the turn, so it cannot have the steer yet.")
+        attachScreenshot(named: "Codex launch: the steer shows before Codex has it")
+        attachElementScreenshot(transcriptMessage(steerText), named: "Codex launch: the steer's bubble")
+
+        // A queued follow-up steered during the same launch.
+        composer.click()
+        composer.typeText(rowText)
+        composer.typeKey(.return, modifierFlags: [])
+        var rowID = ""
+        XCTAssertTrue(waitUntil({
+            let rows = (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []
+            rowID = rows.first(where: { $0["text"] as? String == rowText })?["id"] as? String ?? ""
+            return !rowID.isEmpty
+        }, timeout: 5), "Return should queue a follow-up while Codex is still starting the conversation.")
+        XCTAssertTrue(element("queued-message-text-\(rowID)").waitToExist(timeout: 2), "The queued follow-up's row should show at once.")
+        XCTAssertEqual(composer.value as? String, "", "The composer should clear as soon as the follow-up is queued.")
+        XCTAssertFalse(element("codex-chat-error").exists, "Queueing during the launch is not an error.")
+        XCTAssertFalse(launchMarkerExists(executable, "resolve-ready"))
+        attachScreenshot(named: "Codex launch: a follow-up is queued while the thread starts")
+        let rowSteer = element("steer-queued-message-\(rowID)")
+        XCTAssertTrue(rowSteer.waitToExist(timeout: 5), "The queued follow-up should offer Steer while Codex is still starting.")
+        rowSteer.click()
+        XCTAssertTrue(transcriptMessage(rowText).waitToExist(timeout: 2), "The steered follow-up's bubble should join the transcript at once.")
+        XCTAssertTrue(waitUntil({ !self.element("queued-message-text-\(rowID)").exists }, timeout: 2), "The steered follow-up's row should give way to its bubble at once.")
+        XCTAssertFalse(launchMarkerExists(executable, "resolve-ready"), "Codex has not started the turn, so it cannot have the follow-up yet.")
+        attachScreenshot(named: "Codex launch: the steered follow-up shows before Codex has it")
+
+        // A follow-up queued during the launch and left in the queue.
+        composer.click()
+        composer.typeText(laterText)
+        composer.typeKey(.return, modifierFlags: [])
+        var laterID = ""
+        XCTAssertTrue(waitUntil({
+            let rows = (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []
+            laterID = rows.first(where: { $0["text"] as? String == laterText })?["id"] as? String ?? ""
+            return !laterID.isEmpty
+        }, timeout: 5), "Return should queue a second follow-up while Codex is still starting the conversation.")
+        XCTAssertTrue(element("queued-message-text-\(laterID)").waitToExist(timeout: 2))
+
+        try? FileManager.default.removeItem(atPath: executable + ".thread-start-pause")
+        try writeLaunchMarker(executable, "thread-start-release")
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "resolve-ready") }, timeout: 15), "The steered turn should be active.")
+        XCTAssertTrue(waitUntil({ (try? String(contentsOfFile: executable + ".steers-received", encoding: .utf8)) == "2" }, timeout: 15), "Codex should take both steers in the turn that was starting.")
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.compactMap { $0["id"] as? String } == [laterID]
+        }, timeout: 10), "Only the follow-up that was not steered stays queued.")
+        XCTAssertTrue(element("queued-message-text-\(laterID)").exists)
+        try writeLaunchMarker(executable, "resolve-continue")
+        XCTAssertTrue(waitUntil({ ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.count ?? 1) == 0 }, timeout: 30), "The follow-up left in the queue should be delivered after the steered turn.")
+        XCTAssertTrue(transcriptMessage(laterText).waitToExist(timeout: 10), "The delivered follow-up should join the transcript.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "Both turns should finish.")
+        let protocolHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable + ".history"))) as? [String: Any])
+        let steerRequests = try XCTUnwrap(protocolHistory["steerRequests"] as? [[String: Any]], "Codex should have received the steers through turn/steer.")
+        XCTAssertEqual(Set(steerRequests.compactMap { ($0["input"] as? [[String: String]])?.first?["text"] }), [steerText, rowText])
+        XCTAssertEqual(steerRequests.count, 2)
+        let turnPrompts = (protocolHistory["messages"] as? [[String: Any]] ?? []).compactMap { $0["userMessage"] as? String }
+        XCTAssertFalse(turnPrompts.contains(steerText), "The steer must not have started a turn of its own.")
+        XCTAssertFalse(turnPrompts.contains(rowText), "The steered follow-up must not have started a turn of its own.")
+        XCTAssertEqual(turnPrompts.filter { $0 == laterText }.count, 1, "The follow-up left in the queue runs once as a turn of its own.")
+        XCTAssertEqual(turnPrompts.firstIndex(of: laterText), 1, "It runs right after the turn that was starting.")
+        XCTAssertFalse(element("queued-message-text-\(laterID)").exists)
+        for text in [steerText, rowText, laterText] {
+            let bubbles = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", text))
+            XCTAssertEqual(bubbles.count, 1, "The delivered steer should stay in the transcript exactly once.")
+        }
+        XCTAssertFalse(element("queued-message-text-\(rowID)").exists)
+        attachScreenshot(named: "Codex launch: both steers stayed in the finished turn")
+    }
+
+    // case-contract: test_codex_stop_reaches_message_waiting_behind_stopping_turn | A message sent while the task's earlier turn is still being stopped waits for that turn, and a Stop that arrives while it waits stops it too. That Stop answers at once without asking Codex to interrupt a second time; once the earlier turn is over the waiting send ends with turn_stopped, no second turn starts, and the task stays in Waiting Response with no failure reason. In the window Continue replaces Stop at once, the stopped Continue's message leaves the transcript without an error, and Continue stays available for the turn that was stopped first. The stopped message is saved neither as a draft nor as a prompt still being sent.
+    func test_codex_stop_reaches_message_waiting_behind_stopping_turn() throws {
+        let title = "Codex stop while a message waits"
+        let continueText = "Continue with the same request from where you left off."
+        let executable = try prepareLaunchFixture(provider: "codex", name: "codex-fixture-hold-interrupt")
+        let taskID = try createLaunchTask(title: title, provider: "codex")
+        let events: (String) -> Int = { name in
+            ((try? self.diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == name && ($0["taskID"] as? String)?.lowercased() == taskID.lowercased()
+            }.count
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "interrupt-ready") }, timeout: 15), "The first turn should be running.")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(stop.waitToExist(timeout: 5))
+        stop.click()
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "interrupt-received") }, timeout: 10), "Codex should hold its answer to the first Stop.")
+        let resume = element("continue-response-button")
+        XCTAssertTrue(resume.waitToExist(timeout: 2))
+        XCTAssertTrue(resume.isEnabled, "Continue should work while Codex is still stopping the turn.")
+        resume.click()
+        XCTAssertTrue(waitUntil({ events("conversation.send.accepted") == 2 }, timeout: 10), "The Continue should be accepted while the first turn is still being stopped.")
+        XCTAssertTrue(transcriptMessage(continueText).waitToExist(timeout: 5), "The Continue's message should show while it waits.")
+        XCTAssertTrue(stop.waitToExist(timeout: 5), "A message that waits for its turn can be stopped.")
+        XCTAssertTrue(stop.isEnabled)
+        attachScreenshot(named: "Codex waiting message: Stop is available while the earlier turn is still stopping")
+        attachElementScreenshot(stop, named: "Codex waiting message: the Stop button")
+        stop.click()
+        XCTAssertTrue(resume.waitToExist(timeout: 2), "Continue should replace Stop at once, while Codex still holds the first Stop.")
+        XCTAssertFalse(element("pause-response-button").exists)
+        XCTAssertFalse(launchMarkerExists(executable, "interrupt-release"))
+        attachScreenshot(named: "Codex waiting message: stopped at once")
+        attachElementScreenshot(resume, named: "Codex waiting message: the Continue button")
+        try writeLaunchMarker(executable, "interrupt-release")
+        XCTAssertTrue(waitUntil({ (try? self.runCLI(["conversation", "runtime"])["result"] as? [String: Any])?["activeThreadIDs"] as? [String] == [] }, timeout: 15), "The stopped turn should settle.")
+        XCTAssertTrue(waitUntil({ !self.transcriptMessage(continueText).exists }, timeout: 10), "The stopped Continue's message should leave the transcript.")
+        XCTAssertTrue(resume.waitToExist(timeout: 5), "Continue stays available for the turn that was stopped first.")
+        XCTAssertTrue(waitUntil({ resume.isEnabled }, timeout: 5))
+        XCTAssertFalse(element("pause-response-button").exists)
+        XCTAssertFalse(element("codex-chat-error").exists, "A user's stop is not an error.")
+        XCTAssertEqual(composer.value as? String, "", "A stopped Continue is not a draft.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user's stop leaves no failure reason.")
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: taskID) else { return false }
+            return record["hasUnsentDraft"] as? Bool == false && record["pendingSubmittedPrompt"] as? String == nil
+        }, timeout: 10), "A stopped Continue is saved neither as a draft nor as a prompt still being sent.")
+        XCTAssertNotEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, continueText)
+        XCTAssertEqual(try String(contentsOfFile: executable + ".held-turns", encoding: .utf8).split(whereSeparator: \.isNewline).count, 1, "Codex should have received one turn only.")
+        XCTAssertFalse(launchMarkerExists(executable, "interrupt-ready"), "Codex must not be running a second turn.")
+        attachScreenshot(named: "Codex waiting message: Continue remains for the first stopped turn")
+    }
+
+    // case-contract: test_claude_steer_during_turn_launch_reaches_started_turn | A steer sent while Claude Code is still starting the session waits for the turn instead of missing it: once the turn has started the steer reaches it as a next-priority message, the turn answers it, and it is not queued for a turn of its own. In the window the steer's bubble joins the transcript and the composer clears at once, while the session is still starting and has not received it.
+    func test_claude_steer_during_turn_launch_reaches_started_turn() throws {
+        let title = "Claude steer during launch"
+        let steerText = "Steer the session that is still starting."
+        let executable = try prepareLaunchFixture(provider: "claude", name: "claude-fixture-ui")
+        let taskID = try createLaunchTask(title: title, provider: "claude")
+        try writeLaunchMarker(executable, "launch-pause")
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("Hold for a steer.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "launch-ready") }, timeout: 15), "Claude Code should be held while starting the session.")
+        composer.click()
+        composer.typeText(steerText)
+        composer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(transcriptMessage(steerText).waitToExist(timeout: 2), "The steer should join the transcript at once, while the session is still starting.")
+        XCTAssertEqual(composer.value as? String, "", "The composer should clear as soon as the steer is sent.")
+        XCTAssertFalse(launchMarkerExists(executable, "steer-ready"), "The session has not started the turn, so it cannot have the steer yet.")
+        attachScreenshot(named: "Claude launch: the steer shows before Claude Code has it")
+        attachElementScreenshot(transcriptMessage(steerText), named: "Claude launch: the steer's bubble")
+        try? FileManager.default.removeItem(atPath: executable + ".launch-pause")
+        try writeLaunchMarker(executable, "launch-release")
+        XCTAssertTrue(transcriptMessage("STEERED: \(steerText)").waitToExist(timeout: 20), "Claude Code should answer the steer inside the launched turn.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The steered turn should finish.")
+        XCTAssertEqual((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.count, 0, "The steer should not be queued for a turn of its own.")
+        let steerBubbles = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", steerText))
+        XCTAssertEqual(steerBubbles.count, 1, "The delivered steer should stay in the transcript exactly once.")
+        attachScreenshot(named: "Claude launch: the steer was answered in the launched turn")
+    }
+
+    /// Points the provider at a shared fixture and clears the launch markers earlier cases left.
+    func prepareLaunchFixture(provider: String, name: String) throws -> String {
+        let executable = WorkspaceFixture.root.appendingPathComponent(name).path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable), "The UI runner should have prepared \(name).")
+        for suffix in ["thread-start-pause", "thread-start-ready", "thread-start-release", "turn-start-pause", "turn-start-ready", "turn-start-release",
+                       "launch-pause", "launch-ready", "launch-release", "interrupt-ready", "interrupt-received", "interrupt-release",
+                       "steer-ready", "resolve-ready", "resolve-continue", "reject-next-steer", "steers-received", "held-turns", "history",
+                       "serial-first-turn", "serial-second-turn-started"] {
+            try? FileManager.default.removeItem(atPath: executable + ".\(suffix)")
+        }
+        if provider == "codex" { codexFixtureExecutable = executable } else { claudeFixtureExecutable = executable }
+        return executable
+    }
+
+    func createLaunchTask(title: String, provider: String) throws -> String {
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", provider,
+        ])["result"] as? [String: Any])
+        return try XCTUnwrap(task["id"] as? String)
+    }
+
+    func writeLaunchMarker(_ executable: String, _ suffix: String) throws {
+        try Data("\(suffix)\n".utf8).write(to: URL(fileURLWithPath: executable + ".\(suffix)"))
+    }
+
+    func launchMarkerExists(_ executable: String, _ suffix: String) -> Bool {
+        FileManager.default.fileExists(atPath: executable + ".\(suffix)")
+    }
 }

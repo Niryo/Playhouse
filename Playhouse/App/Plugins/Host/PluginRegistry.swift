@@ -2,12 +2,13 @@ import Foundation
 import Observation
 
 /// The window's installed plugins, read from the bridge daemon, which owns
-/// the plugins folder. The window reloads it whenever `plugin refresh` or
-/// `plugin delete` bumps `WorkspaceSettings.pluginsRevisionKey`.
+/// the plugins folder, with the built-in plugins first. The window reloads it
+/// whenever `plugin refresh`, `plugin delete`, `plugin enable` or
+/// `plugin disable` bumps `WorkspaceSettings.pluginsRevisionKey`.
 @MainActor
 @Observable
 final class PluginRegistry {
-    /// Every plugin folder, valid or not, sorted by id.
+    /// The built-in plugins, then every plugin folder, valid or not, sorted by id.
     private(set) var plugins: [PluginRecord] = []
     private(set) var authoringSessions: [BoardTaskRecord] = []
     @ObservationIgnored private let client: DaemonClient
@@ -27,9 +28,24 @@ final class PluginRegistry {
         }
     }
 
-    /// The valid plugins whose entry goes in `placement`.
+    /// The active plugins whose entry button goes in `placement`.
     func plugins(for placement: PluginPlacement) -> [PluginRecord] {
-        plugins.filter { $0.valid && $0.placement == placement.rawValue }
+        plugins.filter { $0.isActive && $0.placement == placement.rawValue && $0.presentationKind != .inline }
+    }
+
+    /// The active plugins rendered in place as sections of `placement`.
+    func inlinePlugins(for placement: PluginPlacement) -> [PluginRecord] {
+        plugins.filter { $0.isActive && $0.placement == placement.rawValue && $0.presentationKind == .inline }
+    }
+
+    /// The compiled-in plugins, and the installed ones, as the Plugins menu lists them.
+    var builtInPlugins: [PluginRecord] { plugins.filter(\.builtIn) }
+    var installedPlugins: [PluginRecord] { plugins.filter { !$0.builtIn } }
+
+    /// Enables or disables a plugin, shared with the CLI's `plugin enable` and `plugin disable`.
+    func setEnabled(_ id: String, _ enabled: Bool) async throws {
+        try await client.call(enabled ? "plugin.enable" : "plugin.disable", ["pluginID": .string(id)])
+        await reload()
     }
 
     func delete(_ id: String) async throws {

@@ -27,6 +27,8 @@ message, for any the request leaves open. Don't guess:
   - `modal`: a sheet.
   - `sidebar`: a panel that slides in from the right.
   - `page`: a full page over the board or the conversation.
+  - `inline`: only at `conversationSidebar`. No button: the plugin renders in
+    place as a section of the task sidebar, like the built-in Changes.
 - **Name and icon**: a short name and an SF Symbol name for its button.
 
 ## 2. Write the plugin
@@ -61,9 +63,10 @@ It uses these globals:
 
   | Placement | Context |
   | --- | --- |
-  | Every placement | `plugin` (`{id, name, placement, presentation}`) and `app` (`{appearance}`) |
+  | Every placement | `plugin` (`{id, name, placement, presentation}`), `app` (`{appearance}`) and `state` (the plugin's saved values, see `Playhouse.setState`) |
   | Conversation placements | Add `task` (`{id, title, status, provider, isStandaloneChat}`), `repositories` (`[{repositoryPath, worktreePath, branch}]`) and `contextFolders` |
   | `composerActions` | Adds `composer` (`{draft, selection: {location, length, text}}`) |
+  | `conversationSidebar` | Adds `workspace` (`{revision, openDiff: {repository, path, group} or null}`; `revision` grows whenever the task's files may have changed) and `sidebar` (`{collapsed}`, true on the hidden sidebar's narrow rail) |
 
 - `Playhouse.useProps()`, a hook that returns the current props and re-renders
   when they change, such as while the user edits the draft.
@@ -76,6 +79,12 @@ It uses these globals:
   `"task.rename"`, `"task.move"`, `"conversation.send"` and `"settings.get"`.
   `"plugin.render"` is refused.
   A failure rejects with an Error that has `code` and `message`.
+- `Playhouse.setState(key, value)`, which saves one of the plugin's own values
+  (any JSON value; `null` removes it) across launches and returns a Promise.
+  The saved values come back as `Playhouse.props.state` in every mounted copy
+  of the plugin, so keep a plugin's settings, such as whether a section is
+  collapsed, there. It is `Playhouse.bridge("plugin.state.set", {pluginID,
+  key, value})`.
 - `Playhouse.ui`, for what only the window can do. Each call returns a
   Promise:
   - `close()` closes the surface.
@@ -84,6 +93,10 @@ It uses these globals:
     `composer.replaceSelection(text)` and `composer.focus()` work on the
     composer, in conversation placements. From `mainSidebar` they reject with
     `unavailable`.
+  - `openDiff(entry)` opens the diff view for an entry of
+    `"task.changes.list"`, and `refreshWorkspace()` tells the window the
+    task's files changed, which bumps `workspace.revision`. Both work in
+    conversation placements only.
 - `fetch(url, {method, headers, body, timeout})`, like the web's, for `http`
   and `https` URLs from any placement. It resolves with a response that has
   `ok`, `status`, `statusText`, `url`, `redirected`, `headers.get(name)`,

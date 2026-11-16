@@ -6,11 +6,16 @@ extension TaskConversationView {
     var composerModel: ComposerModel {
         let reason = startImplementingUnavailableReason
         let primary: ComposerModel.Primary
-        if isDisplayingActiveResponse
+        if composerSchedule != nil, canSchedule {
+            let label = isExistingConversation ? "Schedule message" : "Schedule task"
+            primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? label, label: label, value: composerSchedule?.summary() ?? "", testID: "send-message-button")
+        // Stop works from the moment a message is sent: a turn that is still launching is
+        // stopped before it starts. Once clicked it gives way to Continue at once.
+        } else if !isPausingResponse, isDisplayingActiveResponse
             || (providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
-            primary = .init(kind: "stop", disabled: isPausingResponse || !canPauseResponse, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
+            primary = .init(kind: "stop", disabled: false, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
         } else if hasPausedResponse {
-            primary = .init(kind: "continue", disabled: false, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
+            primary = .init(kind: "continue", disabled: isStopLandingOnOwnSend, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
         } else if composerSchedule != nil, canSchedule {
             primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task", label: "Schedule task", value: composerSchedule?.summary() ?? "", testID: "send-message-button")
         } else {
@@ -86,7 +91,13 @@ extension TaskConversationView {
         let selection = composerDraft.selection
         return PluginContext.props(
             plugin: plugin, appearance: pluginAppearance, task: PluginTaskContext(task: task),
-            composer: PluginComposerContext(draft: composerDraft.text, selectionLocation: selection.location, selectionLength: selection.length)
+            composer: PluginComposerContext(draft: composerDraft.text, selectionLocation: selection.location, selectionLength: selection.length),
+            workspace: PluginWorkspaceContext(
+                revision: workspaceRevision,
+                // Closing the diff keeps `selectedChange` for its dismissal animation.
+                openDiff: isDiffPresented ? selectedChange.map { .init(repository: $0.repository, path: $0.path, group: $0.group.rawValue) } : nil,
+                sidebarCollapsed: isTaskSidebarShownCollapsed
+            )
         )
     }
 
@@ -97,7 +108,9 @@ extension TaskConversationView {
                 openConversationPlugin = nil
                 onOpenTask(id, "")
             },
-            composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) }
+            composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) },
+            openDiff: { openDiff($0) },
+            refreshWorkspace: { Task { await refreshWorkspaceChanges() } }
         )
     }
 
@@ -133,14 +146,17 @@ extension TaskConversationView {
         ComposerActions(
             change: { draft = $0 },
             submit: {
-                if isResponding {
+                if composerSchedule != nil, canSchedule {
+                    confirmSchedule()
+                } else if isResponding {
                     queueDraftForAfterTurn()
                 } else {
                     sendOrSchedule()
                 }
             },
             steer: {
-                if isResponding, isConversationTurnActive {
+                // A turn that is still launching takes the steer as soon as it starts.
+                if isResponding {
                     steerCurrentTurn()
                 }
             },
@@ -217,23 +233,29 @@ extension TaskConversationView {
     var scheduleHint: some View {
         let validation = scheduleDraft.validationMessage()
         return VStack(alignment: .leading, spacing: 12) {
-            Picker("Schedule", selection: Binding(
-                get: { scheduleDraft.kind },
-                set: { kind in
-                    scheduleDraft.kind = kind
-                    if kind == .recurring, scheduleDraft.title.isEmpty, !Self.placeholderTitles.contains(task.title) {
-                        scheduleDraft.title = task.title
+            if !isExistingConversation {
+                Picker("Schedule", selection: Binding(
+                    get: { scheduleDraft.kind },
+                    set: { kind in
+                        scheduleDraft.kind = kind
+                        if kind == .recurring, scheduleDraft.title.isEmpty, !Self.placeholderTitles.contains(task.title) {
+                            scheduleDraft.title = task.title
+                        }
                     }
+                )) {
+                    Text("Once").tag(TaskScheduleKind.once)
+                    Text("Recurring").tag(TaskScheduleKind.recurring)
                 }
-            )) {
-                Text("Once").tag(TaskScheduleKind.once)
-                Text("Recurring").tag(TaskScheduleKind.recurring)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityIdentifier("schedule-kind-picker")
+            } else {
+                Text("One-time message")
+                    .font(.caption.weight(.medium))
+                    .accessibilityIdentifier("schedule-one-time-only")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .accessibilityIdentifier("schedule-kind-picker")
 
-            if scheduleDraft.kind == .recurring {
+            if scheduleDraft.kind == .recurring && !isExistingConversation {
                 TextField("Title", text: $scheduleDraft.title)
                     .textFieldStyle(.roundedBorder)
                     .focused($isScheduleTitleFocused)

@@ -137,6 +137,56 @@ struct WorkspaceChangeInventory: Codable, Equatable {
     var count: Int { unviewed.count + viewed.count }
 }
 
+/// How a changed file and its repository are shown, shared by the Changes
+/// sidebar and the window's diff.
+enum WorkspaceChangeStyle {
+    struct RepositoryGroup {
+        let repository: String
+        let entries: [WorkspaceChangeEntry]
+    }
+
+    static func repositoryGroups(_ entries: [WorkspaceChangeEntry]) -> [RepositoryGroup] {
+        Dictionary(grouping: entries, by: \.repository)
+            .keys
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { repository in RepositoryGroup(repository: repository, entries: entries.filter { $0.repository == repository }) }
+    }
+
+    static func repositoryLabel(_ path: String) -> String {
+        URL(fileURLWithPath: path).pathComponents.suffix(2).joined(separator: "/")
+    }
+
+    static func badge(for entry: WorkspaceChangeEntry) -> String {
+        if entry.statusCode == "??" { return "U" }
+        if entry.statusCode.contains("R") { return "R" }
+        if entry.statusCode.contains("A") { return "A" }
+        if entry.statusCode.contains("D") { return "D" }
+        if entry.status == "conflict" { return "!" }
+        return "M"
+    }
+
+    /// An SF Symbol name.
+    static func symbol(for status: String) -> String {
+        switch status {
+        case "added", "untracked": "plus.square.fill"
+        case "deleted": "minus.square.fill"
+        case "renamed", "copied": "arrow.turn.up.right"
+        case "conflict": "exclamationmark.triangle.fill"
+        default: "doc.text"
+        }
+    }
+
+    /// An atom color name.
+    static func colorName(for status: String) -> String {
+        switch status {
+        case "added", "untracked": "green"
+        case "deleted", "conflict": "red"
+        case "renamed", "copied": "orange"
+        default: "secondary"
+        }
+    }
+}
+
 /// Whether a planned conversation can hand off to a Code-mode implementation turn.
 enum PlanImplementationHandoff {
     /// Why a task's Start Implementing is unavailable, or nil when the task has somewhere to

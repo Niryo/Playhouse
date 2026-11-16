@@ -383,7 +383,7 @@ extension PlayhouseCLI {
             ])
         case "plugin":
             let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]"
-            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | sessions | edit --id <plugin-id> | delete --id <plugin-id> | author --placement <\(pluginPlacements)> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page>] | render …"
+            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | sessions | edit --id <plugin-id> | delete --id <plugin-id> | enable --id <plugin-id> | disable --id <plugin-id> | state --id <plugin-id> [--key <key> --value <json>] | author --placement <\(pluginPlacements)> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>] | render …"
             switch rest.first {
             case "mode":
                 let options = Array(rest.dropFirst())
@@ -396,9 +396,23 @@ extension PlayhouseCLI {
             case "list", "refresh", "sessions":
                 guard rest.count == 1 else { throw CLIError.usage(usage) }
                 return BridgeRequest(command: "plugin.\(rest[0])")
-            case "delete", "edit", "save", "discard", "versions":
+            case "delete", "enable", "disable", "edit", "save", "discard", "versions":
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id"])
                 return BridgeRequest(command: "plugin.\(rest[0])", arguments: ["pluginID": .string(try requiredFlag("--id", flags: flags).first!)])
+            case "state":
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id", "--key", "--value"])
+                let id = BridgeValue.string(try requiredFlag("--id", flags: flags).first!)
+                switch (flags["--key"]?.first, flags["--value"]?.first) {
+                case (nil, nil):
+                    return BridgeRequest(command: "plugin.state.get", arguments: ["pluginID": id])
+                case (let key?, let json?):
+                    guard let value = try? JSONDecoder().decode(BridgeValue.self, from: Data(json.utf8)) else {
+                        throw CLIError.usage("--value must be JSON, such as true, 3, \"text\" or null (which removes the key).")
+                    }
+                    return BridgeRequest(command: "plugin.state.set", arguments: ["pluginID": id, "key": .string(key), "value": value])
+                default:
+                    throw CLIError.usage("Use: playhouse plugin state --id <plugin-id> [--key <key> --value <json>]")
+                }
             case "restore":
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id", "--version"])
                 guard let version = Int(try requiredFlag("--version", flags: flags).first!) else { throw CLIError.usage("Version must be an integer.") }

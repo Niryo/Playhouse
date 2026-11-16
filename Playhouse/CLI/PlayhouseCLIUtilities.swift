@@ -145,7 +145,10 @@ extension PlayhouseCLI {
       playhouse plugin mode [--on|--off]
       playhouse plugin list|refresh
       playhouse plugin delete --id <plugin-id>
-      playhouse plugin author --placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page>]
+      playhouse plugin enable --id <plugin-id>
+      playhouse plugin disable --id <plugin-id>
+      playhouse plugin state --id <plugin-id> [--key <key> --value <json>]
+      playhouse plugin author --placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>]
       playhouse plugin sessions | edit --id <plugin-id>
       playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]
       playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>

@@ -415,7 +415,7 @@ extension ConversationManager {
                 // A Stop lands as a thrown turn, so the throw alone
                 // can't tell a user takeover from a provider failure.
                 // Only the latter is Playhouse's to report.
-                if self.userTookOverConversation(taskID: taskID, client: operationClient) {
+                if ConversationTurnLaunch.isStoppedBeforeStart(error) || self.userTookOverConversation(taskID: taskID, client: operationClient) {
                     stoppedForUser = true
                 } else {
                     privateTurnFailed = true
@@ -969,11 +969,9 @@ extension ConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void
     ) async {
-        let threadID: String
-        do {
-            guard let value = try tasks.conversationSubject(taskID).activeConversationID else { return }
-            threadID = value
-        } catch { return }
+        // A task without a conversation can only hold follow-ups queued while its first message
+        // was starting; they have no conversation ID, and the first one sent starts it.
+        guard let threadID = try? tasks.conversationSubject(taskID).activeConversationID ?? "" else { return }
         guard Self.dispatchingQueuedTaskIDs.insert(taskID).inserted else {
             Self.pendingQueuedTaskDispatchIDs.insert(taskID)
             return

@@ -318,12 +318,19 @@ extension TaskConversationView {
             modelID: selectedModelID.isEmpty ? nil : selectedModelID
         )
         let taskID = task.id
+        let existingConversation = isExistingConversation
         isSavingSchedule = true
         Task { @MainActor in
             defer { isSavingSchedule = false }
             do {
                 _ = try await BoardTaskManager(modelContext: modelContext).setSchedule(taskID, request)
                 composerDraft.settledText = draft
+                if existingConversation {
+                    draft = ""
+                    pendingImages = []
+                    _ = try await BoardTaskManager(modelContext: modelContext).saveDraft(taskID, prompt: "", imageDataURLs: [])
+                    composerSchedule = nil
+                }
                 PlayhouseDiagnostics.record("ui.task.scheduled", fields: ["taskID": taskID.uuidString, "kind": schedule.kind.rawValue])
                 // A one-time task waits on the board, so the daemon names it now as a first send would.
                 if schedule.kind == .once {
@@ -333,7 +340,7 @@ extension TaskConversationView {
                         PlayhouseDiagnostics.record("ui.task.schedule_title.failed", fields: PlayhouseDiagnostics.errorFields(error).merging(["taskID": taskID.uuidString]) { _, new in new })
                     }
                 }
-                onBack()
+                if !existingConversation { onBack() }
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -341,7 +348,7 @@ extension TaskConversationView {
     }
 
     func sendMessage(overrideText: String? = nil) {
-        guard !isApplyingSavedRepositories else { return }
+        guard !isApplyingSavedRepositories, !isStopLandingOnOwnSend else { return }
         guard isRepositoryRootConfigured else {
             errorMessage = "Set the repository root folder before sending a conversation."
             return
@@ -434,18 +441,29 @@ extension TaskConversationView {
         if usesComposerDraft { pendingImages = [] }
         // Question IDs can repeat across turns.
         answeredUserInputRequestIDs.removeAll()
+        let wasPausedBeforeSend = hasPausedResponse
         hasPausedResponse = false
         isPausingResponse = false
+        sendGeneration += 1
+        let generation = sendGeneration
         errorMessage = nil
         actionNotice = nil
         activities = []
         isPreparingSubmittedMessage = true
         let statusBeforeSubmission = task.status
+        sendsInFlight += 1
+        sendsAwaitingDispatch += 1
 
         Task { @MainActor in
+            var awaitsDispatch = true
+            defer { if awaitsDispatch { sendsAwaitingDispatch -= 1 } }
             // However the send ends, its comments leave the in-flight set: a completed turn has
             // already marked them sent, and any it did not send stay pending in the saved draft.
             defer { releaseInFlightAnnotations(pendingAnnotations) }
+            defer {
+                sendsInFlight -= 1
+                settleLocalStopIfDone()
+            }
             let saved = await saveDraftAndGenerateTitle(
                 status: .inProgress,
                 prompt: text,
@@ -469,6 +487,7 @@ extension TaskConversationView {
                     persistDraft()
                 }
                 isResponding = false
+                hasPausedResponse = false
                 responseStartedAt = nil
                 WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
                 completedResponseDuration = previousResponseDuration
@@ -483,8 +502,12 @@ extension TaskConversationView {
             defer { followedTurnStreams -= 1 }
             do {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
+                awaitsDispatch = false
+                sendsAwaitingDispatch -= 1
                 _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: annotationPageIDs, onTurnStarting: {
-                    isResponding = true
+                    // A turn the user already stopped, or one a newer send replaced, starts
+                    // only to be stopped.
+                    if sendGeneration == generation, !isPausingResponse { isResponding = true }
                 }, onUpdate: { update in
                     applyStreamedUpdate(update, assistantMessageID: assistantMessageID, pendingAnnotations: pendingAnnotations)
                 }, onUserInput: { request in
@@ -494,6 +517,8 @@ extension TaskConversationView {
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
+                // A turn that finished despite a late stop has nothing left to continue.
+                if sendGeneration == generation { hasPausedResponse = false }
                 isComposerFocused = true
                 if resolutionAttempt > 0 {
                     do {
@@ -531,11 +556,21 @@ extension TaskConversationView {
                     conflictResolutionAttempt = 0
                     onConflictResolutionChecked(false)
                 }
+                let stoppedBeforeStart = ConversationTurnLaunch.isStoppedBeforeStart(error)
+                guard sendGeneration == generation else {
+                    // A newer send owns the composer. A message stopped before the agent
+                    // started on it never joined the conversation.
+                    if stoppedBeforeStart {
+                        messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
+                    }
+                    return
+                }
                 responseStartedAt = nil
                 WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
-                if conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
+                if !stoppedBeforeStart,
+                   isPausingResponse || conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
                     hasPausedResponse = true
-                } else if let deliveredHistory = await historyIfSendReachedConversation(text, after: sendAnchorID) {
+                } else if !stoppedBeforeStart, let deliveredHistory = await historyIfSendReachedConversation(text, after: sendAnchorID) {
                     // The send failed after its prompt was saved to the conversation (for example,
                     // Codex exited after the turn started). Returning it to the composer would save
                     // it as an unsent draft and prefix it to the next message.
@@ -549,18 +584,30 @@ extension TaskConversationView {
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                     if usesComposerDraft {
-                        draft = freeformText
+                        // A steer stopped with this message may have returned to the composer already.
+                        draft = [freeformText, draft].filter { !$0.isEmpty }.joined(separator: "\n")
                         pendingImages = imageDataURLs.compactMap { dataURL in
                             guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                             return PendingImage(dataURL: dataURL, image: image)
                         }
                         persistDraft()
                     }
-                    errorMessage = error.localizedDescription
+                    // A stop before the agent started is what the user asked for: the message
+                    // is back in the composer and the conversation is where it was before it,
+                    // still resumable when this was the Continue of an earlier stopped turn.
+                    if stoppedBeforeStart {
+                        hasPausedResponse = wasPausedBeforeSend
+                        // The daemon returned the stopped prompt to the saved draft. One the
+                        // user never typed (Continue) is not a draft: save the composer as it is.
+                        if !usesComposerDraft { persistDraft() }
+                    } else {
+                        errorMessage = error.localizedDescription
+                    }
                 }
                 isComposerFocused = true
             }
 
+            guard sendGeneration == generation else { return }
             isResponding = false
             // A daemon restart can end this window's send stream while the provider turn
             // continues. Refreshing history reconnects the editor to that turn.
@@ -719,58 +766,68 @@ extension TaskConversationView {
         } catch { errorMessage = error.localizedDescription }
     }
 
+    /// Steers the active turn with a queued follow-up. Its row leaves the queue and its bubble
+    /// joins the transcript at once; the daemon and the provider catch up in the background.
     func steerQueuedMessage(_ message: QueuedConversationMessage) {
-        isSubmittingLiveMessage = true
-        Task { @MainActor in
-            defer { isSubmittingLiveMessage = false }
+        guard !steeringQueuedMessageIDs.contains(message.id) else { return }
+        steeringQueuedMessageIDs.insert(message.id)
+        let steer = PendingLocalSteer(text: message.text, imageDataURLs: message.imageDataURLs ?? [])
+        showLocalSteer(steer)
+        errorMessage = nil
+        deliverSteerInOrder {
+            defer { steeringQueuedMessageIDs.remove(message.id) }
             do {
                 let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
+                settleLocalSteer(steer, delivered: outcome.accepted)
                 refreshQueuedMessages()
-                guard outcome.accepted else {
-                    if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
-                        applyHistoryMessages(history)
-                        activities = history.activities
-                        answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
-                    }
-                    errorMessage = nil
-                    return
+                guard !outcome.accepted else { return }
+                // The turn ended first, so the follow-up runs as a turn of its own.
+                if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
+                    applyHistoryMessages(history)
+                    activities = history.activities
+                    answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                 }
-                showLocalSteer(outcome.message, imageDataURLs: outcome.imageDataURLs)
-                refreshQueuedMessages()
-                errorMessage = nil
             } catch {
+                settleLocalSteer(steer, delivered: false)
                 refreshQueuedMessages()
-                errorMessage = error.localizedDescription
+                // The message it steered was stopped first: the follow-up stays in the queue, needing action.
+                if !ConversationTurnLaunch.isStoppedBeforeStart(error) { errorMessage = error.localizedDescription }
             }
         }
     }
 
+    /// Steers the active turn with the composer's draft. The message shows in the transcript
+    /// and the composer clears at once; the daemon and the provider catch up in the background.
     func steerCurrentTurn() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let imageDataURLs = pendingImages.map(\.dataURL)
+        let images = pendingImages
+        let imageDataURLs = images.map(\.dataURL)
         guard !text.isEmpty || !imageDataURLs.isEmpty else { return }
-        isSubmittingLiveMessage = true
-        Task { @MainActor in
-            defer { isSubmittingLiveMessage = false }
+        let steer = PendingLocalSteer(text: text, imageDataURLs: imageDataURLs)
+        showLocalSteer(steer)
+        clearHandedOffDraft()
+        errorMessage = nil
+        deliverSteerInOrder {
             do {
                 let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
-                guard accepted else {
-                    _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
-                    clearHandedOffDraft()
-                    refreshQueuedMessages()
-                    if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
-                        applyHistoryMessages(history)
-                        activities = history.activities
-                    }
-                    errorMessage = nil
-                    return
-                }
-                showLocalSteer(text, imageDataURLs: imageDataURLs)
-                clearHandedOffDraft()
-                errorMessage = nil
-            } catch {
+                settleLocalSteer(steer, delivered: accepted)
+                guard !accepted else { return }
+                // The turn ended first, so the message runs as a turn of its own.
+                _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
                 refreshQueuedMessages()
-                errorMessage = error.localizedDescription
+                if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
+                    applyHistoryMessages(history)
+                    activities = history.activities
+                }
+            } catch {
+                // Nothing took the message, so it returns to the composer.
+                settleLocalSteer(steer, delivered: false)
+                draft = [text, draft].filter { !$0.isEmpty }.joined(separator: "\n")
+                if pendingImages.isEmpty { pendingImages = images }
+                persistDraft()
+                refreshQueuedMessages()
+                // A stop of the message it steered is what the user asked for, not a failure.
+                if !ConversationTurnLaunch.isStoppedBeforeStart(error) { errorMessage = error.localizedDescription }
             }
         }
     }

@@ -727,11 +727,11 @@ extension PlayhouseUITests {
         XCTAssertEqual(try historyTexts(taskID: taskID, environment: environment).filter { $0 == "After restart." }.count, 1)
         attachScreenshot(named: "claude-finished-while-down")
     }
-    // case-contract: test_codex_stop_rejection_restores_active_task | If Codex rejects turn/interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
+    // case-contract: test_codex_stop_rejection_restores_active_task | If Codex rejects turn/interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; in the window Continue replaces Stop at once and gives way to Stop again when the provider refuses; releasing the fixture lets the original turn complete normally into Waiting Response.
     func test_codex_stop_rejection_restores_active_task() throws {
         try exerciseRejectedStop(provider: "codex", title: "Codex rejected stop")
     }
-    // case-contract: test_claude_stop_rejection_restores_active_task | If Claude rejects its session control interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
+    // case-contract: test_claude_stop_rejection_restores_active_task | If Claude rejects its session control interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; in the window Continue replaces Stop at once and gives way to Stop again when the provider refuses; releasing the fixture lets the original turn complete normally into Waiting Response.
     func test_claude_stop_rejection_restores_active_task() throws {
         try exerciseRejectedStop(provider: "claude", title: "Claude rejected stop")
     }

@@ -104,6 +104,14 @@ extension ConversationManager {
                 var activity = activity
                 activity.turnID = turnID
                 if activity.isContextCompaction {
+                    // A compaction starts after the text written before it, so a new row follows the
+                    // turn's latest message; later updates to the row keep that place.
+                    let continuesRow = transcript.turns[index].activities.contains {
+                        $0.isContextCompaction && ($0.id == activity.id || $0.status == "inProgress")
+                    }
+                    if !continuesRow, activity.afterMessageID == nil {
+                        activity.afterMessageID = transcript.turns[index].messages.last?.id
+                    }
                     ConversationActivity.upsertCompaction(activity, into: &transcript.turns[index].activities)
                 } else if let existing = transcript.turns[index].activities.firstIndex(where: { $0.id == activity.id }) {
                     activity = activity.preservingTimelineFields(of: transcript.turns[index].activities[existing])
@@ -543,6 +551,7 @@ extension ConversationManager {
                 }
             },
             onTurnStarted: { turnID in
+                ConversationTurnLaunch.turnStarted(taskID)
                 if provider == .codex, let segment {
                     self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: turnID, modelID: modelID)
                 }

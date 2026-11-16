@@ -158,7 +158,14 @@ extension PlayhouseUITests {
         XCTAssertEqual(element("mention-menu-title").value as? String, "Recent mentions")
         attachElementScreenshot(menu, named: "Mention menu showing recent mentions")
         // Moving the keyboard out of the composer closes the menu; typing there again reopens it.
-        bubble.textViews.firstMatch.click()
+        // The nudge can push the sent message above the viewport, so click whichever
+        // transcript text is in view.
+        let transcript = element("conversation-scroll-view")
+        let viewport = transcript.frame
+        let transcriptText = try XCTUnwrap(transcript.descendants(matching: .textView).allElementsBoundByIndex.first { text in
+            viewport.contains(CGPoint(x: text.frame.midX, y: text.frame.midY))
+        }, "A transcript message is in view.")
+        transcriptText.click()
         XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5), "The menu closes when the composer loses focus.")
         composer.click()
         composer.typeText(XCUIKeyboardKey.delete.rawValue + "@")
