@@ -532,7 +532,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try tasksFromBoardList().count, 0)
         attachScreenshot(named: "Failed task deletion can be retried after repository recovery")
     }
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Before any root is set, opening the Add repository picker from the empty state's + still leaves Set root folder able to bring its folder panel to the front, every time it is clicked.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         launchApp(defaultParent: nil)
         let initialSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
@@ -541,10 +541,25 @@ extension PlayhouseUITests {
         XCTAssertEqual(try tasksFromBoardList().count, 1, "New Task should create its pending conversation before folder discovery.")
         XCTAssertTrue(element("repository-root-required-notice").exists)
         XCTAssertFalse(element("send-message-button").isEnabled)
+        // Opening the picker from the empty state's + first must not leave the root button unable
+        // to show its folder panel.
+        element("empty-conversation-add-repository-button").click()
+        XCTAssertTrue(element("conversation-repository-search").waitToExist(timeout: 5))
+        attachScreenshot(named: "Empty state + opens the picker before a root is set")
         element("set-conversation-repository-root-button").click()
         let firstRunPanel = openFolderPanel
-        XCTAssertTrue(firstRunPanel.waitToExist(timeout: 10))
+        XCTAssertTrue(firstRunPanel.waitToExist(timeout: 10), "Set root folder should open its panel even after the empty state's + opened the picker.")
+        attachScreenshot(named: "Set root folder opens its panel after the picker was open")
+        XCTAssertTrue(firstRunPanel.buttons["Cancel"].isHittable, "The root folder panel should be in front, not hidden behind the conversation window.")
+        // A click on the conversation window brings it over the panel, which must not leave the
+        // root button doing nothing: clicking it again brings the same panel back to the front.
+        element("message-composer").click()
+        XCTAssertTrue(waitUntil({ !self.openFolderPanel.buttons["Cancel"].isHittable }, timeout: 5), "The conversation window should come in front of the panel.")
+        element("set-conversation-repository-root-button").click()
+        XCTAssertTrue(waitUntil({ self.openFolderPanel.buttons["Cancel"].isHittable }, timeout: 5), "Set root folder should bring its covered panel back to the front.")
+        XCTAssertEqual(app.windows.matching(identifier: "open-panel").count, 1, "Clicking again should reuse the open panel, not stack another.")
         firstRunPanel.buttons["Cancel"].click()
+        XCTAssertTrue(waitUntil({ !self.openFolderPanel.exists }, timeout: 5))
         XCTAssertFalse(element("conversation-repository-search").exists, "Canceling root setup should leave the direct-created task and picker closed.")
         XCTAssertEqual(try tasksFromBoardList().count, 1)
 

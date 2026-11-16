@@ -250,7 +250,7 @@ extension TaskConversationView {
         return RepositoryPickerView(
             model: RepositoryPickerModel(
                 parentFolder: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)?.path,
-                isChoosingParent: isChoosingRepositoryParent,
+                isChoosingParent: repositoryParentPanel != nil,
                 placeholder: repositorySearchPlaceholder,
                 search: repositorySearch,
                 isListingRecent: isShowingRecentRepositories,
@@ -416,7 +416,17 @@ extension TaskConversationView {
     }
 
     func chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: Bool = true) {
-        guard !isChoosingRepositoryParent else { return }
+        if let openPanel = repositoryParentPanel {
+            // The panel doesn't block the window, so the window can come back over it (a click on
+            // the window, or the picker's popover closing). Bring it back to the front; if it never
+            // showed, drop it so this click opens a new one.
+            if openPanel.isVisible {
+                openPanel.makeKeyAndOrderFront(nil)
+                return
+            }
+            repositoryParentPanel = nil
+        }
+        let closesPicker = isShowingRepositoryPicker
         isShowingRepositoryPicker = false
         let panel = NSOpenPanel()
         panel.title = "Choose repository root folder"
@@ -426,23 +436,31 @@ extension TaskConversationView {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-        isChoosingRepositoryParent = true
-        panel.begin { response in
-            DispatchQueue.main.async {
-                isChoosingRepositoryParent = false
-                guard response == .OK, let selected = panel.url else {
-                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
-                    return
-                }
-                let path = selected.standardizedFileURL.path
-                do {
-                    try WorkspaceSettingsManager().setDefaultParentFolder(path)
-                    defaultParentFolderPath = path
-                    loadSuggestedRepositories()
-                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
-                } catch {
-                    errorMessage = "Couldn't set the repository suggestion folder: \(error.localizedDescription)"
-                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
+        repositoryParentPanel = panel
+        Task { @MainActor in
+            // The closing popover hands the key window back to the conversation window, which
+            // would cover a panel opened meanwhile, so open it once the picker has gone.
+            if closesPicker { try? await Task.sleep(for: .milliseconds(300)) }
+            guard repositoryParentPanel === panel else { return }
+            panel.begin { response in
+                DispatchQueue.main.async {
+                    // A panel replaced by a newer one reports nothing.
+                    guard repositoryParentPanel === panel else { return }
+                    repositoryParentPanel = nil
+                    guard response == .OK, let selected = panel.url else {
+                        isShowingRepositoryPicker = showRepositoryPickerWhenFinished
+                        return
+                    }
+                    let path = selected.standardizedFileURL.path
+                    do {
+                        try WorkspaceSettingsManager().setDefaultParentFolder(path)
+                        defaultParentFolderPath = path
+                        loadSuggestedRepositories()
+                        isShowingRepositoryPicker = showRepositoryPickerWhenFinished
+                    } catch {
+                        errorMessage = "Couldn't set the repository suggestion folder: \(error.localizedDescription)"
+                        isShowingRepositoryPicker = showRepositoryPickerWhenFinished
+                    }
                 }
             }
         }

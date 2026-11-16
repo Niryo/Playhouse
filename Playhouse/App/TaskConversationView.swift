@@ -281,7 +281,8 @@ struct TaskConversationView: View {
     @State var actionNotice: String?
     @State var isShowingWorkspaceEditor = false
     @State var isShowingRepositoryPicker = false
-    @State var isChoosingRepositoryParent = false
+    /// The open repository root panel; nil while none is open.
+    @State var repositoryParentPanel: NSOpenPanel?
     @State var repositorySearch = ""
     @State var repositorySuggestionIndex = 0
     @State var lastSelectedRepositoryPaths: [String] = []
