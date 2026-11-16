@@ -158,6 +158,7 @@ extension View {
             .modifier(Applied(when: common.fillWidth == true) { $0.frame(maxWidth: .infinity, alignment: .leading) })
             .modifier(Applied(when: common.padding != nil) { $0.padding(CGFloat(common.padding ?? 0)) })
             .modifier(Applied(when: common.opacity != nil) { $0.opacity(common.opacity ?? 1) })
+            .modifier(Applied(when: common.fixedSize == true) { $0.fixedSize() })
     }
 
     @ViewBuilder

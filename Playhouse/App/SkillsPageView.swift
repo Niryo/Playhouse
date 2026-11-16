@@ -5,21 +5,14 @@ import SwiftUI
 /// skills, instruction files and servers, the user's global ones, and the ones
 /// that came with each provider. Every skill, rule or server a user adds works with both Claude and Codex,
 /// so the page shows where it lives and who can use it rather than which
-/// provider owns it. The header and the skill gallery are composed of plugin
-/// atoms (`SkillsPageHeader` and `SkillGalleryView`); this view owns their
+/// provider owns it. The header, the tabs and the skill gallery are composed of
+/// plugin atoms (`SkillsPageHeader`, `SkillsPageTabs` and `SkillGalleryView`); this view owns their
 /// state, the confirmations and the editor panels, and the Rules and MCP lists.
 struct SkillsPageView: View {
     enum Kind: String, CaseIterable, Identifiable {
         case skills
         case rules
         case mcp
-        var id: String { rawValue }
-    }
-
-    enum Tab: String, CaseIterable, Identifiable {
-        case repo
-        case global
-        case builtin
         var id: String { rawValue }
     }
 
@@ -35,7 +28,10 @@ struct SkillsPageView: View {
     @State private var isPresentingRulePanel = false
     /// A server's editor is open over the MCP list.
     @State private var isPresentingMcpPanel = false
-    @State private var tab: Tab = .repo
+    /// The group the list last scrolled to, and how many times it has, so
+    /// choosing the same anchor again scrolls back to it.
+    @State private var scrollTarget: String?
+    @State private var scrollRequest = 0
     @State private var catalog: SkillCatalog?
     @State private var search = ""
     @State private var errorMessage: String?
@@ -68,6 +64,7 @@ struct SkillsPageView: View {
         VStack(alignment: .leading, spacing: 0) {
             SkillsPageHeader(model: model, actions: actions)
             Divider()
+            SkillsPageTabs(model: model, actions: actions)
             switch kind {
             case .skills: skillsBody
             case .rules: RulesSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingRulePanel, onFixTask: onFixTask)
@@ -84,7 +81,7 @@ struct SkillsPageView: View {
 
     private var model: SkillsPageModel {
         SkillsPageModel(
-            catalog: catalog, kind: kind.rawValue, tab: tab.rawValue, search: search,
+            catalog: catalog, kind: kind.rawValue, scrollTo: scrollTarget, scrollRequest: scrollRequest, search: search,
             selection: isSelecting ? selection : nil, enabledOverrides: enabledOverrides,
             isLoadingBuiltins: isLoading, isFixing: isFixing, error: errorMessage,
             panelOpen: isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel
@@ -95,7 +92,7 @@ struct SkillsPageView: View {
         SkillsPageActions(
             back: onClose,
             selectKind: { if let kind = Kind(rawValue: $0) { self.kind = kind } },
-            selectTab: { if let tab = Tab(rawValue: $0) { self.tab = tab } },
+            jump: jump,
             search: { search = $0 },
             newSkill: { withAnimation(Self.panelAnimation) { panel = .creating } },
             fixSelected: { fix(selectedSkills.filter(SkillsPageModel.isFixable)) },
@@ -190,7 +187,7 @@ struct SkillsPageView: View {
                         taskID: task.id, name: manifest.name, description: manifest.description, body: manifest.body,
                         fields: [:], scope: scope, root: root
                     )
-                    tab = record.scope == .global ? .global : .repo
+                    jump(record.scope == .global ? "global" : "repo")
                     await reload()
                 }
                 .padding(.horizontal, 20)
@@ -201,6 +198,12 @@ struct SkillsPageView: View {
                 EmptyView()
             }
         }
+    }
+
+    /// Scrolls the list to a group: repo, global or builtin.
+    private func jump(_ group: String) {
+        scrollTarget = group
+        scrollRequest += 1
     }
 
     private func closePanel() {
@@ -489,9 +492,9 @@ private struct NewSkillPanel: View {
     var body: some View {
         SkillPanel(identifier: "new-skill-panel") {
             VStack(alignment: .leading, spacing: 12) {
+                Text("New Skill").font(.headline)
+                // The controls get their own row so the panel fits the narrow modal.
                 HStack {
-                    Text("New Skill").font(.headline)
-                    Spacer()
                     Picker("Save to", selection: $destination) {
                         Text("Global (~/.agents/skills)").tag("global")
                         ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }

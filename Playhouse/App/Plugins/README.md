@@ -13,8 +13,8 @@ archive exist only as native SwiftUI built from the same atoms
 `KanbanColumnSection` in `Playhouse/App/KanbanColumnSection.swift`,
 `ComposerView` in `Playhouse/App/ComposerView.swift`, `AgentsInfoSection` in
 `Playhouse/App/AgentsInfoView.swift`, `TokenStatsView` in
-`Playhouse/App/TokenStatsView.swift`, `SkillsPageHeader` and
-`SkillGalleryView` in `Playhouse/App/SkillGalleryView.swift`,
+`Playhouse/App/TokenStatsView.swift`, `SkillsPageHeader`, `SkillsPageTabs`
+and `SkillGalleryView` in `Playhouse/App/SkillGalleryView.swift`,
 `RepositoryChipsView` and `RepositoryPickerView` in
 `Playhouse/App/RepositoryChipsView.swift`).
 
@@ -40,11 +40,12 @@ Token Stats modal's content, opened by the task item's token counter
 presents it as a sheet, and the raw input sheet it opens stays native. Change
 it whenever that modal changes; `test_plugin_token_stats_renders_from_atoms_like_native`
 compares those two. `catalog/SkillsPage.js` does the same for the Skills
-page's header and skill gallery (`SkillsPageHeader` and `SkillGalleryView`),
+page's header, tabs and skill gallery (`SkillsPageHeader`, `SkillsPageTabs`
+and `SkillGalleryView`),
 opened by the composer's Skills button (`SkillsButton`); `SkillsPageView`
 owns their state and keeps the delete and link confirmations, the editor and
 New Skill panels, and the Rules and MCP lists native. Change it whenever the
-header or gallery changes; `test_plugin_skills_page_renders_from_atoms_like_native`
+header, tabs or gallery changes; `test_plugin_skills_page_renders_from_atoms_like_native`
 compares those two. `catalog/RepositoryChips.js` does the same for the task
 header's repository chips (`RepositoryChipsView`) and the Add repository
 picker their + button opens (`RepositoryPickerView`); the header presents
@@ -89,8 +90,8 @@ rows took clicks but XCUITest couldn't find them), and a SidePanel orders its
 panel ahead of the covered view, so its controls stay reachable even when
 that view is one accessibility group (a plugin's base Stack with `group`). On a Modal or SidePanel, `width` (and a Modal's `height`) sizes what it
 presents, not the atom: those keys are its own props there, not the common
-frame props. A Popover's `width` still frames its anchor too; a follow-up is
-to keep atom and common prop names apart. The board presents those three through the same
+frame props. A Popover's `width` likewise sizes only its content, never its
+anchor. The board presents those three through the same
 atom views (`atomModal`, `atomPage` and `atomSidePanel`).
 
 Smaller native views are also built straight from atoms, with no catalog
@@ -173,6 +174,7 @@ Token Stats modal, the Skills page, the repository chips and picker, the compose
 | `help` | Hover tooltip |
 | `width`, `height`, `minWidth`, `minHeight` | Frame, in points (a Button's is its label's slot, and its hover capsule spills past it without growing the layout; a Link's surrounds the capsule) |
 | `fillWidth` | Stretch to the available width, content leading |
+| `fixedSize` | Keep its natural size, so a tight row squeezes its other children rather than wrapping or truncating it (a badge beside a name) |
 | `padding` | Uniform padding |
 | `paddingY` | Extra vertical padding (inside `padding`) |
 | `opacity` | Dims the atom and everything in it (0…1) |
@@ -186,7 +188,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 
 | Atom | Props | Events | Children |
 | --- | --- | --- | --- |
-| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels), `summary` (one accessibility element that reads only as its `label`, hiding its children, for a notice whose combined texts would otherwise hide the label); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary` | | atoms |
+| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels), `summary` (one accessibility element that reads only as its `label`, hiding its children, for a notice whose combined texts would otherwise hide the label); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary`. `scrollID` names it as a place a `Scroll` around it can scroll to | | atoms |
 | `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits`, `align` (how wrapped lines line up: `leading` default, `center`, `trailing`) | | strings |
 | `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color`, `original` (draw the asset in its own colors, as the board's logo) | | |
 | `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color`; SwiftUI's label for an `Icon` and a `Text` in a row `Stack` (see Composite atoms below) | | |
@@ -199,7 +201,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Disclosure` | `title`, `collapsed` (required; the atom shows what it is given), `spacing`, `toggleTestID` (the title button); a collapsed section keeps its children in the tree and hides them | `onToggle()`, called inside an animation; the owner flips `collapsed` | atoms |
 | `Panel` | `spacing`, `fill`, `fillOpacity`, `cornerRadius`, `capsule`, `stroke`, `strokeOpacity`, `strokeWidth`, `dash`, `align` (`leading` default or `center`), `combine`. A composite atom, shorthand for a column `Stack` with `group` and a surface whose defaults differ: `fill` `primary` at `fillOpacity` 0.05, `cornerRadius` 8, `align` `leading`, the common `padding` 12, and a border only when it has a `stroke`. Its view is that Stack's (`PanelProps.stack`) | | atoms |
 | `Meter` | `fraction` (0…1, required), `color` (`accent` default), `thickness` (3 default), `trackOpacity` (0.12 default), `minFill` (shortest fill in points, 0 default); decorative unless it has a `label` | | |
-| `Scroll` | `spacing`, `maxHeight` (shrinks to its content up to it; the common `height` fixes it), `inset` (padding inside the scroll view), `lazy` (builds only the children in view); a vertical scroll view around a leading column that fills its width | `onEndReached()`: raised each time the end of its content comes into view, and once when the content fits (the Done archive appends its next page). It isn't raised again while the end stays in view, so an owner whose page doesn't fill the view loads the next one itself | atoms |
+| `Scroll` | `spacing`, `maxHeight` (shrinks to its content up to it; the common `height` fixes it), `inset` (padding inside the scroll view), `lazy` (builds only the children in view), `scrollTo` and `scrollRequest` (each new `scrollRequest` scrolls, animated, until the descendant `Stack` whose `scrollID` is `scrollTo` sits at the top; the Skills modal's anchors use it); a vertical scroll view around a leading column that fills its width | `onEndReached()`: raised each time the end of its content comes into view, and once when the content fits (the Done archive appends its next page). It isn't raised again while the end stays in view, so an owner whose page doesn't fill the view loads the next one itself | atoms |
 | `Divider` | none; a thin separator across its stack | | |
 | `ChoiceBar` | `options` (`[{value, label, testID?}]`), `selected`; one button per option, the selected one highlighted and marked selected. Its capabilities are reachable through a decorated row `Stack` of `Button`s (`selected`) each on a decorated `Stack` with a `Text`, as the ChoiceBar page composes it beside the atom (see Composite atoms below) | `onChange(value)`, not raised for the option already selected | |
 | `Toggle` | `isOn` (required; the atom shows what it is given), `size` (`mini`, `small`, `regular` default), `disabled`; a switch with no visible label, so give it a `label` | `onToggle()`; the owner flips `isOn` | |
@@ -209,7 +211,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `PressArea` | `spacing`, `pointer` (the pointing hand); a leading column that takes every click on its children, one accessibility container | `onPress()` for a click, `onLongPress()` for a press and hold | atoms |
 | `Overlay` | `align` (`center` default, `top`, `bottom`, `leading`, `trailing`, `topLeading`, `topTrailing`, `bottomLeading`, `bottomTrailing`), `offsetX`, `offsetY`, `revealOnHover` (the overlay shows only while the pointer is over the atom); its first child laid out as usual and the rest drawn over it at `align`, moved by the offsets without changing its size; one accessibility container | | atoms |
 | `Editor` | `text` (required), `placeholder`, `placeholderTestID`, `enabled`, `autofocus`, `focused`, `focusRequest` (each new value moves the keyboard in once), `inputTestID` and `inputLabel` (the text view's own accessibility identifier and label); a multiline message editor that grows with its text; the common `hint` is its accessibility help; a pasted image, and Escape when the owner handles it, reach native owners only | `onChange(text)`, `onSubmit()` (Return), `onSteerSubmit()` (Command-Return), `onFocusChange(isFocused)` | |
-| `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`, `inset` (padding around the content, 14 default), `spacing` (between its children, 10 default); shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
+| `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`, `inset` (padding around the content, 14 default), `spacing` (between its children, 10 default), `hover` (also opens as a hint while the pointer rests on the anchor for `delay` seconds, and closes when it leaves; the Skills modal's rows show their details this way); shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
 | `StepSlider` | `options` (`[{value, label}]`), `selected`; a discrete slider as wide as its container, driven by click, drag or arrow keys; its common `label` and `testID` name it | `onChange(value)` | |
 | `Modal` | `isPresented` (required), `width`, `height` (fix the sheet's size, content at the top; it fits its content otherwise), `title`, `subtitle`, `icon` (SF Symbol), `inset` (padding around the header and content, 24 default), `spacing` (between the header and each child, 16 default); a sheet over the window presented from its first child, which stays laid out as usual, showing the rest in a leading column. With a `title` the sheet starts with the app's standard modal header: the accent `icon`, the 19-point semibold rounded title (`<testID>-title`), the secondary subtitle, and a close button (`<testID>-close`, or `modal-title` and `modal-close` without a `testID`); its `testID` and accessibility props name the sheet's content | `onDismiss()` (Escape or the header's close button; the owner sets `isPresented` false) | atoms: the presenter, then the content |
 | `Page` | `isPresented` (required); slides in from the trailing edge over all of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a leading column on the window background, like the built-in Scheduled Tasks page; its `testID` and accessibility props name the page; the owner closes it with its own control | | atoms: the covered view, then the page |

@@ -675,6 +675,21 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("skills-loading").waitToExist(timeout: 0.5) && !waitUntil({ !self.element("skills-loading").exists }, timeout: 10),
                        "The Skills page should finish loading.", file: file, line: line)
     }
+    /// Checks the Skills modal's layout around one list: the header holds only
+    /// the title and close button, the Skills | Rules | MCP tabs sit centered
+    /// under it, then the list's search fills a row beside its New button and
+    /// the anchors sit on their own row below.
+    func assertSkillsModalLayout(search: String, newButton: String, anchors: String, file: StaticString = #filePath, line: UInt = #line) {
+        let page = element("skills-page").frame, title = element("skills-title").frame, close = element("skills-back-button").frame
+        let tabs = element("skills-kind-picker").frame, field = element(search).frame, new = element(newButton).frame, jump = element(anchors).frame
+        XCTAssertEqual(close.midY, title.midY, accuracy: 4, "The close button sits level with the title in the header.", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(tabs.minY, title.maxY, "The tabs sit in the body, below the header's title.", file: file, line: line)
+        XCTAssertEqual(tabs.midX, page.midX, accuracy: 2, "The tabs are centered in the modal.", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(field.minY, tabs.maxY, "The search row sits below the tabs.", file: file, line: line)
+        XCTAssertEqual(field.midY, new.midY, accuracy: 8, "The search and its New button share one row.", file: file, line: line)
+        XCTAssertGreaterThan(field.width, 250, "The search fills its row.", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(jump.minY, field.maxY, "The anchors sit on their own row below the search.", file: file, line: line)
+    }
     func selectSkillsTab(_ label: String, picker identifier: String = "skills-tab-picker", file: StaticString = #filePath, line: UInt = #line) {
         let picker = element(identifier)
         XCTAssertTrue(picker.waitToExist(timeout: 5), file: file, line: line)
@@ -684,6 +699,127 @@ extension PlayhouseUITests {
             return
         }
         segment.click()
+        // A list's anchors scroll it to their section instead of switching tabs; let the scroll settle.
+        if identifier.hasSuffix("-tab-picker") { waitForScrollToSettle(section: "\(identifier.dropLast("-tab-picker".count))-group-\(Self.anchorValue(label))") }
+    }
+    static func anchorValue(_ label: String) -> String {
+        label.lowercased().replacingOccurrences(of: "-", with: "")
+    }
+    /// Waits until an anchor's section stops moving, so its rows are where a click will land.
+    func waitForScrollToSettle(section identifier: String) {
+        let section = element(identifier)
+        guard section.waitToExist(timeout: 5) else { return }
+        var last = section.frame
+        var stableReads = 0
+        let deadline = Date().addingTimeInterval(3)
+        while stableReads < 2, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+            let frame = section.frame
+            stableReads = frame == last ? stableReads + 1 : 0
+            last = frame
+        }
+    }
+    /// Rests the pointer on a list row so its hover hint shows, then returns the hint.
+    @discardableResult
+    func revealHint(_ hintIdentifier: String, row rowIdentifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        let hint = element(hintIdentifier)
+        let row = element(rowIdentifier)
+        XCTAssertTrue(row.waitToExist(timeout: 10), "\(rowIdentifier) should be listed.", file: file, line: line)
+        // Rest on the row even when its hint already shows: a hint opened by a pointer
+        // left there by chance (say, after a panel closed over the row) closes as soon
+        // as the list shifts under it.
+        for _ in 0..<3 {
+            // Another row's hint, opened where the pointer last rested, can cover this row;
+            // leaving the list closes it.
+            if !row.isHittable {
+                element("skills-title").hover()
+                _ = waitUntil({ row.isHittable }, timeout: 3)
+            }
+            row.hover()
+            if hint.waitToExist(timeout: 3) { return hint }
+            // Leave the row and come back, so its tracking area sees a fresh entry.
+            element("skills-title").hover()
+        }
+        XCTFail("Resting on \(rowIdentifier) should show its hint.", file: file, line: line)
+        return hint
+    }
+    /// Moves the pointer off the list and waits for any hint it opened to close, so a
+    /// screenshot shows the rows rather than a hint left over them.
+    func restPointerOffList(hints prefix: String, file: StaticString = #filePath, line: UInt = #line) {
+        element("skills-title").hover()
+        let hints = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix))
+        XCTAssertTrue(waitUntil({ hints.count == 0 }, timeout: 5), "Leaving the list closes its hints.", file: file, line: line)
+    }
+    @discardableResult
+    func revealSkillHint(_ name: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        revealHint("skill-hint-\(name)", row: "skill-row-\(name)", file: file, line: line)
+    }
+    @discardableResult
+    func revealRuleHint(_ key: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        revealHint("rule-hint-\(key)", row: "rule-row-\(key)", file: file, line: line)
+    }
+    @discardableResult
+    func revealMcpHint(_ key: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        revealHint("mcp-hint-\(key)", row: "mcp-row-\(key)", file: file, line: line)
+    }
+    /// The details a rule or MCP server row shows only in its hover hint, by identifier prefix.
+    private static let hintDetailFields = [
+        ("rule", ["summary", "paths", "linked", "native", "issue", "always-on", "shared", "location"]),
+        ("mcp", ["summary", "transport", "native", "env", "issue", "limitation", "always-on", "shared", "location"]),
+    ]
+    /// A detail shown only in a rule or MCP server's hover hint, such as `rule-summary-<key>` or
+    /// `mcp-env-<key>`: rests the pointer on its row so the hint shows, then returns it.
+    /// An absent detail is then absent from a showing hint, not merely hidden.
+    func hintDetail(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        for (kind, fields) in Self.hintDetailFields {
+            for field in fields where identifier.hasPrefix("\(kind)-\(field)-") {
+                let key = String(identifier.dropFirst("\(kind)-\(field)-".count))
+                revealHint("\(kind)-hint-\(key)", row: "\(kind)-row-\(key)", file: file, line: line)
+                return element(identifier)
+            }
+        }
+        XCTFail("\(identifier) is not a hint detail.", file: file, line: line)
+        return element(identifier)
+    }
+    /// A skill, rule or MCP server's Claude or Codex badge, such as `rule-provider-<key>-codex`,
+    /// looked up on its row without resting the pointer there: the badges sit beside the
+    /// name, not in the hover hint, so one shown only in the hint is missing here.
+    func rowBadge(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        for kind in ["skill", "rule", "mcp"] where identifier.hasPrefix("\(kind)-provider-") {
+            var key = String(identifier.dropFirst("\(kind)-provider-".count))
+            if let dash = key.lastIndex(of: "-") { key = String(key[..<dash]) }
+            let row = element("\(kind)-row-\(key)")
+            XCTAssertTrue(row.waitToExist(timeout: 10), "\(kind)-row-\(key) should be listed.", file: file, line: line)
+            return row.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        XCTFail("\(identifier) is not a provider badge.", file: file, line: line)
+        return element(identifier)
+    }
+    /// Whether a section shows in a list: its heading at the list's top, or the
+    /// whole section in view when the list ends before it can reach the top.
+    func isInView(section: String, in list: String) -> Bool {
+        let section = element(section).frame, list = element(list).frame
+        return abs(section.minY - list.minY) < 40 || (section.minY >= list.minY - 1 && section.maxY <= list.maxY + 1)
+    }
+    /// Clicks an anchor and asserts it scrolled its section into the list: to the
+    /// top, or, for a section the list can't bring that far (near its end),
+    /// further up and in view. The section must start away from the top, so a
+    /// dead anchor can't pass by leaving the list where it was.
+    func jumpToSection(_ label: String, picker identifier: String, file: StaticString = #filePath, line: UInt = #line) {
+        let kind = identifier.dropLast("-tab-picker".count)
+        let section = element("\(kind)-group-\(Self.anchorValue(label))"), list = element("\(kind)-list")
+        XCTAssertTrue(section.waitToExist(timeout: 5), file: file, line: line)
+        let before = section.frame.minY - list.frame.minY
+        XCTAssertGreaterThanOrEqual(abs(before), 40, "The \(label) section already sits at the top of \(kind)-list, so its anchor can't be tested from here.", file: file, line: line)
+        selectSkillsTab(label, picker: identifier, file: file, line: line)
+        XCTAssertTrue(waitUntil({
+            let offset = section.frame.minY - list.frame.minY
+            return abs(offset) < 40 || (offset < before - 20 && offset >= -1 && offset < list.frame.height - 40)
+        }, timeout: 5), "The \(label) anchor scrolls \(kind)-list to its section (\(before) → \(section.frame.minY - list.frame.minY)).", file: file, line: line)
+    }
+    /// Whether a row sits in an anchor's section of the one sectioned list.
+    func isListed(_ rowIdentifier: String, inSection sectionIdentifier: String) -> Bool {
+        element(sectionIdentifier).descendants(matching: .any).matching(identifier: rowIdentifier).firstMatch.exists
     }
     func clickSkillMenuItem(skill: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         let actions = element("skill-actions-\(skill)")

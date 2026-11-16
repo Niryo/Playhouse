@@ -55,7 +55,7 @@ extension PlayhouseUITests {
         selectSkillsTab("Global")
         XCTAssertTrue(waitUntil({ self.element("skill-toggle-global-agents").exists && !self.isOn(self.element("skill-toggle-global-agents")) }, timeout: 10),
                       "The off state survives reopening the Skills page.")
-        attachScreenshot(named: "A skill turned off on the Global tab")
+        attachScreenshot(named: "A skill turned off in the Global section")
         let sessionsBeforeTurningOn = claudeSessions()
         element("skill-toggle-global-agents").click()
         XCTAssertTrue(waitUntil({ self.isOn(self.element("skill-toggle-global-agents")) }, timeout: 0.75), "The switch flips back at once.")
@@ -67,7 +67,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ self.element("confirm-link-skill").exists || self.app.buttons["Create Link"].exists }, timeout: 5))
         attachScreenshot(named: "Make available outside Playhouse confirmation")
         clickDialogButton("confirm-link-skill", title: "Create Link")
-        XCTAssertTrue(element("skill-linked-global-agents").waitToExist(timeout: 10), "A linked skill shows as Linked.")
+        XCTAssertTrue(waitUntil({ (try? FileManager.default.destinationOfSymbolicLink(atPath: claudeSkills.appendingPathComponent("global-agents").path)) != nil }, timeout: 10))
+        revealSkillHint("global-agents")
+        XCTAssertTrue(element("skill-linked-global-agents").waitToExist(timeout: 10), "A linked skill's hint shows Linked.")
         let link = claudeSkills.appendingPathComponent("global-agents")
         XCTAssertEqual(realPath(try FileManager.default.destinationOfSymbolicLink(atPath: link.path)),
                        realPath(skillsHome.appendingPathComponent(".agents/skills/global-agents").path))
@@ -84,13 +86,17 @@ extension PlayhouseUITests {
         selectSkillsTab("Repo")
         clickSkillMenuItem(skill: "repo-agents", item: "skill-link-repo-agents", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-skill", title: "Create Link")
+        XCTAssertTrue(waitUntil({ (try? FileManager.default.destinationOfSymbolicLink(atPath: worktree.appendingPathComponent(".claude/skills/repo-agents").path)) != nil }, timeout: 10))
+        revealSkillHint("repo-agents")
         XCTAssertTrue(element("skill-linked-repo-agents").waitToExist(timeout: 10))
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: worktree.appendingPathComponent(".claude/skills/repo-agents").path),
                        "../../.agents/skills/repo-agents", "A repository link is relative, so it can be committed.")
 
         selectSkillsTab("Global")
         clickSkillMenuItem(skill: "global-agents", item: "skill-unlink-global-agents", title: "Remove Outside Link")
-        XCTAssertTrue(waitUntil({ !self.element("skill-linked-global-agents").exists }, timeout: 10))
+        XCTAssertTrue(waitUntil({ (try? FileManager.default.destinationOfSymbolicLink(atPath: link.path)) == nil }, timeout: 10))
+        revealSkillHint("global-agents")
+        XCTAssertTrue(waitUntil({ !self.element("skill-linked-global-agents").exists }, timeout: 10), "The hint no longer shows Linked.")
         XCTAssertNil(try? FileManager.default.destinationOfSymbolicLink(atPath: link.path), "Removing the outside link deletes only the symlink.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: skillsHome.appendingPathComponent(".agents/skills/global-agents/SKILL.md").path))
         assertCLIError(try runCLI(["skills", "unlink", "--task", taskID, "--skill", "global:global-agents"], expectedStatus: 2), code: "invalid_argument")
@@ -137,7 +143,7 @@ extension PlayhouseUITests {
         selectSkillsTab("Global")
         element("skill-row-global-one").click()
         element("skill-row-global-two").click()
-        XCTAssertTrue(waitUntil({ self.selectionCount() == "3 selected" }, timeout: 5), "A click selects a skill, across tabs.")
+        XCTAssertTrue(waitUntil({ self.selectionCount() == "3 selected" }, timeout: 5), "A click selects a skill, across sections.")
         attachScreenshot(named: "Several skills selected for one action")
         selectSkillsTab("Built-in")
         XCTAssertTrue(element("skill-row-codex-system-skill").waitToExist(timeout: 10))
@@ -162,7 +168,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !self.element("skill-row-global-one").exists && !self.element("skill-row-global-two").exists }, timeout: 10),
                       "Deleted skills leave the page.")
         XCTAssertTrue(element("new-skill-button").waitToExist(timeout: 5), "Deleting the selection ends selecting.")
-        attachScreenshot(named: "Global tab after deleting several skills")
+        attachScreenshot(named: "Global section after deleting several skills")
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-one").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-two").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.appendingPathComponent(".agents/skills/repo-one").path),
@@ -178,7 +184,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(skillsByName(try skillCatalog(taskID: taskID)["global"])["global-two"]?["enabled"] as? Bool, true,
                        "Deleting a skill forgets that it was turned off.")
     }
-    // case-contract: test_skills_fix_with_agent_starts_task_for_repo_and_global_skills | A conflicting or invalid skill offers Fix with Agent, and several selected skills can be fixed in one task. Fixing creates a task, on the source task's provider, whose saved prompt teaches the agent the skill format and lists each skill with its problem: repository skills by repository-relative path, to be fixed in the new task's own worktree of the source repository and committed and pushed like any code change, and global skills by absolute path, to be fixed in place with nothing to commit; the global skill folders are opened to the agent as context folders, and fixing only global skills needs no repository. The view switches to the new task's conversation, which sends that prompt as its own composer draft, leaving the composer empty and no unsent draft behind, so the turn runs in the new task's worktree with the global folders reachable. A skill with no problem, a built-in skill, an unknown skill, and a request without a task are rejected without opening a task.
+    // case-contract: test_skills_fix_with_agent_starts_task_for_repo_and_global_skills | A conflicting or invalid skill offers a Fix button on its row (Fix with Agent while selecting), and several selected skills can be fixed in one task. Fixing creates a task, on the source task's provider, whose saved prompt teaches the agent the skill format and lists each skill with its problem: repository skills by repository-relative path, to be fixed in the new task's own worktree of the source repository and committed and pushed like any code change, and global skills by absolute path, to be fixed in place with nothing to commit; the global skill folders are opened to the agent as context folders, and fixing only global skills needs no repository. The view switches to the new task's conversation, which sends that prompt as its own composer draft, leaving the composer empty and no unsent draft behind, so the turn runs in the new task's worktree with the global folders reachable. A skill with no problem, a built-in skill, an unknown skill, and a request without a task are rejected without opening a task.
     func test_skills_fix_with_agent_starts_task_for_repo_and_global_skills() throws {
         let repository = try makeSkillRepository("skills-fix-repo", skills: [
             ".agents/skills/repo-dup/SKILL.md": skillManifest("repo-dup", "The agents copy"),
@@ -229,7 +235,7 @@ extension PlayhouseUITests {
                       "The fixing task sends its prompt as soon as it opens.")
         XCTAssertFalse(try XCTUnwrap(single["savedPrompt"] as? String).contains("commit and push"))
 
-        // Several skills, selected across tabs, fixed in one task.
+        // Several skills, selected across sections, fixed in one task.
         openTask(named: "Skills fix source")
         openSkillsPage()
         XCTAssertTrue(element("skill-row-repo-dup").waitToExist(timeout: 10))
@@ -307,7 +313,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-repo-off")) }, timeout: 10))
         selectSkillsTab("Built-in")
         let bundledToggle = element("skill-toggle-simplify")
-        XCTAssertTrue(bundledToggle.waitToExist(timeout: 20), "Claude Code's built-ins load on the Built-in tab.")
+        XCTAssertTrue(bundledToggle.waitToExist(timeout: 20), "Claude Code's built-ins load in the Built-in section.")
         bundledToggle.click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-simplify")) }, timeout: 10))
         selectSkillsTab("Repo")
@@ -516,13 +522,16 @@ extension PlayhouseUITests {
         attachScreenshot(named: "New Skill with Private on for a repository skill")
         element("new-skill-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-skill-name").exists }, timeout: 10), "Creating closes the panel.")
-        XCTAssertTrue(element("skill-row-deploy-notes").waitToExist(timeout: 10), "The private skill shows on the Repo tab.")
-        XCTAssertTrue(element("skill-private-deploy-notes").exists, "The private skill has a Private badge.")
-        XCTAssertFalse(element("skill-private-committed").exists, "A committed skill has no Private badge.")
-        XCTAssertTrue(element("skill-provider-deploy-notes-claude").exists && element("skill-provider-deploy-notes-codex").exists)
-        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-deploy-notes")).hasPrefix("Private to skills-private-repo"), "The row names the repository it belongs to.")
+        XCTAssertTrue(element("skill-row-deploy-notes").waitToExist(timeout: 10), "The private skill shows in the Repo section.")
+        XCTAssertTrue(isListed("skill-row-deploy-notes", inSection: "skills-group-repo"))
         XCTAssertTrue(element("skills-repo-section-skills-private-repo").exists)
-        attachScreenshot(named: "A private skill on the Repo tab with its Private badge")
+        revealSkillHint("committed")
+        XCTAssertFalse(element("skill-private-committed").exists, "A committed skill's hint has no Private badge.")
+        revealSkillHint("deploy-notes")
+        XCTAssertTrue(element("skill-private-deploy-notes").waitToExist(timeout: 5), "The private skill's hint has a Private badge.")
+        XCTAssertTrue(rowBadge("skill-provider-deploy-notes-claude").exists && rowBadge("skill-provider-deploy-notes-codex").exists)
+        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-deploy-notes")).hasPrefix("Private to skills-private-repo"), "The hint names the repository it belongs to.")
+        attachScreenshot(named: "A private skill's hint with its Private badge")
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8),
                        "---\nname: deploy-notes\ndescription: \"Write deploy notes\"\n---\n\nList the deploy steps.\n")
         XCTAssertEqual(try String(contentsOf: store.appendingPathComponent("repository"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), repository.path)
@@ -564,7 +573,14 @@ extension PlayhouseUITests {
         element("skills-back-button").click()
         openSkillsPage()
         XCTAssertTrue(element("skill-shadowed-deploy-notes").waitToExist(timeout: 10), "A shadowed private skill is flagged on the page.")
-        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-issue-deploy-notes")).contains("takes precedence"), "The page explains which skill takes precedence.")
+        // Both copies are listed as deploy-notes; rest on the shadowed private one.
+        let shadowedRow = app.descendants(matching: .any).matching(identifier: "skill-row-deploy-notes")
+            .containing(.any, identifier: "skill-shadowed-deploy-notes").firstMatch
+        XCTAssertTrue(waitUntil({
+            shadowedRow.hover()
+            return self.element("skill-issue-deploy-notes").waitToExist(timeout: 2)
+        }, timeout: 10), "Resting on the shadowed private skill shows its hint.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-issue-deploy-notes")).contains("takes precedence"), "The hint explains which skill takes precedence.")
         attachScreenshot(named: "A private skill shadowed by a committed skill of the same name")
         let shadowed = try XCTUnwrap(try privateRecord())
         XCTAssertEqual(shadowed["providers"] as? [String], [], "A shadowed private skill is used by neither provider.")
@@ -579,14 +595,18 @@ extension PlayhouseUITests {
         element("skills-back-button").click()
         skillsButtonPoint.click()
         XCTAssertTrue(element("skills-page").waitToExist(timeout: 10), "Clicking the Skills button right after closing the page should reopen it.")
-        XCTAssertTrue(waitUntil({ !self.element("skill-shadowed-deploy-notes").exists && self.element("skill-private-deploy-notes").exists }, timeout: 10),
+        XCTAssertTrue(waitUntil({ !self.element("skill-shadowed-deploy-notes").exists && self.element("skill-row-deploy-notes").exists }, timeout: 10),
                       "A Skills page reopened right after closing should show the catalog read after the committed copy was removed.")
+        revealSkillHint("deploy-notes")
+        XCTAssertTrue(element("skill-private-deploy-notes").waitToExist(timeout: 5), "The no longer shadowed skill is still private.")
         attachScreenshot(named: "Reopened Skills page shows the private skill no longer shadowed")
 
         clickSkillMenuItem(skill: "deploy-notes", item: "skill-convert-repo-deploy-notes", title: "Convert to Repository Skill")
         let converted = worktree.appendingPathComponent(".agents/skills/deploy-notes/SKILL.md")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: converted.path) }, timeout: 10), "Converting moves the skill into the worktree's Agent Skills folder.")
-        XCTAssertTrue(waitUntil({ !self.element("skill-private-deploy-notes").exists && self.element("skill-row-deploy-notes").exists }, timeout: 10),
+        XCTAssertTrue(element("skill-row-deploy-notes").waitToExist(timeout: 10))
+        revealSkillHint("deploy-notes")
+        XCTAssertTrue(waitUntil({ !self.element("skill-private-deploy-notes").exists }, timeout: 10),
                       "The converted skill is a repository skill without the Private badge.")
         XCTAssertEqual(try String(contentsOf: converted, encoding: .utf8), edited)
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "Converting removes the skill from the store.")
@@ -596,6 +616,8 @@ extension PlayhouseUITests {
         attachScreenshot(named: "A private skill converted to a repository skill")
 
         clickSkillMenuItem(skill: "deploy-notes", item: "skill-make-private-deploy-notes", title: "Make Private")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: folder.appendingPathComponent("SKILL.md").path) }, timeout: 10))
+        revealSkillHint("deploy-notes")
         XCTAssertTrue(waitUntil({ self.element("skill-private-deploy-notes").exists }, timeout: 10), "Make Private shows the Private badge again.")
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8), edited, "Make Private moves the skill back into the store.")
         XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "Make Private takes the skill out of the worktree.")
@@ -614,11 +636,13 @@ extension PlayhouseUITests {
         selectSkillsTab("Global")
         XCTAssertTrue(element("skill-row-global-taken").waitToExist(timeout: 10))
         clickSkillMenuItem(skill: "global-taken", item: "skill-make-private-global-taken-skills-private-repo", title: "Make Private to skills-private-repo")
-        XCTAssertTrue(waitUntil({ !self.element("skill-row-global-taken").exists }, timeout: 10), "The skill leaves the Global tab.")
+        XCTAssertTrue(waitUntil({ !self.isListed("skill-row-global-taken", inSection: "skills-group-global") }, timeout: 10), "The skill leaves the Global section.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.appendingPathComponent(".claude/skills/global-taken/SKILL.md").path),
                       "The global skill moves into the repository's store.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: skillsHome.appendingPathComponent(".agents/skills/global-taken").path), "It leaves the global skills folder.")
         selectSkillsTab("Repo")
+        XCTAssertTrue(waitUntil({ self.isListed("skill-row-global-taken", inSection: "skills-group-repo") }, timeout: 10), "It shows under its repository.")
+        revealSkillHint("global-taken")
         XCTAssertTrue(element("skill-private-global-taken").waitToExist(timeout: 10), "It shows as private under its repository.")
         XCTAssertEqual(try section().compactMap { $0["name"] as? String }.sorted(), ["committed", "global-taken"])
         XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "Making a global skill private writes nothing into the worktree.")
@@ -677,6 +701,7 @@ extension PlayhouseUITests {
 
         openTask(named: "Private Claude skills")
         openSkillsPage()
+        revealSkillHint("release-check")
         XCTAssertTrue(element("skill-private-release-check").waitToExist(timeout: 10))
         element("skill-use-release-check").click()
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "/release-check " }, timeout: 5), "Use puts /skill-name at the start of the composer.")
@@ -723,9 +748,19 @@ extension PlayhouseUITests {
         let namespaced = try create(bothID, second, "shared-name", "The second repository's copy")
         openTask(named: "Two private repositories")
         openSkillsPage()
-        XCTAssertTrue(element("skill-namespaced-shared-name").waitToExist(timeout: 10), "The later repository's private skill shows its namespaced name.")
-        XCTAssertEqual(accessibleLabelOrValue(of: element("skill-namespaced-shared-name").staticTexts.firstMatch), "/skills-private-second:shared-name",
+        let sharedRows = app.descendants(matching: .any).matching(identifier: "skill-row-shared-name")
+        XCTAssertTrue(waitUntil({ sharedRows.count == 2 }, timeout: 10), "Each repository lists its own shared-name.")
+        // The later repository's row is the second; resting on it shows its hint.
+        XCTAssertTrue(waitUntil({
+            sharedRows.element(boundBy: 1).hover()
+            return self.element("skill-namespaced-shared-name").waitToExist(timeout: 2)
+        }, timeout: 10), "The later repository's private skill's hint shows its namespaced name.")
+        // The badge may be flattened into one static text or keep its label as a child.
+        let namespacedBadge = element("skill-namespaced-shared-name")
+        let namespacedText = namespacedBadge.staticTexts.firstMatch.exists ? namespacedBadge.staticTexts.firstMatch : namespacedBadge
+        XCTAssertEqual(accessibleLabelOrValue(of: namespacedText), "/skills-private-second:shared-name",
                        "The badge shows the namespaced name to type.")
+        XCTAssertLessThan(namespacedBadge.frame.height, 30, "The namespaced name sits on one line of its own instead of wrapping beside the chips.")
         attachScreenshot(named: "Two repositories' private skills with the same name, the later one namespaced")
         let uses = app.descendants(matching: .any).matching(identifier: "skill-use-shared-name")
         XCTAssertEqual(uses.count, 2, "Each repository lists its own shared-name.")
@@ -752,6 +787,7 @@ extension PlayhouseUITests {
         }
         openTask(named: "Private Codex skills")
         openSkillsPage()
+        revealSkillHint("shared-name")
         XCTAssertTrue(element("skill-private-shared-name").waitToExist(timeout: 10))
         element("skill-use-shared-name").click()
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "/shared-name " }, timeout: 5))

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// value, and the owner moves `selected`.
@@ -310,19 +311,45 @@ struct AtomPopover<Anchor: View, Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        anchor()
-            .popover(isPresented: Binding(get: { props.isPresented }, set: { if !$0 && props.isPresented { onDismiss() } }), arrowEdge: edge) {
-                content()
-                    .padding(CGFloat(props.inset ?? PopoverProps.defaultInset))
-                    .modifier(Applied(when: props.width != nil) { $0.frame(width: props.width.map { CGFloat($0) }) })
-            }
-            .atomCommon(layoutOnly, atom: .popover)
+        if props.hover == true {
+            anchor()
+                .background(HoverPopoverPresenter(
+                    isPresented: props.isPresented,
+                    delay: props.delay ?? PopoverProps.defaultHoverDelay,
+                    edge: rectEdge,
+                    content: AnyView(paddedContent)
+                ))
+                .atomCommon(layoutOnly, atom: .popover)
+        } else {
+            anchor()
+                .popover(isPresented: Binding(get: { props.isPresented }, set: { if !$0 && props.isPresented { onDismiss() } }), arrowEdge: edge) {
+                    paddedContent
+                }
+                .atomCommon(layoutOnly, atom: .popover)
+        }
+    }
+
+    private var paddedContent: some View {
+        content()
+            .padding(CGFloat(props.inset ?? PopoverProps.defaultInset))
+            .modifier(Applied(when: props.width != nil) { $0.frame(width: props.width.map { CGFloat($0) }) })
+    }
+
+    private var rectEdge: NSRectEdge {
+        switch edge {
+        case .bottom: .minY
+        case .leading: .minX
+        case .trailing: .maxX
+        case .top: .maxY
+        }
     }
 
     /// The anchor and the content keep their own accessibility, so the popover's
-    /// `testID` only names it to a plugin's events.
+    /// `testID` only names it to a plugin's events. Its `width` is the content's,
+    /// so it must not also size the anchor.
     private var layoutOnly: AtomCommon {
         var copy = common
+        copy.width = nil
         copy.testID = nil
         copy.label = nil
         copy.value = nil
@@ -337,6 +364,161 @@ struct AtomPopover<Anchor: View, Content: View>: View {
         case "trailing": .trailing
         default: .top
         }
+    }
+}
+
+/// Shows a hover Popover's content in an `NSPopover` beside its anchor while
+/// `isPresented` holds or the pointer has rested on the anchor for `delay`
+/// seconds. The popover is application-defined, so it neither takes focus
+/// nor closes on clicks, and the tracking view passes every event through.
+private struct HoverPopoverPresenter: NSViewRepresentable {
+    let isPresented: Bool
+    let delay: Double
+    let edge: NSRectEdge
+    let content: AnyView
+
+    func makeNSView(context: Context) -> HoverPopoverView { HoverPopoverView() }
+
+    func updateNSView(_ view: HoverPopoverView, context: Context) {
+        view.delay = delay
+        view.edge = edge
+        // The popover hosts its content outside this tree, so carry over the
+        // environment the atoms read; anything else falls back to its default.
+        view.content = AnyView(content.environment(\.highlightNativeAtoms, context.environment.highlightNativeAtoms))
+        view.isPresented = isPresented
+        view.sync()
+    }
+
+    static func dismantleNSView(_ view: HoverPopoverView, coordinator: ()) {
+        view.teardown()
+    }
+}
+
+final class HoverPopoverView: NSView {
+    var isPresented = false
+    var delay: Double = PopoverProps.defaultHoverDelay
+    var edge: NSRectEdge = .maxX
+    var content = AnyView(EmptyView()) {
+        didSet { hosting?.rootView = content }
+    }
+
+    private var isHovered = false
+    private var pending: DispatchWorkItem?
+    private var popover: NSPopover?
+    private var hosting: NSHostingController<AnyView>?
+    private var tracking: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        tracking = area
+        syncHover()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { teardown() } else { syncHover() }
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(true) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    /// A view that appears or scrolls under a resting pointer gets no
+    /// `mouseEntered`, so its hover state comes from where the pointer is.
+    private func syncHover() {
+        guard window != nil else { return }
+        setHovered(pointerIsInside)
+    }
+
+    /// The visible part only, so a row scrolled under the list's edge isn't hovered.
+    private var pointerIsInside: Bool {
+        guard let window else { return false }
+        return visibleRect.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+    }
+
+    private func setHovered(_ hovered: Bool) {
+        guard hovered != isHovered else { return }
+        isHovered = hovered
+        pending?.cancel()
+        pending = nil
+        if hovered {
+            // Rows that slid under a resting pointer while laying out have since
+            // moved on, so only a pointer still on the anchor opens the hint.
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                pending = nil
+                if pointerIsInside { sync() } else { setHovered(false) }
+            }
+            pending = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        } else {
+            sync()
+        }
+    }
+
+    func sync() {
+        let shows = isPresented || (isHovered && pending == nil)
+        if shows, window != nil, popover?.isShown != true {
+            // One hover hint at a time: opening this one closes the last.
+            if let shown = Self.shown, shown !== self { shown.yield() }
+            Self.shown = self
+            let hosting = NSHostingController(rootView: content)
+            hosting.sizingOptions = .preferredContentSize
+            let popover = NSPopover()
+            popover.behavior = .applicationDefined
+            popover.animates = false
+            popover.contentViewController = hosting
+            self.hosting = hosting
+            self.popover = popover
+            popover.show(relativeTo: bounds, of: self, preferredEdge: edge)
+            watchPointer()
+        } else if !shows {
+            close()
+        }
+    }
+
+    private static weak var shown: HoverPopoverView?
+
+    /// Another hint opened: drop this one's hover unless its owner holds it open.
+    private func yield() {
+        pending?.cancel()
+        pending = nil
+        isHovered = false
+        if !isPresented { close() }
+    }
+
+    /// AppKit misses `mouseExited` when the pointer jumps or lands on the
+    /// popover's own window, so an open hint checks the pointer itself.
+    private func watchPointer() {
+        watch?.invalidate()
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncHover() }
+        }
+        // Common modes, so it keeps checking while the list scrolls.
+        RunLoop.main.add(timer, forMode: .common)
+        watch = timer
+    }
+
+    private var watch: Timer?
+
+    private func close() {
+        watch?.invalidate()
+        watch = nil
+        popover?.close()
+        popover = nil
+        hosting = nil
+        if Self.shown === self { Self.shown = nil }
+    }
+
+    func teardown() {
+        pending?.cancel()
+        pending = nil
+        isHovered = false
+        close()
     }
 }
 

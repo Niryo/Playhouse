@@ -349,37 +349,53 @@ extension TaskConversationView {
         composerDraft.focusRequest += 1
     }
 
-    /// The skill gallery as a full page that slides in from the trailing side
-    /// over the task, and back out when it closes. In the standalone chat sidebar,
-    /// `skillsPageWindowWidth` widens it from the sidebar's leading edge across the
-    /// whole window, and `SkillsPageShowingKey` tells the board it is open.
+    /// The skill gallery as a modal card centered over the task, about as wide
+    /// as the composer, over a dimmed backdrop that blocks the task under it.
+    /// In the standalone chat sidebar, `skillsPageWindowWidth` widens the
+    /// backdrop from the sidebar's leading edge across the whole window, so the
+    /// card centers in the window, and `SkillsPageShowingKey` tells the board it is open.
     var skillsPage: some View {
         SkillsPageWindowFrame {
-            ZStack {
-                if isShowingSkills {
-                    SkillsPageView(
-                        task: task, manager: conversationManager, onUse: useSkill,
-                        onFixTask: { taskID, prompt in
+            GeometryReader { geometry in
+                ZStack {
+                    if isShowingSkills {
+                        Color.black.opacity(0.28)
+                            .contentShape(Rectangle())
+                            .onTapGesture {}
+                            .accessibilityHidden(true)
+                            .transition(.opacity)
+                        SkillsPageView(
+                            task: task, manager: conversationManager, onUse: useSkill,
+                            onFixTask: { taskID, prompt in
+                                isShowingSkills = false
+                                onOpenTask(taskID, prompt)
+                            }
+                        ) {
                             isShowingSkills = false
-                            onOpenTask(taskID, prompt)
+                            composerDraft.focusRequest += 1
                         }
-                    ) {
-                        isShowingSkills = false
-                        composerDraft.focusRequest += 1
+                        .id(skillsPresentation)
+                        .frame(
+                            width: max(0, min(Self.skillsPageWidth, geometry.size.width - 48)),
+                            height: max(0, min(Self.skillsPageMaxHeight, geometry.size.height - 64))
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+                        .shadow(color: .black.opacity(0.3), radius: 28, y: 10)
+                        .transition(.scale(scale: 0.96).combined(with: .opacity))
                     }
-                    .id(skillsPresentation)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
-                    .transition(.move(edge: .trailing))
                 }
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
         }
         .allowsHitTesting(isShowingSkills)
-        .animation(.spring(response: 0.34, dampingFraction: 0.92), value: isShowingSkills)
+        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: isShowingSkills)
         .preference(key: SkillsPageShowingKey.self, value: isShowingSkills)
     }
+
+    /// The Skills modal's width: a narrow column centered over the conversation.
+    static let skillsPageWidth: CGFloat = 480
+    static let skillsPageMaxHeight: CGFloat = 760
 
     /// Summarizes how the selected provider's native configuration differs, so a
     /// switch doesn't silently change which skills or MCP servers are available.

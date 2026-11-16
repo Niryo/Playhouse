@@ -8,13 +8,6 @@ import SwiftUI
 /// organization's managed CLAUDE.md. Like skills, each rule is shared with the
 /// provider that would not read it on its own.
 struct RulesSectionView: View {
-    enum Tab: String, CaseIterable, Identifiable {
-        case repo = "Repo"
-        case global = "Global"
-        case managed = "Managed"
-        var id: String { rawValue }
-    }
-
     enum Panel {
         case editing(RuleRecord, String)
         case creating
@@ -25,7 +18,9 @@ struct RulesSectionView: View {
     @Binding var isPresentingPanel: Bool
     let onFixTask: (UUID, String) -> Void
 
-    @State private var tab: Tab = .repo
+    /// The section the list last scrolled to, and how many times it has.
+    @State private var scrollTarget: String?
+    @State private var scrollRequest = 0
     @State private var catalog: RuleCatalog?
     @State private var search = ""
     @State private var errorMessage: String?
@@ -49,42 +44,51 @@ struct RulesSectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                Picker("Rule source", selection: $tab) {
-                    ForEach(Tab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+            HStack(spacing: 8) {
+                SkillsPageSearchField(text: search, placeholder: "Search rules", testID: "rules-search") { search = $0 }
+                AtomButton(
+                    props: ButtonProps(style: "bordered", controlSize: "small"),
+                    common: AtomCommon(testID: "new-rule-button", help: "Create a rule that both Claude and Codex follow"),
+                    action: { setPanel(.creating) }
+                ) {
+                    AtomLabel(props: LabelProps(text: "New Rule", icon: "plus"))
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 260)
-                .accessibilityIdentifier("rules-tab-picker")
-                Spacer()
-                AtomTextField(props: TextFieldProps(text: search, placeholder: "Search rules"), common: AtomCommon(testID: "rules-search", width: 200)) { search = $0 }
-                Button { setPanel(.creating) } label: { Label("New Rule", systemImage: "plus") }
-                    .buttonHoverPointer()
-                    .nativeHelp("Create a rule that both Claude and Codex follow")
-                    .accessibilityIdentifier("new-rule-button")
             }
             .padding(.horizontal, 20)
-            .padding(.top, 10)
+            HStack(spacing: 8) {
+                SkillsPageAnchorBar(testID: "rules-tab-picker", anchorPrefix: "rules-anchor", anchors: anchors, onJump: jump)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
             if let errorMessage {
                 Text(errorMessage)
                     .font(.callout)
                     .foregroundStyle(.red)
                     .padding(.horizontal, 20)
-                    .padding(.top, 8)
+                    .padding(.bottom, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("rules-error")
             }
-            Text("Rules are the instruction files an agent follows on every turn. Click one to open it. Turning a rule on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .accessibilityIdentifier("rules-provider-timing")
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) { content }
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        content
+                        Text("Rules are the instruction files an agent follows on every turn. Hover one for its details, or click it to open it. Turning a rule on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 4)
+                            .accessibilityIdentifier("rules-provider-timing")
+                    }
                     .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .hoverRevealScrollers()
+                }
+                .onChange(of: scrollRequest) {
+                    guard let scrollTarget else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(scrollTarget, anchor: .top) }
+                }
             }
             .accessibilityIdentifier("rules-list")
         }
@@ -152,7 +156,7 @@ struct RulesSectionView: View {
             case .creating:
                 NewRulePanel(roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, paths, body, scope, root in
                     let record = try await manager.createRule(taskID: task.id, name: name, paths: paths, body: body, scope: scope, root: root)
-                    tab = record.scope == .global ? .global : .repo
+                    jump(record.scope == .global ? "global" : "repo")
                     search = ""
                     await reload()
                 }
@@ -166,49 +170,81 @@ struct RulesSectionView: View {
         }
     }
 
+    private func jump(_ section: String) {
+        scrollTarget = section
+        scrollRequest += 1
+    }
+
+    private var anchors: [SkillsPageAnchor] {
+        [
+            SkillsPageAnchor(value: "repo", label: "Repo", count: (catalog?.repositories ?? []).reduce(0) { $0 + filtered($1.rules).count }),
+            SkillsPageAnchor(value: "global", label: "Global", count: filtered(catalog?.global ?? []).count),
+            SkillsPageAnchor(value: "managed", label: "Managed", count: filtered(catalog?.managed ?? []).count),
+        ]
+    }
+
     @ViewBuilder
     private var content: some View {
         if let catalog {
-            switch tab {
-            case .repo:
-                Text("Rules in the task's repositories: AGENTS.md, CLAUDE.md, CLAUDE.local.md and .claude/rules. Playhouse shares each one with the agent that would not read it on its own.")
-                    .font(.callout).foregroundStyle(.secondary)
+            let counts = Dictionary(uniqueKeysWithValues: anchors.map { ($0.value, $0) })
+            group(counts["repo"]!, intro: "Rules in the task's repositories: AGENTS.md, CLAUDE.md, CLAUDE.local.md and .claude/rules. Playhouse shares each one with the agent that would not read it on its own.") {
                 if catalog.repositories.isEmpty {
                     emptyState("This task has no repositories.", identifier: "rules-empty-repo")
                 }
                 ForEach(catalog.repositories, id: \.rootPath) { section in
                     let shown = filtered(section.rules)
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(section.name)
-                            .font(.headline)
-                            .padding(.top, 6)
-                            .accessibilityIdentifier("rules-repo-section-\(section.name)")
-                        if shown.isEmpty {
-                            emptyState(section.rules.isEmpty ? "No rules in \(section.name)." : "No matching rules.", identifier: "rules-empty-\(section.name)")
-                        }
-                        ForEach(shown) { row($0) }
+                    Text(section.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 4)
+                        .accessibilityIdentifier("rules-repo-section-\(section.name)")
+                    if shown.isEmpty {
+                        emptyState(section.rules.isEmpty ? "No rules in \(section.name)." : "No matching rules.", identifier: "rules-empty-\(section.name)")
                     }
+                    rows(shown)
                 }
-            case .global:
-                let shown = filtered(catalog.global)
-                Text("Your rules for every repository. New global rules go in ~/.agents/AGENTS.md, which Playhouse shares with both agents, like ~/.agents/skills.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if shown.isEmpty { emptyState(catalog.global.isEmpty ? "No global rules." : "No matching rules.", identifier: "rules-empty-global") }
-                ForEach(shown) { row($0) }
-            case .managed:
-                let shown = filtered(catalog.managed)
-                Text("Your organization's managed CLAUDE.md. Claude Code always follows it, and it can't be edited or turned off here.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if shown.isEmpty { emptyState(catalog.managed.isEmpty ? "No managed rules on this Mac." : "No matching rules.", identifier: "rules-empty-managed") }
-                ForEach(shown) { row($0) }
+            }
+            let global = filtered(catalog.global)
+            group(counts["global"]!, intro: "Your rules for every repository. New global rules go in ~/.agents/AGENTS.md, which Playhouse shares with both agents, like ~/.agents/skills.") {
+                if global.isEmpty { emptyState(catalog.global.isEmpty ? "No global rules." : "No matching rules.", identifier: "rules-empty-global") }
+                rows(global)
+            }
+            let managed = filtered(catalog.managed)
+            group(counts["managed"]!, intro: "Your organization's managed CLAUDE.md. Claude Code always follows it, and it can't be edited or turned off here.") {
+                if managed.isEmpty { emptyState(catalog.managed.isEmpty ? "No managed rules on this Mac." : "No matching rules.", identifier: "rules-empty-managed") }
+                rows(managed)
             }
         } else {
             ProgressView().frame(maxWidth: .infinity).accessibilityIdentifier("rules-loading")
         }
     }
 
+    /// One of the list's sections, which its anchor scrolls to.
+    private func group<Content: View>(_ anchor: SkillsPageAnchor, intro: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SkillsPageGroupHeader(label: anchor.label, count: anchor.count, intro: intro, introTestID: "rules-intro-\(anchor.value)")
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .id(anchor.value)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(anchor.label)
+        .accessibilityIdentifier("rules-group-\(anchor.value)")
+    }
+
+    @ViewBuilder
+    private func rows(_ rules: [RuleRecord]) -> some View {
+        if !rules.isEmpty {
+            SkillsPageCard {
+                ForEach(Array(rules.enumerated()), id: \.element.id) { index, rule in
+                    if index > 0 { AtomDivider() }
+                    row(rule)
+                }
+            }
+        }
+    }
+
     private func emptyState(_ text: String, identifier: String) -> some View {
-        Text(text).foregroundStyle(.secondary).padding(.vertical, 6).accessibilityIdentifier(identifier)
+        Text(text).font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 4).accessibilityIdentifier(identifier)
     }
 
     /// The rules whose path or summary contains the search, like the Skills search.
@@ -226,92 +262,124 @@ struct RulesSectionView: View {
         return "Playhouse shares it with " + rule.sharedWith.map(\.displayName).joined(separator: " and ") + "."
     }
 
+    /// A rule on one line: its name, a mark when it has a problem, its Fix,
+    /// switch and actions. Its details show in a hint while the pointer rests on it.
     private func row(_ rule: RuleRecord) -> some View {
         let key = Self.key(rule)
-        return HStack(alignment: .center, spacing: 12) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(rule.name)
-                            .font(.body.weight(.semibold))
-                            .accessibilityIdentifier("rule-name-\(key)")
-                        ForEach([ConversationProvider.claude, .codex]) { provider in
-                            if rule.providers.contains(provider) {
-                                badge(provider.displayName, systemImage: "checkmark", color: .green)
-                                    .accessibilityIdentifier("rule-provider-\(key)-\(provider.rawValue)")
-                            }
-                        }
-                        if !rule.paths.isEmpty {
-                            badge(rule.paths.joined(separator: ", "), systemImage: "scope", color: .purple)
-                                .accessibilityIdentifier("rule-paths-\(key)")
-                        }
-                        // Linked when Playhouse's symlinks make it work outside Playhouse;
-                        // a file both CLIs already read needs no link.
-                        if rule.availableOutsidePlayhouse, rule.locations.contains(where: \.isSymlink) {
-                            badge("Linked", systemImage: "link", color: .blue)
-                                .accessibilityIdentifier("rule-linked-\(key)")
-                        } else if rule.availableOutsidePlayhouse {
-                            badge("Both CLIs", systemImage: "checkmark.seal", color: .blue)
-                                .accessibilityIdentifier("rule-native-\(key)")
-                        }
-                        if rule.issue != nil {
-                            badge("Problem", systemImage: "exclamationmark.triangle", color: .orange)
-                                .accessibilityIdentifier("rule-problem-\(key)")
-                        }
-                    }
-                    if !rule.summary.isEmpty {
-                        Text(rule.summary)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .accessibilityIdentifier("rule-summary-\(key)")
-                    }
-                    if let issue = rule.issue {
-                        Text(issue).font(.caption).foregroundStyle(.orange).accessibilityIdentifier("rule-issue-\(key)")
-                    }
-                    if !isEnabled(rule), !rule.alwaysOnFor.isEmpty {
-                        Text("\(rule.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still reads this file itself, so turning it off applies to the other agent only.")
-                            .font(.caption)
+        return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "trailing", width: 320, inset: 12, hover: true), onDismiss: {}) {
+            HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    Text(rule.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .accessibilityIdentifier("rule-name-\(key)")
+                    if rule.issue != nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
                             .foregroundStyle(.orange)
-                            .accessibilityIdentifier("rule-always-on-\(key)")
-                    } else if let note = Self.sharedNote(rule) {
-                        Text(note).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("rule-shared-\(key)")
+                            .nativeHelp("Problem")
+                            .accessibilityLabel("Problem")
+                            .accessibilityIdentifier("rule-problem-\(key)")
                     }
-                    Text(rule.locations.map(\.layout.displayName).joined(separator: " · ") + " · " + ByteCountFormatter.string(fromByteCount: Int64(rule.byteCount), countStyle: .file))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .accessibilityIdentifier("rule-location-\(key)")
+                    providerBadges(rule.providers, key: key)
+                    Spacer(minLength: 8)
                 }
-                Spacer(minLength: 8)
+                .overlay {
+                    PressAreaView(showsPointingHand: true, onClick: { openEditor(rule) }, onLongPress: {})
+                }
+                .accessibilityHint(rule.summary)
+                if rule.issue != nil, rule.editable {
+                    Button { fix(rule) } label: { Label("Fix", systemImage: "wand.and.stars") }
+                        .controlSize(.small)
+                        .disabled(isFixing)
+                        .buttonHoverPointer()
+                        .nativeHelp("Open a task whose agent fixes \(rule.name)")
+                        .accessibilityIdentifier("rule-fix-\(key)")
+                }
+                if rule.scope != .managed {
+                    Toggle("Enabled", isOn: Binding(get: { isEnabled(rule) }, set: { setEnabled(rule, $0) }))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                        .buttonHoverPointer()
+                        .nativeHelp(isEnabled(rule) ? "Turn the rule off in Playhouse sessions" : "Turn the rule on in Playhouse sessions")
+                        .accessibilityLabel("\(rule.name) enabled")
+                        .accessibilityIdentifier("rule-toggle-\(key)")
+                }
+                actions(rule, key: key)
             }
-            .overlay {
-                PressAreaView(showsPointingHand: true, onClick: { openEditor(rule) }, onLongPress: {})
-            }
-            if rule.issue != nil, rule.editable {
-                Button { fix(rule) } label: { Label("Fix with Agent", systemImage: "wand.and.stars") }
-                    .controlSize(.small)
-                    .disabled(isFixing)
-                    .buttonHoverPointer()
-                    .nativeHelp("Open a task whose agent fixes \(rule.name)")
-                    .accessibilityIdentifier("rule-fix-\(key)")
-            }
-            if rule.scope != .managed {
-                Toggle("Enabled", isOn: Binding(get: { isEnabled(rule) }, set: { setEnabled(rule, $0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .buttonHoverPointer()
-                    .nativeHelp(isEnabled(rule) ? "Turn the rule off in Playhouse sessions" : "Turn the rule on in Playhouse sessions")
-                    .accessibilityLabel("\(rule.name) enabled")
-                    .accessibilityIdentifier("rule-toggle-\(key)")
-            }
-            actions(rule, key: key)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("rule-row-\(key)")
+        } content: {
+            hint(rule, key: key)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// The agents that read a rule, beside its name on the row.
+    private func providerBadges(_ providers: [ConversationProvider], key: String) -> some View {
+        ForEach([ConversationProvider.claude, .codex]) { provider in
+            if providers.contains(provider) {
+                badge(provider.displayName, systemImage: "checkmark", color: .green)
+                    .fixedSize()
+                    .accessibilityIdentifier("rule-provider-\(key)-\(provider.rawValue)")
+            }
+        }
+    }
+
+    /// A rule's details: its summary, what it applies to, any problem, and where it lives.
+    private func hint(_ rule: RuleRecord, key: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(rule.name).font(.system(size: 13, weight: .semibold))
+            if !rule.summary.isEmpty {
+                Text(rule.summary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("rule-summary-\(key)")
+            }
+            HStack(spacing: 4) {
+                if !rule.paths.isEmpty {
+                    badge(rule.paths.joined(separator: ", "), systemImage: "scope", color: .purple)
+                        .accessibilityIdentifier("rule-paths-\(key)")
+                }
+                // Linked when Playhouse's symlinks make it work outside Playhouse;
+                // a file both CLIs already read needs no link.
+                if rule.availableOutsidePlayhouse, rule.locations.contains(where: \.isSymlink) {
+                    badge("Linked", systemImage: "link", color: .blue)
+                        .accessibilityIdentifier("rule-linked-\(key)")
+                } else if rule.availableOutsidePlayhouse {
+                    badge("Both CLIs", systemImage: "checkmark.seal", color: .blue)
+                        .accessibilityIdentifier("rule-native-\(key)")
+                }
+            }
+            if let issue = rule.issue {
+                Text(issue)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("rule-issue-\(key)")
+            }
+            if !isEnabled(rule), !rule.alwaysOnFor.isEmpty {
+                Text("\(rule.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still reads this file itself, so turning it off applies to the other agent only.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("rule-always-on-\(key)")
+            } else if let note = Self.sharedNote(rule) {
+                Text(note).font(.system(size: 11)).foregroundStyle(.secondary).accessibilityIdentifier("rule-shared-\(key)")
+            }
+            Text(rule.locations.map(\.layout.displayName).joined(separator: " · ") + " · " + ByteCountFormatter.string(fromByteCount: Int64(rule.byteCount), countStyle: .file))
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("rule-location-\(key)")
+        }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("rule-row-\(key)")
+        .accessibilityIdentifier("rule-hint-\(key)")
     }
 
     private func badge(_ text: String, systemImage: String, color: Color) -> some View {
@@ -544,9 +612,9 @@ private struct NewRulePanel: View {
     var body: some View {
         SkillPanel(identifier: "new-rule-panel") {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("New Rule").font(.headline)
-                    Spacer()
+                Text("New Rule").font(.headline)
+                // The controls get their own rows so the panel fits the narrow modal.
+                VStack(alignment: .leading, spacing: 8) {
                     Picker("Kind", selection: $form) {
                         ForEach(Form.allCases) { form in Text(form.rawValue).tag(form) }
                     }
