@@ -513,53 +513,58 @@ struct KanbanBoardView: View {
                         }
 
                         HStack(spacing: 0) {
-                            // The board centers its columns with its own frame and keeps the scroll view's
-                            // clip origin at zero. Left to itself, the two-axis scroll view centers narrower
-                            // content by giving AppKit's clip view a negative bounds origin, and after a
-                            // horizontal scroll nudge followed by a content-height change, SwiftUI's hit
-                            // testing lost that offset: the board drew centered while clicks resolved as if
-                            // it were flush left, so buttons stopped responding until the window was resized.
+                            // The board pins its columns to the top, just under the header, centers them
+                            // across its width with its own viewport-sized frame, and keeps the scroll
+                            // view's clip origin at zero. Left to itself, the two-axis scroll view centers
+                            // narrower content by giving AppKit's clip view a negative bounds origin, and
+                            // after a horizontal scroll nudge followed by a content-height change, SwiftUI's
+                            // hit testing lost that offset: the board drew centered while clicks resolved as
+                            // if it were flush left, so buttons stopped responding until the window was resized.
                             // The board's scrollers always float over the content (see HoverRevealScrollers),
                             // so the visible area is the reader's full frame.
                             GeometryReader { viewport in
                                 ScrollView([.horizontal, .vertical]) {
-                                    HStack(alignment: .top, spacing: 16) {
-                                        ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
-                                            if status == .backlog {
-                                                let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                                                VStack(spacing: 12) {
-                                                    if hasBlockedTasks {
-                                                        kanbanColumn(.blocked, minHeight: 220)
-                                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                    HStack(alignment: .top, spacing: 0) {
+                                        Spacer(minLength: 30)
+                                        HStack(alignment: .top, spacing: 16) {
+                                            ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
+                                                if status == .backlog {
+                                                    let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
+                                                    VStack(spacing: 12) {
+                                                        if hasBlockedTasks {
+                                                            kanbanColumn(.blocked, minHeight: 220)
+                                                                .transition(.opacity.combined(with: .move(edge: .top)))
+                                                        }
+                                                        kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
                                                     }
-                                                    kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
-                                                }
-                                                .frame(width: 264)
-                                                .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
-                                            } else if status == .inProgress {
-                                                let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                                                VStack(spacing: 12) {
-                                                    if hasWaitingResponseTasks {
-                                                        kanbanColumn(.waitingResponse, minHeight: 220)
-                                                            .transition(.opacity.combined(with: .move(edge: .top)))
-                                                    }
-                                                    kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
-                                                }
-                                                .frame(width: 264)
-                                                .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
-                                            } else {
-                                                kanbanColumn(status)
                                                     .frame(width: 264)
+                                                    .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                                                } else if status == .inProgress {
+                                                    let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                                                    VStack(spacing: 12) {
+                                                        if hasWaitingResponseTasks {
+                                                            kanbanColumn(.waitingResponse, minHeight: 220)
+                                                                .transition(.opacity.combined(with: .move(edge: .top)))
+                                                        }
+                                                        kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                                                    }
+                                                    .frame(width: 264)
+                                                    .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
+                                                } else {
+                                                    kanbanColumn(status)
+                                                        .frame(width: 264)
+                                                }
                                             }
                                         }
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        // The trailing spacer also leaves room for the Done drawer, so the last
+                                        // column scrolls clear of it. The spacers split spare width evenly, so the
+                                        // columns center in the whole board once it is wide enough for both minimums.
+                                        Spacer(minLength: 30 + DoneDropDrawer.gutterWidth)
                                     }
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .padding(.horizontal, 30)
                                     .padding(.top, 22)
                                     .padding(.bottom, 28)
-                                    // Room for the Done drawer, so the last column scrolls clear of it.
-                                    .padding(.trailing, DoneDropDrawer.gutterWidth)
-                                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height)
+                                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .top)
                                     .hoverRevealScrollers()
                                 }
                                 .modifier(TopLeadingScrollAlignment())
@@ -948,9 +953,6 @@ struct KanbanBoardView: View {
 
 
 }
-
-/// Places scroll content smaller than its container at the top leading corner instead of
-/// centering it through a negative clip origin; the board centers its columns itself.
 
 /// Where the session files the token map reads live, as this window's bridge
 /// requests would name them.

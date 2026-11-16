@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (216-point) Kanban sidebar, 8% wider than its previous 200-point width and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (216-point) Kanban sidebar, 8% wider than its previous 200-point width and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The board's columns start at its top, just below the header instead of centering in a board taller than they are; they center across a board wider than they are and start just right of the sidebar in a narrower one. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "Playhouse should open one board window on launch.")
@@ -35,6 +35,14 @@ extension PlayhouseUITests {
         XCTAssertLessThan(backlogColumn.frame.minX, backlogColumnStartX, "The board columns should scroll horizontally.")
         XCTAssertEqual(sidebar.frame, sidebarFrame, "Scrolling the board columns should not move the sidebar.")
         assertPlayhouseLogoArtwork(logo)
+        element("board-columns-scroll-view").swipeRight()
+        XCTAssertTrue(waitUntil({ abs(backlogColumn.frame.minX - backlogColumnStartX) <= 2 }, timeout: 3), "Scrolling back should return the columns to their start.")
+        // The empty columns are shorter than the board, which used to center them vertically.
+        let boardViewport = element("board-columns-scroll-view")
+        XCTAssertGreaterThan(boardViewport.frame.height, backlogColumn.frame.height + 22 + 28 + 8, "The board should be taller than its empty columns, so centering them would show: board=\(boardViewport.frame), backlog=\(backlogColumn.frame).")
+        XCTAssertEqual(backlogColumn.frame.minY - sidebarFrame.minY, 22, accuracy: 4, "The columns should start just below the header, not centered in the board's height: backlog=\(backlogColumn.frame), sidebar=\(sidebarFrame).")
+        XCTAssertEqual(backlogColumn.frame.minX - sidebarFrame.maxX, 31, accuracy: 4, "In a board narrower than its columns, they should start just right of the sidebar: backlog=\(backlogColumn.frame), sidebar=\(sidebarFrame).")
+        attachAppWindowScreenshot(named: "Board columns start just below the header, beside the sidebar")
         let headerLogoURL = repositoryRoot.appendingPathComponent("Playhouse/Assets.xcassets/PlayhouseLogo.imageset/PlayhouseLogo.png")
         let headerLogoBitmap = try XCTUnwrap(NSBitmapImageRep(data: Data(contentsOf: headerLogoURL)), "The in-app logo image should load.")
         let transparentCorner = try XCTUnwrap(headerLogoBitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.deviceRGB))
