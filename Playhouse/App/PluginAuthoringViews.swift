@@ -64,7 +64,10 @@ struct PluginCreationSetup: View {
 struct PluginAuthoringPreview: View {
     let task: any ConversationSubject
     let pluginID: String
+    /// Closes the editor before a plugin that was never saved is discarded with its conversation.
+    let onClose: () -> Void
     @State private var plugin: PluginRecord?
+    @State private var isSaved = true
     @State private var revision = ""
     @State private var versions: [Int] = []
     @State private var operationError: String?
@@ -90,7 +93,7 @@ struct PluginAuthoringPreview: View {
                     }
                 }.disabled(versions.isEmpty)
                 Button("Discard draft") { confirmDiscard = true }
-                    .buttonHoverPointer().nativeHelp("Reset the draft to the saved plugin")
+                    .buttonHoverPointer().nativeHelp(isSaved ? "Reset the draft to the saved plugin" : "Delete this unsaved plugin and its conversation")
                 Button("Save") { perform("plugin.save") }
                     .keyboardShortcut("s", modifiers: .command)
                     .buttonHoverPointer().nativeHelp("Publish this plugin draft")
@@ -129,12 +132,15 @@ struct PluginAuthoringPreview: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .alert("Discard draft?", isPresented: $confirmDiscard) {
-            Button("Discard", role: .destructive) { perform("plugin.discard") }
+        .alert(isSaved ? "Discard draft?" : "Discard plugin?", isPresented: $confirmDiscard) {
+            Button("Discard", role: .destructive) { isSaved ? perform("plugin.discard") : discardUnsaved() }
                 .buttonHoverPointer().nativeHelp("Discard the plugin draft")
             Button("Cancel", role: .cancel) { }
                 .buttonHoverPointer().nativeHelp("Keep the plugin draft")
-        } message: { Text("The preview will be reset to the saved plugin.") }
+        } message: {
+            Text(isSaved ? "The preview will be reset to the saved plugin."
+                 : "This plugin was never saved. Its draft and this conversation will be deleted.")
+        }
         .alert("Plugin operation", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
             Button("OK") { operationError = nil }
                 .buttonHoverPointer().nativeHelp("Dismiss plugin operation message")
@@ -156,12 +162,28 @@ struct PluginAuthoringPreview: View {
                 var arguments: [String: BridgeValue] = ["pluginID": .string(pluginID)]
                 if let version { arguments["version"] = .integer(version) }
                 let result = try await DaemonClient().call(command, arguments)
+                // The bridge decides: a plugin it found unsaved was deleted with this conversation.
+                if result.object?["deleted"]?.bool == true { onClose(); return }
                 if result.object?["draftSyncFailed"]?.bool == true {
                     operationError = "The plugin was published, but the draft could not be refreshed. Your existing draft was preserved."
                 }
                 await loadVersions()
                 refresh()
             } catch { operationError = error.localizedDescription }
+        }
+    }
+
+    /// Nothing of a plugin that was never saved is kept: the bridge deletes its draft and
+    /// editor conversation, so the editor closes first, as deleting from the Plugins menu does.
+    private func discardUnsaved() {
+        onClose()
+        Task { @MainActor in
+            await Task.yield()
+            do {
+                _ = try await DaemonClient().call("plugin.discard", ["pluginID": .string(pluginID)])
+            } catch {
+                NSAlert(error: error).runModal()
+            }
         }
     }
 
@@ -191,7 +213,9 @@ struct PluginAuthoringPreview: View {
 
     private func refresh() {
         guard let folder = task.contextFolderPaths.first else { return }
-        let library = PluginLibrary(dataDirectory: URL(fileURLWithPath: folder).deletingLastPathComponent().path)
+        let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
+        let library = PluginLibrary(dataDirectory: draftData.path)
+        isSaved = PluginLibrary(dataDirectory: draftData.deletingLastPathComponent().deletingLastPathComponent().path).isInstalled(id: pluginID)
         let current = try? library.plugin(id: pluginID, validate: false)
         let source = current.flatMap { try? String(contentsOfFile: $0.entryPath, encoding: .utf8) } ?? ""
         let signature = "\(String(describing: current))\n\(source)"

@@ -270,7 +270,9 @@ struct KanbanBoardView: View {
                         .id(pluginChat.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     Divider()
-                    PluginAuthoringPreview(task: pluginChat, pluginID: pluginID)
+                    PluginAuthoringPreview(task: pluginChat, pluginID: pluginID, onClose: {
+                        self.pluginChat = nil; pluginInitialDraft = nil
+                    })
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
@@ -280,7 +282,7 @@ struct KanbanBoardView: View {
                         conversationView(for: selectedTask)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         Divider()
-                        PluginAuthoringPreview(task: selectedTask, pluginID: pluginID)
+                        PluginAuthoringPreview(task: selectedTask, pluginID: pluginID, onClose: { self.selectedTask = nil })
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }

@@ -391,6 +391,7 @@ extension PlayhouseUITests {
         try original.write(to: draft, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
         app.buttons["Discard draft"].click()
+        XCTAssertTrue(app.sheets.staticTexts["The preview will be reset to the saved plugin."].waitToExist(timeout: 5), "A saved plugin's discard only resets its draft.")
         app.sheets.buttons["Discard"].click()
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: draft, encoding: .utf8)) == changed }, timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
@@ -432,6 +433,91 @@ extension PlayhouseUITests {
         let publishedManifest = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: pluginsFolder.appendingPathComponent("versioned/plugin.json"))) as? [String: Any])
         XCTAssertEqual(publishedManifest["version"] as? Int, 3)
         app.sheets.buttons["OK"].click()
+    }
+
+    // case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard draft in an unsaved plugin's editor asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
+    func test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        func sessions() throws -> [String] {
+            let entries = try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
+            return entries.compactMap { $0["authoredPluginID"] as? String }
+        }
+        let drafts = pluginsFolder.appendingPathComponent(".drafts/plugins")
+        _ = try runCLI(["plugin", "mode", "--on"])
+        let placeholder = element("plugin-add-here-mainSidebar")
+        XCTAssertTrue(placeholder.waitToExist(timeout: 15))
+        placeholder.click()
+        XCTAssertTrue(element("plugin-creation-name").waitToExist(timeout: 10))
+        element("plugin-creation-name").click()
+        element("plugin-creation-name").typeText("Blamos")
+        element("plugin-creation-continue").click()
+        XCTAssertTrue(element("plugin-creation-start").waitToExist(timeout: 5))
+        element("plugin-creation-start").click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
+        let blamosID = try XCTUnwrap(try sessions().first)
+
+        // The unsaved plugin is its own submenu, never a root Edit item.
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        let row = menu.menuItems["Blamos — Main sidebar (Unsaved)"]
+        XCTAssertTrue(row.waitToExist(timeout: 10), "The unsaved plugin has its own row in the Plugins menu.")
+        XCTAssertFalse(menu.menuItems["Edit Blamos…"].exists, "No Edit item sits at the menu's root.")
+        XCTAssertFalse(menu.menus.firstMatch.children(matching: .menuItem)["Edit…"].exists, "Edit is only inside a plugin's submenu.")
+        XCTAssertTrue(waitForStableFrame(row))
+        row.hover()
+        let editItem = row.descendants(matching: .menuItem)["Edit…"]
+        XCTAssertTrue(waitUntil({ editItem.isHittable }, timeout: 5), "The submenu offers Edit.")
+        XCTAssertTrue(row.descendants(matching: .menuItem)["Delete…"].isHittable, "The submenu offers Delete.")
+        let menuCapture = XCTAttachment(screenshot: menu.menus.firstMatch.screenshot())
+        menuCapture.name = "Plugins menu lists the unsaved plugin"
+        menuCapture.lifetime = .keepAlways
+        add(menuCapture)
+        let submenuCapture = XCTAttachment(screenshot: row.menus.firstMatch.screenshot())
+        submenuCapture.name = "Unsaved plugin submenu"
+        submenuCapture.lifetime = .keepAlways
+        add(submenuCapture)
+        app.typeKey(.escape, modifierFlags: [])
+        app.typeKey(.escape, modifierFlags: [])
+        // Closed menu-bar items stay in the accessibility tree, so wait for the menu to stop taking hits instead.
+        // The pointer is parked in the editor so it cannot leave a menu bar title tracking.
+        element("plugin-creation-preview").hover()
+        XCTAssertTrue(waitUntil({ !menu.menus.firstMatch.isHittable && self.app.buttons["Discard draft"].isHittable }, timeout: 5), "The menu closes.")
+
+        // Discarding an unsaved plugin removes its draft and conversation and closes its editor.
+        let blamosDraft = drafts.appendingPathComponent(blamosID)
+        try FileManager.default.createDirectory(at: blamosDraft, withIntermediateDirectories: true)
+        try "draft".write(to: blamosDraft.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: blamosDraft.appendingPathComponent("index.js").path))
+        app.buttons["Discard draft"].click()
+        XCTAssertTrue(app.sheets.staticTexts["Discard plugin?"].waitToExist(timeout: 5))
+        XCTAssertTrue(app.sheets.staticTexts["Discard plugin?"].isHittable, "No menu covers the confirmation.")
+        XCTAssertTrue(app.sheets.staticTexts["This plugin was never saved. Its draft and this conversation will be deleted."].exists)
+        attachAppWindowScreenshot(named: "Discard unsaved plugin confirmation")
+        app.sheets.buttons["Discard"].click()
+        XCTAssertTrue(waitUntil({ !self.element("plugin-creation-preview").exists }, timeout: 10), "The editor closes.")
+        XCTAssertTrue(waitUntil({ (try? sessions())?.contains(blamosID) == false }, timeout: 10), "Its editor conversation is deleted.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: blamosDraft.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent(blamosID).path))
+        attachAppWindowScreenshot(named: "Editor closed after discarding")
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Reload Plugins"].waitToExist(timeout: 10))
+        XCTAssertFalse(menu.menuItems["Blamos — Main sidebar (Unsaved)"].exists, "The discarded plugin leaves the menu.")
+        app.typeKey(.escape, modifierFlags: [])
+
+        // Delete in an unsaved plugin's submenu removes it the same way.
+        let second = try XCTUnwrap((try runCLI(["plugin", "author", "--placement", "mainSidebar", "--name", "Second", "--presentation", "popover"])["result"] as? [String: Any])?["task"] as? [String: Any])
+        let secondID = try XCTUnwrap(second["authoredPluginID"] as? String)
+        try FileManager.default.createDirectory(at: drafts.appendingPathComponent(secondID), withIntermediateDirectories: true)
+        try "draft".write(to: drafts.appendingPathComponent(secondID).appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
+        clickInstalledPluginAction("Delete…", pluginRow: "Second — Main sidebar (Unsaved)")
+        XCTAssertTrue(app.dialogs.staticTexts["It was never saved. Its draft and editor conversation are removed."].waitToExist(timeout: 5))
+        app.dialogs.buttons["Delete"].click()
+        XCTAssertTrue(waitUntil({ (try? sessions())?.contains(secondID) == false }, timeout: 10))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: drafts.appendingPathComponent(secondID).path))
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Reload Plugins"].waitToExist(timeout: 10))
+        XCTAssertFalse(menu.menuItems["Second — Main sidebar (Unsaved)"].exists, "The deleted plugin leaves the menu.")
+        app.typeKey(.escape, modifierFlags: [])
     }
 
     // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
@@ -521,10 +607,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(turns().isEmpty, "Creating the plugin does not start a provider turn.")
         attachScreenshot(named: "Plugin authoring draft ready to review with selected model")
         element("back-to-board-button").click()
-        let draftMenu = app.menuBars.menuBarItems["Plugins"]
-        draftMenu.click()
-        XCTAssertTrue(draftMenu.menuItems["Edit Timer…"].waitToExist(timeout: 10))
-        draftMenu.menuItems["Edit Timer…"].click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Timer — Main sidebar (Unsaved)")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10), "A draft can be reopened before its plugin folder exists.")
         XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String) == authoringDraft }, timeout: 10), "The user’s authoring draft survives reopening unsent.")
         element("send-message-button").click()
@@ -559,11 +642,7 @@ extension PlayhouseUITests {
         element("back-to-board-button").click()
         XCTAssertTrue(app.sheets.staticTexts["Your changes are saved as a draft. You can return and continue editing later."].waitToExist(timeout: 5))
         app.sheets.buttons["OK"].click()
-        let menu = app.menuBars.menuBarItems["Plugins"]
-        menu.click()
-        let edit = menu.menuItems["Edit Timer…"]
-        XCTAssertTrue(edit.waitToExist(timeout: 10))
-        edit.click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Timer — Main sidebar (Unsaved)")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["preview-content"]) == "Updated preview" }, timeout: 10))
         XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").contains("A saved draft") }, timeout: 10))
@@ -702,10 +781,7 @@ extension PlayhouseUITests {
             guard let data = try? Data(contentsOf: historyURL) else { return [:] }
             return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         }
-        let menu = app.menuBars.menuBarItems["Plugins"]
-        menu.click()
-        XCTAssertTrue(menu.menuItems["Edit Codex timer…"].waitToExist(timeout: 10))
-        menu.menuItems["Edit Codex timer…"].click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Codex timer — Main sidebar (Unsaved)")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         let composer = element("message-composer")
         XCTAssertTrue((composer.value as? String ?? "").isEmpty)
@@ -752,8 +828,8 @@ extension PlayhouseUITests {
         _ = try runCLI(["plugin", "author", "--placement", "mainSidebar", "--name", "Restart plugin", "--presentation", "modal", "--provider", "claude"], extraEnvironment: environment)
         XCTAssertTrue(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent(".drafts/plugins").path), "The working folder exists before reopening the editor or sending.")
         let menu = app.menuBars.menuBarItems["Plugins"]
-        XCTAssertTrue(waitUntil({ menu.click(); let found = menu.menuItems["Edit Restart plugin…"].exists; if !found { self.app.typeKey(.escape, modifierFlags: []) }; return found }, timeout: 15))
-        menu.menuItems["Edit Restart plugin…"].click()
+        XCTAssertTrue(waitUntil({ menu.click(); let found = menu.menuItems["Restart plugin — Main sidebar (Unsaved)"].exists; self.app.typeKey(.escape, modifierFlags: []); return found }, timeout: 15))
+        clickInstalledPluginAction("Edit…", pluginRow: "Restart plugin — Main sidebar (Unsaved)")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         let composer = element("message-composer")
         composer.click()

@@ -296,11 +296,13 @@ extension BoardTaskManager {
     }
 
     /// Lock every editor turn while deleting its plugin, then remove its conversation records.
+    /// A plugin that was never saved has only its draft and editor conversations, which go together.
     /// If deleting the folder fails, the saved conversations remain available for retry.
     func deletePlugin(id: String, library: PluginLibrary) async throws {
-        _ = try library.plugin(id: id, validate: false)
         let ids = try pluginConversations().filter { $0.authoredPluginID == id }.map(\.id)
             .sorted { $0.uuidString < $1.uuidString }
+        let installed = library.isInstalled(id: id)
+        if installed || ids.isEmpty { _ = try library.plugin(id: id, validate: false) }
         func reserve(_ index: Int) async throws {
             if index < ids.count {
                 try await withConversationTurnReservation(ids[index]) {
@@ -310,7 +312,7 @@ extension BoardTaskManager {
                 }
                 return
             }
-            try library.delete(id: id)
+            if installed { try library.delete(id: id) } else { try library.discardDraft(id: id) }
             for id in ids {
                 if let chat = try standaloneChatModel(id) { modelContext.delete(chat) }
                 else if let task = try? taskModel(id) { modelContext.delete(task) }
