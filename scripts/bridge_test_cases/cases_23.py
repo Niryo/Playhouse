@@ -207,6 +207,41 @@ class BridgeTestCases23:
         self.assertEqual(texts.count(steer_text), 1, f"The steer should appear once in the turn it steered: {texts}")
         self.assertIn(f"STEERED: {steer_text}", texts, "Claude Code should have answered the steer inside the launched turn.")
 
+    # case-contract: test_long_command_activity_title_is_previewed | A tool call whose command is long keeps its whole command: the streamed activity and fresh CLI/XPC history carry its title as Running followed by every line of a heredoc or every character of a long single-line command, and a short command's title is recorded unchanged. While the heredoc still runs, its live command row shows only the title's first line ending in an ellipsis, with no expand control. In the transcript's Worked for list a long title shows its first line, cut to 160 characters and ending in an ellipsis, with an expand control whose accessibility label names expanding the activity title; expanding reveals all of the command and collapsing restores the preview, while the row's accessibility label keeps the full title. A short command's row shows its whole title with no control, and reopening the task shows the long title collapsed again. The preview is Playhouse-owned presentation in the activity row both providers share, and both build a command's title as Running followed by the whole command, so Claude is the representative provider.
+    def test_long_command_activity_title_is_previewed(self):
+        environment = self.install_claude_fixture("claude-fixture-long-command")
+        task_id = self.create_task("Long command title", provider="claude")["id"]
+        # Matches LONG_HEREDOC_COMMAND and SHORT_COMMAND in scripts/fixtures/claude-code-fixture.py.
+        long_command = "cat > /tmp/playhouse-fixture-release-notes.md <<'NOTES'\n" + "\n".join(
+            [f"Release note line {index:03d}: this change keeps a long command readable without laying all of it out." for index in range(1, 121)]
+            + ["NOTES"]
+        )
+        long_title, short_title = "Running " + long_command, "Running echo release notes checked"
+        # Matches LONG_SINGLE_LINE_COMMAND: one line past the 160-character preview.
+        single_line_title = "Running echo " + " ".join(f"release-note-{index:03d}" for index in range(1, 41))
+        expected = {"toolu_long_heredoc": long_title, "toolu_long_single_line": single_line_title, "toolu_short_command": short_title}
+        sent, events = self.call_cli("conversation", "send", task_id, "--message", "Write the release notes with one long heredoc.",
+                                     extra_environment=environment)
+        self.assert_success(sent)
+        streamed = {}
+        for event in events:
+            activity = event.get("payload", {}).get("activity", {})
+            if event["type"] == "activity" and activity.get("id") in expected:
+                streamed.setdefault(activity["id"], set()).add(activity["title"])
+        self.assertEqual(streamed, {tool_id: {title} for tool_id, title in expected.items()},
+                         "Every streamed update of each command carries its whole title.")
+        self.assertEqual(self.wait_for_task_status(task_id, {"Review"})["status"], "Review")
+        # A fresh read is the reload a reopened transcript applies, and what expanding the row shows.
+        history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        titles = {row["id"]: row["title"] for row in history["activities"]}
+        self.assertEqual(titles.get("toolu_long_heredoc"), long_title, "Only the row's presentation is shortened: history keeps the whole command.")
+        self.assertEqual(len(titles["toolu_long_heredoc"].splitlines()), 122, "All 120 heredoc lines and both delimiters stay in history.")
+        self.assertGreater(len(long_title), 10_000, "The command is long enough that a full layout of it is what the preview avoids.")
+        self.assertEqual(titles.get("toolu_short_command"), short_title, "A short command is recorded unchanged.")
+        self.assertEqual(titles.get("toolu_long_single_line"), single_line_title, "A long single-line command keeps every character in history.")
+        self.assertNotIn("\n", single_line_title)
+        self.assertGreater(len(single_line_title), 160, "The single-line command runs past the row's preview.")
+
     def launch_marker(self, executable, suffix):
         return Path(f"{executable}.{suffix}")
 

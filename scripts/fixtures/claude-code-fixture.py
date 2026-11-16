@@ -108,6 +108,18 @@ LONG_HANDOFF_NOTICE = "\n".join(
     [f"Handoff context line {index:02d}: the previous session summarized this part of the task in detail." for index in range(1, 25)]
     + ["Handoff context ends here."]
 )
+# A turn that writes a file with one long heredoc command, then runs one long single-line command
+# and one short command, as an agent's real heredocs put tens of thousands of characters in a
+# command's title.
+LONG_COMMAND_PROMPT = "Write the release notes with one long heredoc."
+LONG_COMMAND_ANSWER = "The release notes are written."
+SHORT_COMMAND = "echo release notes checked"
+# One line far past the row's 160-character preview, as a long `python3 -c` or a Codex argument list joined by spaces.
+LONG_SINGLE_LINE_COMMAND = "echo " + " ".join(f"release-note-{index:03d}" for index in range(1, 41))
+LONG_HEREDOC_COMMAND = "cat > /tmp/playhouse-fixture-release-notes.md <<'NOTES'\n" + "\n".join(
+    [f"Release note line {index:03d}: this change keeps a long command readable without laying all of it out." for index in range(1, 121)]
+    + ["NOTES"]
+)
 # A chat turn that forgets close-turn; Playhouse's one visible nudge then gets it run.
 CHAT_SKIPPED_CLOSE_TURN_PROMPT = "Plan a weekend hiking trip."
 CHAT_SKIPPED_CLOSE_TURN_ANSWER = "Pick a loop trail under 15 km and start early."
