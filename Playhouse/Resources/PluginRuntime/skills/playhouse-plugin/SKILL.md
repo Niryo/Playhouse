@@ -31,6 +31,10 @@ message, for any the request leaves open. Don't guess:
     place as a section of the task sidebar, like the built-in Changes.
 - **Name and icon**: a short name and an SF Symbol name for its button.
 
+The name, placement and presentation the user picked when the editor opened are
+a starting point, not fixed. When the user later asks to change any of them, or
+the icon, update `plugin.json` to match. Keep the plugin id and folder.
+
 ## 2. Write the plugin
 
 Create `<plugins folder>/<plugin-id>/`. The plugin id is lowercase words

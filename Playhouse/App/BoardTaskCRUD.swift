@@ -212,7 +212,17 @@ extension BoardTaskManager {
 
     func pluginConversations() throws -> [BoardTaskRecord] {
         let sessions = try modelContext.fetch(FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)]))
-            .filter { $0.authoredPluginID != nil }.map { BoardTaskRecord(task: $0) }
+            .filter { $0.authoredPluginID != nil }.map { chat in
+                var record = BoardTaskRecord(task: chat)
+                // The agent can rename the plugin; its draft manifest's name wins over the setup-time title.
+                if let folder = chat.pluginContextFolder, let id = chat.authoredPluginID, PluginLibrary.isValidID(id),
+                   FileManager.default.fileExists(atPath: URL(fileURLWithPath: folder).appendingPathComponent(id).appendingPathComponent("plugin.json").path),
+                   let name = try? PluginLibrary(dataDirectory: URL(fileURLWithPath: folder).deletingLastPathComponent().path).plugin(id: id, validate: false).name,
+                   !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    record.title = name
+                }
+                return record
+            }
         let legacy = try modelContext.fetch(FetchDescriptor<BoardTask>())
             .filter { $0.authoredPluginID != nil && $0.repositoryWorktrees.isEmpty }
             .map { BoardTaskRecord(task: $0) }
