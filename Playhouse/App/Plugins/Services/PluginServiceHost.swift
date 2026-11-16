@@ -1,0 +1,110 @@
+import Foundation
+
+/// A built-in plugin's background half: it hears the app's events in the
+/// bridge daemon, whether or not a window shows the plugin, and acts only
+/// through bridge commands, the same ones a JavaScript plugin's
+/// `Playhouse.bridge` reaches.
+@MainActor
+protocol PluginService: AnyObject {
+    var pluginID: String { get }
+    func handle(_ event: PluginEvent, context: PluginServiceContext) async
+    /// Whether the service still wants `action` done for `taskID`, asked by a
+    /// command it started right before an irreversible step (a merge, a fix
+    /// turn), since the user may have changed their mind while it probed.
+    func confirms(_ action: String, taskID: String, context: PluginServiceContext) async -> Bool
+}
+
+extension PluginService {
+    func confirms(_ action: String, taskID: String, context: PluginServiceContext) async -> Bool { true }
+}
+
+/// What a service may do: run bridge commands as the request whose change
+/// raised the event, so they reach the same store, settings and fixtures.
+@MainActor
+struct PluginServiceContext {
+    let origin: BridgeRequest
+
+    func call(_ command: String, _ arguments: [String: PluginValue] = [:]) async throws -> PluginValue {
+        var nested = origin
+        nested.id = UUID().uuidString
+        nested.command = command
+        nested.arguments = origin.arguments.filter { $0.key.hasPrefix("__") }
+            .merging(BridgeValue(plugin: .object(arguments)).object ?? [:]) { _, new in new }
+        let response = await PlayhouseBridgeRuntime().perform(nested) { _ in }
+        guard response.ok else {
+            throw PluginHostError(code: response.error?.code ?? "operation_failed", message: response.error?.message ?? "The bridge command failed.")
+        }
+        return PluginValue(bridge: response.result ?? .null)
+    }
+
+    /// The plugin's saved state, or nil when the user disabled the plugin.
+    func enabledState(of pluginID: String) async -> [String: PluginValue]? {
+        guard let value = try? await call("plugin.state.get", ["pluginID": .string(pluginID)]).object,
+              value["enabled"] != .bool(false) else { return nil }
+        return value["state"]?.object ?? [:]
+    }
+}
+
+/// Delivers app events to the built-in plugins' services. The bridge daemon
+/// installs the services; a window forwards the changes it saves itself to
+/// the daemon (`plugin.event`), so each change reaches the services once.
+@MainActor
+enum PluginServiceHost {
+    /// The request being performed, whose isolation a service's commands reuse.
+    @TaskLocal static var origin: BridgeRequest?
+
+    nonisolated(unsafe) static var services: [any PluginService] = []
+    /// Set in the app: sends an event it raised to the daemon's services.
+    nonisolated(unsafe) static var forward: ((PluginEvent) -> Void)?
+
+    private static var running: [UUID: (taskID: String?, task: Task<Void, Never>)] = [:]
+
+    static func publish(_ event: PluginEvent) {
+        if let forward {
+            forward(event)
+            return
+        }
+        guard !services.isEmpty else { return }
+        guard let origin else {
+            PlayhouseDiagnostics.record("plugin.event.dropped", fields: ["name": event.name, "reason": "no-origin-request"])
+            return
+        }
+        PlayhouseDiagnostics.record("plugin.event.published", fields: [
+            "name": event.name, "taskID": event.payload["taskID"]?.string ?? "", "to": event.payload["to"]?.string ?? ""
+        ])
+        let context = PluginServiceContext(origin: origin)
+        for service in services {
+            let id = UUID()
+            // The daemon stays up until the service has acted.
+            BridgeBackgroundWork.onBegin?()
+            let task = Task { @MainActor in
+                if await context.enabledState(of: service.pluginID) != nil {
+                    await service.handle(event, context: context)
+                }
+                running[id] = nil
+                BridgeBackgroundWork.onEnd?()
+            }
+            // The task can't start before this main-actor turn ends, so it's
+            // recorded before it can remove itself.
+            running[id] = (event.payload["taskID"]?.string, task)
+        }
+    }
+
+    /// Asks the service of `pluginID` whether it still wants `action` done for
+    /// `taskID` (see `PluginService.confirms`); true when no such service runs here.
+    static func confirm(pluginID: String, action: String, taskID: String, origin: BridgeRequest) async -> Bool {
+        guard let service = services.first(where: { $0.pluginID == pluginID }) else { return true }
+        return await service.confirms(action, taskID: taskID, context: PluginServiceContext(origin: origin))
+    }
+
+    /// Waits for the services' reactions to the events raised for `taskID`
+    /// so far, so a command that moved the task returns once, for example,
+    /// the pull request mode has created its pull requests. Work a service
+    /// starts in the background (an autopilot pass) is not waited for.
+    static func settle(taskID: UUID) async {
+        let id = taskID.uuidString
+        while let next = running.values.first(where: { $0.taskID == id }) {
+            await next.task.value
+        }
+    }
+}

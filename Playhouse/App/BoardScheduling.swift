@@ -159,7 +159,6 @@ extension BoardTaskManager {
                 modelID: task.scheduledModelID,
                 provider: task.conversationProvider,
                 effort: task.conversationEffortRawValue,
-                pullRequestMode: task.pullRequestMode,
                 repositories: task.repositoryWorktrees.map {
                     RepositoryWorktreeSpec(
                         repositoryPath: $0.repositoryPath,
@@ -215,7 +214,6 @@ extension BoardTaskManager {
             repositories: claim.repositories,
             contextFolders: claim.contextFolders,
             provider: claim.provider,
-            pullRequestMode: claim.pullRequestMode,
             prompt: claim.prompt
         )
         let record = try await withTaskOperationLock(created.id) {

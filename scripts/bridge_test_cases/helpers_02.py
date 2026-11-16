@@ -379,6 +379,17 @@ class BridgeTestHelpers02:
         return [turn.get("userText") or "" for turn in json.loads(history.read_text(encoding="utf-8")).get("turns", [])]
     def plugins_folder(self):
         return self.data_directory / "plugins"
+    def set_pull_request_mode(self, task_id, mode, extra_environment=None):
+        """Chooses a task's pull request mode as its card's pill does: the `pull-request-mode` plugin's state.
+        The plugin acts on the change at once (a Green or Merge task in Review is followed), with this call's environment."""
+        value = "null" if mode is None else json.dumps(mode)
+        return self.assert_success(self.call_cli(
+            "plugin", "state", "--id", "pull-request-mode", "--key", task_id, "--value", value, extra_environment=extra_environment,
+        )[0])
+    def pull_request_mode(self, task_id):
+        """The mode the `pull-request-mode` plugin keeps for a task, or None for the default (PR)."""
+        state = self.assert_success(self.call_cli("plugin", "state", "--id", "pull-request-mode")[0])
+        return state["state"].get(task_id)
     def write_installed_plugin(self, plugin_id, source, placement="composerActions", presentation="popover", manifest=None):
         """Writes a plugin folder as an authoring agent would: plugin.json and index.js."""
         folder = self.plugins_folder() / plugin_id

@@ -184,6 +184,9 @@ struct PluginInlineSlot: View {
     let placement: PluginPlacement
     let props: (PluginRecord) -> [String: PluginValue]
     var actions = PluginUIActions()
+    /// Set where the slot's view is rebuilt as its context moves (a task
+    /// card changing columns), so its installed plugins keep running.
+    var keepAliveScope: String?
     @Environment(PluginRegistry.self) private var registry
 
     var body: some View {
@@ -192,7 +195,7 @@ struct PluginInlineSlot: View {
                 if plugin.builtIn {
                     BuiltInPluginView(plugin: plugin, props: props(plugin), actions: actions)
                 } else {
-                    PluginSurfaceView(plugin: plugin, props: props(plugin), actions: actions)
+                    PluginSurfaceView(plugin: plugin, props: props(plugin), actions: actions, keepAliveKey: keepAliveScope.map { "\(plugin.id):\($0)" })
                 }
             }
         }

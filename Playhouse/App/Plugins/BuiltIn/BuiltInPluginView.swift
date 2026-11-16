@@ -13,6 +13,10 @@ struct BuiltInPluginView: View {
         switch plugin.id {
         case BuiltInPlugins.changesID:
             ChangesPlugin(host: host, props: props)
+        case BuiltInPlugins.pullRequestModeID:
+            PullRequestModePlugin(host: host, props: props)
+        case BuiltInPlugins.pullRequestsID:
+            PullRequestsPlugin(host: host, props: props)
         default:
             AtomText(props: TextProps(text: "Unknown built-in plugin \(plugin.id).", size: 11, color: "red"), common: AtomCommon(testID: "plugin-error"))
         }

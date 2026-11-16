@@ -203,16 +203,16 @@ final class BoardTask {
     var totalCacheReadTokens: Int = 0
     var totalCacheCreationTokens: Int = 0
     var callUsageSnapshotsData: Data?
-    /// When true, moving this task to Review automatically creates its pull request(s)
-    /// instead of waiting for the user to click the manual "PR" control.
+    /// Legacy pull request mode columns, from before the `pull-request-mode`
+    /// plugin kept each task's mode in its own state. Only the one-time import
+    /// (`legacyPullRequestMode`) reads them; a new task gets the default mode's
+    /// value, as tasks did before.
     var autoCreatePullRequestOnReview: Bool = false
-    /// When true (with `autoCreatePullRequestOnReview`), Playhouse keeps following the
-    /// task's pull requests in Review and sends fix turns until checks pass and every
-    /// review thread is resolved.
     var pullRequestAutopilot: Bool = false
-    /// When true (with `pullRequestAutopilot`), autopilot also merges the pull
-    /// requests once they're green.
     var pullRequestAutoMerge: Bool = false
+    /// The column the task was in when it last saved, while a move is unsaved;
+    /// saving publishes the move to plugins as `task.statusChanged`.
+    @Transient var statusBeforeSave: String? = nil
     /// Autopilot fix turns sent since the pull requests were last green; bounds the loop.
     var pullRequestAutopilotFixAttempts: Int = 0
     /// The PR state the last autopilot fix turn was sent for, so an unchanged red state
@@ -291,6 +291,9 @@ final class BoardTask {
         savedPrompt = nil
         pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
+        // Reads as the default mode, so the legacy import never gives a task
+        // created since the plugin owned the mode one it didn't choose.
+        autoCreatePullRequestOnReview = true
         repositoryWorktreesData = nil
         contextFolderPathsData = nil
         draftImageDataURLsData = nil
@@ -299,33 +302,6 @@ final class BoardTask {
         conversationActivityDurationsData = nil
         answeredAsyncQuestionIDsData = nil
         viewedWorkspaceChangesData = nil
-    }
-}
-
-/// What reaching Review does with a task's pull requests: nothing (the user creates
-/// them), create them, or create them and keep fixing them until they're green.
-enum PullRequestMode: String, CaseIterable, Codable, Sendable {
-    case manual
-    case pullRequest = "pr"
-    case autopilot
-    case merge
-
-    var label: String {
-        switch self {
-        case .manual: "Manual"
-        case .pullRequest: "PR"
-        case .autopilot: "Green"
-        case .merge: "Merge"
-        }
-    }
-
-    var helpText: String {
-        switch self {
-        case .manual: "Manual: you open the pull request yourself"
-        case .pullRequest: "PR: open the pull request when the task reaches Review"
-        case .autopilot: "Green: open the PR, then fix failing checks and review comments until it's green"
-        case .merge: "Merge: like Green, then merge the PR once it's green"
-        }
     }
 }
 
@@ -433,13 +409,6 @@ extension BoardTask {
     var scheduledImageDataURLs: [String] {
         get { scheduledImageDataURLsData.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
         set { scheduledImageDataURLsData = newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue) }
-    }
-}
-
-extension BoardTask {
-    var pullRequestMode: PullRequestMode {
-        if pullRequestAutopilot { return pullRequestAutoMerge ? .merge : .autopilot }
-        return autoCreatePullRequestOnReview ? .pullRequest : .manual
     }
 }
 

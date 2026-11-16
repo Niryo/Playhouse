@@ -103,13 +103,12 @@ struct KanbanColumnView: View {
     let status: TaskStatus
     let tasks: [BoardTask]
     let onMoveTask: (UUID, TaskStatus) -> Void
-    let onCreatePullRequests: (BoardTask) -> Void
-    let onSetPullRequestMode: (BoardTask, PullRequestMode) -> Void
-    let onResolveConflicts: (BoardTask) -> Void
-    let creatingPullRequestTaskIDs: Set<UUID>
-    let mergedReviewTaskIDs: Set<UUID>
-    let conflictedReviewTaskIDs: Set<UUID>
-    let pullRequestHealth: [UUID: [Int: PullRequestHealth]]
+    /// What the cards' plugins (`PluginPlacement.taskItem`) can do on the board.
+    let pluginActions: PluginUIActions
+    /// Presents a card plugin's modal, sidebar or page for its task.
+    let onOpenPlugin: (PluginRecord, BoardTask) -> Void
+    /// Add Plugin mode's "Add here" placeholder on a card was pressed.
+    let onAddPlugin: (PluginPlacement) -> Void
     let onAddTask: () -> Void
     let onOpenTask: (BoardTask) -> Void
     let onRenameTask: (BoardTask) -> Void
@@ -189,13 +188,9 @@ struct KanbanColumnView: View {
             onRename: { onRenameTask(task) },
             onDelete: { onDeleteTask(task) },
             onShowTokenStats: { onShowTaskTokenStats(task) },
-            onCreatePullRequests: { onCreatePullRequests(task) },
-            onSetPullRequestMode: { onSetPullRequestMode(task, $0) },
-            onResolveConflicts: { onResolveConflicts(task) },
-            isCreatingPullRequests: creatingPullRequestTaskIDs.contains(task.id),
-            isPullRequestMerged: mergedReviewTaskIDs.contains(task.id),
-            hasPullRequestConflicts: conflictedReviewTaskIDs.contains(task.id),
-            pullRequestHealth: pullRequestHealth[task.id] ?? [:],
+            pluginActions: pluginActions,
+            onOpenPlugin: { onOpenPlugin($0, task) },
+            onAddPlugin: onAddPlugin,
             onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil,
             onMoveToReview: task.status == .waitingResponse ? { onMoveTask(task.id, .review) } : nil
         )
@@ -341,13 +336,9 @@ private struct TaskCardView: View {
     let onRename: () -> Void
     let onDelete: () -> Void
     let onShowTokenStats: () -> Void
-    let onCreatePullRequests: () -> Void
-    let onSetPullRequestMode: (PullRequestMode) -> Void
-    let onResolveConflicts: () -> Void
-    let isCreatingPullRequests: Bool
-    let isPullRequestMerged: Bool
-    let hasPullRequestConflicts: Bool
-    let pullRequestHealth: [Int: PullRequestHealth]
+    let pluginActions: PluginUIActions
+    let onOpenPlugin: (PluginRecord) -> Void
+    let onAddPlugin: (PluginPlacement) -> Void
     let onMoveToDone: (() -> Void)?
     let onMoveToReview: (() -> Void)?
 
@@ -364,14 +355,10 @@ private struct TaskCardView: View {
                 default: break
                 }
             },
-            showTokenStats: onShowTokenStats,
-            createPullRequests: onCreatePullRequests,
-            setPullRequestMode: { raw in
-                if let mode = PullRequestMode(rawValue: raw) { onSetPullRequestMode(mode) }
-            },
-            moveToDone: { onMoveToDone?() },
-            resolveConflicts: onResolveConflicts
-        ))
+            showTokenStats: onShowTokenStats
+        ), pluginRow: AnyView(TaskItemPluginRow(
+            task: task, hasBuiltInControls: model.hasPluginRow, actions: pluginActions, open: onOpenPlugin, add: onAddPlugin
+        )))
     }
 
     /// For Codex the CPU share is the task's working-directory share of the
@@ -382,12 +369,50 @@ private struct TaskCardView: View {
             cpuPercent: cpuUsageModel.percent(threadID: task.activeConversationID),
             cpuUsageColorMax: cpuUsageColorMax,
             tokenUsageColorMax: tokenUsageColorMax,
-            isCreatingPullRequests: isCreatingPullRequests,
-            isPullRequestMerged: isPullRequestMerged,
-            hasPullRequestConflicts: hasPullRequestConflicts,
-            pullRequestHealth: pullRequestHealth,
             canMoveToDone: onMoveToDone != nil,
             canMoveToReview: onMoveToReview != nil
         )
+    }
+}
+
+/// A card's bottom row: the task card plugins (`PluginPlacement.taskItem`),
+/// right-aligned. The built-in ones (the mode pill and the pull request
+/// controls) render inline once the task has started in a repository;
+/// installed ones show on every card, inline or as entry buttons, beside
+/// Add Plugin mode's "Add here" placeholder.
+struct TaskItemPluginRow: View {
+    let task: BoardTask
+    let hasBuiltInControls: Bool
+    let actions: PluginUIActions
+    let open: (PluginRecord) -> Void
+    let add: (PluginPlacement) -> Void
+    @Environment(PluginRegistry.self) private var registry
+    @AppStorage(WorkspaceSettings.pluginAddModeKey, store: WorkspaceSettings.preferencesStore) private var isAddModeOn = false
+    @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
+
+    private var hasInstalledPlugins: Bool {
+        (registry.plugins(for: .taskItem) + registry.inlinePlugins(for: .taskItem)).contains { !$0.builtIn }
+    }
+
+    var body: some View {
+        if hasBuiltInControls || hasInstalledPlugins || isAddModeOn {
+            AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(minHeight: 30)) {
+                AtomSpacer(props: SpacerProps(minLength: 8))
+                AtomStack(props: StackProps(axis: "h", spacing: 5)) {
+                    PluginSlot(placement: .taskItem, props: props, actions: actions, open: open, add: add)
+                    // A card is rebuilt in its new column when its task
+                    // moves; its plugins keep running and hear the move.
+                    PluginInlineSlot(placement: .taskItem, props: props, actions: actions, keepAliveScope: task.id.uuidString)
+                }
+            }
+            // The card's own element is its press target, a sibling of the
+            // row, so the row is a container of its own.
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("task-card-plugins-\(task.id.uuidString)")
+        }
+    }
+
+    private func props(_ plugin: PluginRecord) -> [String: PluginValue] {
+        PluginContext.props(plugin: plugin, appearance: appearance, task: PluginTaskContext(task: task), composer: nil)
     }
 }

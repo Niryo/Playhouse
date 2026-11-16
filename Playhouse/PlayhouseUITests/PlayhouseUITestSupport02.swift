@@ -52,10 +52,14 @@ extension PlayhouseUITests {
         let executable = WorkspaceFixture.root
             .appendingPathComponent(emptyQuestions ? "codex-fixture-empty" : (nonblocking ? "codex-fixture-nonblocking" : "codex-fixture-ui"))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path), "The prepared Codex fixture is missing or not executable.")
-        // The shared fixture records turns beside itself; start each case from an empty
-        // history, once, so a later call cannot remove a running turn's history.
+        // The shared fixture records turns and hold markers beside itself; start each case
+        // from an empty history and no holds, once, so a later call cannot remove a running
+        // turn's. A failed assertion ends a case without its `defer`s, which would otherwise
+        // leave an earlier case's hold to stall this one's turns.
         if codexFixtureHistoriesReset.insert(executable.path).inserted {
-            try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+            for suffix in [".history", ".hold-release", ".outcome-hold", ".turn-active", ".turn-release"] {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + suffix))
+            }
         }
         return executable
     }

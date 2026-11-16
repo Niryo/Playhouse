@@ -545,23 +545,6 @@ struct RemoteConversationManager {
         try await daemon.call("task.pr.create", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
     }
 
-    func setPullRequestMode(taskID: UUID, mode: PullRequestMode) async throws -> BoardTaskRecord {
-        try await daemon.call("task.pr.mode", ["taskID": id(taskID), "mode": .string(mode.rawValue)]).decoded(BoardTaskRecord.self)
-    }
-
-    /// Runs one autopilot pass in the daemon. `onStatus` gets the probed states
-    /// before any fix turn starts; the call itself returns after that turn ends.
-    func runPullRequestAutopilot(
-        taskID: UUID,
-        onStatus: @escaping ([PullRequestReviewState]) -> Void = { _ in }
-    ) async throws -> PullRequestAutopilotOutcome {
-        try await daemon.call("task.pr.autopilot", ["taskID": id(taskID)]) { event in
-            guard event.type == "autopilot_status",
-                  let states = try? event.payload.decoded([PullRequestReviewState].self) else { return }
-            onStatus(states)
-        }.decoded(PullRequestAutopilotOutcome.self)
-    }
-
     /// Review syncs pull request changes and may open PRs, which needs the
     /// daemon's provider clients, so this move runs there rather than in-process.
     func moveTaskToReview(taskID: UUID) async throws -> BoardTaskRecord {

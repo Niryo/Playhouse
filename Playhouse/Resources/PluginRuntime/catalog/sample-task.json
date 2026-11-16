@@ -13,22 +13,7 @@
     "createdText": "Nov 8, 2026",
     "tokens": { "compact": "1.2M", "color": "#C9A02E", "description": "1.2M tokens sent · 14 calls · 312K final transcript" },
     "cpu": { "fraction": 0.35, "label": "CPU 35%" },
-    "pullRequests": {
-      "create": null,
-      "mergedCheck": false,
-      "conflictsHelp": "Resolve pull request conflicts with Claude",
-      "showModePill": true,
-      "mode": "autopilot",
-      "modes": [
-        { "value": "manual", "label": "Manual", "help": "Manual: you open the pull request yourself", "testID": "task-pr-mode-manual-C0FFEE00-0000-4000-8000-000000000001" },
-        { "value": "pr", "label": "PR", "help": "PR: open the pull request when the task reaches Review", "testID": "task-pr-mode-pr-C0FFEE00-0000-4000-8000-000000000001" },
-        { "value": "autopilot", "label": "Green", "help": "Green: open the PR, then fix failing checks and review comments until it's green", "testID": "task-pr-mode-autopilot-C0FFEE00-0000-4000-8000-000000000001" },
-        { "value": "merge", "label": "Merge", "help": "Merge: like Green, then merge the PR once it's green", "testID": "task-pr-mode-merge-C0FFEE00-0000-4000-8000-000000000001" }
-      ],
-      "links": [
-        { "number": 193, "url": "https://github.com/example/playhouse/pull/193", "color": "blue", "help": "playhouse · checks running", "health": "pending" }
-      ]
-    },
+    "hasPluginRow": false,
     "canMoveToDone": true,
     "canMoveToReview": false
   },

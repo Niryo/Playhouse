@@ -101,6 +101,14 @@ final class PluginRuntime {
         return dispatcher?.call(withArguments: arguments)?.toBool() ?? false
     }
 
+    /// Delivers an app event to the plugin's `Playhouse.on` listeners, whose
+    /// updates commit as one batch. Returns how many listeners heard it.
+    @discardableResult
+    func emit(_ event: PluginEvent) -> Int {
+        let emitter = context.objectForKeyedSubscript("__playhouseEmit")
+        return Int(emitter?.call(withArguments: [event.name, PluginValue.object(event.payload).javaScriptValue(in: context)])?.toInt32() ?? 0)
+    }
+
     /// Replaces `Playhouse.props` and tells `Playhouse.useProps` subscribers,
     /// whose updates commit as one batch.
     func updateProps(_ props: [String: PluginValue]) {

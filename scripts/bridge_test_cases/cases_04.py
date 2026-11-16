@@ -615,7 +615,7 @@ class BridgeTestCases04:
             self.assertTrue(Path(after["worktreePath"]).exists(), "Each repository of the reopened task gets a fresh worktree.")
         self.assertEqual(both["pastRepositoryWorktrees"], [], "Records without a pull request leave no past link.")
         self.complete_fixture_turn(multi["id"], message="Change both repositories.")
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the JavaScript task item composes it the same way, as a borderless 30-point button whose 10-point capsule overhangs it, labelled PR.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the button is the built-in pull requests plugin's, which `plugin list` reports as an enabled inline task card plugin.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -662,16 +662,8 @@ class BridgeTestCases04:
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
 
-        # Framed outside its hover capsule, the 30-point button left "PR" 10 points and showed "…".
-        sample = json.loads((Path(__file__).resolve().parent.parent / "Playhouse/Resources/PluginRuntime/catalog/sample-task.json").read_text(encoding="utf-8"))
-        sample_task = sample["task"]
-        sample_task["pullRequests"].update({"create": {"title": "PR", "label": "PR. Create a pull request for each repository linked to this task",
-                                                       "help": "Create a pull request for each repository linked to this task", "busy": False},
-                                            "conflictsHelp": None, "showModePill": False, "links": []})
-        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "TaskItem", "--props", json.dumps({"task": sample_task}))[0])
-        self.assertEqual(rendered["errors"], [])
-        create = self.plugin_node(rendered["tree"], f"task-create-pr-{sample_task['id']}")
-        self.assertEqual(create["type"], "Button")
-        self.assertEqual({key: create["props"].get(key) for key in ["style", "emphasis", "overhang", "width", "height"]},
-                         {"style": "borderless", "emphasis": 10, "overhang": None, "width": 30, "height": 30})
-        self.assertEqual([(child["type"], self.plugin_text(child)) for child in create["children"]], [("Text", "PR")])
+        # The card's PR button is the built-in pull requests plugin's, an inline task card plugin.
+        listed = self.assert_success(self.call_cli("plugin", "list")[0])["plugins"]
+        pull_requests = next(plugin for plugin in listed if plugin["id"] == "pull-requests")
+        self.assertEqual({key: pull_requests.get(key) for key in ["placement", "presentation", "builtIn", "enabled"]},
+                         {"placement": "taskItem", "presentation": "inline", "builtIn": True, "enabled": True})

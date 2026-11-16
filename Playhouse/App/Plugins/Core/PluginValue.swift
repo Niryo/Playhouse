@@ -50,6 +50,16 @@ enum PluginValue: Codable, Equatable, Sendable {
         return nil
     }
 
+    var array: [PluginValue]? {
+        if case .array(let value) = self { return value }
+        return nil
+    }
+
+    var bool: Bool? {
+        if case .bool(let value) = self { return value }
+        return nil
+    }
+
     var object: [String: PluginValue]? {
         if case .object(let value) = self { return value }
         return nil

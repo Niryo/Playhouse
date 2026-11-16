@@ -21,33 +21,6 @@ struct TaskItemModel: Codable, Equatable {
         var label: String
     }
 
-    struct CreateButton: Codable, Equatable {
-        var title: String
-        var label: String
-        var help: String
-        var busy: Bool
-    }
-
-    struct PullRequestLink: Codable, Equatable {
-        var number: Int
-        var url: String
-        var color: String
-        var help: String
-        var health: String
-    }
-
-    /// The bottom row, left to right: create, the merged check (which
-    /// replaces the rest), conflicts, the mode pill, the linked pull requests.
-    struct PullRequests: Codable, Equatable {
-        var create: CreateButton?
-        var mergedCheck: Bool
-        var conflictsHelp: String?
-        var showModePill: Bool
-        var mode: String
-        var modes: [PillPickerProps.Option]
-        var links: [PullRequestLink]
-    }
-
     var id: String
     var title: String
     var titleSpinner: Bool
@@ -63,7 +36,10 @@ struct TaskItemModel: Codable, Equatable {
     var createdText: String
     var tokens: Tokens?
     var cpu: CPU?
-    var pullRequests: PullRequests?
+    /// Whether the card keeps a bottom row for its task card plugins (the
+    /// built-in pull request controls and mode pill among them): once the task
+    /// has started and has a repository.
+    var hasPluginRow: Bool
     var canMoveToDone: Bool
     var canMoveToReview: Bool
 
@@ -83,31 +59,6 @@ struct TaskItemModel: Codable, Equatable {
         let days = hours / 24
         return "\(days)d\(hours % 24 == 0 ? "" : " \(hours % 24)h")"
     }
-
-    static func modeOptions(taskID: String) -> [PillPickerProps.Option] {
-        PullRequestMode.allCases.map {
-            PillPickerProps.Option(value: $0.rawValue, label: $0.label, help: $0.helpText, testID: "task-pr-mode-\($0.rawValue)-\(taskID)")
-        }
-    }
-
-    static func healthColor(_ health: PullRequestHealth?) -> String {
-        switch health {
-        case .green: "green"
-        case .red: "red"
-        case .pending: "blue"
-        case .merged: "purple"
-        case nil: "accent"
-        }
-    }
-
-    static func healthDescription(_ health: PullRequestHealth) -> String {
-        switch health {
-        case .green: "checks passing"
-        case .red: "checks failing or conflicted"
-        case .pending: "checks running"
-        case .merged: "merged"
-        }
-    }
 }
 
 extension TaskItemModel {
@@ -116,10 +67,6 @@ extension TaskItemModel {
         cpuPercent: Double?,
         cpuUsageColorMax: Int,
         tokenUsageColorMax: Int,
-        isCreatingPullRequests: Bool,
-        isPullRequestMerged: Bool,
-        hasPullRequestConflicts: Bool,
-        pullRequestHealth: [Int: PullRequestHealth],
         canMoveToDone: Bool,
         canMoveToReview: Bool
     ) {
@@ -158,67 +105,7 @@ extension TaskItemModel {
         self.canMoveToDone = canMoveToDone
         self.canMoveToReview = canMoveToReview
 
-        // Absent until the task has started and has a repository.
-        guard task.status != .backlog, !task.repositoryWorktrees.isEmpty else { return }
-        let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
-        let started = task.repositoryWorktrees.filter { !$0.isPending }
-        // Repositories PR creation found unchanged drop out of the count, so a
-        // two-repository task that changed one offers a single "PR".
-        let awaiting = task.repositoryWorktrees.filter(\.awaitsPullRequest)
-        let plural = (awaiting.isEmpty ? started : awaiting).count > 1
-        // While the task is still being worked on, the mode pill replaces the
-        // manual create button: once it reaches Review, PR and Auto modes
-        // create the pull request themselves.
-        let isAutoPRWorkingState = [.inProgress, .blocked, .waitingResponse].contains(task.status)
-        var pullRequests = PullRequests(
-            mergedCheck: false,
-            showModePill: true,
-            mode: task.pullRequestMode.rawValue,
-            modes: Self.modeOptions(taskID: taskID),
-            links: []
-        )
-        if linked.isEmpty && isAutoPRWorkingState {
-            // Only the pill.
-        } else if linked.isEmpty {
-            pullRequests.showModePill = false
-            pullRequests.create = CreateButton(
-                title: plural ? "PRs" : "PR",
-                label: plural ? "PRs. Create pull requests for each repository linked to this task" : "PR. Create a pull request for each repository linked to this task",
-                help: "Create a pull request for each repository linked to this task",
-                busy: isCreatingPullRequests
-            )
-        } else {
-            if !awaiting.isEmpty {
-                pullRequests.create = CreateButton(
-                    title: plural ? "PRs" : "PR",
-                    label: plural ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request",
-                    help: "Create pull requests for repositories without a linked pull request",
-                    busy: isCreatingPullRequests
-                )
-            }
-            pullRequests.mergedCheck = isPullRequestMerged && canMoveToDone
-            if hasPullRequestConflicts {
-                pullRequests.conflictsHelp = "Resolve pull request conflicts with \(task.conversationProvider.displayName)"
-            }
-            pullRequests.links = linked.compactMap { record in
-                Self.pullRequestLink(record, health: pullRequestHealth[record.pullRequestNumber ?? 0] ?? (record.isPullRequestMerged ? .merged : nil))
-            }
-        }
-        // Pull requests from before the task renewed its worktree stay on the card (merged
-        // ones in purple), ahead of the current ones.
-        pullRequests.links = task.pastRepositoryWorktrees.compactMap { Self.pullRequestLink($0, health: $0.isPullRequestMerged ? .merged : nil) } + pullRequests.links
-        self.pullRequests = pullRequests
-    }
-
-    private static func pullRequestLink(_ record: RepositoryWorktreeRecord, health: PullRequestHealth?) -> PullRequestLink? {
-        guard let number = record.pullRequestNumber, let url = record.pullRequestURL, URL(string: url) != nil else { return nil }
-        return PullRequestLink(
-            number: number,
-            url: url,
-            color: healthColor(health),
-            help: URL(fileURLWithPath: record.repositoryPath).lastPathComponent + (health.map { " · \(healthDescription($0))" } ?? ""),
-            health: health?.rawValue ?? "unknown"
-        )
+        hasPluginRow = task.status != .backlog && !task.repositoryWorktrees.isEmpty
     }
 }
 
@@ -227,27 +114,26 @@ struct TaskItemActions {
     var open: () -> Void = {}
     var menu: (String) -> Void = { _ in }
     var showTokenStats: () -> Void = {}
-    var createPullRequests: () -> Void = {}
-    var setPullRequestMode: (String) -> Void = { _ in }
-    var moveToDone: () -> Void = {}
-    var resolveConflicts: () -> Void = {}
 }
 
 /// The board's task item, composed only of plugin atoms (Plugins/Atoms), so a
 /// plugin building the same item from the same atoms looks identical.
 /// Rows, top to bottom: the title, the live progress report, the schedule,
-/// the status message, the time with the token counter, then the
-/// pull-request controls on the right.
+/// the status message, the time with the token counter, then the row of
+/// task card plugins (`PluginPlacement.taskItem`) on the right, among them
+/// the built-in pull request controls and mode pill.
 struct TaskItemView: View {
     let model: TaskItemModel
     var actions = TaskItemActions()
+    /// The bottom row's plugins; the board passes its `TaskItemPluginRow`.
+    var pluginRow: AnyView?
 
     private var id: String { model.id }
 
     var body: some View {
         AtomCard(props: cardProps, common: AtomCommon(testID: "task-card-\(id)", label: model.title, hint: "Open task", fillWidth: true, padding: 14), onPress: actions.open, onMenu: actions.menu) {
             AtomStack(props: StackProps(axis: "v", spacing: 10, align: "leading")) {
-                // Every row but the token counter and the pull-request controls
+                // Every row but the token counter and the plugin row
                 // lets clicks through to the card.
                 AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(testID: "task-title-\(id)", passThrough: true)) {
                     if model.titleSpinner { AtomSpinner() }
@@ -288,13 +174,8 @@ struct TaskItemView: View {
 
                 timeRow
 
-                if let pullRequests = model.pullRequests {
-                    AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(minHeight: 30)) {
-                        AtomSpacer(props: SpacerProps(minLength: 8))
-                        AtomStack(props: StackProps(axis: "h", spacing: 5)) {
-                            pullRequestControls(pullRequests)
-                        }
-                    }
+                if let pluginRow {
+                    pluginRow
                 }
             }
         }
@@ -324,57 +205,6 @@ struct TaskItemView: View {
             }
             if let tokens = model.tokens {
                 TokenCounterButton(tokens: tokens, testID: "task-token-usage-counter-\(id)", action: actions.showTokenStats)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func pullRequestControls(_ pullRequests: TaskItemModel.PullRequests) -> some View {
-        if let create = pullRequests.create {
-            AtomButton(
-                props: ButtonProps(style: "borderless", emphasis: 10, disabled: create.busy),
-                common: AtomCommon(testID: "task-create-pr-\(id)", label: create.label, help: create.help, width: 30, height: 30),
-                action: actions.createPullRequests
-            ) {
-                if create.busy {
-                    AtomSpinner(props: SpinnerProps(size: "mini"))
-                } else {
-                    AtomText(props: TextProps(text: create.title, size: 10, weight: "semibold"))
-                }
-            }
-        }
-        if pullRequests.mergedCheck {
-            // The capsule hugs the small check and the 30 pt slot centers it.
-            AtomStack(props: StackProps(axis: "h"), common: AtomCommon(width: 30, height: 30)) {
-                AtomButton(
-                    props: ButtonProps(style: "borderless", emphasis: 10, overhang: true),
-                    common: AtomCommon(testID: "task-complete-merged-pr-\(id)", label: "Green checkmark. Complete task, all linked pull requests merged", help: "Complete task: all linked pull requests have merged"),
-                    action: actions.moveToDone
-                ) {
-                    AtomIcon(props: IconProps(name: "checkmark", size: 11, weight: "bold", color: "green"))
-                }
-            }
-        } else {
-            if let conflictsHelp = pullRequests.conflictsHelp {
-                AtomButton(
-                    props: ButtonProps(style: "borderless", emphasis: 10),
-                    common: AtomCommon(testID: "task-resolve-pr-conflicts-\(id)", label: "Resolve pull request conflicts", help: conflictsHelp),
-                    action: actions.resolveConflicts
-                ) {
-                    AtomIcon(props: IconProps(asset: "ConflictIndicator", color: "orange"), common: AtomCommon(testID: "task-resolve-pr-conflicts-icon-\(id)", width: 16, height: 16))
-                }
-            }
-            if pullRequests.showModePill {
-                AtomPillPicker(
-                    props: PillPickerProps(options: pullRequests.modes, selected: pullRequests.mode),
-                    common: AtomCommon(testID: "task-pr-mode-\(id)", label: "Pull request mode", help: "How Playhouse handles this task's pull request. {help}. Click to choose another mode."),
-                    onChange: actions.setPullRequestMode
-                )
-            }
-            ForEach(Array(pullRequests.links.enumerated()), id: \.offset) { _, link in
-                AtomLink(props: LinkProps(url: link.url, emphasis: 5), common: AtomCommon(testID: "task-pr-link-\(id)-\(link.number)", value: link.health, help: link.help, minWidth: 30, minHeight: 30)) {
-                    AtomText(props: TextProps(text: "#\(link.number)", size: 10, weight: "semibold", design: "monospaced", color: link.color))
-                }
             }
         }
     }

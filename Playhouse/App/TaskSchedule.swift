@@ -31,7 +31,6 @@ struct ScheduledRunClaim {
     let modelID: String?
     let provider: ConversationProvider
     let effort: String?
-    let pullRequestMode: PullRequestMode
     let repositories: [RepositoryWorktreeSpec]
     let contextFolders: [String]
 }

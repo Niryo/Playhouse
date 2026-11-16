@@ -732,6 +732,8 @@ class BridgeTestCases13:
         command.extend(str(root / "Playhouse" / "App" / f"{name}.swift") for name in core)
         # BridgeCore's plugin.render uses the plugin core, as build-bridge.sh compiles it for the daemon.
         command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Core").glob("*.swift")))
+        # Its plugin services (the pull-request-mode plugin's), which the daemon runs too.
+        command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Services").glob("*.swift")))
         command.extend([str(root / "Playhouse/Bridge/BridgeContract.swift"),
                         str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
         compiled = subprocess.run(command, capture_output=True, text=True, timeout=180)

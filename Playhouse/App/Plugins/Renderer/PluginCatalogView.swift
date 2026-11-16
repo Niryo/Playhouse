@@ -260,7 +260,6 @@ private struct TaskItemComparison: View {
 private struct NativeTaskItemDemo: View {
     let sample: TaskItemComparison.Sample
     @State private var blocked = false
-    @State private var mode: String?
     @State private var opened = 0
     @State private var lastAction = "none"
 
@@ -271,11 +270,6 @@ private struct NativeTaskItemDemo: View {
             task.statusMessage = sample.blockedStatusMessage
             task.statusIsBlocked = true
         }
-        if var pullRequests = task.pullRequests {
-            pullRequests.modes = TaskItemModel.modeOptions(taskID: task.id).filter { option in pullRequests.modes.contains { $0.value == option.value } }
-            pullRequests.mode = mode ?? pullRequests.mode
-            task.pullRequests = pullRequests
-        }
         return task
     }
 
@@ -284,11 +278,7 @@ private struct NativeTaskItemDemo: View {
             TaskItemView(model: model, actions: TaskItemActions(
                 open: { opened += 1 },
                 menu: { lastAction = "menu \($0)" },
-                showTokenStats: { lastAction = "token stats" },
-                createPullRequests: { lastAction = "create pull requests" },
-                setPullRequestMode: { mode = $0; lastAction = "mode \($0)" },
-                moveToDone: { lastAction = "move to done" },
-                resolveConflicts: { lastAction = "resolve conflicts" }
+                showTokenStats: { lastAction = "token stats" }
             ))
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
                 AtomButton(props: ButtonProps(style: "borderless"), common: AtomCommon(testID: "native-toggle-blocked"), action: { blocked.toggle() }) {

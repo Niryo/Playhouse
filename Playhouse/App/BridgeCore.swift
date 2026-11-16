@@ -491,8 +491,6 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let pastRepositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
     let draftImageDataURLs: [String]?
-    let autoCreatePullRequestOnReview: Bool
-    let pullRequestMode: String
     /// Present for a scheduled task (one-time or a recurring template).
     let schedule: TaskScheduleRecord?
     /// The recurring schedule that started this task, if any.
@@ -535,8 +533,6 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         pastRepositoryWorktrees = boardTask?.pastRepositoryWorktrees ?? []
         contextFolders = task.contextFolderPaths
         draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
-        autoCreatePullRequestOnReview = task.autoCreatePullRequestOnReview
-        pullRequestMode = task.pullRequestMode.rawValue
     }
 }
 
@@ -561,10 +557,22 @@ extension PluginTaskContext {
             id: task.id.uuidString, title: task.title, status: task.status.rawValue,
             provider: task.conversationProvider.rawValue, isStandaloneChat: task.isStandaloneChat,
             repositories: task.repositoryWorktrees.map {
-                .init(repositoryPath: $0.repositoryPath, worktreePath: $0.worktreePath, branch: $0.branch)
+                .init(
+                    repositoryPath: $0.repositoryPath, worktreePath: $0.worktreePath, branch: $0.branch,
+                    isPending: $0.isPending, awaitsPullRequest: $0.awaitsPullRequest, pullRequest: Self.pullRequest($0)
+                )
             },
-            contextFolders: task.contextFolderPaths
+            contextFolders: task.contextFolderPaths,
+            pastPullRequests: ((task as? BoardTask)?.pastRepositoryWorktrees ?? []).compactMap { record in
+                Self.pullRequest(record).map { .init(repositoryPath: record.repositoryPath, pullRequest: $0) }
+            },
+            scheduleSourceTaskID: (task as? BoardTask)?.scheduleSourceTaskID?.uuidString
         )
+    }
+
+    private static func pullRequest(_ record: RepositoryWorktreeRecord) -> PullRequest? {
+        guard let number = record.pullRequestNumber, let url = record.pullRequestURL else { return nil }
+        return PullRequest(number: number, url: url, merged: record.isPullRequestMerged)
     }
 }
 

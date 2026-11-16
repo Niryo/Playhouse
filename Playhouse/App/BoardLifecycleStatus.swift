@@ -24,14 +24,16 @@ extension BoardTaskManager {
         }
         // Hold the reservation so a turn started after the check above waits
         // instead of writing files while the sync commits and pushes them.
-        let record = try await withConversationTurnReservation(id) {
+        _ = try await withConversationTurnReservation(id) {
             _ = try await syncPullRequestChanges(id, clients: clients)
             guard try await transitionLifecycleStatus(id, from: .waitingResponse, to: .review) != nil else {
                 throw PlayhouseManagerError.invalidTransition("The task's status changed before it could move to Review. Try again.")
             }
             return try get(id)
         }
-        await createPullRequestsOnReviewIfNeeded(record, clients: clients, settingsManager: settingsManager)
+        // The plugins' reactions to the move, such as the pull request mode
+        // opening the task's pull requests, finish before the move returns.
+        await PluginServiceHost.settle(taskID: id)
         PlayhouseDiagnostics.record("task.move.succeeded", fields: ["taskID": id.uuidString, "status": TaskStatus.review.rawValue])
         return try get(id)
     }

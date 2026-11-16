@@ -310,6 +310,13 @@ and deleting a plugin forgets its disabled state.
 | `conversationSidebar` | The task sidebar: entry buttons first, then inline sections such as Changes | Labeled, or none when `inline` | `task`, `repositories`, `contextFolders`, `workspace` (`{revision, openDiff: {repository, path, group} or null}`) and `sidebar` (`{collapsed}`) |
 | `conversationToolbar` | The task sidebar's bottom row, beside Terminal | Icon | `task`, `repositories`, `contextFolders` |
 | `composerActions` | The composer's actions row, beside Skills (also in the standalone chat) | Icon | The above and `composer` (`{draft, selection: {location, length, text}}`) |
+| `taskItem` | The bottom row of each task's card on the board, beside the built-in pull request controls once the task has started | Icon, or none when `inline` | `task`, `repositories`, `pastPullRequests`, `contextFolders` for the card's task |
+
+`task` is `{id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}`;
+each of `repositories` is `{repositoryPath, worktreePath, branch, isPending,
+awaitsPullRequest, pullRequest: {number, url, merged} or null}`, and
+`pastPullRequests` lists `{repositoryPath, number, url, merged}` from worktrees
+the task has removed.
 
 Every plugin also gets `plugin` (`{id, name, placement, presentation}`),
 `app` (`{appearance}`) and `state`, the plugin's own saved values.
@@ -324,11 +331,13 @@ the new props, and deleting a plugin forgets them. `presentation` is one of:
 - `modal`: a sheet.
 - `sidebar`: slides in from the trailing edge.
 - `page`: covers the board or the conversation.
-- `inline`: rendered in place as a section of the conversation sidebar, with
-  no entry button, header or padding of its own beyond a 10-point inset. It
-  stays mounted while its task is open, so it can keep the task's state live.
-  While the sidebar is hidden to its narrow rail, `sidebar.collapsed` is true
-  and the plugin should show at most a compact count there.
+- `inline`: rendered in place as a section of the conversation sidebar, or in
+  the task card's bottom row, with no entry button, header or padding of its
+  own beyond a 10-point inset. It stays mounted while its task is open (or its
+  card shown), so it can keep the task's state live. While the sidebar is
+  hidden to its narrow rail, `sidebar.collapsed` is true and the plugin should
+  show at most a compact count there. On a task card, keep it to an icon or a
+  short label.
 
 Each presentation but `inline` starts with the app's standard modal header (the plugin's
 icon and name, `plugin-surface-title`, and its close button,
@@ -352,8 +361,46 @@ Installed plugins also get host calls. Each returns a Promise:
 | `Playhouse.ui.composer.setDraft(text)`, `.insertText(text)`, `.replaceSelection(text)`, `.focus()` | Edit the composer at the conversation placements; elsewhere they reject |
 | `Playhouse.ui.openDiff(entry)` | Opens the window's diff view for an entry of `task.changes.list` (`{repository, path, group, …}`) at the conversation placements |
 | `Playhouse.ui.refreshWorkspace()` | Tells the window the task's folders changed: it bumps `workspace.revision` for every sidebar plugin and refreshes an open diff. The window also bumps it whenever its file watcher sees a change, while an inline sidebar plugin is shown |
+| `Playhouse.ui.moveTask(taskID, status)` | Moves a task to a board column the way dragging its card does, including the window's own checks and alerts |
+| `Playhouse.ui.resolveConflicts(taskID)` | Starts the task's pull request conflict resolution turn |
+| `Playhouse.ui.alert(title, message)` | Shows an alert over the window, for a failure the user should see |
 
-`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, and a composer, `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`.
+`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, a composer call from the board's sidebar or a task card is `unavailable`, an `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`, and a `moveTask`, `resolveConflicts` or `alert` call from anywhere but a task card is `unavailable`.
+
+### Events and throttling
+
+`Playhouse.on(name, listener)` listens for app events (`PluginEvent` in
+`Core/PluginEvents.swift`) and returns a function that stops listening:
+
+| Event | Payload | When |
+| --- | --- | --- |
+| `task.statusChanged` | `{taskID, from, to}` (column names, such as `"In Progress"` and `"Review"`) | The plugin's task moved between board columns |
+| `app.focus` | `{}` | The app became the active application |
+| `plugin.stateChanged` | `{pluginID, key, value}` | One of the plugin's saved values changed |
+
+A mounted plugin hears them from its surface (`PluginSurfaceView` compares
+its old and new props). A task card's plugin keeps running when its card is
+rebuilt in another column (`PluginRuntimeKeepAlive`), so it hears its task's
+moves; a change made while no card shows the task is not replayed, so work
+that must happen on every move belongs in a service (below). `plugin render --event @<name>[:<json payload>]`
+emits one headlessly and reports how many listeners heard it in `emitted`;
+`--event +<seconds>` advances the clock between events.
+
+`Playhouse.throttle(fn, seconds)` returns a function that runs `fn` at once
+on its first call; the calls made while it runs (until a promise it returns
+settles) or within `seconds` after it started collapse into one trailing call
+with the latest arguments. Use it so that frequent events (every focus, every
+move) don't flood a rate-limited service such as GitHub. Swift code has the
+same helper, `PluginThrottle`.
+
+A built-in plugin's background half is a `PluginService`
+(`Services/PluginServiceHost.swift`): it hears the same events in the bridge
+daemon, whether or not a window shows the plugin, and acts only through bridge
+commands. The daemon raises `task.statusChanged` and `plugin.stateChanged` for
+the changes its commands save; a window forwards the others (`app.focus`)
+over `plugin.event`, which the CLI sends as
+`plugin event <name> [--payload <json>]` (an unknown name is
+`invalid_argument`).
 
 ### Built-in plugins
 
@@ -372,6 +419,8 @@ and an installed plugin's folder can't take a built-in's id.
 
 | Built-in | Placement | Presentation | What it is |
 | --- | --- | --- | --- |
+| `pull-request-mode` (`BuiltIn/PullRequestModePlugin.swift`, `Services/PullRequestModeService.swift`) | `taskItem` | `inline` | The task card's mode pill: Manual, PR, Green or Merge. The mode is this plugin's state, keyed by task id (none means PR, or the recurring schedule's mode for a scheduled run), not a property of the task. Its service decides what each mode does: when the task reaches Review it opens the pull request (`task.pr.create` with `ifNeeded`) unless the mode is Manual; in Green and Merge it then runs `task.pr.autopilot` passes (with `merge` in Merge mode) until the PR is green or merged, polling while checks run, again when the mode changes and, throttled, when the app comes to the front |
+| `pull-requests` (`BuiltIn/PullRequestsPlugin.swift`) | `taskItem` | `inline` | The task card's pull request controls: the create button, the links coloured by health, the merged check (which moves the task to Done with `ui.moveTask`, passing `pullRequestsMerged` so the move trusts the merge its probe just saw instead of asking GitHub again; the window honors that only from a built-in plugin, since the move records the pull requests merged) and the resolve-conflicts button (`ui.resolveConflicts`). It probes `task.pr.status` with `shared` (a short cache with in-flight dedupe, so cards and windows share one GitHub read) on focus and when its task moves, through `PluginThrottle`, and raises a failed probe with `ui.alert` while the task is in Review |
 | `changes` (`BuiltIn/ChangesPlugin.swift`) | `conversationSidebar` | `inline` | The Changes section: lists the task's Git changes with `task.changes.list`, reloads on `workspace.revision`, opens diffs with `ui.openDiff`, marks files with `task.changes.mark-viewed`, `mark-unviewed` and `mark-all-viewed`, and shows the pending count on the sidebar's rail. Disabling it hides the section and stops the window's file watching. Whether the section is collapsed is its plugin state, `state.collapsed` |
 
 ### Network

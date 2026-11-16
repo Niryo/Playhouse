@@ -611,22 +611,23 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         ]:
             failed = self.render_plugin(source, expected_status=1)
             self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{source} reports {message}: {failed['result']['errors']}")
-    # case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
+    # case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message and token counter with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu; neither shows a pull-request mode pill, pull-request link, create button or conflicts button, which are task card plugins and not part of the task item. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
     def test_plugin_task_item_renders_from_atoms_like_native(self):
         task = self.TASK_ITEM_ID
         rendered = self.assert_success(self.call_cli(
             "plugin", "render", "--page", "TaskItem",
             "--event", "js-toggle-blocked:onPress",
-            "--event", f"task-card-{task}:onPress",
-            "--event", f"task-pr-mode-{task}:onChange:merge")[0])
+            "--event", f"task-card-{task}:onPress")[0])
         self.assertEqual(rendered["errors"], [])
         tree = rendered["tree"]
         # The same identifiers the board's native TaskItemView gives its card.
         for test_id in [f"task-card-{task}", f"task-title-{task}", f"task-progress-report-{task}", f"task-progress-icon-{task}",
                         f"task-progress-label-{task}", f"task-progress-detail-{task}", f"task-status-message-{task}",
-                        f"task-token-usage-counter-{task}", f"task-resolve-pr-conflicts-{task}", f"task-resolve-pr-conflicts-icon-{task}",
-                        f"task-pr-mode-{task}", f"task-pr-link-{task}-193"]:
+                        f"task-token-usage-counter-{task}"]:
             self.plugin_node(tree, test_id)
+        self.assertFalse(any(str(node.get("props", {}).get("testID", "")).startswith(("task-pr-mode-", "task-pr-link-", "task-resolve-pr-conflicts-", "task-create-pr-"))
+                             for node in self.plugin_nodes(tree)),
+                         "The pull request controls are task card plugins, not part of the task item.")
         card = self.plugin_node(tree, f"task-card-{task}")
         self.assertEqual(card["type"], "Card")
         self.assertEqual(card["props"]["meterTestID"], f"task-cpu-usage-bar-{task}")
@@ -634,7 +635,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
                          ["move-task-to-done-menu-item", "rename-task-menu-item", "token-stats-task-menu-item", "delete-task-menu-item"])
         self.assertEqual(self.plugin_text(self.plugin_node(tree, f"task-progress-label-{task}")), "Building")
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
-        self.assertEqual(types, {"Card", "Stack", "Text", "Icon", "Button", "Link", "Spacer", "PillPicker"}, "The task item is atoms only.")
+        self.assertEqual(types, {"Card", "Stack", "Text", "Icon", "Button"}, "The task item is atoms only.")
         # The clock, time and counter share one row, as TaskItemView builds it.
         created = self.plugin_node(tree, f"task-created-time-{task}")
         self.assertEqual(self.plugin_text(created), "Nov 8, 2026")
@@ -661,19 +662,13 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(opened["ops"], ["text"])
         self.assertEqual(opened["touchedNodes"], [opened_count["children"][1]["id"]])
 
-        mode = commits[f"task-pr-mode-{task}:onChange"]
-        pill = self.plugin_node(tree, f"task-pr-mode-{task}")
-        self.assertEqual(pill["props"]["selected"], "merge")
-        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: mode merge")
-        self.assertEqual(sorted(mode["ops"]), ["text", "update"], "Choosing a mode updates the pill and the readout only.")
-        self.assertIn(pill["id"], mode["touchedNodes"])
         self.assertEqual(self.plugin_node(tree, f"task-title-{task}")["updates"], 0, "The title never re-rendered.")
         self.assertEqual(card["updates"], 0, "The card's own props never changed.")
 
         menu = self.assert_success(self.call_cli("plugin", "render", "--page", "TaskItem", "--event", f"task-card-{task}:onMenu:done")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(menu["tree"], "js-last-action")), "Last: menu done", "A menu item runs onMenu with its id.")
         self.assertEqual(menu["commits"][-1]["ops"], ["text"])
-        self.assert_failure(self.call_cli("plugin", "render", "--page", "TaskItem", "--event", f"task-pr-mode-{task}:onPress", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "TaskItem", "--event", f"task-title-{task}:onPress", expected_status=2)[0], "invalid_argument")
     # case-contract: test_plugin_agents_info_renders_from_atoms_like_native | The Plugin Catalog's Agents Info page shows the Agents info section composed in JavaScript from atoms beside the native SwiftUI section the board uses, built from the same atoms and sample data: both show the Agents info title button (Expanded), a Claude block above a Codex block with the same account and plan rows, window rows (label, percent, usage bar and reset time), Codex's credits, its Near limit status and the updated hints, each at the same size in both, and the JavaScript tree uses only atoms (Disclosure, Panel, Meter, Stack, Text, Icon, Button, Spacer) with the board section's identifiers. Collapsing is the Disclosure atom's own: clicking the JavaScript title runs onToggle, whose state change is one commit that updates only the Disclosure's props and the readout (Last: collapse) while the blocks stay in the tree, the JavaScript blocks go away and its title reads Collapsed while the native section stays open, the native title collapses its own section to the same size, and expanding brings the blocks back (Last: expand). Signing Claude out in the JavaScript example replaces its window rows with a Log in button the same size as the native one, whose onPress runs in JavaScript (Last: login claude) and brings the rows back, and Codex's switch-account button runs its JavaScript handler with its provider (Last: switch codex) without re-rendering any block.
     def test_plugin_agents_info_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli(

@@ -132,6 +132,9 @@ enum WorkspaceSettings {
     static let disabledPluginIDsKey = "disabledPluginIDs"
     /// Each plugin's own saved values (`plugin state`), as JSON keyed by plugin id.
     static let pluginStatesKey = "pluginStates"
+    /// Set once the tasks' pull request modes, from before the `pull-request-mode`
+    /// plugin kept them in its state, were carried into that state.
+    static let legacyPullRequestModesImportedKey = "legacyPullRequestModesImported"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
@@ -299,22 +302,27 @@ final class PlayhouseDiagnosticsScope: @unchecked Sendable {
 }
 
 /// What a request's background work needs to keep behaving as part of that
-/// request after the request has returned: its environment and its diagnostics
-/// scope. `Task.detached` doesn't inherit task-local values.
+/// request after the request has returned: its environment, its diagnostics
+/// scope, and the request itself, whose isolation the plugin services' commands
+/// reuse when a change it made raises an event (`PluginServiceHost.origin`).
+/// `Task.detached` doesn't inherit task-local values.
 struct PlayhouseRequestContext: Sendable {
     @TaskLocal static var diagnosticsScope: PlayhouseDiagnosticsScope?
 
     let environment: [String: String]?
     let scope: PlayhouseDiagnosticsScope?
+    var origin: BridgeRequest? = nil
 
     @MainActor static func capture() -> PlayhouseRequestContext {
-        PlayhouseRequestContext(environment: PlayhouseProcessEnvironment.requestEnvironment, scope: diagnosticsScope)
+        PlayhouseRequestContext(environment: PlayhouseProcessEnvironment.requestEnvironment, scope: diagnosticsScope, origin: PluginServiceHost.origin)
     }
 
     func run<T>(_ operation: () async throws -> T) async rethrows -> T {
         try await PlayhouseProcessEnvironment.$requestEnvironment.withValue(environment) {
             try await Self.$diagnosticsScope.withValue(scope) {
-                try await operation()
+                try await PluginServiceHost.$origin.withValue(origin) {
+                    try await operation()
+                }
             }
         }
     }

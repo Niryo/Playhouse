@@ -686,7 +686,7 @@ extension PlayhouseUITests {
         let taskID = try XCTUnwrap(created?["id"] as? String)
         // This case is about the task's base. Manual mode keeps Review from publishing the task
         // branch to the fixture origin and opening a pull request through an unfixtured gh.
-        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+        try setPullRequestMode("manual", taskID: taskID)
         openTask(named: title)
         let badge = element("conversation-repository-badge-primary")
         XCTAssertTrue(badge.waitToExist(timeout: 5))

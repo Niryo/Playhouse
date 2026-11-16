@@ -301,8 +301,65 @@
       };
     }
 
+    // App events (PluginEvent in Swift): Swift calls __playhouseEmit(name, payload)
+    // for "task.statusChanged", "app.focus" and "plugin.stateChanged".
+    var eventListeners = {};
+    global.__playhouseEmit = function (name, payload) {
+      var listeners = (eventListeners[name] || []).slice();
+      reconciler.batchedUpdates(function () {
+        listeners.forEach(function (listener) { run(function () { listener(payload || {}); }); });
+      });
+      return listeners.length;
+    };
+    function on(name, listener) {
+      name = String(name);
+      (eventListeners[name] = eventListeners[name] || []).push(listener);
+      return function () {
+        var listeners = eventListeners[name] || [];
+        var index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      };
+    }
+
+    // throttle(fn, seconds): the first call runs at once; calls made while it
+    // runs (until a promise it returns settles) or within `seconds` after it
+    // started collapse into one trailing call with the latest arguments. Use it
+    // to keep frequent events from flooding a rate-limited service like GitHub.
+    function throttle(fn, seconds) {
+      var interval = Math.max(0, Number(seconds) || 0) * 1000;
+      // The cooldown is a timer, so it follows the host's clock (and
+      // `plugin render --advance`) the way every other timer does.
+      var cooling = false;
+      var running = false;
+      var pendingArgs = null;
+      function start(args) {
+        running = true;
+        cooling = true;
+        pendingArgs = null;
+        global.setTimeout(function () { cooling = false; schedule(); }, interval);
+        var finish = function () { running = false; schedule(); };
+        var result;
+        try { result = fn.apply(null, args); } catch (error) { reportError(error); }
+        if (result && typeof result.then === "function") {
+          result.then(finish, function (error) { reportError(error); finish(); });
+        } else {
+          finish();
+        }
+      }
+      function schedule() {
+        if (pendingArgs && !running && !cooling) start(pendingArgs);
+      }
+      return function () {
+        pendingArgs = Array.prototype.slice.call(arguments);
+        schedule();
+      };
+    }
+
     var Playhouse = {
       props: global.__playhouseProps || {},
+      // Listens for an app event; returns a function that stops listening.
+      on: on,
+      throttle: throttle,
       render: function (element) { reconciler.updateContainer(element, root, null, null); },
       onPropsChange: onPropsChange,
       // The current props, re-rendering the component whenever they change.
@@ -329,6 +386,12 @@
         openDiff: function (entry) { return hostCall("ui", "openDiff", entry || {}); },
         // Tells the window the task's folders changed, so it rereads them and bumps props.workspace.revision.
         refreshWorkspace: function () { return hostCall("ui", "refreshWorkspace", {}); },
+        // Moves the task to a board column ("Done", "Review", …), as dragging its card would.
+        moveTask: function (taskID, status) { return hostCall("ui", "moveTask", { taskID: String(taskID), status: String(status) }); },
+        // Opens the task with its pull request conflicts ready to resolve.
+        resolveConflicts: function (taskID) { return hostCall("ui", "resolveConflicts", { taskID: String(taskID) }); },
+        // Shows an alert over the window, for a failure the user should see.
+        alert: function (title, message) { return hostCall("ui", "alert", { title: String(title), message: message == null ? "" : String(message) }); },
         composer: {
           setDraft: function (text) { return hostCall("ui", "composer.setDraft", { text: String(text) }); },
           insertText: function (text) { return hostCall("ui", "composer.insertText", { text: String(text) }); },

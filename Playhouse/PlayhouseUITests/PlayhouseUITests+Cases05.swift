@@ -203,7 +203,7 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any])
         let activeTaskID = try XCTUnwrap(activeCreated["id"] as? String)
         // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
-        _ = try runCLI(["task", "pr", "mode", activeTaskID, "manual"])
+        try setPullRequestMode("manual", taskID: activeTaskID)
         openTask(named: "Active linked PR UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
         element("back-to-board-button").click()
@@ -326,7 +326,7 @@ extension PlayhouseUITests {
             ])["result"] as? [String: Any])
             let taskID = try XCTUnwrap(created["id"] as? String)
             // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
-            _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+            try setPullRequestMode("manual", taskID: taskID)
             openTask(named: title)
             try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
             element("back-to-board-button").click()

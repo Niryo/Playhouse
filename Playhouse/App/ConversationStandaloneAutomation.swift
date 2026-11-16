@@ -200,20 +200,25 @@ extension ConversationManager {
         """
     }
 
-    /// Probes an autopilot task's pull requests in Review and, when they're red
-    /// (failing checks, conflicts, or unresolved review threads), sends the task's
-    /// provider a visible fix turn through the normal send path. The loop stops on
-    /// green, on merge, when the model reports `waiting-response`, or when
-    /// `claimPullRequestAutopilotFix` finds nothing changed since the last attempt.
+    /// Probes a task's pull requests in Review and, when they're red (failing
+    /// checks, conflicts, or unresolved review threads), sends the task's provider
+    /// a visible fix turn through the normal send path; with `merge`, merges them
+    /// once they're green. The `pull-request-mode` plugin runs a pass for its Green
+    /// and Merge tasks. The loop stops on green, on merge, when the model reports
+    /// `waiting-response`, or when `claimPullRequestAutopilotFix` finds nothing
+    /// changed since the last attempt; `resetAttempts` starts a fresh set of fix
+    /// attempts, as choosing the mode again does.
     func runPullRequestAutopilot(
         taskID: UUID,
+        merge: Bool,
+        resetAttempts: Bool = false,
+        confirm: @MainActor (_ action: String) async -> Bool = { _ in true },
         onStatus: @escaping ([PullRequestReviewState]) -> Void = { _ in }
     ) async throws -> PullRequestAutopilotOutcome {
         let task = try tasks.taskModel(taskID)
         func outcome(_ action: String, _ states: [PullRequestReviewState] = [], reason: String? = nil) throws -> PullRequestAutopilotOutcome {
             PullRequestAutopilotOutcome(action: action, states: states, taskStatus: try tasks.taskModel(taskID).status.rawValue, reason: reason)
         }
-        guard task.pullRequestAutopilot else { return try outcome("inactive", reason: "Autopilot is off for this task.") }
         guard task.status == .review else { return try outcome("inactive", reason: "Autopilot acts only on tasks in Review.") }
         guard task.repositoryWorktrees.contains(where: { !$0.isPending && $0.pullRequestNumber != nil }) else {
             return try outcome("inactive", reason: "This task has no linked pull request yet.")
@@ -222,30 +227,34 @@ extension ConversationManager {
             return try outcome("inactive", reason: "Autopilot is already handling this task.")
         }
         defer { Self.autopilotRunningTaskIDs.remove(taskID) }
+        if resetAttempts { try await tasks.resetPullRequestAutopilotAttempts(taskID) }
         guard try !tasks.hasConversationTurnReservation(taskID) else {
             return try outcome("inactive", reason: "A conversation turn is running for this task.")
         }
-        let states = try await tasks.reviewPullRequests(task)
+        let states = try await tasks.reviewPullRequests(task, includeReviewThreads: true)
         onStatus(states)
         switch BoardTaskManager.assessPullRequestAutopilot(states) {
         case .merged:
             return try outcome("merged", states)
         case .green:
             try await tasks.resetPullRequestAutopilotAttempts(taskID)
-            guard task.pullRequestAutoMerge else { return try outcome("green", states) }
+            guard merge else { return try outcome("green", states) }
             // A head with no checks yet is still pending inside the registration grace,
             // so `.none` here is a repository without CI: it merges on mergeability alone.
             // GitHub may still be computing mergeability; merge once it says MERGEABLE.
             guard states.filter({ !$0.merged }).allSatisfy({ $0.mergeable == "MERGEABLE" }) else {
                 return try outcome("pending", states)
             }
+            guard await confirm("merge") else {
+                return try outcome("inactive", states, reason: "Merge is no longer wanted for this task.")
+            }
             switch try await tasks.mergeGreenPullRequests(taskID, states: states) {
             case .skipped:
-                return try outcome("inactive", states, reason: "The task left Review, a turn started, or merge mode was turned off.")
+                return try outcome("inactive", states, reason: "The task left Review or a turn started.")
             case .refused(let reason):
                 return try outcome("stalled", states, reason: reason)
             case .merged(let numbers):
-                var result = try outcome("merged", try await tasks.reviewPullRequests(try tasks.taskModel(taskID)))
+                var result = try outcome("merged", try await tasks.reviewPullRequests(try tasks.taskModel(taskID), includeReviewThreads: true))
                 result.mergedPullRequests = numbers
                 return result
             }
@@ -253,8 +262,11 @@ extension ConversationManager {
             return try outcome("pending", states)
         case .needsFix:
             let current = try tasks.taskModel(taskID)
-            guard current.status == .review, current.pullRequestAutopilot else {
-                return try outcome("inactive", states, reason: "The task left Review or autopilot was turned off.")
+            guard current.status == .review else {
+                return try outcome("inactive", states, reason: "The task left Review.")
+            }
+            guard await confirm("fix") else {
+                return try outcome("inactive", states, reason: "Fixing is no longer wanted for this task.")
             }
             let signature = BoardTaskManager.pullRequestAutopilotSignature(states)
             switch try await tasks.claimPullRequestAutopilotFix(taskID, signature: signature) {

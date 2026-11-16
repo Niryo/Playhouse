@@ -450,7 +450,7 @@ extension PlayhouseUITests {
             XCTAssertTrue(errors.contains { $0.contains(message) }, "\(source) reports \(message): \(errors)")
         }
     }
-    // case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
+    // case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message and token counter with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu; neither shows a pull-request mode pill, pull-request link, create button or conflicts button, which are task card plugins and not part of the task item. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
     func test_plugin_task_item_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -468,8 +468,7 @@ extension PlayhouseUITests {
             (element("\(prefix)\(id)\(suffix)"), element("\(prefix)native-\(id)\(suffix)"))
         }
         let shared = [("task-card-", ""), ("task-title-", ""), ("task-progress-report-", ""), ("task-progress-label-", ""),
-                      ("task-status-message-", ""), ("task-token-usage-counter-", ""), ("task-resolve-pr-conflicts-", ""),
-                      ("task-pr-mode-", ""), ("task-pr-link-", "-193")]
+                      ("task-status-message-", ""), ("task-token-usage-counter-", "")]
         for (prefix, suffix) in shared {
             let (js, native) = pair(prefix, suffix)
             XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript item has \(prefix)…")
@@ -480,7 +479,12 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(pair("task-title-").js), "Add a React renderer for plugins")
         XCTAssertEqual(pluginText(pair("task-title-").js), pluginText(pair("task-title-").native), "Both show the same title.")
         XCTAssertEqual(pluginText(pair("task-progress-label-").js), "Building")
-        XCTAssertEqual(pair("task-pr-link-", "-193").js.value as? String, "pending", "The link reports its health like the board's.")
+        for prefix in ["task-pr-mode-", "task-resolve-pr-conflicts-", "task-create-pr-"] {
+            XCTAssertFalse(pair(prefix).js.exists || pair(prefix).native.exists,
+                           "The pull request controls (\(prefix)…) are task card plugins, not part of the task item.")
+        }
+        XCTAssertFalse(pair("task-pr-link-", "-193").js.exists || pair("task-pr-link-", "-193").native.exists,
+                       "The pull request link is the pull-requests plugin's, not part of the task item.")
         let jsStatus = pair("task-status-message-").js, nativeStatus = pair("task-status-message-").native
         XCTAssertEqual(pluginText(jsStatus), "Waiting on CI checks")
         XCTAssertEqual(pluginText(nativeStatus), "Waiting on CI checks")
@@ -515,15 +519,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("js-opened-count")) == "Opened 1 times" }, timeout: 5), "Clicking the card ran its onPress handler.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 3: text → node ") }, timeout: 5), pluginText(commit))
 
-        pair("task-pr-mode-").js.click()
-        let merge = element("task-pr-mode-merge-\(id)")
-        XCTAssertTrue(merge.waitToExist(timeout: 5), "The mode pill opens into every mode.")
-        merge.click()
-        XCTAssertTrue(waitUntil({ self.pluginText(self.element("js-last-action")) == "Last: mode merge" }, timeout: 5), "Choosing Merge ran onChange.")
-        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 4: update, text → nodes ") }, timeout: 5),
-                      "Choosing Merge updated only the pill's props and the readout, not the title or the card: \(pluginText(commit))")
-        XCTAssertTrue(waitUntil({ (pair("task-pr-mode-").js.value as? String) == "merge" }, timeout: 5), "The pill shows the new mode.")
-        attachScreenshot(named: "Task item: both blocked, JavaScript mode Merge")
+        attachScreenshot(named: "Task item: both blocked")
 
         jsCard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).rightClick()
         let moveToDone = element("move-task-to-done-menu-item")
@@ -532,7 +528,7 @@ extension PlayhouseUITests {
                       "It has the native card's menu items.")
         moveToDone.click()
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("js-last-action")) == "Last: menu done" }, timeout: 5), "The menu item ran onMenu with its id.")
-        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 5: text → node ") }, timeout: 5), pluginText(commit))
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 4: text → node ") }, timeout: 5), pluginText(commit))
     }
     // case-contract: test_plugin_agents_info_renders_from_atoms_like_native | The Plugin Catalog's Agents Info page shows the Agents info section composed in JavaScript from atoms beside the native SwiftUI section the board uses, built from the same atoms and sample data: both show the Agents info title button (Expanded), a Claude block above a Codex block with the same account and plan rows, window rows (label, percent, usage bar and reset time), Codex's credits, its Near limit status and the updated hints, each at the same size in both, and the JavaScript tree uses only atoms (Disclosure, Panel, Meter, Stack, Text, Icon, Button, Spacer) with the board section's identifiers. Collapsing is the Disclosure atom's own: clicking the JavaScript title runs onToggle, whose state change is one commit that updates only the Disclosure's props and the readout (Last: collapse) while the blocks stay in the tree, the JavaScript blocks go away and its title reads Collapsed while the native section stays open, the native title collapses its own section to the same size, and expanding brings the blocks back (Last: expand). Signing Claude out in the JavaScript example replaces its window rows with a Log in button the same size as the native one, whose onPress runs in JavaScript (Last: login claude) and brings the rows back, and Codex's switch-account button runs its JavaScript handler with its provider (Last: switch codex) without re-rendering any block.
     func test_plugin_agents_info_renders_from_atoms_like_native() throws {
