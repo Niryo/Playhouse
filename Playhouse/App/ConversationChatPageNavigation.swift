@@ -322,24 +322,29 @@ extension TaskConversationView {
             && transcriptWidth >= ChatPageAnchorsLayout.minimumTranscriptWidth
     }
 
-    /// The page labels over the transcript's leading edge, or the button that brings them back.
+    /// The page labels over the transcript's leading edge, halfway down it.
     @ViewBuilder
     func chatPageAnchorsOverlay(showsLabels: Bool, transcriptWidth: CGFloat) -> some View {
-        let leading = ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth)
         if showsLabels {
             ChatPageAnchorsView(
                 model: chatPageAnchors,
                 // The labels end a little before the rows start.
                 width: ChatPageAnchorsLayout.rowInset(transcriptWidth: transcriptWidth)
                     + ChatPageAnchorsLayout.transcriptPadding - ChatPageAnchorsLayout.leadingInset - 12,
-                jump: { jumpToChatPage($0) },
-                hide: { hidesChatPageAnchors = true }
+                jump: { jumpToChatPage($0) }
             )
-            .padding(.leading, leading + ChatPageAnchorsLayout.leadingInset)
-            .padding(.top, 6)
-        } else if task.isStandaloneChat, hidesChatPageAnchors, !chatPageAnchors.pages.isEmpty {
-            ChatPageAnchorsToggle(isHidden: true) { hidesChatPageAnchors = false }
-                .padding(.leading, leading + 5)
+            .padding(.leading, ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth) + ChatPageAnchorsLayout.leadingInset)
+            // Clear of the toggle in the transcript's corner.
+            .padding(.vertical, 26)
+        }
+    }
+
+    /// Hides the page labels, or brings them back, from the transcript's top corner.
+    @ViewBuilder
+    func chatPageAnchorsToggleOverlay(showsLabels: Bool, transcriptWidth: CGFloat) -> some View {
+        if showsLabels || (task.isStandaloneChat && hidesChatPageAnchors && !chatPageAnchors.pages.isEmpty) {
+            ChatPageAnchorsToggle(isHidden: !showsLabels) { hidesChatPageAnchors = showsLabels }
+                .padding(.leading, ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth) + ChatPageAnchorsLayout.leadingInset)
                 .padding(.top, 6)
         }
     }

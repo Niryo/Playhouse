@@ -113,8 +113,11 @@ extension TaskConversationView {
             .accessibilityValue(hasLoadedConversation
                 ? "Showing \(isBrowsingEarlier ? "earlier" : "latest") \(renderedConversationMessages.count) of \(storedConversationMessageCount) messages"
                 : "Loading conversation history")
-            .overlay(alignment: .topLeading) {
+            .overlay(alignment: .leading) {
                 chatPageAnchorsOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
+            }
+            .overlay(alignment: .topLeading) {
+                chatPageAnchorsToggleOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
             }
             .overlay(alignment: .bottom) { jumpToLatestButton }
             .onChange(of: isLoadingHistory) { _, isLoading in

@@ -2,6 +2,7 @@
 """Verify every app scroll view reveals its scrollers only on hover (see HoverRevealScrollers.swift).
 
 A SwiftUI ScrollView, List, or Form must carry `.hoverRevealScrollers()` inside its content,
+unless `.scrollIndicators(.never)` directly follows it and it has no scrollers to reveal,
 and a file that builds an AppKit scroll view must call `HoverRevealScrollers.install(on:)`.
 SwiftUI's TextEditor hides its scroll view, so the app uses SkillTextEditor instead.
 """
@@ -17,6 +18,8 @@ FILES = tuple(sorted(APP.rglob("*.swift")))
 CONTAINER = re.compile(r"(?<![A-Za-z.])(ScrollView|List|Form)\s*(?:\(|\{)")
 APPKIT_SCROLL_VIEW = re.compile(r"\bscrollableTextView\(\)|\b\w*ScrollView\(\)|\bNSScrollView\(frame")
 TEXT_EDITOR = re.compile(r"(?<![A-Za-z])TextEditor\s*\(")
+# Comment lines may sit between the container's closing brace and the modifier.
+NEVER_SHOWS_SCROLLERS = re.compile(r"\}(?:\s*//[^\n]*)*\s*\.scrollIndicators\(\.never\)")
 
 _spec = importlib.util.spec_from_file_location("button_feedback", ROOT / "scripts" / "check-button-feedback.py")
 _button_feedback = importlib.util.module_from_spec(_spec)
@@ -50,6 +53,8 @@ def main() -> int:
             if span is None:
                 continue
             containers += 1
+            if NEVER_SHOWS_SCROLLERS.match(source, span[1]):
+                continue
             if ".hoverRevealScrollers()" not in source[span[0] : span[1]]:
                 line = source.count("\n", 0, match.start()) + 1
                 errors.append(f"{name}:{line}: {match.group(1)} content lacks .hoverRevealScrollers()")

@@ -72,7 +72,19 @@ enum ChatPageAnchorsLayout {
     /// to leave on their right, and whatever a wide chat has beyond a full-width message.
     static func rowInset(transcriptWidth: CGFloat) -> CGFloat {
         let rowWidth = min(transcriptWidth, transcriptMaxWidth) - transcriptPadding * 2
-        return min(140, max(84, rowWidth - bubbleMaxWidth))
+        return min(168, max(101, rowWidth - bubbleMaxWidth))
+    }
+
+    /// Labels in view at a time; older ones are scrolled to.
+    static let visibleLabelCount = 15
+    static let labelHeight: CGFloat = 14
+    static let labelSpacing: CGFloat = 12
+    static let labelsVerticalPadding: CGFloat = 6
+
+    /// The height that shows `count` labels, at most `visibleLabelCount` of them.
+    static func labelsHeight(count: Int) -> CGFloat {
+        let rows = CGFloat(max(1, min(count, visibleLabelCount)))
+        return rows * labelHeight + (rows - 1) * labelSpacing + labelsVerticalPadding * 2
     }
 
     /// Where the transcript's centered column starts.
@@ -82,54 +94,52 @@ enum ChatPageAnchorsLayout {
 }
 
 /// The standalone chat's page labels: a narrow column of page titles beside the transcript,
-/// well apart from each other. Clicking one jumps to its page; the page the transcript shows
-/// is marked, and the column scrolls to keep it in view.
+/// well apart from each other and a few at a time; scrolling it, with no scroll bar, reaches
+/// older ones. Clicking one jumps to its page; the page the transcript shows is marked, and
+/// the column scrolls to keep it in view.
 struct ChatPageAnchorsView: View {
     let model: ChatPageAnchorsModel
     let width: CGFloat
     let jump: (StandaloneChatPage) -> Void
-    let hide: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ChatPageAnchorsToggle(isHidden: false, action: hide)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        if model.hasOlderPages {
-                            // Reaching the oldest label read so far reads the ones before it.
-                            Color.clear
-                                .frame(height: 1)
-                                .id("older-\(model.pages.count)")
-                                .onAppear { loadOlder(proxy) }
-                        }
-                        ForEach(model.pages, id: \.id) { page in
-                            ChatPageAnchorLabel(
-                                page: page,
-                                isCurrent: page.id == model.currentPageID,
-                                isLoading: page.id == model.loadingPageID,
-                                action: { jump(page) }
-                            )
-                            .id(page.id)
-                        }
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: ChatPageAnchorsLayout.labelSpacing) {
+                    if model.hasOlderPages {
+                        // Reaching the oldest label read so far reads the ones before it.
+                        Color.clear
+                            .frame(height: 1)
+                            .id("older-\(model.pages.count)")
+                            .onAppear { loadOlder(proxy) }
                     }
-                    .padding(.top, 6)
-                    .padding(.bottom, 14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .hoverRevealScrollers()
+                    ForEach(model.pages, id: \.id) { page in
+                        ChatPageAnchorLabel(
+                            page: page,
+                            isCurrent: page.id == model.currentPageID,
+                            isLoading: page.id == model.loadingPageID,
+                            action: { jump(page) }
+                        )
+                        .id(page.id)
+                    }
                 }
-                .defaultScrollAnchor(.bottom)
-                .accessibilityLabel("Chat pages")
-                .accessibilityValue("\(model.pages.count) pages\(model.hasOlderPages ? ", older pages above" : "")")
-                .accessibilityIdentifier("chat-page-anchors")
-                .onChange(of: model.currentPageID) { _, pageID in
-                    guard let pageID else { return }
-                    // Slow enough to read as the labels following the transcript.
-                    withAnimation(.easeInOut(duration: 0.7)) { proxy.scrollTo(pageID, anchor: .center) }
-                }
+                .padding(.vertical, ChatPageAnchorsLayout.labelsVerticalPadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // `.hidden` still shows a bar when the system always shows scroll bars.
+            .scrollIndicators(.never)
+            .defaultScrollAnchor(.bottom)
+            .accessibilityLabel("Chat pages")
+            .accessibilityValue("\(model.pages.count) pages\(model.hasOlderPages ? ", older pages above" : "")")
+            .accessibilityIdentifier("chat-page-anchors")
+            .onChange(of: model.currentPageID) { _, pageID in
+                guard let pageID else { return }
+                // Slow enough to read as the labels following the transcript.
+                withAnimation(.easeInOut(duration: 0.7)) { proxy.scrollTo(pageID, anchor: .center) }
             }
         }
         .frame(width: width, alignment: .leading)
+        .frame(maxHeight: ChatPageAnchorsLayout.labelsHeight(count: model.pages.count))
     }
 
     private func loadOlder(_ proxy: ScrollViewProxy) {
@@ -162,6 +172,7 @@ private struct ChatPageAnchorLabel: View {
                     .opacity(isLoading ? 0.5 : 1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: ChatPageAnchorsLayout.labelHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
