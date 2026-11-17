@@ -131,6 +131,8 @@ class LiveWorkspace:
         self.environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
         self.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = str(self.data_directory / "preferences")
         self.environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = service_name
+        # Task status sounds play at volume 0, never through the host's speakers.
+        self.environment["PLAYHOUSE_MUTE_SOUNDS"] = "1"
 
     def run_cli(self, *command):
         result = subprocess.run(

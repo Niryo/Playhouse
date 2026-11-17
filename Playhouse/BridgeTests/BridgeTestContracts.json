@@ -697,7 +697,7 @@
   },
   {
     "id": "test_settings_status_sounds_toggle_mutes_task_sounds",
-    "expectation": "Task status sounds are on by default and turn off and back on through the CLI/XPC settings commands, persisting across a fresh read; an unknown value is rejected as invalid_argument without changing the stored setting. With sounds off, a task that waits for a response and then settles in Review after its turn plays no sound and records the Ping and Glass it would have played as muted; once sounds are back on, the next such task plays Ping then Glass. In the visible UI, the Workspace Settings Sounds toggle shows the stored setting and turning it off or on changes the setting the bridge reads."
+    "expectation": "Task status sounds are on by default and turn off and back on through the CLI/XPC settings commands, persisting across a fresh read; an unknown value is rejected as invalid_argument without changing the stored setting. With sounds off, a task that waits for a response and then settles in Review after its turn plays no sound and records the Ping and Glass it would have played as muted; once sounds are back on, the next such task plays Ping then Glass, and because the test runner sets PLAYHOUSE_MUTE_SOUNDS=1 each played sound is recorded as muted by the environment (played at volume 0). In the visible UI, the Workspace Settings Sounds toggle shows the stored setting and turning it off or on changes the setting the bridge reads."
   },
   {
     "id": "test_agents_info_shows_provider_usage_and_accounts",

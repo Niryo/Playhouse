@@ -51,6 +51,9 @@ final class PlayhouseUITests: XCTestCase {
             throw XCTSkip("Not run because an earlier case hit a global Playhouse startup/focus failure: \(reason)")
         }
         continueAfterFailure = false
+        // Every CLI call, app and daemon a case starts copies this process's environment,
+        // so task status sounds play at volume 0 instead of through the speakers.
+        setenv("PLAYHOUSE_MUTE_SOUNDS", "1", 1)
         // Every case starts on a plain fixture so nothing can reach an installed Codex CLI;
         // cases that need a specific fixture replace it.
         codexFixtureExecutable = isLiveIntegration ? nil : WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui").path

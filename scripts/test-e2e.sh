@@ -121,6 +121,8 @@ if (( ${#selected_cases[@]} > 0 )); then
 fi
 
 report_phase cases
+# Task status sounds play at volume 0 in every CLI call and daemon the suite starts.
+export PLAYHOUSE_MUTE_SOUNDS=1
 set +e
 # Reused builds share an XPC identity and process-global diagnostics routing.
 # Serialize only callers of that exact cached build, never unrelated worktrees/UI.
