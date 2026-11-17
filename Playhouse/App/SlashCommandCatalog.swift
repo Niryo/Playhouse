@@ -109,7 +109,7 @@ enum SlashCommandCatalog {
         if command == .goal, !provider.supportsGoals {
             return SlashCommandEntry(
                 command: command, detail: command.detail, enabled: false,
-                disabledReason: "Goal mode isn't supported by \(provider.displayName). Switch to Codex to use it."
+                disabledReason: "Goal mode isn't supported by \(provider.displayName)"
             )
         }
         return SlashCommandEntry(command: command, detail: command.detail, enabled: true, disabledReason: nil)

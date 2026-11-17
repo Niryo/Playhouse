@@ -1564,7 +1564,7 @@ extension PlayhouseUITests {
 }
 
 extension PlayhouseUITests {
-    // case-contract: test_slash_commands_menu_lists_commands_and_items | Typing / where a word starts anywhere in the composer opens a command menu listing /mcp, /plan, /goal, /skill, /login and /plugin in that order, narrowed to the commands whose name starts with what follows the /. On a Claude task /goal can't be chosen and says goal mode isn't supported by Claude, while on a Codex task it can. Choosing /plan turns plan mode on and choosing /goal on a Codex task opens the goal entry, each removing the typed command from the draft. Typing a command with its own list in full lists its items, narrowed by text after a space: /mcp lists the MCP servers the composer can mention, and asked with sign-in status marks each server with the agents that need a sign-in to it (shown as a Sign in button per agent on its row); /skill lists the mentionable skills, editable ones with a working gear and built-in ones with a disabled gear; choosing either mentions it as @handle in place of the command. /login lists both agents, the task's own first, and choosing one starts that agent's sign-in. /plugin lists Create Plugin first, which turns on Add Plugin mode, then the user's own plugins (never built-in ones), disabled ones marked so, each with edit, which opens the plugin's editor conversation, delete, which asks first, and a settings gear that stays disabled until plugins have settings. In the window an MCP server's gear opens the MCP page with that server's editor, its Sign in button opens the MCP page filtered to it and starts that agent's sign-in, and every choice removes the typed command. Listing without a task is a usage error and for an unknown task is not_found.
+    // case-contract: test_slash_commands_menu_lists_commands_and_items | Typing / where a word starts anywhere in the composer opens a command menu listing /mcp, /plan, /goal, /skill, /login and /plugin in that order, narrowed to the commands whose name starts with what follows the /. On a Claude task /goal can't be chosen and says goal mode isn't supported by Claude, while on a Codex task it can. Choosing /plan turns plan mode on and choosing /goal on a Codex task opens the goal entry, each removing the typed command from the draft. The command menu shares the mention menu's look: the same floating panel, as wide as the mention menu, with the same section headers and highlighted-row surface. Typing a command with its own list in full lists its items, narrowed by text after a space: /mcp lists the MCP servers the composer can mention, and asked with sign-in status marks each server with the agents that need a sign-in to it (shown as a Sign in button per agent on its row); /skill lists the mentionable skills, editable ones with a working gear and built-in ones with a disabled gear; choosing either mentions it as @handle in place of the command. /login lists both agents, the task's own first, and choosing one starts that agent's sign-in. /plugin lists Create Plugin first, which turns on Add Plugin mode, then the user's own plugins (never built-in ones), disabled ones marked so, each with edit, which opens the plugin's editor conversation, delete, which asks first, and a settings gear that stays disabled until plugins have settings. In the window an MCP server's gear opens the MCP page with that server's editor, its Sign in button opens the MCP page filtered to it and starts that agent's sign-in, and every choice removes the typed command. Listing without a task is a usage error and for an unknown task is not_found.
     func test_slash_commands_menu_lists_commands_and_items() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let codexPath = try XCTUnwrap(codexFixtureExecutable)
@@ -1618,6 +1618,14 @@ extension PlayhouseUITests {
         composer.typeText("Draft first, then /")
         XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing / where a word starts, anywhere in the draft, opens the command menu.")
         XCTAssertLessThanOrEqual(menu.frame.maxY, composer.frame.minY + 1, "The menu opens above the composer.")
+        // Measured from the rows, which fill the panel's inner width: the mention menu's identifier
+        // lands on its scroll view, inside the panel's inset, so its frame isn't the panel's.
+        let slashRowWidth = element("slash-command-plan").frame.width
+        let slashTitleInset = element("slash-menu-title").frame.minX - element("slash-command-plan").frame.minX
+        let slashRowHeight = element("slash-command-plan").frame.height
+        let highlighted = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND selected == true", "slash-command-"))
+        XCTAssertEqual(highlighted.count, 1, "Only one command row is highlighted.")
+        XCTAssertEqual(highlighted.firstMatch.identifier, "slash-command-mcp", "The first row starts highlighted.")
         XCTAssertEqual(slashRows(), ["mcp", "plan", "goal", "skill", "login", "plugin"], "Every command is listed, in order.")
         let goal = element("slash-command-goal")
         XCTAssertFalse(goal.isEnabled, "Claude can't run goal mode, so /goal can't be chosen.")
@@ -1637,6 +1645,18 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitForDisappearance(menu))
         attachScreenshot(named: "Choosing /plan turns plan mode on and removes the command")
         clearComposer()
+        composer.typeText("@")
+        let mentionMenu = element("mention-menu")
+        XCTAssertTrue(mentionMenu.waitToExist(timeout: 10), "Typing @ opens the mention menu.")
+        let mentionHeader = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@ OR identifier == %@", "mention-section-", "mention-menu-title")).firstMatch
+        let mentionRow = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "mention-item-")).firstMatch
+        XCTAssertTrue(mentionHeader.waitToExist(timeout: 10) && mentionRow.waitToExist(timeout: 10), "The mention menu lists a section with rows.")
+        XCTAssertEqual(slashTitleInset, mentionHeader.frame.minX - mentionRow.frame.minX, accuracy: 1, "Both menus' headers sit at the same inset from their rows.")
+        XCTAssertEqual(slashRowHeight, mentionRow.frame.height, accuracy: 1, "Both menus' rows are the same height.")
+        XCTAssertEqual(slashRowWidth, mentionRow.frame.width, accuracy: 1, "The command menu sits in the mention menu's panel, as wide as it.")
+        attachScreenshot(named: "The mention menu, the design the command menu shares")
+        clearComposer()
+        XCTAssertTrue(waitForDisappearance(mentionMenu))
 
         // /mcp: choosing a server mentions it.
         composer.typeText("/mcp")
