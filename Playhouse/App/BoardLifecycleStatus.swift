@@ -14,8 +14,9 @@ extension BoardTaskManager {
         PlayhouseDiagnostics.record("task.move.review.started", fields: ["taskID": id.uuidString])
         let initialTask = try requireTask(id)
         if initialTask.status == .review { return BoardTaskRecord(task: initialTask) }
-        guard initialTask.status == .waitingResponse else {
-            throw PlayhouseManagerError.invalidTransition("Only a task in Waiting Response can move to Review.")
+        let sourceStatus = initialTask.status
+        guard TaskStatus.manualReviewSources.contains(sourceStatus) else {
+            throw PlayhouseManagerError.invalidTransition("Only a task in Waiting Response or Blocked can move to Review.")
         }
         // A blocking question also shows Waiting Response while its turn is
         // still running; that turn owns the worktree and the final status.
@@ -26,7 +27,7 @@ extension BoardTaskManager {
         // instead of writing files while the sync commits and pushes them.
         _ = try await withConversationTurnReservation(id) {
             _ = try await syncPullRequestChanges(id, clients: clients)
-            guard try await transitionLifecycleStatus(id, from: .waitingResponse, to: .review) != nil else {
+            guard try await transitionLifecycleStatus(id, from: sourceStatus, to: .review) != nil else {
                 throw PlayhouseManagerError.invalidTransition("The task's status changed before it could move to Review. Try again.")
             }
             return try get(id)

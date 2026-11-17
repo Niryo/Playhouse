@@ -368,7 +368,7 @@ class BridgeTestCases06:
         waiting = self.assert_success(self.call_cli("task", "get", waiting_id)[0])
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
-    # case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review. Each transition into Waiting Response plays Ping and each transition into Review plays Glass; rejected and repeated moves play no sound.
+    # case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which Waiting Response and Blocked cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review. Each transition into Waiting Response plays Ping and each transition into Review plays Glass; rejected and repeated moves play no sound.
     def test_waiting_response_task_moves_to_review_manually(self):
         def remove_fixture_origin(repository, expected_url):
             current = subprocess.run(
@@ -476,6 +476,106 @@ class BridgeTestCases06:
         self.assertEqual([event["sound"] for event in sounds[initial_sound_count:]], ["Ping", "Ping", "Glass"])
         done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
         self.assertEqual(done["status"], "Done")
+    # case-contract: test_waiting_and_blocked_tasks_move_directly_to_review_and_done | A task in Waiting Response moves straight to Done, and a Blocked task moves to Review or straight to Done, through the CLI and on the board: Waiting Response and Blocked cards offer Move to Done in their context menu, Blocked cards also offer Move to Review, a Blocked card dragged onto the Review column lands in Review, and a Blocked card dragged onto the Done drawer lands in Done; a Backlog card offers neither and a Backlog task is still rejected for both moves and keeps its status. Moving a Waiting Response task to Done while its blocking question's turn still runs is rejected as still running, shown on the board in a Couldn't move task to Done alert, and keeps the task in Waiting Response with its worktree in place; once the turn finishes, Move to Done reaches Done and removes the task's clean Playhouse worktree as a move from Review does. Moving a Blocked task to Review clears its blocked reason and plays Glass; moving one to Done clears it too. Each move persists across a fresh CLI/XPC read, and a task already in Done is returned unchanged.
+    def test_waiting_and_blocked_tasks_move_directly_to_review_and_done(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        question_executable = self.data_directory / "codex-fixture-direct-move-question-flow"
+        copy_file(fixture, question_executable)
+        question_executable.chmod(0o755)
+        empty_executable = self.data_directory / "codex-fixture-direct-move-empty"
+        copy_file(fixture, empty_executable)
+        empty_executable.chmod(0o755)
+        question_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(question_executable)}
+
+        def blocked_task(title, root):
+            task_id = self.create_task(title, roots=[root])["id"]
+            response, _ = self.call_cli(
+                "conversation", "send", task_id, "--message", "Please ask your questions.", expected_status=1,
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(empty_executable)},
+            )
+            self.assert_failure(response, "operation_failed")
+            blocked = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            self.assertEqual(blocked["status"], "Blocked")
+            self.assertTrue(blocked.get("statusMessage"), "A blocked task carries the reason it is blocked.")
+            return task_id
+
+        def sounds(task_id):
+            return [event["sound"] for event in self.diagnostic_events()
+                    if event.get("event") == "task.status_sound.played" and event.get("taskID") == task_id]
+
+        # Backlog still can't skip ahead to Done or Review.
+        backlog_id = self.create_task("Direct move backlog")["id"]
+        rejected, _ = self.call_cli("task", "move", backlog_id, "Done", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("Only a task in Review, Waiting Response or Blocked", rejected["error"]["message"])
+        rejected, _ = self.call_cli("task", "move", backlog_id, "Review", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("Only a task in Waiting Response or Blocked", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", backlog_id)[0])["status"], "Backlog")
+
+        # Waiting Response -> Done, refused while the question's turn still runs.
+        waiting = self.create_repo_task("Direct waiting done", [self.primary], materialize=True)
+        worktree = Path(waiting["repositoryWorktrees"][0]["worktreePath"])
+        command = ["conversation", "send", waiting["id"], "--message", "Please ask your questions.", "--mode", "plan"]
+        process = self.start_cli(*command, extra_environment=question_environment)
+        try:
+            deadline = time.monotonic() + 60
+            pending = None
+            while process.poll() is None and time.monotonic() < deadline and pending is None:
+                history, _ = self.call_cli("conversation", "history", waiting["id"], extra_environment=question_environment)
+                pending = self.assert_success(history).get("pendingUserInputRequest")
+                if pending is None:
+                    time.sleep(0.1)
+            self.assertIsNotNone(pending, "The blocking question should hold the turn open.")
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", waiting["id"])[0])["status"], "Waiting Response")
+            running, _ = self.call_cli("task", "move", waiting["id"], "Done", expected_status=2)
+            self.assert_failure(running, "invalid_argument")
+            self.assertIn("still running", running["error"]["message"])
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", waiting["id"])[0])["status"], "Waiting Response")
+            self.assertTrue(worktree.exists(), "A refused move must leave the running turn's worktree in place.")
+            answered, _ = self.call_cli(
+                "conversation", "answer-user-input", waiting["id"], pending["id"],
+                "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=question_environment,
+            )
+            self.assert_success(answered)
+            self.assert_success(self.finish_cli(process, command)[0])
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=20)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", waiting["id"])[0])["status"], "Waiting Response")
+        done = self.assert_success(self.call_cli("task", "move", waiting["id"], "Done")[0])
+        self.assertEqual(done["status"], "Done")
+        self.assertIsNone(done.get("statusMessage"))
+        self.assertFalse(worktree.exists(), "Done removes the task's clean Playhouse worktree as it does from Review.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", waiting["id"])[0])["status"], "Done")
+
+        # Blocked -> Review clears the blocked reason and plays the Review sound.
+        review_id = blocked_task("Direct blocked review", self.secondary)
+        blocked_sounds = sounds(review_id)
+        reviewed = self.assert_success(self.call_cli("task", "move", review_id, "Review")[0])
+        self.assertEqual(reviewed["status"], "Review")
+        self.assertIsNone(reviewed.get("statusMessage"))
+        reread = self.assert_success(self.call_cli("task", "get", review_id)[0])
+        self.assertEqual(reread["status"], "Review")
+        self.assertIsNone(reread.get("statusMessage"))
+        self.assertEqual(sounds(review_id)[len(blocked_sounds):], ["Glass"])
+        drag_review_id = blocked_task("Direct blocked review drag", self.secondary)
+        dragged = self.assert_success(self.call_cli("task", "move", drag_review_id, "Review")[0])
+        self.assertEqual(dragged["status"], "Review")
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", drag_review_id)[0]).get("statusMessage"))
+
+        # Blocked -> Done.
+        done_id = blocked_task("Direct blocked done", self.secondary)
+        done = self.assert_success(self.call_cli("task", "move", done_id, "Done")[0])
+        self.assertEqual(done["status"], "Done")
+        self.assertIsNone(done.get("statusMessage"))
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", done_id)[0])["status"], "Done")
+        repeated = self.assert_success(self.call_cli("task", "move", done_id, "Done")[0])
+        self.assertEqual(repeated["status"], "Done", "A task already in Done is returned unchanged.")
     # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome and with nothing left running receives exactly one private recovery prompt that offers only the stopping outcomes; a completed report during it moves the task to Review, a waiting-response report during it leaves the task in Waiting Response, and no report by its end marks the task Blocked with the missing-outcome reason rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work; they offer no outcome for unfinished work and tell the agent to keep awaiting a required command within the turn. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A recovery prompt Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those prompts also retains the latest ordinary-turn diff while showing their replies. Completed and waiting-response outcomes start Glass and Ping respectively when their turns settle.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]

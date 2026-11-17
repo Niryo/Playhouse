@@ -185,7 +185,7 @@ struct AtomModalHeader: View {
 }
 
 /// A page that slides in from the trailing edge over all of `base`, on the
-/// window background, while `props.isPresented` (the Scheduled Tasks page
+/// window background, while `props.isPresented` (a main sidebar page plugin
 /// over the board). `base` sizes the atom; the owner closes the page.
 struct AtomPage<Base: View, Content: View>: View {
     var props: PageProps

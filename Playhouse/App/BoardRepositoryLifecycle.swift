@@ -643,11 +643,17 @@ extension BoardTaskManager {
         guard status == .done else {
             throw PlayhouseManagerError.invalidTransition("Task status is controlled by Codex. Start or continue a conversation to update it.")
         }
-        return try await withTaskOperationLock(id) {
+        let requestedSource = try requireTask(id).status
+        let moveToDone: @MainActor () async throws -> BoardTaskRecord = { [self] in try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
             guard initialTask.status != .done else { return BoardTaskRecord(task: initialTask) }
-            guard initialTask.status == .review else {
-                throw PlayhouseManagerError.invalidTransition("Only a task in Review can move to Done.")
+            let sourceStatus = initialTask.status
+            guard TaskStatus.manualDoneSources.contains(sourceStatus) else {
+                throw PlayhouseManagerError.invalidTransition("Only a task in Review, Waiting Response or Blocked can move to Done.")
+            }
+            // The turn reservation was chosen for the status read before this lock.
+            guard sourceStatus == requestedSource else {
+                throw PlayhouseManagerError.invalidTransition("The task's status changed before it could move to Done. Try again.")
             }
 
             let originalRepositories = initialTask.repositoryWorktrees
@@ -665,8 +671,8 @@ extension BoardTaskManager {
                 }
             }
             let task = try requireTask(id)
-            guard task.status == .review else {
-                throw PlayhouseManagerError.invalidTransition("Only a task in Review can move to Done.")
+            guard task.status == sourceStatus else {
+                throw PlayhouseManagerError.invalidTransition("The task's status changed before it could move to Done. Try again.")
             }
             guard task.repositoryWorktrees == originalRepositories else {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task's pull request links changed while they were being checked. Try again.")
@@ -703,6 +709,14 @@ extension BoardTaskManager {
                 "status": task.status.rawValue
             ])
             return BoardTaskRecord(task: task)
+        } }
+        guard requestedSource != .review, TaskStatus.manualDoneSources.contains(requestedSource) else { return try await moveToDone() }
+        // A blocking question shows Waiting Response while its turn still runs, and a reply
+        // can start one mid-move; hold the reservation so no turn uses the worktrees this
+        // move removes.
+        guard let moved = try await withConversationTurnReservationIfFree(id, operation: moveToDone) else {
+            throw PlayhouseManagerError.invalidTransition("This task's conversation turn is still running. Answer or stop it before moving the task to Done.")
         }
+        return moved
     }
 }

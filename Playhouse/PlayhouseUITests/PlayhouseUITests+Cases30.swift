@@ -1016,8 +1016,8 @@ extension PlayhouseUITests {
         }
         XCTAssertGreaterThan(element("task-view-title").frame.width, 100, "The title keeps room beside three chips.")
         attachScreenshot(named: "A new task lists one repository three times")
-        attachRegionScreenshot(of: ["auto", "auto 2", "auto 3"].map { element("conversation-repository-badge-primary-\($0)") },
-                               named: "One chip per pending worktree: auto, auto 2, auto 3")
+        attachRegionScreenshot(["auto", "auto 2", "auto 3"].map { element("conversation-repository-badge-primary-\($0)") },
+                           named: "One chip per pending worktree: auto, auto 2, auto 3")
 
         // Each pending duplicate is edited and removed on its own.
         secondPending.click()
@@ -1040,8 +1040,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitForDisappearance(element("conversation-repository-badge-primary-auto 3"), timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-primary-repeated-second-ui").waitToExist(timeout: 10), app.debugDescription)
         XCTAssertTrue(element("conversation-repository-badge-primary-auto").exists)
-        attachRegionScreenshot(of: ["auto", "repeated-second-ui"].map { element("conversation-repository-badge-primary-\($0)") },
-                               named: "The edited and remaining pending worktree chips")
+        attachRegionScreenshot(["auto", "repeated-second-ui"].map { element("conversation-repository-badge-primary-\($0)") },
+                           named: "The edited and remaining pending worktree chips")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Repeated repository UI")
         let started = try worktreeRecords(repeatedID)
         let startedBranches = started.compactMap { $0["branch"] as? String }
@@ -1055,8 +1055,8 @@ extension PlayhouseUITests {
             XCTAssertTrue(element("conversation-repository-badge-primary-\(branch)").waitToExist(timeout: 10), app.debugDescription)
         }
         attachScreenshot(named: "Both worktrees of the repeated repository started on their own branches")
-        attachRegionScreenshot(of: startedBranches.map { element("conversation-repository-badge-primary-\($0)") },
-                               named: "The repeated repository's started worktree chips")
+        attachRegionScreenshot(startedBranches.map { element("conversation-repository-badge-primary-\($0)") },
+                           named: "The repeated repository's started worktree chips")
         let tasksBefore = ((try runCLI(["board", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count
         let sameBranch = try runCLI([
             "task", "create", "--title", "Same branch twice UI", "--prompt", "Fixture task description.",

@@ -368,26 +368,11 @@ extension TaskConversationView {
                         }
                         .accessibilityIdentifier("task-title-generating")
                     } else {
-                        HStack(spacing: 6) {
-                            Text(task.title)
-                                .font(.system(size: 14, weight: .semibold))
-                                .lineLimit(1)
-                                .accessibilityIdentifier("task-view-title")
-
-                            // The task title becomes the pull request title, so it can be copied as-is.
-                            Button(action: copyTaskTitle) {
-                                Image(systemName: didCopyTaskTitle ? "checkmark" : "doc.on.doc")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .frame(width: 22, height: 22)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .nativeHelp("Copy title")
-                            .accessibilityLabel(didCopyTaskTitle ? "Title copied" : "Copy title")
-                            .accessibilityIdentifier("task-view-title-copy-button")
-                        }
+                        Text(task.title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("task-view-title")
                     }
 
                 }
@@ -427,17 +412,6 @@ extension TaskConversationView {
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
-    }
-
-    func copyTaskTitle() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(task.title, forType: .string)
-        didCopyTaskTitle = true
-        let token = UUID()
-        taskTitleCopyFeedbackToken = token
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            if taskTitleCopyFeedbackToken == token { didCopyTaskTitle = false }
-        }
     }
 
     var repositoryBadges: some View {

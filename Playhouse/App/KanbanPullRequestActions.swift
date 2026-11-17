@@ -12,7 +12,7 @@ extension KanbanBoardView {
     ) {
         guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
         if status == .review {
-            guard task.status == .waitingResponse else { return }
+            guard TaskStatus.manualReviewSources.contains(task.status) else { return }
             Task { @MainActor in
                 do {
                     _ = try await remoteConversations.moveTaskToReview(taskID: id)

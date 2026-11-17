@@ -143,7 +143,7 @@ struct KanbanBoardView: View {
     @Environment(PluginRegistry.self) var pluginRegistry
     @EnvironmentObject var conversationRuntime: ConversationRuntimeModel
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) var allTasks: [BoardTask]
-    /// Board cards. Recurring schedule templates aren't board tasks; the Scheduled Tasks page
+    /// Board cards. Recurring schedule templates aren't board tasks; the Scheduled Tasks popover
     /// lists them, and each of their runs appears here as its own task.
     var tasks: [BoardTask] { allTasks.filter { !$0.isRecurringScheduleTemplate } }
     /// Every scheduled task, soonest first, as `schedule.list` lists them for
@@ -392,13 +392,13 @@ struct KanbanBoardView: View {
         } message: {
             Text(pullRequestError ?? "Please try again.")
         }
-        .alert("Couldn't check pull request status", isPresented: Binding(
+        .alert("Couldn't move task to Done", isPresented: Binding(
             get: { doneMoveError != nil },
             set: { if !$0 { doneMoveError = nil } }
         )) {
             Button("OK", role: .cancel) { doneMoveError = nil }
             .buttonHoverPointer()
-            .nativeHelp("Dismiss pull request status error")
+            .nativeHelp("Dismiss move to Done error")
         } message: {
             Text(doneMoveError ?? "Please try again.")
         }
@@ -568,7 +568,7 @@ struct KanbanBoardView: View {
                                 // drawer to its left, and the drawer stays put while scrolling.
                                 .overlay(alignment: .trailing) {
                                     DoneDropDrawer(
-                                        isOpen: draggedTaskStatus == .review,
+                                        isOpen: draggedTaskStatus.map(TaskStatus.manualDoneSources.contains) ?? false,
                                         isActive: $isDoneTargetActive,
                                         onDrop: { moveTask(id: $0, to: .done) }
                                     )
@@ -622,7 +622,7 @@ struct KanbanBoardView: View {
             }
         }
         // The archive is a SidePanel atom over the board; the main sidebar's
-        // plugins (the Scheduled Tasks page among them) present over it too.
+        // page, modal and side panel plugins present over it too.
         .atomSidePanel(
             SidePanelProps(isPresented: isShowingDoneArchive, width: 340),
             common: AtomCommon(testID: "done-archive-panel")
@@ -731,7 +731,7 @@ struct KanbanBoardView: View {
             },
             onShowTaskTokenStats: { taskShowingTokenStats = $0 },
             draggedTaskID: $draggedTaskID,
-            acceptsDraggedTask: status == .review && draggedTaskStatus == .waitingResponse,
+            acceptsDraggedTask: status == .review && draggedTaskStatus.map(TaskStatus.manualReviewSources.contains) ?? false,
             minHeight: minHeight
         )
         .frame(width: 264)

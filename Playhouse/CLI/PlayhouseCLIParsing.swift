@@ -398,9 +398,10 @@ extension PlayhouseCLI {
             let tail = Array(rest.dropFirst(2))
             switch rest[1] {
             case "list":
-                let flags = try parseFlags(tail, valueFlags: ["--limit"])
+                let flags = try parseFlags(tail, valueFlags: ["--limit", "--title"])
                 var arguments: [String: BridgeValue] = [:]
                 if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
+                if let title = flags["--title"]?.first { arguments["title"] = .string(title) }
                 return BridgeRequest(command: "chat.page.list", arguments: arguments)
             case "search":
                 let query = try firstPositional(tail)

@@ -179,8 +179,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(try taskRecord(named: "After rename")?["title"] as? String, "After rename")
         attachScreenshot(named: "Renamed task remains unchanged after rejected blank rename")
     }
-    // case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
-    func test_task_title_copy_button_copies_persisted_title() throws {
+    // case-contract: test_task_title_is_selectable_and_matches_persisted_title | The conversation title has no copy button and its text is selectable: selecting and copying it places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename, and fresh CLI/XPC reads report the same title.
+    func test_task_title_is_selectable_and_matches_persisted_title() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Before copy", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Before copy")
@@ -191,15 +191,13 @@ extension PlayhouseUITests {
         clickTaskCardTitle(card)
         XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Opening the renamed task should show its conversation.")
 
-        let copyTitleButton = app.buttons["task-view-title-copy-button"]
-        XCTAssertTrue(copyTitleButton.waitToExist(timeout: 10), "The conversation title should have a copy button.")
+        XCTAssertFalse(app.buttons["task-view-title-copy-button"].exists, "The conversation title should not have a copy button.")
         XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: element("task-view-title")) == title }, timeout: 10), "The header should show the persisted title.")
         NSPasteboard.general.clearContents()
-        copyTitleButton.click()
-        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Title copied" }, timeout: 3), "The copy button should confirm the copy while the checkmark is shown.")
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), title, "Copying the title should place its exact persisted text on the pasteboard.")
-        attachScreenshot(named: "Conversation title copied to the pasteboard")
-        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Copy title" }, timeout: 4), "The copy button should return to its idle label after the confirmation window.")
+        element("task-view-title").coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5)).doubleClick()
+        app.typeKey("c", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) == "Café" }, timeout: 5), "Double-clicking the title's first word and copying should place that selected text on the pasteboard.")
+        attachScreenshot(named: "Conversation title selected")
         XCTAssertEqual(try taskRecord(id: taskID)?["title"] as? String, title, "The copied title should match the persisted title.")
     }
     // case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved.
@@ -428,7 +426,7 @@ extension PlayhouseUITests {
         XCTAssertGreaterThan(badgeAfterSend.frame.minX, title.frame.maxX, "Repository badges should remain beside the task title after a message is sent.")
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - headerMidY()), 4, "Repository badges should stay vertically centered in the fixed task header after the timeline scrolls.")
     }
-    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, adding an attached repository again gives it another worktree on its own branch, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
+    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, adding an attached repository again gives it another worktree on its own branch, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit. Both buttons sit clear of the list's overlay scroller and each shows a hover highlight while the pointer is on it.
     func test_conversation_repository_picker_add_and_replace_buttons() throws {
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI(["task", "create", "--title", "Picker add and replace", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any]
@@ -453,8 +451,10 @@ extension PlayhouseUITests {
         let primaryAdd = element("conversation-repository-suggestion-primary-add")
         XCTAssertTrue(primaryAdd.waitToExist(timeout: 5))
         XCTAssertTrue(primaryAdd.isHittable, "Hovering the row should reveal its plus button.")
-        // The row's text stops 44 points (plus its 7-point padding) before its trailing edge, where the hover buttons sit.
-        XCTAssertLessThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.minX, 51, "The plus button should sit in the space the row's text leaves clear.")
+        // The row's text stops 64 points (plus its 7-point padding) before its trailing edge, where the hover buttons sit.
+        XCTAssertLessThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.minX, 71, "The plus button should sit in the space the row's text leaves clear.")
+        // The list's overlay scroller covers about the last 15 points of each row.
+        XCTAssertGreaterThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.maxX, 15, "The plus button should sit clear of the list's scroller.")
         attachScreenshot(named: "Hovered repository row shows its plus button")
         XCTAssertFalse(element("conversation-repository-suggestion-primary-replace").exists, "Replace is offered only once the task has repositories.")
         primaryAdd.click()
@@ -478,6 +478,31 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Hovered repository row shows Replace and Add once the task has a repository")
         attachElementScreenshot(element("conversation-repository-picker"), named: "Repository picker hover actions")
+        // Each button draws a highlight behind its icon only while the pointer is on it.
+        func meanDifference(_ first: NSImage, _ second: NSImage) -> CGFloat {
+            guard let a = first.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let b = second.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+            let left = NSBitmapImageRep(cgImage: a), right = NSBitmapImageRep(cgImage: b)
+            let width = min(left.pixelsWide, right.pixelsWide), height = min(left.pixelsHigh, right.pixelsHigh)
+            var total: CGFloat = 0
+            for x in 0..<width {
+                for y in 0..<height {
+                    guard let l = left.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          let r = right.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                    total += abs(l.redComponent - r.redComponent) + abs(l.greenComponent - r.greenComponent) + abs(l.blueComponent - r.blueComponent)
+                }
+            }
+            return total / CGFloat(max(1, width * height * 3))
+        }
+        for (button, other) in [(secondaryAdd, secondaryReplace), (secondaryReplace, secondaryAdd)] {
+            other.hover()
+            Thread.sleep(forTimeInterval: 0.4)
+            let resting = button.screenshot().image
+            button.hover()
+            Thread.sleep(forTimeInterval: 0.4)
+            XCTAssertGreaterThan(meanDifference(resting, button.screenshot().image), 0.02, "\(button.identifier) should show a hover highlight.")
+            attachElementScreenshot(element("conversation-repository-list"), named: "Hovering \(button.identifier) highlights it")
+        }
         element("conversation-repository-search").hover()
         XCTAssertTrue(waitUntil({ !secondaryAdd.exists && !secondaryReplace.exists }, timeout: 5), "Actions should disappear after leaving the row.")
         secondaryRow.hover()
@@ -503,7 +528,7 @@ extension PlayhouseUITests {
         alternateRow.hover()
         let alternateReplace = element("conversation-repository-suggestion-alternate-replace")
         XCTAssertTrue(alternateReplace.waitToExist(timeout: 5))
-        XCTAssertLessThanOrEqual(alternateRow.frame.maxX - alternateReplace.frame.minX, 51, "Replace and plus should both sit in the space the row's text leaves clear.")
+        XCTAssertLessThanOrEqual(alternateRow.frame.maxX - alternateReplace.frame.minX, 71, "Replace and plus should both sit in the space the row's text leaves clear.")
         alternateReplace.hover()
         attachScreenshot(named: "Hovering Replace on alternate")
         alternateReplace.click()

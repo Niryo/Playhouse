@@ -376,7 +376,7 @@ final class PlayhouseBridgeRuntime {
                 let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
                 let limit = request.arguments["limit"]?.string.flatMap(Int.init) ?? 50
                 result = .object([
-                    "pages": try Self.value(chatManager.listPages(limit: limit)),
+                    "pages": try Self.value(chatManager.listPages(limit: limit, titleContaining: request.arguments["title"]?.string)),
                     "archiveDirectory": .string(chatManager.pageFilesDirectoryURL.path),
                 ])
             case "chat.page.search":
@@ -765,7 +765,7 @@ final class PlayhouseBridgeRuntime {
                         // The board's agents: the last-known usage and each provider's running tasks.
                         var agents: PluginAgentsContext?
                         if command.placement == .mainSidebarBottom {
-                            let report = try await AgentUsageService.report(clients: conversationClients(), refresh: false)
+                            let report = await AgentUsageService.report(clients: conversationClients(), refresh: false)
                             agents = PluginAgentsContext(
                                 usage: PluginValue(bridge: try Self.value(report)),
                                 runningTasks: try taskManager.list(status: .inProgress).reduce(into: [:]) { $0[$1.conversationProvider, default: 0] += 1 }

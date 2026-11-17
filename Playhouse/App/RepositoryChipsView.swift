@@ -294,7 +294,8 @@ struct RepositoryPickerView: View {
 
     private func row(_ repository: RepositoryPickerModel.Repository, highlighted: Bool) -> some View {
         let id = "\(prefix)conversation-repository-\(model.listing)-\(repository.name)"
-        return AtomOverlay(props: OverlayProps(align: "trailing", offsetX: -6, revealOnHover: true)) {
+        // The inset keeps the buttons clear of the list's overlay scroller.
+        return AtomOverlay(props: OverlayProps(align: "trailing", offsetX: -16, revealOnHover: true)) {
             AtomButton(
                 common: AtomCommon(testID: id, help: "Add \(repository.name) alongside the selected repositories"),
                 action: { actions.select(repository.path) }
@@ -309,14 +310,15 @@ struct RepositoryPickerView: View {
                             AtomText(props: TextProps(text: repository.name, size: 11, weight: "medium"))
                             AtomText(props: TextProps(text: repository.path, size: 9, color: "secondary", lineLimit: 1))
                         }
-                        AtomSpacer(props: SpacerProps(minLength: 44))
+                        AtomSpacer(props: SpacerProps(minLength: 64))
                     }
                 }
             }
         } overlay: {
-            AtomStack(props: StackProps(axis: "h", spacing: 6)) {
+            AtomStack(props: StackProps(axis: "h", spacing: 2)) {
                 if model.canReplace {
                     AtomButton(
+                        props: ButtonProps(emphasis: 4),
                         common: AtomCommon(testID: "\(id)-replace", label: "Replace with \(repository.name)", help: "Replace the selected repositories with \(repository.name)"),
                         action: { actions.replace(repository.path) }
                     ) {
@@ -324,6 +326,7 @@ struct RepositoryPickerView: View {
                     }
                 }
                 AtomButton(
+                    props: ButtonProps(emphasis: 4),
                     common: AtomCommon(testID: "\(id)-add", label: "Add \(repository.name)", help: "Add \(repository.name) alongside the selected repositories"),
                     action: { actions.select(repository.path) }
                 ) {

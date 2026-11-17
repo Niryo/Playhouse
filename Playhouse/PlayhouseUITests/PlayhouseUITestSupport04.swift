@@ -195,26 +195,19 @@ extension PlayhouseUITests {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
-    /// Attaches the screen area around `elements` together, at native pixel density, for
-    /// controls that sit side by side without one container element (such as a row of chips).
-    func attachRegionScreenshot(of elements: [XCUIElement], named name: String) {
+    /// Attaches the region around `elements` together, at native pixel density, for a close-up
+    /// of a small control and what sits next to it.
+    func attachRegionScreenshot(_ elements: [XCUIElement], named name: String, padding: CGFloat = 8) {
         let screenshot = XCUIScreen.main.screenshot()
-        let frames = elements.filter(\.exists).map(\.frame).filter { !$0.isEmpty }
-        guard let first = frames.first,
-              let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let screen = NSScreen.main?.frame, screen.width > 0 else {
-            attachScreenshot(named: name)
-            return
-        }
-        let region = frames.dropFirst().reduce(first) { $0.union($1) }
-            .insetBy(dx: -24, dy: -16)
+        guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let screen = NSScreen.main?.frame, screen.width > 0,
+              let first = elements.first?.frame else { return }
+        let region = elements.dropFirst().map(\.frame).reduce(first) { $0.union($1) }
+            .insetBy(dx: -padding, dy: -padding)
             .intersection(CGRect(origin: .zero, size: screen.size))
         let scale = CGFloat(image.width) / screen.width
         let pixels = CGRect(x: region.minX * scale, y: region.minY * scale, width: region.width * scale, height: region.height * scale).integral
-        guard let cropped = image.cropping(to: pixels) else {
-            attachScreenshot(named: name)
-            return
-        }
+        guard !region.isEmpty, let cropped = image.cropping(to: pixels) else { return }
         let attachment = XCTAttachment(image: NSImage(cgImage: cropped, size: NSSize(width: cropped.width, height: cropped.height)))
         attachment.name = name
         attachment.lifetime = .keepAlways
