@@ -1089,6 +1089,7 @@ extension PlayhouseUITests {
         let bundleIdentifier = Bundle(url: appBundle)?.bundleIdentifier ?? "com.playhouse.app.e2e"
         app = XCUIApplication(bundleIdentifier: bundleIdentifier)
         app.launchEnvironment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
+        app.launchEnvironment["PLAYHOUSE_MUTE_SOUNDS"] = "1"
         let usesLiveCodex = isLiveCodexIntegration
         let liveCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
         app.launchEnvironment["CODEX_HOME"] = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
@@ -1124,6 +1125,7 @@ extension PlayhouseUITests {
         let targetBundleIdentifier = bundleIdentifier ?? Bundle(url: appBundle)?.bundleIdentifier ?? "com.playhouse.app.e2e"
         var environment = ProcessInfo.processInfo.environment
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
+        environment["PLAYHOUSE_MUTE_SOUNDS"] = "1"
         let usesLiveCodex = isLiveCodexIntegration
         let liveCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
         let codexHome = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
