@@ -164,12 +164,13 @@ function Row(props) {
       name: selected ? "checkmark.circle.fill" : "circle", size: 14, color: selected ? "accent" : "secondary",
       testID: prefix + "skill-select-" + name, label: selected ? "Selected" : "Not selected"
     }) : null,
-    h(Text, { size: 13, weight: "medium", lineLimit: 1, testID: prefix + "skill-name-" + name }, name),
-    row.flag ? h(Icon, { name: row.flag.icon, size: 11, color: row.flag.color, testID: prefix + row.flag.testID, label: row.flag.text, help: row.flag.text }) : null,
+    // Who can use the skill leads its name; its warning follows it.
     row.provider ? h(Icon, {
       name: row.provider.icon, asset: row.provider.asset, size: 11, color: row.provider.color, width: 12, height: 12,
       testID: prefix + row.provider.testID, label: row.provider.label, help: row.provider.label
     }) : null,
+    h(Text, { size: 13, weight: "medium", lineLimit: 1, testID: prefix + "skill-name-" + name }, name),
+    row.flag ? h(Icon, { name: row.flag.icon, size: 11, color: row.flag.color, testID: prefix + row.flag.testID, label: row.flag.text, help: row.flag.text }) : null,
     h(Spacer, { minLength: 8 })
   ];
   // A press and hold starts selecting; a click opens the skill, or selects while

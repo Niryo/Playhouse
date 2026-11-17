@@ -681,15 +681,16 @@ struct SkillGalleryView: View {
                                 common: AtomCommon(testID: "\(prefix)skill-select-\(name)", label: isSelected ? "Selected" : "Not selected")
                             )
                         }
-                        AtomText(props: TextProps(text: name, size: 13, weight: "medium", lineLimit: 1), common: AtomCommon(testID: "\(prefix)skill-name-\(name)"))
-                        if let flag = row.flag {
-                            AtomIcon(props: IconProps(name: flag.icon, size: 11, color: flag.color), common: AtomCommon(testID: "\(prefix)\(flag.testID)", label: flag.text, help: flag.text))
-                        }
+                        // Who can use the skill leads its name; its warning follows it.
                         if let mark = row.provider {
                             AtomIcon(
                                 props: IconProps(name: mark.icon, asset: mark.asset, size: 11, color: mark.color),
                                 common: AtomCommon(testID: "\(prefix)\(mark.testID)", label: mark.label, help: mark.label, width: 12, height: 12)
                             )
+                        }
+                        AtomText(props: TextProps(text: name, size: 13, weight: "medium", lineLimit: 1), common: AtomCommon(testID: "\(prefix)skill-name-\(name)"))
+                        if let flag = row.flag {
+                            AtomIcon(props: IconProps(name: flag.icon, size: 11, color: flag.color), common: AtomCommon(testID: "\(prefix)\(flag.testID)", label: flag.text, help: flag.text))
                         }
                         AtomSpacer(props: SpacerProps(minLength: 8))
                     }
