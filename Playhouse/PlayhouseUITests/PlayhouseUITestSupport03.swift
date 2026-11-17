@@ -793,6 +793,50 @@ extension PlayhouseUITests {
         }
         XCTFail("Hovering should present the native help text ‘\(expected)’ outside the PR control.")
     }
+    /// Whether the cursor on screen is the pointing hand. It is read from the window server, which
+    /// the runner shares with the app, so it reports what the user sees rather than what the app
+    /// last asked for: a pushed cursor that AppKit has since replaced reads as the arrow.
+    func systemCursorIsPointingHand() -> Bool {
+        systemCursorMatches(.pointingHand)
+    }
+    func systemCursorMatches(_ expected: NSCursor) -> Bool {
+        guard let cursor = NSCursor.currentSystem else { return false }
+        return cursor.hotSpot == expected.hotSpot && cursor.image.size == expected.image.size
+    }
+    /// Whether the cursor on screen is the left-right resize cursor of a column divider: SwiftUI's
+    /// column-resize pointer style on macOS 15 and later, AppKit's resize-left-right before it.
+    func systemCursorIsColumnResize() -> Bool {
+        if #available(macOS 15.0, *), systemCursorMatches(.columnResize) { return true }
+        return systemCursorMatches(.resizeLeftRight)
+    }
+    /// Rests the pointer on `point` with a few small moves, so AppKit and SwiftUI see it arrive.
+    func restPointer(on point: XCUICoordinate) {
+        point.hover()
+        for dy in [-2.0, 2.0, 0.0] {
+            Thread.sleep(forTimeInterval: 0.1)
+            point.withOffset(CGVector(dx: 0, dy: dy)).hover()
+        }
+    }
+    func systemCursorDescription() -> String {
+        guard let cursor = NSCursor.currentSystem else { return "<no system cursor>" }
+        return "hotSpot \(cursor.hotSpot), size \(cursor.image.size); pointing hand is hotSpot \(NSCursor.pointingHand.hotSpot), size \(NSCursor.pointingHand.image.size); resize-left-right is hotSpot \(NSCursor.resizeLeftRight.hotSpot), size \(NSCursor.resizeLeftRight.image.size)"
+    }
+    /// With the pointer still resting on a control whose tooltip `help` is up, asserts the pointing
+    /// hand shows, and still shows after a further pause, then that the arrow shows over the
+    /// window's title bar, so a probe that always read the hand could not pass.
+    func assertPointingHandCursor(whileShowingHelp help: String, _ name: String) {
+        XCTAssertTrue(nativeHelpTextIsVisible(help), "\(name)'s tooltip should still be up while its cursor is read.")
+        XCTAssertTrue(waitUntil({ self.systemCursorIsPointingHand() }, timeout: 3), "\(name) should show the pointing hand while its tooltip is up: \(systemCursorDescription())")
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertTrue(systemCursorIsPointingHand(), "\(name) should keep the pointing hand while the pointer stays on it: \(systemCursorDescription())")
+        // Clear of the window's top resize edge, so the title bar's own cursor is the arrow.
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).hover()
+        // The window server's arrow is not `NSCursor.arrow`'s image, so this checks that a cursor is
+        // shown and that it is neither the hand nor a resize cursor.
+        XCTAssertTrue(waitUntil({
+            NSCursor.currentSystem != nil && !self.systemCursorIsPointingHand() && !self.systemCursorIsColumnResize()
+        }, timeout: 3), "The window's title bar should show the arrow, not the pointing hand: \(systemCursorDescription())")
+    }
     func nativeHelpTextIsVisible(_ expected: String) -> Bool {
         helpTagIsShowing(expected) || screenTextContains(expected)
     }

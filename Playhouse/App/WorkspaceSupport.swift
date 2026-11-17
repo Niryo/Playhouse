@@ -4,39 +4,75 @@ import Foundation
 import OSLog
 import SwiftUI
 
-/// Shows `cursor` while the pointer is over the view, keeping the cursor stack balanced:
-/// repeated hover events are ignored, and a view that disappears under the pointer pops it.
-private struct HoverCursor: ViewModifier {
-    let cursor: NSCursor
-    @State private var isHovering = false
+/// A cursor shown while the pointer rests over a view. It comes from a mechanism the system
+/// re-applies for as long as the pointer stays there: SwiftUI's pointer style, or an AppKit cursor
+/// rect before macOS 15. A cursor pushed from `onHover` must not be used for this: AppKit sets the
+/// window's cursor again whenever it rebuilds cursor rects (after a layout pass, a tooltip, or a
+/// neighboring text view's I-beam rect), silently replacing the pushed one with the arrow.
+enum HoverCursorKind {
+    /// The pointing hand over a clickable control.
+    case pointingHand
+    /// The left-right resize arrows over a draggable column divider.
+    case resizeLeftRight
 
-    func body(content: Content) -> some View {
-        content
-            .onHover { isInside in
-                guard isInside != isHovering else { return }
-                isHovering = isInside
-                if isInside {
-                    cursor.push()
-                } else {
-                    NSCursor.pop()
-                }
-            }
-            .onDisappear {
-                if isHovering {
-                    NSCursor.pop()
-                    isHovering = false
-                }
-            }
+    var cursor: NSCursor {
+        switch self {
+        case .pointingHand: .pointingHand
+        case .resizeLeftRight: .resizeLeftRight
+        }
+    }
+
+    @available(macOS 15.0, *)
+    var pointerStyle: PointerStyle {
+        switch self {
+        case .pointingHand: .link
+        case .resizeLeftRight: .columnResize
+        }
+    }
+}
+
+/// The macOS 14 fallback for `hoverCursor`: a click-through view behind the content whose cursor
+/// rect AppKit maintains for the view's frame.
+private struct HoverCursorRect: NSViewRepresentable {
+    let cursor: NSCursor
+
+    func makeNSView(context: Context) -> CursorRectView {
+        let view = CursorRectView()
+        view.cursor = cursor
+        return view
+    }
+
+    func updateNSView(_ view: CursorRectView, context: Context) {
+        guard view.cursor !== cursor else { return }
+        view.cursor = cursor
+        view.window?.invalidateCursorRects(for: view)
+    }
+
+    final class CursorRectView: NSView {
+        var cursor = NSCursor.arrow
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: cursor)
+        }
     }
 }
 
 extension View {
+    /// The pointing hand over a clickable control; every app action control carries it.
     func buttonHoverPointer() -> some View {
         hoverCursor(.pointingHand)
     }
 
-    func hoverCursor(_ cursor: NSCursor) -> some View {
-        modifier(HoverCursor(cursor: cursor))
+    @ViewBuilder
+    func hoverCursor(_ kind: HoverCursorKind) -> some View {
+        if #available(macOS 15.0, *) {
+            pointerStyle(kind.pointerStyle)
+        } else {
+            background(HoverCursorRect(cursor: kind.cursor).accessibilityHidden(true))
+        }
     }
 }
 
