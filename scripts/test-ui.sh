@@ -412,6 +412,9 @@ overall_failed=0
 # from this unsandboxed script instead, and keep it alive for the whole run by
 # holding one watcher connection (the daemon exits when its last one closes).
 bridge_watcher_pid=""
+# The daemon keeps the PLAYHOUSE_MUTE_SOUNDS it starts with, so the watcher that
+# starts it must carry it for task status sounds to play at volume 0.
+export PLAYHOUSE_MUTE_SOUNDS=1
 # A daemon left from an earlier build would silently serve this run's requests.
 pkill -f "${compiled_app}/Contents/MacOS/playhouse-daemon" 2>/dev/null || true
 if [[ -x "${compiled_app}/Contents/MacOS/playhouse-cli" ]]; then

@@ -33,6 +33,9 @@ from pathlib import Path
 # socket; every harness subprocess must reach the daemon derived from this
 # run's service name instead.
 os.environ.pop("PLAYHOUSE_BRIDGE_SOCKET_PATH", None)
+# Every CLI call and every daemon it starts inherits this, so task status
+# sounds play at volume 0 instead of through the host's speakers.
+os.environ["PLAYHOUSE_MUTE_SOUNDS"] = "1"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--cli", required=True, type=Path)

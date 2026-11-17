@@ -69,6 +69,8 @@ For full end-to-end coverage, the combined script checks that the CLI and UI tes
 
 The fast verifier runs all CLI/XPC cases and checks that the UI suite has the exact same case IDs and expectations. After the CLI gate passes, the UI coverage reviewer inspects only the paired cases affected by the change and does not execute tests. Any UI execution, including full E2E runs, happens in the Tart VM. Keep `./scripts/test-full-e2e.sh` for deliberate full E2E runs across every CLI and UI case. Add the same named case and shared expectation to both suites for each new behavior; `scripts/check-test-parity.py` rejects unmatched, duplicate, or mismatched cases. The VM needs XCTest UI automation available. It does not require Codex sign-in.
 
+`PLAYHOUSE_MUTE_SOUNDS=1` makes the app and the bridge daemon play task status sounds (Ping for Waiting Response, Glass for Review) at volume 0. The sound still "plays", so the setting check and the `task.status_sound.*` diagnostics are unchanged, and each played sound records `environmentMuted: "true"`. A daemon keeps the value it was started with. The CLI/XPC, UI, and live integration runners always set it, so test runs never play sounds through the speakers.
+
 Real provider turns use a separate opt-in suite. It runs against Claude Code by default; pass `--provider codex` for Codex or `--provider all` to also check a Claude → Codex → Claude handoff. Claude needs a working host `claude` login; Codex needs `codex login` and Luna access. Its live UI cases also run in Tart, where the VM needs the provider CLI installed and its own guest login. Use `--show-vm` on the direct Tart command when you need to sign in interactively:
 
 ```sh

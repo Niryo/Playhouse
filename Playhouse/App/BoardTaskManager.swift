@@ -234,9 +234,14 @@ final class BoardTaskManager {
             return
         }
         let sound = NSSound(contentsOfFile: "/System/Library/Sounds/\(name).aiff", byReference: true)
+        // The test runners set PLAYHOUSE_MUTE_SOUNDS=1 (inherited by the daemon) so
+        // sounds still play and are recorded, just at volume 0.
+        if PlayhouseProcessEnvironment.current["PLAYHOUSE_MUTE_SOUNDS"] == "1" { sound?.volume = 0 }
         let played = sound?.play() == true
         PlayhouseDiagnostics.record(played ? "task.status_sound.played" : "task.status_sound.failed", fields: [
-            "taskID": task.id.uuidString, "status": task.status.rawValue, "sound": name
+            "taskID": task.id.uuidString, "status": task.status.rawValue, "sound": name,
+            // Read back from the sound itself, so it reports the volume it actually played at.
+            "environmentMuted": String(sound?.volume == 0)
         ])
         // Each transition owns its sound, so overlapping transitions do not interrupt one another.
         if let sound, played {

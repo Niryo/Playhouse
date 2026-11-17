@@ -95,7 +95,7 @@ enum PlayhouseBridgeDaemonMain {
     /// Playhouse settings travel as `BridgeRequest` fields.
     static func reduceToSessionEnvironment() {
         let kept = BridgeContract.sessionEnvironmentNames
-            .union(["PLAYHOUSE_BRIDGE_SERVICE_NAME", "PLAYHOUSE_BRIDGE_SOCKET_PATH", "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS"])
+            .union(["PLAYHOUSE_BRIDGE_SERVICE_NAME", "PLAYHOUSE_BRIDGE_SOCKET_PATH", "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS", "PLAYHOUSE_MUTE_SOUNDS"])
         for name in ProcessInfo.processInfo.environment.keys where !kept.contains(name) {
             unsetenv(name)
         }
