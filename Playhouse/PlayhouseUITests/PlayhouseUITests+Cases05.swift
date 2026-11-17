@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both, and a pull request status read of the Done task, whose worktree was removed, reports no state instead of failing. A Done task renews too: a follow-up to it returns it to In Progress before its turn starts, and `task repository renew` on a Done task does the same, each with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request); that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
+    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both, and a pull request status read of the Done task, whose worktree was removed, lists only its recorded pull requests, the retired one marked past, without probing instead of failing. A Done task renews too: a follow-up to it returns it to In Progress before its turn starts, and `task repository renew` on a Done task does the same, each with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request); that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
     func test_merged_task_renew_opens_fresh_worktree_and_new_pr() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -120,12 +120,16 @@ extension PlayhouseUITests {
         try "123=merged\n501=merged\n".write(to: stateURL, atomically: true, encoding: .utf8)
         XCTAssertEqual((try runCLI(["task", "move", taskID, "Done"], extraEnvironment: ghEnvironment)["result"] as? [String: Any])?["status"] as? String, "Done")
         XCTAssertFalse(FileManager.default.fileExists(atPath: freshWorktree.path))
+        func listed(_ states: [[String: Any]]?) -> [String] {
+            (states ?? []).map { "\($0["number"] as? Int ?? 0) merged=\($0["merged"] as? Bool ?? false) past=\($0["past"] as? Bool ?? false)" }
+        }
+        let recorded = ["501 merged=true past=false", "123 merged=true past=true"]
         let doneStates = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]]
-        XCTAssertEqual(doneStates?.count, 0, "A Done task whose worktree was removed has no pull request state to report.")
+        XCTAssertEqual(listed(doneStates), recorded, "A Done task whose worktree was removed lists only its recorded pull requests, the retired one marked past, without probing.")
         // A shared read may reuse the card's own probe from just before the move for a few seconds.
         XCTAssertTrue(waitUntil({
-            ((try? self.runCLI(["task", "pr", "status", taskID, "--shared"], extraEnvironment: ghEnvironment))?["result"] as? [[String: Any]])?.isEmpty == true
-        }, timeout: 10), "A shared status read of the Done task reports no state either.")
+            listed((try? self.runCLI(["task", "pr", "status", taskID, "--shared"], extraEnvironment: ghEnvironment))?["result"] as? [[String: Any]]) == recorded
+        }, timeout: 10), "A shared status read of the Done task lists the same recorded pull requests.")
         XCTAssertFalse(app.staticTexts["Pull request operation failed"].exists, "A probe still running when the task moved to Done raises no alert.")
         element("done-archive-button").click()
         XCTAssertTrue(element("done-archive-task-\(taskID)").waitToExist(timeout: 10))
@@ -321,7 +325,7 @@ extension PlayhouseUITests {
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
-    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error and is remembered as skipped at its branch head, so the card offers no further create action; a review sync with no change keeps the skip, and once the primary's pull request merges and the task moves to Done, the Done archive shows the primary's PR link and no create action either. A two-repository task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved, and both repositories are remembered as skipped. After the task changes one of them, the review sync clears only that repository's skip, the card's create action counts it alone as a single PR, and creating it opens exactly one more pull request, for that repository. A later change to the still-skipped repository beside that linked PR brings back a single create action for the repository without a linked pull request, and creating it links that repository too. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error and is remembered as skipped at its branch head, so the card offers no further create action; a review sync with no change keeps the skip, and once the primary's pull request merges and the task moves to Done, the Done archive shows the primary's PR link and no create action either. A two-repository task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved, and both repositories are remembered as skipped. After the task changes one of them, the review sync clears only that repository's skip, the card's create action counts it alone as a single PR, and creating it opens exactly one more pull request, for that repository. A later change to the still-skipped repository beside that linked PR brings back a single create action for the repository without a linked pull request, and creating it with a given --title and --body opens that repository's pull request with that title and body and links it too. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
     func test_task_pr_create_skips_unchanged_repositories() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -459,11 +463,15 @@ extension PlayhouseUITests {
         XCTAssertEqual(unchangedButton.label, "PR. Create a pull request for the repository without a linked pull request")
         XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-502"].exists)
         attachScreenshot(named: "A later change beside a linked PR offers a single PR")
-        revealOnBoard(unchangedButton)
-        unchangedButton.click()
+        // Creating it with a given title and body opens the pull request with them.
+        XCTAssertEqual(try runCLI([
+            "task", "pr", "create", unchangedID, "--title", "Explain the later change", "--body", "Why the primary changed later.",
+        ], extraEnvironment: ghEnvironment)["ok"] as? Bool, true)
         XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-503"].waitToExist(timeout: 30), "The repository changed beside a linked PR should get its pull request.")
         XCTAssertTrue(waitUntil({ !unchangedButton.exists }, timeout: 30), "Both repositories now have pull requests, so no create action remains.")
         XCTAssertEqual(try createTargets(), [normalized(primaryWorktree), normalized(laterWorktree), normalized(laterPrimaryWorktree)])
+        let lastCreate = try XCTUnwrap(try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n").last { $0.hasPrefix("create\t") })
+        XCTAssertTrue(lastCreate.contains("--title Explain the later change --body Why the primary changed later."), "A given title and body open the pull request: \(lastCreate)")
     }
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     func test_task_lifecycle_rollout_clears_records_and_clean_worktrees() throws {

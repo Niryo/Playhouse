@@ -9,7 +9,8 @@
 function PullRequests(props) {
   var row = props.row, prs = row.pullRequests, prefix = props.prefix;
   var create = prs.create;
-  return h(Stack, { axis: "h", spacing: 5 },
+  // Several pull requests keep their numbers whole; the title truncates instead.
+  return h(Stack, { axis: "h", spacing: 5, fixedSize: true },
     create ? h(Button, {
       style: "borderless", emphasis: 4, disabled: create.busy, width: 30, height: 30,
       testID: prefix + "done-archive-create-pr-" + row.id, label: create.label, help: create.help,
@@ -18,7 +19,7 @@ function PullRequests(props) {
     prs.links.map(function (link) {
       return h(Link, {
         key: link.url, url: link.url, emphasis: 5, minWidth: 30, minHeight: 30,
-        testID: prefix + "done-archive-pr-link-" + row.id + "-" + link.number, help: link.repository
+        testID: prefix + "done-archive-pr-link-" + row.id + "-" + link.number, value: link.state, help: link.repository + " · " + link.state
       }, h(Text, { size: 10, weight: "semibold", design: "monospaced" }, "#" + link.number));
     }));
 }

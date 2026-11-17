@@ -416,8 +416,22 @@ class BridgeTestCases05:
         self.assertEqual(len(follows("poll")), polls_when_green, "A green PR isn't polled.")
         self.complete_fixture_turn(followed["id"], executable_name="codex-fixture-follow-review", extra_environment=service_environment)
         wait_for_follows("review", 2)
-        # Generous: the review pass and the next 2s poll can lag when the host is busy.
-        wait_for_follows("poll", polls_when_green + 1, timeout=30)
+
+        def review_outcomes():
+            return [event.get("action") for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.followed"
+                    and event.get("taskID") == followed["id"] and event.get("trigger") == "review"]
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and len(review_outcomes()) < 2:
+            time.sleep(0.25)
+        self.assertEqual(len(review_outcomes()), 2, "The review pass reports its outcome.")
+        if review_outcomes()[1] == "inactive":
+            # Generous: the review pass and the next 2s poll can lag when the host is busy.
+            wait_for_follows("poll", polls_when_green + 1, timeout=30)
+        else:
+            # On a busy host the turn can let go of the task before the pass reads it; the
+            # pass then finds the green PR itself, and a green PR needs no poll.
+            self.assertEqual(review_outcomes()[1], "green", "A review pass that isn't skipped finds the green PR.")
 
         # A pass the plugin started asks it again before it merges: with the mode no longer
         # Merge, it merges nothing.
@@ -520,7 +534,7 @@ class BridgeTestCases05:
         self.assertEqual(merges()[-1], "merge-failed\t812\t--merge")
         idle = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(idle["action"], "inactive", "A refused merge does not retry.")
-    # case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, a board probe that was already running when it moved raises no alert, and `task pr status` of the Done task reports no state instead of the GitHub CLI's error.
+    # case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, a board probe that was already running when it moved raises no alert, and `task pr status` of the Done task lists only its recorded pull request, without probing, instead of the GitHub CLI's error.
     def test_review_probe_failure_alerts_only_while_in_review(self):
         task = self.create_repo_task("Review probe failure", [self.primary], materialize=True)
         self.assertEqual(task["status"], "Review")
@@ -539,8 +553,9 @@ class BridgeTestCases05:
         self.assertEqual(self.assert_success(moved)["status"], "Done")
         self.assertFalse(worktree.exists(), "Moving to Done removes the worktree a later probe would read.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Done")
-        self.assertEqual(self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)[0]), [],
-                         "A Done task whose worktree was removed has no pull request state to report.")
+        listed = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)[0])
+        self.assertEqual([(item["number"], item.get("past")) for item in listed], [(123, None)],
+                         "A Done task whose worktree was removed lists only its recorded pull request, without probing GitHub.")
     # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     def test_review_pr_conflicts_probe_and_verify(self):
         task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
@@ -558,7 +573,7 @@ class BridgeTestCases05:
         executable = directory / "gh"
         executable.write_text(
             "#!/bin/sh\n"
-            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid,statusCheckRollup ]; then\n"
+            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid,statusCheckRollup,state ]; then\n"
             "  echo 'Unexpected gh fixture command' >&2\n"
             "  exit 2\n"
             "fi\n"

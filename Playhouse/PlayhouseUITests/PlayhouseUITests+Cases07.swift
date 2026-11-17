@@ -426,7 +426,7 @@ extension PlayhouseUITests {
         XCTAssertGreaterThan(badgeAfterSend.frame.minX, title.frame.maxX, "Repository badges should remain beside the task title after a message is sent.")
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - headerMidY()), 4, "Repository badges should stay vertically centered in the fixed task header after the timeline scrolls.")
     }
-    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit. Both buttons sit clear of the list's overlay scroller and each shows a hover highlight while the pointer is on it.
+    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, adding an attached repository again gives it another worktree on its own branch, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit. Both buttons sit clear of the list's overlay scroller and each shows a hover highlight while the pointer is on it.
     func test_conversation_repository_picker_add_and_replace_buttons() throws {
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI(["task", "create", "--title", "Picker add and replace", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any]
@@ -512,6 +512,15 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("conversation-repository-badge-primary").exists, "Adding keeps the other selected repositories.")
         XCTAssertEqual(Set(try attachedPaths()), Set([fixture.primary.path, fixture.secondary.path]))
         attachScreenshot(named: "Clicking the row added secondary alongside primary")
+        // Adding an attached repository again gives it another worktree, with a chip per worktree.
+        let again = try XCTUnwrap((try runCLI(["task", "repository", "add", taskID, "--repo", fixture.secondary.path])["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(again.compactMap { $0["repositoryPath"] as? String }.filter { $0 == fixture.secondary.path }.count, 2)
+        let secondaryBranches = again.filter { $0["repositoryPath"] as? String == fixture.secondary.path }.compactMap { $0["branch"] as? String }
+        XCTAssertEqual(Set(secondaryBranches).count, 2, "Each worktree of a repository has its own branch.")
+        for branch in secondaryBranches {
+            XCTAssertTrue(element("conversation-repository-badge-secondary-\(branch)").waitToExist(timeout: 10), "Each secondary worktree gets its own chip.")
+        }
+        XCTAssertFalse(element("conversation-repository-badge-secondary").exists)
         // Replace removes every selected repository.
         search("alternate")
         let alternateRow = element("conversation-repository-suggestion-alternate")
@@ -524,8 +533,12 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Hovering Replace on alternate")
         alternateReplace.click()
         XCTAssertTrue(element("conversation-repository-badge-alternate").waitToExist(timeout: 10))
-        XCTAssertTrue(waitUntil({ !self.element("conversation-repository-badge-primary").exists && !self.element("conversation-repository-badge-secondary").exists }, timeout: 10), "Replace should remove the previous repository badges.")
-        XCTAssertEqual(try attachedPaths().map { URL(fileURLWithPath: $0).lastPathComponent }, ["alternate"])
+        // Replace removes the worktrees one by one; the last secondary one is briefly the plain chip.
+        XCTAssertTrue(waitUntil({ (try? attachedPaths().map { URL(fileURLWithPath: $0).lastPathComponent }) == ["alternate"] }, timeout: 15),
+                      "Replace should leave only alternate attached: \(String(describing: try? attachedPaths()))")
+        XCTAssertTrue(waitUntil({ !self.element("conversation-repository-badge-primary").exists
+            && !self.element("conversation-repository-badge-secondary").exists
+            && secondaryBranches.allSatisfy { !self.element("conversation-repository-badge-secondary-\($0)").exists } }, timeout: 10), "Replace should remove the previous repository badges.")
         attachScreenshot(named: "Replace left only alternate attached")
     }
     // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.

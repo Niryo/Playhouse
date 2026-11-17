@@ -345,7 +345,7 @@ final class PlayhouseBridgeRuntime {
                         allowDiscardingUncommittedChanges: request.arguments["allowDiscardingUncommittedChanges"]?.bool ?? false
                     ))
                 }
-            case "task.pr.autopilot", "task.pr.create",
+            case "task.pr.autopilot", "task.pr.create", "task.pr.link",
                  "task.pr.conflicts", "task.pr.status", "task.pr.verify", "task.pr.resolve", "task.pr.sync":
                 result = try await pullRequestOperation(
                     request, taskManager: taskManager, settings: settings,
@@ -428,7 +428,7 @@ final class PlayhouseBridgeRuntime {
                     PlayhouseDiagnostics.record("chat.page.close_turn.settle_failed", fields: fields)
                 }
                 result = try Self.value(["page": page])
-            case "task.rename", "task.repository.add", "task.repository.add-batch", "task.repository.replace",
+            case "task.rename", "task.repository.add", "task.repository.add-batch", "task.repository.add-worktree", "task.repository.replace",
                  "task.repository.recent", "task.repository.edit", "task.repository.renew", "task.repository.remove",
                  "task.prompt.save", "task.draft.save", "task.comments.save", "task.comments.edit",
                  "task.roots.get", "workspace.roots", "task.roots.set", "task.terminal",

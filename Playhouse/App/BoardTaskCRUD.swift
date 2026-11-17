@@ -75,13 +75,19 @@ extension BoardTaskManager {
         let folders = try Self.normalizeOptionalRoots(contextFolders)
         var worktrees: [RepositoryWorktreeRecord] = []
         for spec in repositories {
-            worktrees.append(try await worktreeService.pendingRecord(spec: spec))
+            var record = try await worktreeService.pendingRecord(spec: spec)
+            // A repository listed more than once gets a worktree for each, on its own branch:
+            // a further automatic one waits as "auto 2" and is named when the task starts.
+            if RepositoryWorktreeRecord.isAutomaticBranch(record.branch) {
+                record.branch = RepositoryWorktreeRecord.automaticBranch(for: record.repositoryPath, among: worktrees)
+            }
+            worktrees.append(record)
         }
         let duplicate = worktrees.first { record in
-            worktrees.filter { $0.repositoryPath == record.repositoryPath }.count > 1
+            worktrees.filter { $0.repositoryPath == record.repositoryPath && $0.branch == record.branch }.count > 1
         }
         if let duplicate {
-            throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(duplicate.repositoryPath)")
+            throw BridgeCommandError(code: "invalid_argument", message: "Each worktree of a repository needs its own branch; '\(duplicate.branch)' is given twice for \(duplicate.repositoryPath).")
         }
         let roots = try Self.normalizeOptionalRoots(worktrees.map(\.repositoryPath) + folders)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)

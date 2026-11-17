@@ -742,14 +742,14 @@ private struct NativeRepositoryChipsDemo: View {
     var body: some View {
         let chipsModel = chipsModel
         let pickerModel = pickerModel
-        let chipNames = chipsModel.chips.map { (path: $0.path, name: $0.name) }
+        let chipNames = chipsModel.chips.map { (path: $0.id, name: $0.name) }
         let repositoryNames = pickerModel.repositories.map { (path: $0.path, name: $0.name) }
         AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
             AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             RepositoryChipsView(model: chipsModel, actions: RepositoryChipsActions(
                 edit: { lastAction = "edit \(name($0, in: chipNames))" },
                 remove: { path in
-                    chips = chipsModel.chips.filter { $0.path != path }
+                    chips = chipsModel.chips.filter { $0.id != path }
                     lastAction = "remove \(name(path, in: chipNames))"
                 },
                 add: {

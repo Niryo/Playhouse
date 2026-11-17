@@ -112,8 +112,13 @@ enum TaskThreadDeveloperInstructions {
         \(quotedExecutable) task repository add \(id) --repo <path>
         \(quotedExecutable) task repository add-batch \(id) --repo <path> [--repo <path>...]
         \(quotedExecutable) task repository replace \(id) --repo <path> [--repo <path>...]
+        \(quotedExecutable) task repository add-worktree \(id) --repo <path> [--branch <name>] [--branch-from <ref>]   (another worktree, on its own new branch, of a repository this task already has)
         \(quotedExecutable) task repository remove \(id) --repo <path>
         \(quotedExecutable) task repository renew \(id) --repo <path>   (only after the repository's pull request merged)
+        \(quotedExecutable) task pr create \(id) [--title <title>] [--body <text>]
+        \(quotedExecutable) task pr link \(id) --worktree <path> --url <pr-url>
+        A task can have several worktrees of the same repository, each on its own branch with at most one pull request. When the task has more than one worktree of a repository, pass --worktree <worktree-path> instead of --repo to remove, renew, edit or link one of them.
+        Open a task's pull requests with task pr create. If you open one another way (for example with gh pr create), register it right away with task pr link from that worktree's branch, so the task lists it. Never switch the branch checked out in a task worktree; when work needs another branch of the same repository, create one with task repository add-worktree and work in its returned worktreePath.
         \(quotedExecutable) settings get
         \(quotedExecutable) workspace repos list
 

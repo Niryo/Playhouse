@@ -78,6 +78,7 @@ extension PlayhouseUITests {
         let stateURL = directory.appendingPathComponent("state")
         let callLogURL = directory.appendingPathComponent("calls")
         let createLogURL = directory.appendingPathComponent("create-calls")
+        let detectLogURL = directory.appendingPathComponent("detect-calls")
         let createFailureURL = directory.appendingPathComponent("fail-create-attempt")
         try expectedNumbers.map { "\($0)=unmerged" }.joined(separator: "\n").appending("\n")
             .write(to: stateURL, atomically: true, encoding: .utf8)
@@ -94,6 +95,7 @@ extension PlayhouseUITests {
             "PLAYHOUSE_E2E_GH_STATE_PATH": stateURL.path,
             "PLAYHOUSE_E2E_GH_CALL_LOG": callLogURL.path,
             "PLAYHOUSE_E2E_GH_CREATE_LOG": createLogURL.path,
+            "PLAYHOUSE_E2E_GH_DETECT_LOG": detectLogURL.path,
             "PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH": createFailureURL.path,
             "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "501",
             "PLAYHOUSE_E2E_GH_STARTED_DIRECTORY": startedDirectory.path,

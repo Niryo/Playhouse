@@ -124,14 +124,14 @@ extension BoardTaskManager {
         let outcome: Result<[Int], BridgeCommandError>? = try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             guard task.status == .review, try !hasConversationTurnReservation(id) else { return nil }
-            let heads = Dictionary(states.filter { !$0.merged }.map { ($0.repositoryPath, $0.headRefOid) }, uniquingKeysWith: { first, _ in first })
-            let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && heads.keys.contains($0.repositoryPath) }
+            let heads = Dictionary(states.filter { !$0.merged }.map { ($0.worktreePath, $0.headRefOid) }, uniquingKeysWith: { first, _ in first })
+            let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && heads.keys.contains($0.worktreePath) }
             let executable = try pullRequestService.resolveExecutable()
             var merged: [Int] = []
             for record in records {
                 let number = record.pullRequestNumber ?? 0
                 do {
-                    guard let head = heads[record.repositoryPath] ?? nil else {
+                    guard let head = heads[record.worktreePath] ?? nil else {
                         throw BridgeCommandError(code: "operation_failed", message: "GitHub didn't report its head commit.")
                     }
                     let method = try await pullRequestService.merge(record, headOid: head, executable: executable)
@@ -171,7 +171,17 @@ extension BoardTaskManager {
         }
     }
 
-    func createPullRequests(_ id: UUID, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil) async throws -> BoardTaskRecord {
+    /// Opens a pull request for every started worktree that waits for one. `title` and
+    /// `body` replace the task title and the generated description when given.
+    func createPullRequests(
+        _ id: UUID,
+        clients: ConversationClients,
+        settingsManager: WorkspaceSettingsManager? = nil,
+        title requestedTitle: String? = nil,
+        body requestedBody: String? = nil
+    ) async throws -> BoardTaskRecord {
+        let requestedTitle = requestedTitle?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        let requestedBody = requestedBody?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         let lookup = try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
             let originalRecords = initialTask.repositoryWorktrees
@@ -183,7 +193,7 @@ extension BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
             }
             var records = originalRecords
-            for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
+            for index in records.indices where !records[index].hasPullRequest || records[index].awaitsPullRequest {
                 do {
                     // `--head` skips gh's push flow, and `gh pr list` also needs a
                     // published branch. Commit and publish before either GH request.
@@ -196,6 +206,8 @@ extension BoardTaskManager {
                 if let existing = try await pullRequestService.findOpen(records[index], executable: gh) {
                     records[index].pullRequestNumber = existing.number
                     records[index].pullRequestURL = existing.url
+                    records[index].isPullRequestClosed = false
+                    records[index].isPullRequestMerged = false
                 } else if try await !worktreeService.hasCommitsAheadOfMergeTarget(records[index]) {
                     // A repository the task never changed has nothing to propose;
                     // the card stops offering it one until the task changes it.
@@ -223,7 +235,9 @@ extension BoardTaskManager {
         let conversationText = conversation.messages.map { "\($0.role.rawValue): \($0.text)" }.joined(separator: "\n\n")
         let currentTitle = try requireSubject(id).title
         let summary: String
-        if !conversationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let requestedBody {
+            summary = requestedBody
+        } else if !conversationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let roots = records.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) }
             let workspace = try ConversationWorkspaceContext(roots: roots)
             var generated = ""
@@ -279,10 +293,12 @@ extension BoardTaskManager {
                     } catch {
                         throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
                     }
-                    pullRequest = try await pullRequestService.create(record, title: currentTitle, body: summary, executable: gh)
+                    pullRequest = try await pullRequestService.create(record, title: requestedTitle ?? currentTitle, body: summary, executable: gh)
                 }
                 updatedRecords[index].pullRequestNumber = pullRequest.number
                 updatedRecords[index].pullRequestURL = pullRequest.url
+                updatedRecords[index].isPullRequestClosed = false
+                updatedRecords[index].isPullRequestMerged = false
                 let currentTask = try requireTask(id)
                 guard currentTask.repositoryWorktrees == expectedRecords else {
                     throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while the pull request was being created.")
@@ -310,6 +326,12 @@ extension BoardTaskManager {
     /// probe of a Done task whose linked worktrees are gone (often one that was already
     /// running when the task moved) has no state to report; that is not a failure.
     func pullRequestStatus(_ id: UUID, includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {
+        // Best-effort: the status of the pull requests already linked is read without it.
+        do {
+            try await detectPullRequests(id)
+        } catch {
+            PlayhouseDiagnostics.record("task.pr.detect.failed", fields: ["taskID": id.uuidString, "error": "\(error)"])
+        }
         do {
             return try await reviewPullRequests(id, includeReviewThreads: includeReviewThreads)
         } catch {
@@ -324,27 +346,60 @@ extension BoardTaskManager {
         }
     }
 
+    /// Every pull request the task has recorded that `probed` (a status read's answer)
+    /// leaves out: closed ones, a Done task's (whose worktrees are gone), and those of
+    /// worktrees retired by renew, marked `past`. Read from the task's records, not probed.
+    func recordedPullRequests(_ id: UUID, besides probed: [PullRequestReviewState]) throws -> [PullRequestReviewState] {
+        let task = try requireTask(id)
+        func state(_ record: RepositoryWorktreeRecord, past: Bool) -> PullRequestReviewState? {
+            guard let number = record.pullRequestNumber else { return nil }
+            var state = PullRequestReviewState(
+                repositoryPath: record.repositoryPath, worktreePath: record.worktreePath, branch: record.branch,
+                url: record.pullRequestURL, number: number, merged: record.isPullRequestMerged,
+                mergeable: "UNKNOWN", headRefOid: nil, localHeadOid: nil, closed: record.isPullRequestClosed
+            )
+            state.past = past ? true : nil
+            return state
+        }
+        let current = task.repositoryWorktrees.filter { record in
+            !probed.contains { $0.worktreePath == record.worktreePath && $0.number == record.pullRequestNumber }
+        }
+        return current.compactMap { state($0, past: false) } + task.pastRepositoryWorktrees.compactMap { state($0, past: true) }
+    }
+
     /// Autopilot also reads unresolved review threads; a plain status probe skips
     /// that GitHub request because nothing acts on it.
     func reviewPullRequests(_ task: BoardTask, includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {
-        let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
+        // A closed pull request has no review state left to act on; the card shows it closed.
+        let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && !$0.isPullRequestClosed }
         let states = try await reviewPullRequests(records, includeReviewThreads: includeReviewThreads)
-        try await recordPullRequestsMerged(task.id, repositoryPaths: states.filter(\.merged).map(\.repositoryPath))
-        return states
+        try await recordPullRequestOutcomes(
+            task.id,
+            merged: states.filter(\.merged).map(\.worktreePath),
+            closed: states.filter(\.closed).map(\.worktreePath)
+        )
+        return states.filter { !$0.closed }
     }
 
-    /// Persists that these repositories' linked pull requests merged, so follow-up turns
-    /// are told to renew the worktree instead of committing to the finished branch.
-    func recordPullRequestsMerged(_ id: UUID, repositoryPaths: [String]) async throws {
-        let paths = Set(repositoryPaths)
-        guard !paths.isEmpty else { return }
+    /// Persists that these worktrees' linked pull requests merged, so follow-up turns
+    /// are told to renew the worktree instead of committing to the finished branch, or
+    /// closed unmerged on GitHub, so the card shows them closed and Done doesn't wait on them.
+    func recordPullRequestOutcomes(_ id: UUID, merged: [String], closed: [String]) async throws {
+        let mergedPaths = Set(merged)
+        let closedPaths = Set(closed)
+        guard !mergedPaths.isEmpty || !closedPaths.isEmpty else { return }
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             var changed = false
             let records = task.repositoryWorktrees.map { record in
                 var record = record
-                if record.pullRequestNumber != nil, !record.isPullRequestMerged, paths.contains(record.repositoryPath) {
+                guard record.pullRequestNumber != nil else { return record }
+                if !record.isPullRequestMerged, mergedPaths.contains(record.worktreePath) {
                     record.isPullRequestMerged = true
+                    changed = true
+                }
+                if !record.isPullRequestClosed, closedPaths.contains(record.worktreePath) {
+                    record.isPullRequestClosed = true
                     changed = true
                 }
                 return record
@@ -366,7 +421,191 @@ extension BoardTaskManager {
             }
             var states: [PullRequestReviewState] = []
             for try await state in group { states.append(state) }
-            return states.sorted { $0.repositoryPath < $1.repositoryPath }
+            return states.sorted { ($0.repositoryPath, $0.worktreePath) < ($1.repositoryPath, $1.worktreePath) }
+        }
+    }
+
+    /// Brings each started worktree's record in line with Git and GitHub, so a pull
+    /// request opened outside Playhouse (plain `gh pr create`) still shows on the task.
+    /// A worktree switched to another branch records that branch; a pull request linked
+    /// to the old branch moves to the task's past worktrees and stays listed. A worktree
+    /// without an open or merged pull request takes the one GitHub has for its branch.
+    /// Best effort: Git or GitHub being unavailable leaves the records unchanged.
+    /// A turn holding the task skips it: the agent may be mid-way through switching or
+    /// pushing a branch, and the next read after the turn records what it left.
+    func detectPullRequests(_ id: UUID) async throws {
+        let task = try requireTask(id)
+        guard task.status != .done, try !hasConversationTurnReservation(id) else { return }
+        let candidates = task.repositoryWorktrees.filter {
+            !$0.isPending && FileManager.default.fileExists(atPath: $0.worktreePath)
+        }
+        guard !candidates.isEmpty else { return }
+        let executable = try? pullRequestService.resolveExecutable()
+        var updates: [(old: RepositoryWorktreeRecord, new: RepositoryWorktreeRecord, retired: RepositoryWorktreeRecord?)] = []
+        for record in candidates {
+            var updated = record
+            var retired: RepositoryWorktreeRecord?
+            if let branch = try? await worktreeService.checkedOutBranch(record), branch != record.branch {
+                if let problem = await adoptedBranchProblem(branch, for: record, in: task) {
+                    // Keeping the recorded branch leaves Review's "switch it back" check in force.
+                    PlayhouseDiagnostics.record("task.pr.detect.branch_not_adopted", fields: [
+                        "taskID": id.uuidString, "worktreePath": record.worktreePath,
+                        "recordedBranch": record.branch, "checkedOutBranch": branch, "reason": problem
+                    ])
+                    continue
+                }
+                if record.hasPullRequest { retired = record }
+                updated.branch = branch
+                updated.pullRequestNumber = nil
+                updated.pullRequestURL = nil
+                updated.isPullRequestMerged = false
+                updated.isPullRequestClosed = false
+                updated.pullRequestSkippedHead = nil
+                PlayhouseDiagnostics.record("task.pr.detect.branch_corrected", fields: [
+                    "taskID": id.uuidString, "worktreePath": record.worktreePath,
+                    "recordedBranch": record.branch, "checkedOutBranch": branch
+                ])
+            }
+            if let executable, !updated.hasPullRequest || updated.isPullRequestClosed {
+                do {
+                    if let found = try await pullRequestService.find(branch: updated.branch, record: updated, executable: executable),
+                       found.number != updated.pullRequestNumber || found.isClosed != updated.isPullRequestClosed {
+                        // A closed pull request the branch has since replaced stays listed.
+                        if retired == nil, updated.hasPullRequest, updated.pullRequestURL != found.url { retired = updated }
+                        updated.pullRequestNumber = found.number
+                        updated.pullRequestURL = found.url
+                        updated.isPullRequestMerged = found.isMerged
+                        updated.isPullRequestClosed = found.isClosed
+                        updated.pullRequestSkippedHead = nil
+                        PlayhouseDiagnostics.record("task.pr.detect.found", fields: [
+                            "taskID": id.uuidString, "worktreePath": record.worktreePath,
+                            "number": String(found.number), "state": found.state
+                        ])
+                    }
+                } catch {
+                    PlayhouseDiagnostics.record("task.pr.detect.failed", fields: [
+                        "taskID": id.uuidString, "worktreePath": record.worktreePath, "error": error.localizedDescription
+                    ])
+                }
+            }
+            if updated != record { updates.append((record, updated, retired)) }
+        }
+        guard !updates.isEmpty else { return }
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            var applied: [(old: RepositoryWorktreeRecord, new: RepositoryWorktreeRecord, retired: RepositoryWorktreeRecord?)] = []
+            task.repositoryWorktrees = task.repositoryWorktrees.map { current in
+                guard let update = updates.first(where: { $0.old == current }) else { return current }
+                // Another worktree or task may have taken the branch while GitHub answered.
+                if update.new.branch != current.branch, heldBranchProblem(update.new.branch, for: current, in: task) != nil { return current }
+                applied.append(update)
+                return update.new
+            }
+            guard !applied.isEmpty else { return }
+            retirePullRequests(applied.compactMap(\.retired), on: task)
+            try await saveTaskContext(taskID: id)
+        }
+    }
+
+    /// Keeps pull requests a worktree no longer holds listed on the task, once each.
+    /// A pull request a current worktree still holds is already listed there.
+    func retirePullRequests(_ records: [RepositoryWorktreeRecord], on task: BoardTask) {
+        var listed = Set((task.pastRepositoryWorktrees + task.repositoryWorktrees).compactMap(\.pullRequestURL))
+        for record in records where record.hasPullRequest {
+            guard let url = record.pullRequestURL, listed.insert(url).inserted else { continue }
+            task.pastRepositoryWorktrees.append(record)
+        }
+    }
+
+    /// Why a worktree can't take the branch it was switched to as its task branch, or
+    /// nil when it can. Detection and linking adopt a switched branch, and later commits
+    /// and pushes go to the recorded branch, so a shared base or merge target, or a
+    /// branch another worktree or task holds, never becomes one.
+    func adoptedBranchProblem(_ branch: String, for record: RepositoryWorktreeRecord, in task: BoardTask) async -> String? {
+        let remoteBase = record.branchFrom.hasPrefix("origin/") ? String(record.branchFrom.dropFirst("origin/".count)) : nil
+        if [record.mergeTarget, record.branchFrom, remoteBase].contains(branch) {
+            return "it is the worktree's base or merge target"
+        }
+        if let problem = heldBranchProblem(branch, for: record, in: task) { return problem }
+        let repositoryPath = record.repositoryPath
+        let defaultBranch = try? await PlayhouseBackgroundOperation.run {
+            try PlayhouseWorktreeManager.defaultLocalBranch(repositoryPath: repositoryPath)
+        }
+        return defaultBranch == branch ? "it is the repository's default branch" : nil
+    }
+
+    /// Why `branch` is held by another worktree of the task or by another task, or nil.
+    /// Read again under the task operation lock, since either can change while GitHub answers.
+    func heldBranchProblem(_ branch: String, for record: RepositoryWorktreeRecord, in task: BoardTask) -> String? {
+        let siblings = task.repositoryWorktrees.filter { !$0.isSameWorktree(as: record) }
+        if ownBranches(of: record.repositoryPath, in: siblings).contains(branch) {
+            return "another worktree of this task uses it"
+        }
+        if reservedBranches(repositoryPath: record.repositoryPath, excludingTaskID: task.id).contains(branch) {
+            return "another task uses it"
+        }
+        return nil
+    }
+
+    /// Records the pull request at `url` on the selected worktree. GitHub must report
+    /// the worktree's checked-out branch as the pull request's head branch.
+    func linkPullRequest(_ id: UUID, worktree selector: RepositoryWorktreeSelector, url: String) async throws -> BoardTaskRecord {
+        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard URL(string: trimmedURL)?.host != nil else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Pass the pull request's URL, for example https://github.com/owner/repo/pull/12.")
+        }
+        let initialTask = try requireTask(id)
+        guard initialTask.status != .done else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Pull requests can't be linked on a completed task.")
+        }
+        let record = try repositoryRecord(selector, in: initialTask)
+        guard !record.isPending else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Start the task so this worktree exists before linking a pull request to it.")
+        }
+        let branch = try await worktreeService.checkedOutBranch(record)
+        let executable = try pullRequestService.resolveExecutable()
+        let pullRequest = try await pullRequestService.view(url: trimmedURL, record: record, executable: executable)
+        guard let branch, pullRequest.headRefName == branch else {
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "Pull request #\(pullRequest.number) is for branch '\(pullRequest.headRefName ?? "unknown")', but the worktree \(record.worktreePath) is on \(branch.map { "branch '\($0)'" } ?? "a detached HEAD"). Link it to the worktree of that branch."
+            )
+        }
+        if branch != record.branch, let problem = await adoptedBranchProblem(branch, for: record, in: initialTask) {
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "The worktree \(record.worktreePath) is on branch '\(branch)', which can't be a task branch because \(problem). Switch it back to '\(record.branch)', or create another worktree with task repository add-worktree."
+            )
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard let index = task.repositoryWorktrees.firstIndex(where: { $0 == record }) else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The task worktrees changed while the pull request was being read. Try again.")
+            }
+            if branch != record.branch, let problem = heldBranchProblem(branch, for: record, in: task) {
+                throw BridgeCommandError(
+                    code: "invalid_argument",
+                    message: "The worktree \(record.worktreePath) is on branch '\(branch)', which can't be a task branch because \(problem). Switch it back to '\(record.branch)', or create another worktree with task repository add-worktree."
+                )
+            }
+            var updated = record
+            updated.branch = branch
+            updated.pullRequestNumber = pullRequest.number
+            updated.pullRequestURL = pullRequest.url
+            updated.isPullRequestMerged = pullRequest.isMerged
+            updated.isPullRequestClosed = pullRequest.isClosed
+            updated.pullRequestSkippedHead = nil
+            var repositories = task.repositoryWorktrees
+            repositories[index] = updated
+            task.repositoryWorktrees = repositories
+            if record.hasPullRequest, record.pullRequestURL != pullRequest.url || record.branch != branch {
+                retirePullRequests([record], on: task)
+            }
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.pr.linked", fields: [
+                "taskID": id.uuidString, "worktreePath": record.worktreePath, "number": String(pullRequest.number)
+            ])
+            return BoardTaskRecord(task: task)
         }
     }
 
@@ -614,4 +853,8 @@ extension BoardTask {
         if pullRequestAutopilot { return pullRequestAutoMerge ? .merge : .autopilot }
         return autoCreatePullRequestOnReview ? .pullRequest : .manual
     }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

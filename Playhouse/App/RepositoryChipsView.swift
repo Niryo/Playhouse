@@ -6,10 +6,19 @@ import SwiftUI
 /// every accessibility identifier ("" in the header).
 struct RepositoryChipsModel: Codable, Equatable {
     struct Chip: Codable, Equatable {
-        /// The repository folder's name, which its identifiers end with.
+        /// The repository folder's name, which its identifiers end with; with the
+        /// branch appended when the task has several worktrees of the repository.
         var name: String
-        /// The source repository's path, which the chip's actions name.
+        /// The source repository's path.
         var path: String
+        /// The worktree the chip stands for, which its actions name; the path when absent.
+        var key: String?
+        /// Shown beside the name when the task has several worktrees of the repository.
+        var branch: String?
+
+        var id: String { key ?? path }
+        /// The repository folder's name, the chip's text.
+        var title: String { URL(fileURLWithPath: path).lastPathComponent }
     }
 
     var prefix: String
@@ -22,11 +31,42 @@ struct RepositoryChipsModel: Codable, Equatable {
 }
 
 extension RepositoryChipsModel {
-    init(repositoryPaths: [String], readOnly: Bool) {
+    /// A chip per worktree. A repository the task has once keeps the chip and
+    /// identifiers it always had; several worktrees of one repository each show
+    /// their branch and end their identifiers with it.
+    init(records: [RepositoryWorktreeRecord], readOnly: Bool) {
         prefix = ""
-        chips = repositoryPaths.map { Chip(name: URL(fileURLWithPath: $0).lastPathComponent, path: $0) }
+        let counts = Dictionary(grouping: records, by: \.repositoryPath).mapValues(\.count)
+        chips = records.indices.map { index in
+            let record = records[index]
+            let name = URL(fileURLWithPath: record.repositoryPath).lastPathComponent
+            guard (counts[record.repositoryPath] ?? 0) > 1 else {
+                return Chip(name: name, path: record.repositoryPath, key: records.chipKey(at: index))
+            }
+            return Chip(name: "\(name)-\(record.branch)", path: record.repositoryPath, key: records.chipKey(at: index), branch: record.branch)
+        }
         accent = AtomColor.hex(WorkspaceTheme.accent)
         self.readOnly = readOnly
+    }
+}
+
+extension Array where Element == RepositoryWorktreeRecord {
+    /// What a header chip names its worktree by: the worktree's path once it is
+    /// created, else the repository and the record's place among that
+    /// repository's pending records, which a branch edit doesn't change.
+    func chipKey(at index: Int) -> String {
+        let record = self[index]
+        guard record.isPending else { return record.worktreePath }
+        let ordinal = self[..<index].filter { $0.isPending && $0.repositoryPath == record.repositoryPath }.count
+        return "\(record.repositoryPath)#\(ordinal)"
+    }
+
+    func chipKey(of record: RepositoryWorktreeRecord) -> String? {
+        firstIndex { $0.isSameWorktree(as: record) }.map(chipKey(at:))
+    }
+
+    func record(chipKey key: String) -> RepositoryWorktreeRecord? {
+        indices.first { chipKey(at: $0) == key }.map { self[$0] }
     }
 }
 
@@ -86,7 +126,7 @@ extension RepositoryPickerModel {
     }
 }
 
-/// What the chips do; each chip's actions name its repository's path.
+/// What the chips do; each chip's actions name its `Chip.id`.
 struct RepositoryChipsActions {
     /// Opens the chip's settings.
     var edit: (String) -> Void = { _ in }
@@ -117,7 +157,7 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
     let model: RepositoryChipsModel
     var actions = RepositoryChipsActions()
     var isPickerPresented: Binding<Bool> = .constant(false)
-    /// The path of the chip whose settings are open.
+    /// The `Chip.id` of the chip whose settings are open.
     var editingPath: Binding<String?> = .constant(nil)
     @ViewBuilder var picker: () -> Picker
     @ViewBuilder var settings: (RepositoryChipsModel.Chip) -> Settings
@@ -126,7 +166,7 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
 
     var body: some View {
         AtomStack(props: StackProps(axis: "h", spacing: 10)) {
-            ForEach(model.chips, id: \.path) { chip($0) }
+            ForEach(model.chips, id: \.id) { chip($0) }
             AtomButton(
                 props: ButtonProps(disabled: model.readOnly),
                 common: AtomCommon(testID: "\(prefix)add-conversation-repository-button", label: "Add repository", help: "Add a repository"),
@@ -146,7 +186,7 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
             AtomButton(
                 props: ButtonProps(disabled: model.readOnly),
                 common: AtomCommon(testID: "\(prefix)conversation-repository-badge-\(name)", help: "Edit repository settings for \(name)"),
-                action: { actions.edit(chip.path) }
+                action: { actions.edit(chip.id) }
             ) {
                 AtomPanel(
                     props: PanelProps(fill: "primary", fillOpacity: 0.08, capsule: true, stroke: "primary", strokeOpacity: 0.14),
@@ -154,14 +194,17 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
                 ) {
                     AtomStack(props: StackProps(axis: "h", spacing: 6)) {
                         AtomIcon(props: IconProps(name: "arrow.triangle.branch", size: 11, weight: "semibold", color: model.accent))
-                        AtomText(props: TextProps(text: name, size: 13, weight: "semibold", color: "primary", lineLimit: 1))
+                        AtomText(props: TextProps(text: chip.branch == nil ? name : chip.title, size: 13, weight: "semibold", color: "primary", lineLimit: 1))
+                        if let branch = chip.branch {
+                            AtomText(props: TextProps(text: branch, size: 11, color: "secondary", lineLimit: 1, truncation: "middle"))
+                        }
                     }
                 }
             }
             .popover(isPresented: Binding(
-                get: { editingPath.wrappedValue == chip.path },
+                get: { editingPath.wrappedValue == chip.id },
                 // Opening another chip's settings closes this one; only this chip's own dismissal clears it.
-                set: { if !$0, editingPath.wrappedValue == chip.path { editingPath.wrappedValue = nil } }
+                set: { if !$0, editingPath.wrappedValue == chip.id { editingPath.wrappedValue = nil } }
             )) {
                 settings(chip)
             }
@@ -169,7 +212,7 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
             if !model.readOnly {
                 AtomButton(
                     common: AtomCommon(testID: "\(prefix)remove-conversation-repository-\(name)", label: "Remove \(name)", help: "Remove \(name) from this task"),
-                    action: { actions.remove(chip.path) }
+                    action: { actions.remove(chip.id) }
                 ) {
                     AtomPanel(
                         props: PanelProps(fill: "panel", fillOpacity: 1, capsule: true, stroke: "primary", strokeOpacity: 0.16),
