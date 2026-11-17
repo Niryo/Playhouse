@@ -211,3 +211,76 @@ Playhouse.render(h(Page));
         builtin = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"]}["scheduled-tasks"]
         self.assertEqual((builtin["placement"], builtin["presentation"], builtin["builtIn"]), ("mainSidebar", "page", True))
         self.assert_failure(self.call_cli("plugin", "render", "--plugin", "scheduled-tasks", expected_status=2)[0], "invalid_argument")
+    # case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages. The labels can be hidden and shown again, which persists across a relaunch, and agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    def test_standalone_chat_page_anchors_jump_and_recall(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-page-anchors"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+
+        def cli(*arguments, **options):
+            return self.call_cli(*arguments, extra_environment=environment, **options)[0]
+
+        # Forty-two short pages, then three long ones: more pages than the labels read at
+        # once, and more messages than the transcript loads at once.
+        long_title = "Deep ocean currents and the thermohaline circulation"
+        topics = [(f"Topic {number:02d}", 1) for number in range(1, 43)] + [(long_title, 19), ("Glaciers", 19), ("Harbor", 19)]
+        for title, replies in topics:
+            self.assert_success(cli("conversation", "send", chat_id, "--message", f"anchor-page:{title.replace(' ', '-')}:{replies}"))
+        pages = [page for page in self.assert_success(cli("chat", "page", "list", "--limit", "100"))["pages"] if page["messageCount"] > 0]
+        self.assertEqual([page["title"] for page in pages], [title for title, _ in reversed(topics)],
+                         "Each turn opens its own titled page, listed newest first.")
+        self.assertEqual([page["messageCount"] for page in pages], [replies + 1 for _, replies in reversed(topics)])
+        newest = [page["title"] for page in self.assert_success(cli("chat", "page", "list", "--limit", "40"))["pages"]]
+        self.assertEqual(len(newest), 40, "The labels read the newest pages first.")
+        self.assertNotIn("Topic 03", newest, "Older pages are read only when asked for.")
+        page_ids = {page["title"]: page["id"] for page in pages}
+
+        full = self.assert_success(cli("conversation", "history", chat_id))["messages"]
+        full_ids = [message["id"] for message in full]
+        self.assertEqual(len(full), 144)
+
+        # A page's window starts at its first message and holds only the asked-for messages.
+        window = self.assert_success(cli("conversation", "history", chat_id, "--page", page_ids["Topic 03"], "--limit", "40"))
+        self.assertEqual([message["id"] for message in window["messages"]], full_ids[4:44])
+        self.assertTrue(window["messages"][0]["text"].endswith("anchor-page:Topic-03:1"))
+        self.assertEqual(window["messages"][1]["text"], "Topic 03 reply 1.")
+        self.assertEqual((window["earlierMessageCount"], window["laterMessageCount"]), (4, 100))
+        # Reading on from the window's end continues it without the pages already read.
+        following = self.assert_success(cli("conversation", "history", chat_id, "--after", full_ids[43], "--limit", "80"))
+        self.assertEqual([message["id"] for message in following["messages"]], full_ids[44:124])
+        self.assertEqual((following["earlierMessageCount"], following["laterMessageCount"]), (44, 20))
+        # The newest page's window ends with the chat.
+        last = self.assert_success(cli("conversation", "history", chat_id, "--page", page_ids["Harbor"], "--limit", "40"))
+        self.assertEqual([message["id"] for message in last["messages"]], full_ids[124:])
+        self.assertEqual((last["earlierMessageCount"], last["laterMessageCount"]), (124, 0))
+        ending = self.assert_success(cli("conversation", "history", chat_id, "--after", full_ids[-1], "--limit", "80"))
+        self.assertEqual((ending["messages"], ending["laterMessageCount"]), ([], 0))
+        # Reading backward from the window still works as before.
+        earlier = self.assert_success(cli("conversation", "history", chat_id, "--before", full_ids[4], "--limit", "80"))
+        self.assertEqual([message["id"] for message in earlier["messages"]], full_ids[:4])
+
+        self.assert_failure(cli("conversation", "history", chat_id, "--page", "no-such-page", expected_status=3), "not_found")
+        self.assert_failure(cli("conversation", "history", chat_id, "--after", "no-such-message", expected_status=3), "not_found")
+        for combination in (("--before", full_ids[10], "--page", page_ids["Topic 03"]),
+                            ("--before", full_ids[10], "--after", full_ids[4]),
+                            ("--after", full_ids[4], "--page", page_ids["Topic 03"])):
+            self.assert_failure(cli("conversation", "history", chat_id, *combination, expected_status=2), "invalid_argument")
+        board_task = self.create_task("Chat page history rejection")
+        self.assert_failure(cli("conversation", "history", board_task["id"], "--page", page_ids["Topic 03"], expected_status=2), "invalid_argument")
+
+        # Recalling a page sends it along with the next message, and only that page.
+        self.assert_success(cli("conversation", "send", chat_id, "--message", "What did we say before?", "--context-page", page_ids["Topic 03"]))
+        turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        # The page classifier's own turns quote the message too; the chat's turn is not one of them.
+        recalled = [turn for turn in turns if (turn.get("userText") or "").endswith("What did we say before?")
+                    and not turn["userText"].startswith("Classify the latest user message")][-1]
+        self.assertIn("anchor-page:Topic-03:1", recalled["userText"], "The recalled page travels with the turn.")
+        self.assertIn("Topic 03 reply 1.", recalled["userText"])
+        self.assertNotIn("Topic 04 reply 1.", recalled["userText"], "Only the recalled page is carried.")

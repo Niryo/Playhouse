@@ -132,6 +132,8 @@ struct TaskConversationView: View {
     @State var didCopyTaskTitle = false
     @State var taskTitleCopyFeedbackToken = UUID()
     @State var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
+    /// The message at the top of the transcript's viewport, as last reported.
+    @State var topTranscriptRowID: String?
     @State var conversationMode: ConversationMode = .code
     @State var isEnteringGoal = false
     @State var activeGoal: CodexThreadGoal?
@@ -174,6 +176,21 @@ struct TaskConversationView: View {
     /// read a page at a time, and the next page loads once the reader scrolls
     /// past the oldest message already here.
     @State var earlierStoredMessageCount = 0
+    /// The newest message rendered while the reader browses an earlier chat page. The window
+    /// then ends there instead of at the newest message, and grows downward as they scroll.
+    @State var renderedWindowEndID: String?
+    /// Messages left unloaded between a chat page the reader jumped to and the newest ones.
+    @State var historyGap: ConversationHistoryGap?
+    @State var isLoadingNewerConversationMessages = false
+    /// Counts chat page jumps, so a page read that a later jump overtook is dropped.
+    @State var chatPageJumpCount = 0
+    /// The standalone chat's page labels. Only the labels read it, so the page the reader is on
+    /// changes as they scroll without re-rendering the transcript.
+    @State var chatPageAnchors = ChatPageAnchorsModel()
+    @AppStorage(WorkspaceSettings.chatPageAnchorsHiddenKey, store: WorkspaceSettings.preferencesStore)
+    var hidesChatPageAnchors = false
+    /// Earlier chat pages the next message recalls into the agent's context.
+    @State var recalledChatPages: [StandaloneChatPage] = []
     /// The newest question the transcript has presented, which tells one just sent from it.
     @State var lastScrolledUserMessageID: String?
     @State var annotations: [ConversationAnnotation] = []
@@ -458,7 +475,8 @@ struct TaskConversationView: View {
         return ConversationMessage.latestTurnStartIndex(in: allMessages).map { allMessages[$0].id }
     }
 
-    /// The window runs from `oldestRenderedMessageID` to the newest message.
+    /// The window runs from `oldestRenderedMessageID` to the newest message, or to
+    /// `renderedWindowEndID` while the reader browses an earlier chat page.
     /// A conversation that was empty when it loaded establishes no window of
     /// its own, so it keeps the newest batch rendered as messages arrive.
     var renderedConversationMessages: [ConversationMessage] {
@@ -466,6 +484,9 @@ struct TaskConversationView: View {
         guard let oldestRenderedMessageID,
               let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
             return Array(allMessages.suffix(Self.followedConversationMessageCount))
+        }
+        if let endIndex = renderedWindowEndIndex(in: allMessages, from: startIndex) {
+            return Array(allMessages[startIndex...endIndex])
         }
         return Array(allMessages[startIndex...])
     }
@@ -866,7 +887,7 @@ struct TaskConversationView: View {
     /// in. Only standalone chat has pages, so task conversations always send an empty list.
     func standaloneChatPageIDs(for pendingAnnotations: [ConversationAnnotation]) -> [String] {
         guard task.isStandaloneChat, !pendingAnnotations.isEmpty else { return [] }
-        let activePageID = messages.last(where: { $0.turnID != nil })?.turnID.flatMap { chatPagesByTurnID[$0]?.id }
+        let activePageID = activeChatPageID
         var pageIDs: [String] = []
         for annotation in pendingAnnotations {
             guard let turnID = messages.first(where: { $0.id == annotation.messageID })?.turnID,
@@ -877,12 +898,17 @@ struct TaskConversationView: View {
         return pageIDs
     }
 
-    /// Composed only of plugin atoms (Plugins/Atoms).
-    func standaloneChatPageSeparator(_ page: StandaloneChatPage) -> some View {
+    /// A page's title between two rules. An earlier page also offers to be recalled: the next
+    /// message then carries that page's conversation to the agent.
+    func standaloneChatPageSeparator(_ page: StandaloneChatPage, canRecall: Bool) -> some View {
         AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(paddingY: 5)) {
             transcriptRule(opacity: 0.13)
+            // The title gives way to the button in a narrow chat.
             AtomText(props: TextProps(text: page.title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "chat-page-separator"))
-                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
+            if canRecall {
+                ChatPageRecallButton(pageID: page.id) { recallChatPage(page) }
+            }
             transcriptRule(opacity: 0.13)
         }
     }

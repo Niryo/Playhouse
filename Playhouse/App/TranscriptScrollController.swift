@@ -12,6 +12,8 @@ import SwiftUI
 /// - `reading`: the row the reader is on stays where it is on screen, whatever changes above
 ///   it (older messages revealed, rows far away measured again) or below it (new content).
 ///
+/// - `row`: a named row stays at the top of the viewport, as after a jump to a chat page.
+///
 /// Only the reader moves between them by scrolling: reaching the bottom starts following and
 /// leaving it starts reading. `pin` sets an intent on the reader's behalf, as opening a
 /// conversation or sending a message does.
@@ -27,6 +29,8 @@ final class TranscriptScrollController: NSObject {
         case latestTurn
         /// The end of the transcript, following what arrives.
         case bottom
+        /// The row of this message at the top of the viewport, once it has laid out.
+        case row(String)
     }
 
     private struct Anchor {
@@ -40,6 +44,7 @@ final class TranscriptScrollController: NSObject {
     private enum Intent {
         case following
         case latestTurn
+        case row(String)
         case reading(Anchor?)
     }
 
@@ -77,7 +82,15 @@ final class TranscriptScrollController: NSObject {
         var onApproachTop: () -> Void
         /// The transcript started or stopped following its bottom.
         var onFollowingChange: (Bool) -> Void
+        /// The reader scrolled down to within a viewport of the newest rendered message while
+        /// the rendered window ends before the transcript does.
+        var onApproachBottom: () -> Void = {}
+        /// Another message's row reached the top of the viewport.
+        var onTopRowChange: (String) -> Void = { _ in }
     }
+    /// Whether the rendered rows run to the end of the transcript. A window that ends earlier
+    /// has more to reveal below it, so its bottom is not one to follow.
+    var rendersTranscriptEnd = true
     fileprivate weak var installer: TranscriptScrollInstaller.InstallerView?
 
     /// How close to the bottom, in points, still counts as at the bottom.
@@ -90,6 +103,9 @@ final class TranscriptScrollController: NSObject {
     private var isApplying = false
     /// Older messages were revealed and have not laid out yet.
     private var isRevealPending = false
+    /// Newer messages were revealed below a window that ends early and have not laid out yet.
+    private var isNewerRevealPending = false
+    private var topRowID: String?
     private var notificationTokens: [NSObjectProtocol] = []
     private var scrollWheelMonitor: Any?
     private var displayLink: CADisplayLink?
@@ -114,7 +130,11 @@ final class TranscriptScrollController: NSObject {
 
     /// Sets where the transcript should be and keeps it there until the reader scrolls.
     func pin(_ pin: Pin, animated: Bool = false) {
-        setIntent(pin == .bottom ? .following : .latestTurn)
+        switch pin {
+        case .bottom: setIntent(.following)
+        case .latestTurn: setIntent(.latestTurn)
+        case .row(let id): setIntent(.row(id))
+        }
         if animated, scrollView != nil {
             startAnimation()
         } else {
@@ -136,6 +156,13 @@ final class TranscriptScrollController: NSObject {
     /// than the viewport, `onApproachTop` runs again.
     func didRevealOlderRows() {
         isRevealPending = true
+    }
+
+    /// Newer messages were just revealed below a window that ends before the transcript does.
+    /// Like `didRevealOlderRows`: one batch per layout, and `onApproachBottom` runs again
+    /// should the reader still be near the bottom once they have laid out.
+    func didRevealNewerRows() {
+        isNewerRevealPending = true
     }
 
     private func setIntent(_ newIntent: Intent) {
@@ -188,6 +215,7 @@ final class TranscriptScrollController: NSObject {
         scrollView = nil
         last = nil
         isRevealPending = false
+        isNewerRevealPending = false
     }
 
     private func metrics() -> Metrics? {
@@ -209,6 +237,10 @@ final class TranscriptScrollController: NSObject {
 
     private func isNearTop(_ metrics: Metrics) -> Bool {
         metrics.offsetY - metrics.minOffsetY <= metrics.visibleHeight
+    }
+
+    private func isNearBottom(_ metrics: Metrics) -> Bool {
+        metrics.maxOffsetY - metrics.offsetY <= metrics.visibleHeight
     }
 
     private func setOffsetY(_ offsetY: CGFloat, in metrics: Metrics) {
@@ -235,19 +267,25 @@ final class TranscriptScrollController: NSObject {
         }
         guard metrics.offsetY != last.offsetY else { return }
         stopAnimation()
-        setIntent(isAtBottom(metrics) ? .following : .reading(anchor(at: metrics)))
+        setIntent(rendersTranscriptEnd && isAtBottom(metrics) ? .following : .reading(anchor(at: metrics)))
         self.last = metrics
         reportViewport(metrics)
         // Older messages are revealed before the reader reaches the top of the rendered ones,
         // so scrolling up never stops at an edge that then moves.
         if metrics.offsetY < last.offsetY, isNearTop(metrics) { approachTop() }
+        if metrics.offsetY > last.offsetY, isNearBottom(metrics) { approachBottom() }
     }
 
     private func scrollWheelDidMove(_ event: NSEvent) {
-        guard event.scrollingDeltaY > 0, let scrollView, event.window === scrollView.window,
+        guard event.scrollingDeltaY != 0, let scrollView, event.window === scrollView.window,
               scrollView.bounds.contains(scrollView.convert(event.locationInWindow, from: nil)),
-              let metrics = metrics(), metrics.offsetY <= metrics.minOffsetY + 0.5 else { return }
-        approachTop()
+              let metrics = metrics() else { return }
+        if event.scrollingDeltaY > 0 {
+            if metrics.offsetY <= metrics.minOffsetY + 0.5 { approachTop() }
+        } else if metrics.offsetY >= metrics.maxOffsetY - 0.5 {
+            // Likewise a window at its bottom cannot scroll further down.
+            approachBottom()
+        }
     }
 
     private func approachTop() {
@@ -255,10 +293,17 @@ final class TranscriptScrollController: NSObject {
         installer?.handlers?.onApproachTop()
     }
 
+    private func approachBottom() {
+        guard !rendersTranscriptEnd, !isNewerRevealPending else { return }
+        installer?.handlers?.onApproachBottom()
+    }
+
     private func layoutDidChange() {
         guard !isApplying else { return }
         let didReveal = isRevealPending
         isRevealPending = false
+        let didRevealNewer = isNewerRevealPending
+        isNewerRevealPending = false
         // A running animation moves toward the intent's position as it now is.
         guard displayLink == nil else {
             last = metrics()
@@ -268,6 +313,9 @@ final class TranscriptScrollController: NSObject {
         if didReveal, case .reading = intent, let last, isNearTop(last) {
             // Revealing changes state, which a layout pass must not.
             DispatchQueue.main.async { [weak self] in self?.approachTop() }
+        }
+        if didRevealNewer, !isFollowing, let last, isNearBottom(last) {
+            DispatchQueue.main.async { [weak self] in self?.approachBottom() }
         }
     }
 
@@ -287,6 +335,9 @@ final class TranscriptScrollController: NSObject {
         case .latestTurn:
             // Without the newest question among the rendered rows there is nothing to pin.
             return geometry.latestTurnTop.map { layoutTop + $0 - latestTurnMargin - metrics.topInset }
+        case .row(let id):
+            // The row lays out a pass after it is asked for; the intent waits for it.
+            return geometry.row(id).map { layoutTop + $0.top - latestTurnMargin - metrics.topInset }
         case .reading(let anchor):
             guard var anchor, let row = geometry.row(anchor.id) else {
                 // The row the reader was on is gone, as after a reload; stay put.
@@ -313,7 +364,16 @@ final class TranscriptScrollController: NSObject {
     }
 
     private func reportViewport(_ metrics: Metrics) {
-        virtualizer.updateViewport(offsetY: metrics.visibleTop - layoutTop, height: metrics.visibleHeight)
+        let offsetY = metrics.visibleTop - layoutTop
+        virtualizer.updateViewport(offsetY: offsetY, height: metrics.visibleHeight)
+        // A row still counts as the top one while the margin kept above a pinned row shows.
+        guard let id = geometry.row(atOrAbove: offsetY + latestTurnMargin + 1)?.id, id != topRowID else { return }
+        topRowID = id
+        // Reported after the pass: this runs inside layout, which must not change state.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.topRowID == id else { return }
+            self.installer?.handlers?.onTopRowChange(id)
+        }
     }
 
     // MARK: Animation
@@ -365,10 +425,12 @@ extension View {
         _ controller: TranscriptScrollController,
         layoutTop: CGFloat,
         latestTurnMargin: CGFloat,
+        rendersTranscriptEnd: Bool = true,
         handlers: TranscriptScrollController.Handlers
     ) -> some View {
         background(TranscriptScrollInstaller(
-            controller: controller, layoutTop: layoutTop, latestTurnMargin: latestTurnMargin, handlers: handlers
+            controller: controller, layoutTop: layoutTop, latestTurnMargin: latestTurnMargin,
+            rendersTranscriptEnd: rendersTranscriptEnd, handlers: handlers
         ))
     }
 }
@@ -377,6 +439,7 @@ private struct TranscriptScrollInstaller: NSViewRepresentable {
     let controller: TranscriptScrollController
     let layoutTop: CGFloat
     let latestTurnMargin: CGFloat
+    let rendersTranscriptEnd: Bool
     let handlers: TranscriptScrollController.Handlers
 
     func makeNSView(context: Context) -> InstallerView {
@@ -400,6 +463,7 @@ private struct TranscriptScrollInstaller: NSViewRepresentable {
         controller.installer = view
         controller.layoutTop = layoutTop
         controller.latestTurnMargin = latestTurnMargin
+        controller.rendersTranscriptEnd = rendersTranscriptEnd
     }
 
     final class InstallerView: NSView {

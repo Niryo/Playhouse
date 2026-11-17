@@ -475,6 +475,8 @@ final class PlayhouseBridgeRuntime {
                     restoringEarlierChatPages: true,
                     messageLimit: messageLimit,
                     beforeMessageID: request.arguments["before"]?.string,
+                    afterMessageID: request.arguments["after"]?.string,
+                    chatPageID: request.arguments["page"]?.string,
                     includesImageData: true
                 ))
             case "conversation.images":
