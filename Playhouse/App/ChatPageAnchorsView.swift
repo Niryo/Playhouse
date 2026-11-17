@@ -80,8 +80,13 @@ enum ChatPageAnchorsLayout {
     static let labelHeight: CGFloat = 14
     static let labelSpacing: CGFloat = 12
     static let labelsVerticalPadding: CGFloat = 6
-    /// The gap between the last label and the jump-to-bottom button below it.
+    /// The gap between the last label and the jump-to-bottom button below it, and between the
+    /// pin button and the first label above it.
     static let jumpToBottomSpacing: CGFloat = 4
+    /// Where the handle of the unpinned labels sits from the transcript column's edge.
+    static let handleInset: CGFloat = 6
+    /// How the labels slide out from their handle, pushing the messages right, and back in.
+    static let slideAnimation = Animation.easeInOut(duration: 0.22)
 
     /// The height that shows `count` labels, at most `visibleLabelCount` of them.
     static func labelsHeight(count: Int) -> CGFloat {
@@ -99,12 +104,14 @@ enum ChatPageAnchorsLayout {
 /// well apart from each other and a few at a time; scrolling it, with no scroll bar, reaches
 /// older ones. Clicking one jumps to its page; the page the transcript shows is marked, and
 /// the column scrolls to keep it in view. Below the labels, a button jumps straight to the
-/// bottom of the chat.
+/// bottom of the chat; above them, a pin keeps them open instead of only while hovered.
 struct ChatPageAnchorsView: View {
     let model: ChatPageAnchorsModel
     let width: CGFloat
+    let isPinned: Bool
     let jump: (StandaloneChatPage) -> Void
     let jumpToBottom: () -> Void
+    let togglePin: () -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -149,6 +156,11 @@ struct ChatPageAnchorsView: View {
         .overlay(alignment: .bottom) {
             ChatJumpToBottomButton(action: jumpToBottom)
                 .alignmentGuide(.bottom) { $0[.top] - ChatPageAnchorsLayout.jumpToBottomSpacing }
+        }
+        // Hangs above the labels as the arrow hangs below them.
+        .overlay(alignment: .top) {
+            ChatPageAnchorsPinButton(isPinned: isPinned, action: togglePin)
+                .alignmentGuide(.top) { $0[.bottom] + ChatPageAnchorsLayout.jumpToBottomSpacing }
         }
     }
 
@@ -218,24 +230,49 @@ private struct ChatJumpToBottomButton: View {
     }
 }
 
-/// Hides the page labels, or brings them back from the transcript's edge.
-struct ChatPageAnchorsToggle: View {
-    let isHidden: Bool
+/// Above the page labels, a pin that keeps them open beside the transcript, or lets them fold
+/// back into their handle when the pointer leaves.
+private struct ChatPageAnchorsPinButton: View {
+    let isPinned: Bool
     let action: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 18, height: 18)
+            Image(systemName: isPinned ? "pin.fill" : "pin")
+                .font(.system(size: 10, weight: .semibold))
+                .rotationEffect(.degrees(45))
+                .foregroundStyle(isPinned ? Color.accentColor : isHovering ? Color.primary : Color.secondary)
+                .frame(width: 24, height: ChatPageAnchorsLayout.labelHeight + 4)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
-        .nativeHelp(isHidden ? "Show the chat's pages" : "Hide the chat's pages")
-        .accessibilityLabel(isHidden ? "Show chat pages" : "Hide chat pages")
-        .accessibilityValue(isHidden ? "hidden" : "shown")
-        .accessibilityIdentifier("chat-page-anchors-toggle")
+        .onHover { isHovering = $0 }
+        .nativeHelp(isPinned ? "Show the chat's pages only while hovering their handle" : "Keep the chat's pages open")
+        .accessibilityLabel(isPinned ? "Unpin chat pages" : "Pin chat pages open")
+        .accessibilityValue(isPinned ? "pinned" : "unpinned")
+        .accessibilityIdentifier("chat-page-anchors-pin")
+    }
+}
+
+/// The thin handle at the transcript's leading edge, halfway down it, that slides the unpinned
+/// page labels out while hovered.
+struct ChatPageAnchorsHandle: View {
+    @State private var isHovering = false
+
+    var body: some View {
+        Capsule()
+            .fill(Color.primary.opacity(isHovering ? 0.32 : 0.16))
+            .frame(width: 3, height: 44)
+            // A wider, taller target than the line itself, so it is easy to find.
+            .frame(width: 14, height: 88)
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+            .accessibilityElement()
+            .accessibilityLabel("Show chat pages")
+            .accessibilityHint("Hover to show the chat's pages")
+            .accessibilityIdentifier("chat-page-anchors-handle")
     }
 }
