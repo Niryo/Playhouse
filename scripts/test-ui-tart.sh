@@ -196,7 +196,7 @@ start_vm() {
 	if (( show_vm == 1 )); then
 		tart_display_args=(--vnc)
 	fi
-	python3 - "$launch_log" "${tart_display_args[@]}" \
+	python3 - "$launch_log" "${tart_display_args[@]}" --no-audio \
 		--dir="artifacts:${artifact_root}" \
 		"$vm_name" <<'PY' &
 import subprocess
