@@ -392,13 +392,13 @@ struct KanbanBoardView: View {
         } message: {
             Text(pullRequestError ?? "Please try again.")
         }
-        .alert("Couldn't check pull request status", isPresented: Binding(
+        .alert("Couldn't move task to Done", isPresented: Binding(
             get: { doneMoveError != nil },
             set: { if !$0 { doneMoveError = nil } }
         )) {
             Button("OK", role: .cancel) { doneMoveError = nil }
             .buttonHoverPointer()
-            .nativeHelp("Dismiss pull request status error")
+            .nativeHelp("Dismiss move to Done error")
         } message: {
             Text(doneMoveError ?? "Please try again.")
         }
@@ -568,7 +568,7 @@ struct KanbanBoardView: View {
                                 // drawer to its left, and the drawer stays put while scrolling.
                                 .overlay(alignment: .trailing) {
                                     DoneDropDrawer(
-                                        isOpen: draggedTaskStatus == .review,
+                                        isOpen: draggedTaskStatus.map(TaskStatus.manualDoneSources.contains) ?? false,
                                         isActive: $isDoneTargetActive,
                                         onDrop: { moveTask(id: $0, to: .done) }
                                     )
@@ -731,7 +731,7 @@ struct KanbanBoardView: View {
             },
             onShowTaskTokenStats: { taskShowingTokenStats = $0 },
             draggedTaskID: $draggedTaskID,
-            acceptsDraggedTask: status == .review && draggedTaskStatus == .waitingResponse,
+            acceptsDraggedTask: status == .review && draggedTaskStatus.map(TaskStatus.manualReviewSources.contains) ?? false,
             minHeight: minHeight
         )
         .frame(width: 264)
