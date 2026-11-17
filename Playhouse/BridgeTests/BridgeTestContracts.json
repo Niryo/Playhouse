@@ -185,7 +185,7 @@
   },
   {
     "id": "test_conversation_repository_picker_add_and_replace_buttons",
-    "expectation": "Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit."
+    "expectation": "Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit. Both buttons sit clear of the list's overlay scroller and each shows a hover highlight while the pointer is on it."
   },
   {
     "id": "test_task_repository_settings_validate_persist_and_lock_after_start",

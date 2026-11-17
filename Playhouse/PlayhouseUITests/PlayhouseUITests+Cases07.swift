@@ -426,7 +426,7 @@ extension PlayhouseUITests {
         XCTAssertGreaterThan(badgeAfterSend.frame.minX, title.frame.maxX, "Repository badges should remain beside the task title after a message is sent.")
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - headerMidY()), 4, "Repository badges should stay vertically centered in the fixed task header after the timeline scrolls.")
     }
-    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
+    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit. Both buttons sit clear of the list's overlay scroller and each shows a hover highlight while the pointer is on it.
     func test_conversation_repository_picker_add_and_replace_buttons() throws {
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI(["task", "create", "--title", "Picker add and replace", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any]
@@ -451,8 +451,10 @@ extension PlayhouseUITests {
         let primaryAdd = element("conversation-repository-suggestion-primary-add")
         XCTAssertTrue(primaryAdd.waitToExist(timeout: 5))
         XCTAssertTrue(primaryAdd.isHittable, "Hovering the row should reveal its plus button.")
-        // The row's text stops 44 points (plus its 7-point padding) before its trailing edge, where the hover buttons sit.
-        XCTAssertLessThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.minX, 51, "The plus button should sit in the space the row's text leaves clear.")
+        // The row's text stops 64 points (plus its 7-point padding) before its trailing edge, where the hover buttons sit.
+        XCTAssertLessThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.minX, 71, "The plus button should sit in the space the row's text leaves clear.")
+        // The list's overlay scroller covers about the last 15 points of each row.
+        XCTAssertGreaterThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.maxX, 15, "The plus button should sit clear of the list's scroller.")
         attachScreenshot(named: "Hovered repository row shows its plus button")
         XCTAssertFalse(element("conversation-repository-suggestion-primary-replace").exists, "Replace is offered only once the task has repositories.")
         primaryAdd.click()
@@ -476,6 +478,31 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Hovered repository row shows Replace and Add once the task has a repository")
         attachElementScreenshot(element("conversation-repository-picker"), named: "Repository picker hover actions")
+        // Each button draws a highlight behind its icon only while the pointer is on it.
+        func meanDifference(_ first: NSImage, _ second: NSImage) -> CGFloat {
+            guard let a = first.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let b = second.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+            let left = NSBitmapImageRep(cgImage: a), right = NSBitmapImageRep(cgImage: b)
+            let width = min(left.pixelsWide, right.pixelsWide), height = min(left.pixelsHigh, right.pixelsHigh)
+            var total: CGFloat = 0
+            for x in 0..<width {
+                for y in 0..<height {
+                    guard let l = left.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          let r = right.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                    total += abs(l.redComponent - r.redComponent) + abs(l.greenComponent - r.greenComponent) + abs(l.blueComponent - r.blueComponent)
+                }
+            }
+            return total / CGFloat(max(1, width * height * 3))
+        }
+        for (button, other) in [(secondaryAdd, secondaryReplace), (secondaryReplace, secondaryAdd)] {
+            other.hover()
+            Thread.sleep(forTimeInterval: 0.4)
+            let resting = button.screenshot().image
+            button.hover()
+            Thread.sleep(forTimeInterval: 0.4)
+            XCTAssertGreaterThan(meanDifference(resting, button.screenshot().image), 0.02, "\(button.identifier) should show a hover highlight.")
+            attachElementScreenshot(element("conversation-repository-list"), named: "Hovering \(button.identifier) highlights it")
+        }
         element("conversation-repository-search").hover()
         XCTAssertTrue(waitUntil({ !secondaryAdd.exists && !secondaryReplace.exists }, timeout: 5), "Actions should disappear after leaving the row.")
         secondaryRow.hover()
@@ -492,7 +519,7 @@ extension PlayhouseUITests {
         alternateRow.hover()
         let alternateReplace = element("conversation-repository-suggestion-alternate-replace")
         XCTAssertTrue(alternateReplace.waitToExist(timeout: 5))
-        XCTAssertLessThanOrEqual(alternateRow.frame.maxX - alternateReplace.frame.minX, 51, "Replace and plus should both sit in the space the row's text leaves clear.")
+        XCTAssertLessThanOrEqual(alternateRow.frame.maxX - alternateReplace.frame.minX, 71, "Replace and plus should both sit in the space the row's text leaves clear.")
         alternateReplace.hover()
         attachScreenshot(named: "Hovering Replace on alternate")
         alternateReplace.click()

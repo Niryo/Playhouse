@@ -719,7 +719,7 @@ class BridgeTestCases07:
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
-    # case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
+    # case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit. Both buttons sit clear of the list's overlay scroller and each shows a hover highlight while the pointer is on it.
     def test_conversation_repository_picker_add_and_replace_buttons(self):
         # The catalog exercises the same Overlay atom used by the native picker.
         # Pointer tracking itself is presentation state, checked by the paired UI case.
@@ -729,8 +729,12 @@ class BridgeTestCases07:
         scroll = self.plugin_node(tree, "conversation-repository-list")
         row = next(node for node in scroll["children"] if row_button in node["children"])
         self.assertTrue(row["props"]["revealOnHover"])
+        # Inset past the list's overlay scroller, so it never covers the buttons.
+        self.assertLessEqual(row["props"]["offsetX"], -16)
         for action in ("add", "replace"):
-            self.assertIsNotNone(self.plugin_node(row, f"conversation-repository-recent-mre-{action}"))
+            button = self.plugin_node(row, f"conversation-repository-recent-mre-{action}")
+            self.assertIsNotNone(button)
+            self.assertEqual(button["props"].get("emphasis"), 4, f"The {action} button should show the hover highlight.")
 
         task = self.create_task("Picker add and replace", [self.primary])
         task_id = task["id"]

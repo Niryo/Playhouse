@@ -726,7 +726,7 @@ class BridgeTestCases21:
             self.assertEqual((button["props"]["help"], button["children"][0]["props"]["name"]), (hint[action], icon[action]))
         self.assertEqual([self.plugin_text(text) for text in self.plugin_nodes(first) if text["type"] == "Text"], ["mre", "/Users/demo/git/mre"])
         reserved = [node for node in self.plugin_nodes(first) if node["type"] == "Spacer"]
-        self.assertEqual([node["props"]["minLength"] for node in reserved], [44], "The row text leaves room for the hover buttons.")
+        self.assertEqual([node["props"]["minLength"] for node in reserved], [64], "The row text leaves room for the hover buttons.")
         self.assertEqual((row_fill(tree, "mre"), row_fill(tree, "wix-one-app")), (0.16, 0), "The first row is highlighted.")
 
         searched = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onChange:pla")[0])
