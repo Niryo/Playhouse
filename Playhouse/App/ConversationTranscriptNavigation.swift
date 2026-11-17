@@ -15,7 +15,9 @@ extension TaskConversationView {
                 guard !isFollowing, let firstRenderedID = renderedConversationMessages.first?.id,
                       oldestRenderedMessageID != firstRenderedID else { return }
                 oldestRenderedMessageID = firstRenderedID
-            }
+            },
+            onApproachBottom: { revealNewerConversationMessages() },
+            onTopRowChange: { noteTopTranscriptRow($0) }
         )
     }
 
@@ -119,16 +121,45 @@ extension TaskConversationView {
         for message in messages where !message.imageDataURLs.isEmpty {
             deferredMessageImages[Self.deferredImageKey(message)] = message.imageDataURLs
         }
+        // A chat page read by a jump stays above the gap; the read replaces what follows it.
+        let gapIndex = historyGapIndex(in: messages)
         if let earlierCount = history.earlierMessageCount {
             if let first = incoming.first, let overlap = messages.firstIndex(where: { $0.id == first.id }) {
                 messages = Array(messages[..<overlap]) + incoming
-                earlierStoredMessageCount = max(0, earlierCount - overlap)
+                if let gapIndex, overlap > gapIndex {
+                    // The page and the gap are as they were: the read starts after them.
+                } else {
+                    historyGap = nil
+                    earlierStoredMessageCount = max(0, earlierCount - overlap)
+                }
+            } else if let gapIndex, let gap = historyGap,
+                      earlierCount - earlierStoredMessageCount - (gapIndex + 1) > 0 {
+                messages = Array(messages[...gapIndex]) + incoming
+                historyGap = ConversationHistoryGap(
+                    afterMessageID: gap.afterMessageID,
+                    storedMessageCount: earlierCount - earlierStoredMessageCount - (gapIndex + 1)
+                )
             } else {
                 messages = incoming
                 earlierStoredMessageCount = earlierCount
+                historyGap = nil
+                renderedWindowEndID = nil
             }
             return
         }
+        if let gapIndex, let gap = historyGap,
+           let headStart = incoming.firstIndex(where: { $0.id == messages[0].id }),
+           let gapStart = incoming.firstIndex(where: { $0.id == gap.afterMessageID }),
+           let tailStart = incoming.firstIndex(where: { $0.id == messages[gapIndex + 1].id }),
+           headStart <= gapStart, gapStart < tailStart {
+            // A complete history is trimmed to the page and to the newest messages alike.
+            messages = Array(incoming[headStart...gapStart]) + Array(incoming[tailStart...])
+            earlierStoredMessageCount = headStart
+            let between = tailStart - gapStart - 1
+            historyGap = between > 0 ? ConversationHistoryGap(afterMessageID: gap.afterMessageID, storedMessageCount: between) : nil
+            return
+        }
+        historyGap = nil
         if earlierStoredMessageCount > 0 || messages.count >= Self.historyPageSize,
            let oldestLoadedID = messages.first?.id,
            let start = incoming.firstIndex(where: { $0.id == oldestLoadedID }) {
@@ -164,6 +195,9 @@ extension TaskConversationView {
             transcriptScroll.pin(.bottom)
             return
         }
+        // A reload leaves any earlier chat page the reader had jumped to.
+        renderedWindowEndID = nil
+        dropHistoryHead()
         oldestRenderedMessageID = turnStartID
         // The newest question is already in view, so it is not one that was just sent.
         lastScrolledUserMessageID = latestSentQuestion?.id
@@ -182,6 +216,8 @@ extension TaskConversationView {
         guard hasLoadedConversation, !isLoadingHistory,
               let question = latestSentQuestion, question.id != lastScrolledUserMessageID else { return }
         lastScrolledUserMessageID = question.id
+        // A question sent while reading an earlier chat page is shown where it lands.
+        if isBrowsingEarlierMessages { returnToLatestMessages() }
         transcriptScroll.pin(.bottom, animated: true)
     }
 
@@ -302,7 +338,8 @@ extension TaskConversationView {
     @ViewBuilder
     func transcriptLeadingRows(for message: ConversationMessage, context: TranscriptRowContext) -> some View {
         if let page = standaloneChatPageSeparator(before: message) {
-            standaloneChatPageSeparator(page)
+            // A message written during a turn is queued or steers it, and neither carries a page.
+            standaloneChatPageSeparator(page, canRecall: page.id != activeChatPageID && !isReadOnly && !isResponding)
                 .id("chat-page-separator-\(page.id)-\(message.id)")
         }
         if message.id == context.activityDisclosureAnchorID {

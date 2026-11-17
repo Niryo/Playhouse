@@ -616,7 +616,7 @@ class BridgeTestCases14:
             "A lost wake ends in the column the recovery prompt's outcome names, not In Progress forever.",
         )
         self.assertEqual(len(nudges()), 2, "The lost wake earns exactly one recovery prompt of its own.")
-    # case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send.
+    # case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send. The steered follow-up is recorded inside the turn it steered rather than as a turn of its own, so the transcript keeps it in order: while the turn runs and after it ends, the turn's work stays above its bubble, as does the answer given before it while it is shown, and what the turn said after it renders below it.
     def test_claude_steers_turn_parked_on_background_work(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-parked-steer"
@@ -682,6 +682,15 @@ class BridgeTestCases14:
             [message["text"] for message in history["messages"] if message["role"] == "assistant"][-1],
             "PARKED HANDLED",
             "The woken parent turn's answer still ends the turn.",
+        )
+        question, steer = (
+            next(m for m in history["messages"] if m["role"] == "user" and m["text"] == text)
+            for text in ("Launch a parked background shell for this turn.", "Check the other blocked tasks too.")
+        )
+        self.assertIsNotNone(steer.get("turnID"))
+        self.assertEqual(
+            steer.get("turnID"), question.get("turnID"),
+            "The steered follow-up is recorded inside the turn it steered, not as a turn of its own.",
         )
     # case-contract: test_claude_settles_turn_after_consumed_wake_notification | When Claude Code starts the provider turn that would deliver a finished background task's notification and then says nothing at all, Playhouse settles that turn on its own instead of leaving it open and the task In Progress forever: a follow-up queued while the turn was still parked stays queued through the silent wake, the send finishes and the task reaches Review, and that follow-up is then delivered in its own turn rather than stranded in the queue. A woken turn that is alive and merely slow to speak is not cut off by that backstop: it stays quiet past the grace a consumed notification gets and still ends the turn on its own answer.
     def test_claude_settles_turn_after_consumed_wake_notification(self):

@@ -115,7 +115,7 @@ final class PlayhouseBridgeRuntime {
             let skills = SkillCatalogManager(environment: agentEnvironment, preferences: preferences)
             let rules = RuleCatalogManager(environment: agentEnvironment, preferences: preferences)
             let mcp = McpCatalogManager(environment: agentEnvironment, preferences: preferences)
-            let mentions = MentionCatalogManager(environment: agentEnvironment, preferences: preferences, skills: skills, rules: rules, mcp: mcp)
+            let mentions = MentionCatalogManager(environment: agentEnvironment, preferences: preferences, skills: skills, mcp: mcp)
             func conversationClients() -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: callerCodexHome, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
@@ -475,6 +475,8 @@ final class PlayhouseBridgeRuntime {
                     restoringEarlierChatPages: true,
                     messageLimit: messageLimit,
                     beforeMessageID: request.arguments["before"]?.string,
+                    afterMessageID: request.arguments["after"]?.string,
+                    chatPageID: request.arguments["page"]?.string,
                     includesImageData: true
                 ))
             case "conversation.images":

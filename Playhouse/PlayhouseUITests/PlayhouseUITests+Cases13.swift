@@ -303,4 +303,209 @@ extension PlayhouseUITests {
         XCTAssertTrue(texts.contains("What happened earlier?"))
         XCTAssertTrue(texts.contains("OK."))
     }
+
+    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages. The labels can be hidden and shown again, which persists across a relaunch, and agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    func test_standalone_chat_page_anchors_jump_and_recall() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-anchors")
+        try copyFixtureFile(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+
+        // Forty-two short pages, then three long ones: more pages than the labels read at
+        // once, and more messages than the transcript loads at once.
+        let longTitle = "Deep ocean currents and the thermohaline circulation"
+        let topics = (1...42).map { (String(format: "Topic %02d", $0), 1) } + [(longTitle, 19), ("Glaciers", 19), ("Harbor", 19)]
+        for (title, replies) in topics {
+            _ = try runCLI(["conversation", "send", chatID, "--message", "anchor-page:\(title.replacingOccurrences(of: " ", with: "-")):\(replies)"])
+        }
+        let listed = try XCTUnwrap((try runCLI(["chat", "page", "list", "--limit", "100"])["result"] as? [String: Any])?["pages"] as? [[String: Any]])
+        var pageIDs: [String: String] = [:]
+        for page in listed where (page["messageCount"] as? Int ?? 0) > 0 {
+            pageIDs[try XCTUnwrap(page["title"] as? String)] = try XCTUnwrap(page["id"] as? String)
+        }
+        XCTAssertEqual(pageIDs.count, 45, "Each turn opens its own titled page.")
+
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        waitForConversationLoad()
+
+        let scrollView = element("conversation-scroll-view")
+        let anchors = app.scrollViews.matching(identifier: "chat-page-anchors").firstMatch
+        func label(_ title: String) -> XCUIElement { element("chat-page-anchor-\(pageIDs[title] ?? "missing")") }
+        func transcriptValue() -> String { scrollView.value as? String ?? "" }
+        func renderedCount() -> Int { transcriptValue().split(separator: " ").compactMap { Int($0) }.first ?? 0 }
+        func currentLabelTitle() -> String? {
+            let current = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value == %@", "chat-page-anchor-", "current"))
+            return current.count == 1 ? current.firstMatch.label : nil
+        }
+        func separatorTop(_ title: String) -> CGFloat? {
+            chatPageSeparators(title).first.map { $0.frame.minY - scrollView.frame.minY }
+        }
+        /// Scrolls the labels until `title`'s label can be clicked.
+        func revealLabel(_ title: String) -> Bool {
+            let target = label(title)
+            func ready() -> Bool { target.exists && target.isHittable && anchors.frame.contains(target.frame) }
+            for delta: CGFloat in [150, -150] {
+                for _ in 0..<40 where !ready() {
+                    anchors.scroll(byDeltaX: 0, deltaY: delta)
+                    _ = waitUntil(ready, timeout: 0.3)
+                }
+            }
+            return ready()
+        }
+        func jump(to title: String) {
+            XCTAssertTrue(revealLabel(title), "The label for \(title) should be reachable by scrolling the labels.")
+            label(title).click()
+            XCTAssertTrue(waitUntil({ (separatorTop(title) ?? 1_000) < 80 && currentLabelTitle() == title }, timeout: 15),
+                          "Clicking \(title)'s label should show that page from its first message; transcript=\(transcriptValue()), separator=\(String(describing: separatorTop(title))), current=\(String(describing: currentLabelTitle())).")
+        }
+
+        // The labels sit left of the transcript: newest pages only, compact, long titles cut.
+        XCTAssertTrue(anchors.waitToExist(timeout: 10), "The chat shows its page labels beside the transcript.")
+        XCTAssertEqual(anchors.value as? String, "40 pages, older pages above", "Only the newest pages' labels are read at first.")
+        // The newest turn's 18 earlier replies fold into its Worked for row, leaving 126 of the 144.
+        XCTAssertTrue(waitUntil({ transcriptValue().hasPrefix("Showing latest ") && transcriptValue().hasSuffix(" of 126 messages") }, timeout: 10), transcriptValue())
+        XCTAssertTrue(waitUntil({ label("Harbor").exists && label(longTitle).exists }, timeout: 5), "The newest pages' labels are in view.")
+        XCTAssertEqual(label("Harbor").label, "Harbor", "A label is its page's title.")
+        XCTAssertEqual(label(longTitle).label, longTitle)
+        XCTAssertLessThanOrEqual(anchors.frame.width, 130, "The labels stay compact.")
+        XCTAssertGreaterThanOrEqual(anchors.frame.width, 100, "The labels have room for a short title.")
+        // A window tall enough that the 15 labels, not the transcript's height, bound the column.
+        let window = app.windows.firstMatch
+        let bottomEdge = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1)).withOffset(CGVector(dx: 0, dy: -2))
+        bottomEdge.press(forDuration: 0.2, thenDragTo: bottomEdge.withOffset(CGVector(dx: 0, dy: 400)))
+        XCTAssertTrue(waitUntil({ scrollView.frame.height >= 452 }, timeout: 5),
+                      "The window should grow until the transcript has room for more than 15 labels; transcript height \(scrollView.frame.height).")
+        XCTAssertEqual(anchors.frame.midY, scrollView.frame.midY, accuracy: 4, "The labels sit halfway down the transcript.")
+        let labelsInView = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-"))
+            .allElementsBoundByIndex.filter { anchors.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }.count
+        XCTAssertEqual(labelsInView, 15, "Exactly the 15 newest labels are in view.")
+        XCTAssertEqual(anchors.frame.height, 390, accuracy: 3, "The column is as tall as 15 labels.")
+        XCTAssertLessThan(anchors.frame.height, scrollView.frame.height - 52 - 8, "The column stops at 15 labels with transcript height to spare.")
+        XCTAssertEqual(anchors.scrollBars.count, 0, "The labels scroll without a scroll bar.")
+        XCTAssertLessThanOrEqual(label(longTitle).frame.maxX, anchors.frame.maxX + 1, "A long title is cut to the labels' width instead of running under the messages.")
+        XCTAssertEqual(label(longTitle).frame.height, label("Harbor").frame.height, accuracy: 1, "A long title stays on one line, cut with an ellipsis.")
+        XCTAssertGreaterThan(label("Harbor").frame.minY - label("Glaciers").frame.maxY, 10, "Labels are set apart from each other, newest lowest.")
+        XCTAssertFalse(label("Topic 03").exists, "An older page has no label until the labels are scrolled up to it.")
+        XCTAssertTrue(waitUntil({ currentLabelTitle() == "Harbor" }, timeout: 10), "The label of the page in view is marked; current=\(String(describing: currentLabelTitle())).")
+        XCTAssertFalse(element("chat-jump-to-latest").exists)
+
+        // Agent replies end where the user's messages end, which is the room the labels use.
+        let question = scrollView.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", "anchor-page:Harbor:19")).firstMatch
+        let wideReply = scrollView.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "assistant-message-", "Harbor reply 19.")).firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(wideReply), "The newest page's last reply should be reachable.")
+        let replyRight = wideReply.frame.maxX
+        XCTAssertGreaterThan(wideReply.frame.minX, anchors.frame.maxX, "Messages start right of the labels.")
+        attachScreenshot(named: "chat-page-anchors-beside-latest-messages")
+        XCTAssertTrue(scrollTranscriptUntilExists(question), "The newest page's question should be reachable.")
+        XCTAssertLessThan(abs(question.frame.maxX - replyRight), 60,
+                          "A wrapped agent reply should reach the user's messages' right edge; question=\(question.frame), reply right=\(replyRight).")
+
+        // An old page is read on its own: the labels first read the older pages' titles.
+        jump(to: "Topic 03")
+        XCTAssertEqual(anchors.value as? String, "45 pages", "Scrolling the labels up reads the older pages' labels.")
+        XCTAssertTrue(transcriptValue().hasPrefix("Showing earlier ") && transcriptValue().hasSuffix(" of 126 messages"), transcriptValue())
+        XCTAssertLessThanOrEqual(renderedCount(), 40, "A jump renders the page's own window, not the pages around it.")
+        XCTAssertTrue(transcriptContains("Topic 03 reply 1."), "The page's messages are shown.")
+        XCTAssertFalse(chatPageSeparatorIsVisible("Harbor"), "The newest page is not rendered below a page jumped to.")
+        XCTAssertFalse(chatPageSeparatorIsVisible("Topic 02"), "The page before it is not rendered until the reader scrolls up to it.")
+        XCTAssertTrue(element("chat-jump-to-latest").exists, "An earlier page offers a way back to the newest messages.")
+        attachScreenshot(named: "chat-page-anchors-jumped-to-old-page")
+
+        // Scrolling on from there loads what follows, and the labels follow the transcript.
+        let renderedAfterJump = renderedCount()
+        for _ in 0..<80 where renderedCount() <= 44 {
+            let before = renderedCount()
+            scrollView.scroll(byDeltaX: 0, deltaY: -400)
+            _ = waitUntil({ renderedCount() != before }, timeout: 0.5)
+        }
+        XCTAssertGreaterThan(renderedCount(), 44, "Scrolling down past the page's window should load the messages after it; rendered \(renderedAfterJump) then \(renderedCount()).")
+        XCTAssertTrue(transcriptValue().hasPrefix("Showing earlier "), transcriptValue())
+        XCTAssertTrue(waitUntil({ (currentLabelTitle() ?? "Topic 03") > "Topic 03" }, timeout: 10),
+                      "The marked label follows the page at the top of the transcript; current=\(String(describing: currentLabelTitle())).")
+        attachScreenshot(named: "chat-page-anchors-scrolled-on-from-old-page")
+
+        func labelIsInView(_ title: String) -> Bool { label(title).exists && anchors.frame.contains(label(title).frame) }
+        XCTAssertFalse(labelIsInView("Harbor"), "With an old page in view, the newest page's label is scrolled out of the labels.")
+        element("chat-jump-to-latest").click()
+        XCTAssertTrue(waitUntil({ transcriptValue().hasPrefix("Showing latest ") && !self.element("chat-jump-to-latest").exists }, timeout: 10),
+                      "Latest returns to the newest messages; transcript=\(transcriptValue()).")
+        XCTAssertTrue(waitUntil({ currentLabelTitle() == "Harbor" && labelIsInView("Harbor") }, timeout: 10),
+                      "The labels scroll by themselves to the page now in view; current=\(String(describing: currentLabelTitle())).")
+        XCTAssertTrue(waitUntil({ wideReply.exists && scrollView.frame.intersects(wideReply.frame) }, timeout: 10), "The newest reply is in view again.")
+
+        // A page whose messages are already loaded is shown without reading it again, and its
+        // title offers Recall; the page the next message continues does not.
+        jump(to: "Glaciers")
+        XCTAssertTrue(transcriptValue().hasPrefix("Showing earlier "), transcriptValue())
+        let recallGlaciers = element("chat-page-recall-\(try XCTUnwrap(pageIDs["Glaciers"]))")
+        XCTAssertTrue(recallGlaciers.waitToExist(timeout: 5), "An earlier page's title carries a Recall button.")
+        XCTAssertEqual(recallGlaciers.label, "Recall this conversation")
+        // The hint is a native tooltip, which XCUITest cannot read; the screenshot shows it.
+        recallGlaciers.hover()
+        _ = waitUntil({ false }, timeout: 2)
+        attachScreenshot(named: "chat-page-recall-button-hint")
+        recallGlaciers.click()
+        let glaciersChip = element("composer-recalled-page-\(try XCTUnwrap(pageIDs["Glaciers"]))")
+        XCTAssertTrue(waitUntil({ glaciersChip.exists && transcriptValue().hasPrefix("Showing latest ") && !self.element("chat-jump-to-latest").exists }, timeout: 10),
+                      "Recall returns to the bottom of the chat and notes the page in the composer; transcript=\(transcriptValue()).")
+        XCTAssertEqual(glaciersChip.label, "Recalling Glaciers")
+        XCTAssertTrue(waitUntil({ wideReply.exists && scrollView.frame.intersects(wideReply.frame) }, timeout: 10), "The chat is at its newest reply.")
+        XCTAssertFalse(element("chat-page-recall-\(try XCTUnwrap(pageIDs["Harbor"]))").exists, "The page being continued has nothing to recall.")
+        attachScreenshot(named: "chat-page-recalling-in-composer")
+        element("composer-recalled-page-remove-\(try XCTUnwrap(pageIDs["Glaciers"]))").click()
+        XCTAssertTrue(waitUntil({ !glaciersChip.exists }, timeout: 5), "The recalled page can be dropped before sending.")
+
+        // Recalling an old page sends it, and only it, with the next message.
+        jump(to: "Topic 03")
+        let recallTopic = element("chat-page-recall-\(try XCTUnwrap(pageIDs["Topic 03"]))")
+        XCTAssertTrue(recallTopic.waitToExist(timeout: 5))
+        recallTopic.click()
+        let topicChip = element("composer-recalled-page-\(try XCTUnwrap(pageIDs["Topic 03"]))")
+        XCTAssertTrue(waitUntil({ topicChip.exists && transcriptValue().hasPrefix("Showing latest ") }, timeout: 10), transcriptValue())
+        XCTAssertEqual(topicChip.label, "Recalling Topic 03")
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("What did we say before?")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: "What did we say before?") > 0 && self.noTurnIsRunning()
+        }, timeout: 60), "The recalling turn should finish.")
+        XCTAssertTrue(waitUntil({ !topicChip.exists }, timeout: 5), "The composer's note clears once the message is sent.")
+        let historyData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+        let turns = try XCTUnwrap((try JSONSerialization.jsonObject(with: historyData) as? [String: Any])?["turns"] as? [[String: Any]])
+        // The page classifier's own turns quote the message too; the chat's turn is not one of them.
+        let recalled = try XCTUnwrap(turns.compactMap { $0["userText"] as? String }
+            .last { $0.hasSuffix("What did we say before?") && !$0.hasPrefix("Classify the latest user message") })
+        XCTAssertTrue(recalled.contains("anchor-page:Topic-03:1"), "The recalled page travels with the turn.")
+        XCTAssertTrue(recalled.contains("Topic 03 reply 1."))
+        XCTAssertFalse(recalled.contains("Topic 04 reply 1."), "Only the recalled page is carried.")
+        XCTAssertFalse(recalled.contains("Glaciers reply 1."), "A page dropped from the composer is not carried.")
+
+        // The labels can be hidden, which gives the messages their width back and persists.
+        let toggle = element("chat-page-anchors-toggle")
+        XCTAssertEqual(toggle.value as? String, "shown")
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !anchors.exists && toggle.exists && toggle.value as? String == "hidden" }, timeout: 5), "The labels hide behind their toggle.")
+        attachScreenshot(named: "chat-page-anchors-hidden")
+        refreshStandaloneChatSidebar()
+        XCTAssertTrue(waitUntil({ toggle.exists && toggle.value as? String == "hidden" }, timeout: 10), "Hidden labels stay hidden after a relaunch.")
+        XCTAssertFalse(anchors.exists)
+        toggle.click()
+        XCTAssertTrue(waitUntil({ anchors.exists && toggle.value as? String == "shown" }, timeout: 5), "The toggle brings the labels back.")
+        XCTAssertTrue(waitUntil({ label("Harbor").exists }, timeout: 5))
+        attachScreenshot(named: "chat-page-anchors-shown-again")
+    }
 }

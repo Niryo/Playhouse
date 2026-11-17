@@ -79,9 +79,10 @@ extension BoardTaskManager {
             task.scheduledModeRawValue = request.mode.rawValue
             task.scheduledModelID = request.modelID
             task.schedulePaused = false
-            // A new task keeps the scheduled prompt as its unsent draft until delivery. For an
-            // existing conversation the schedule payload stays separate from the user's draft.
-            if !hasStarted {
+            // The scheduled prompt waits as the unsent draft until delivery, in a new task and in
+            // an existing conversation alike. Only moving a conversation's scheduled message
+            // leaves its draft alone.
+            if !hasStarted || !request.keepsPayload {
                 task.savedPrompt = prompt.isEmpty ? nil : request.prompt
                 task.draftImageDataURLs = request.imageDataURLs
                 task.hasUnsentDraft = task.savedPrompt != nil || !request.imageDataURLs.isEmpty
@@ -180,6 +181,13 @@ extension BoardTaskManager {
                 let hasStarted = task.activeConversationID != nil || task.pendingSubmittedPrompt != nil
                     || !(task.status == .backlog || task.status == .blocked)
                 payload.dropped = !runNow && now.timeIntervalSince(scheduledAt) > gracePeriod
+                // A conversation's scheduled message waits in the composer, so edits made there
+                // since it was scheduled are what gets sent.
+                let draftPrompt = task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if hasStarted && task.hasUnsentDraft && (!draftPrompt.isEmpty || !task.draftImageDataURLs.isEmpty) {
+                    payload.prompt = task.savedPrompt ?? ""
+                    payload.imageDataURLs = task.draftImageDataURLs
+                }
                 Self.resetSchedule(task)
                 if payload.dropped && !hasStarted {
                     Self.markMissedScheduledRun(task, occurrence: scheduledAt, prompt: payload.prompt, imageDataURLs: payload.imageDataURLs)

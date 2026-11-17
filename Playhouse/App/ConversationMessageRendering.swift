@@ -57,9 +57,11 @@ extension TaskConversationView {
                 } else {
                     assistantBubble(message)
                 }
-                Spacer(minLength: 70)
+                // The standalone chat's replies run to the edge its questions end at; the
+                // room that leaves beside the transcript holds the chat's page labels.
+                Spacer(minLength: task.isStandaloneChat ? 0 : 70)
             } else {
-                Spacer(minLength: 70)
+                Spacer(minLength: task.isStandaloneChat ? 40 : 70)
                 userBubble(message)
             }
         }

@@ -56,16 +56,22 @@ struct RemoteConversationManager {
 
     /// With `messageLimit`, only the newest messages (before `beforeMessageID`,
     /// when given) cross the bridge, with a count of the earlier ones left.
+    /// `afterMessageID` and `chatPageID` instead read forward: the messages after
+    /// that message, or from the first message of that standalone chat page.
     func history(
         taskID: UUID,
         messageLimit: Int? = nil,
         beforeMessageID: String? = nil,
+        afterMessageID: String? = nil,
+        chatPageID: String? = nil,
         onActionRequest: @escaping () -> Void = {}
     ) async throws -> ConversationHistory {
         // The window loads earlier messages' images as it shows them (`messageImages`).
         var arguments: [String: BridgeValue] = ["taskID": id(taskID), "deferImages": .boolean(true)]
         if let messageLimit { arguments["limit"] = .string(String(messageLimit)) }
         if let beforeMessageID { arguments["before"] = .string(beforeMessageID) }
+        if let afterMessageID { arguments["after"] = .string(afterMessageID) }
+        if let chatPageID { arguments["page"] = .string(chatPageID) }
         let result = try await daemon.call("conversation.history", arguments) { event in
             if event.type == "action_request" { onActionRequest() }
         }

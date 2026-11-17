@@ -123,8 +123,8 @@ extension PlayhouseUITests {
         composer.typeKey(.return, modifierFlags: .command)
         XCTAssertTrue(transcriptMessage(uiSteeringText).waitToExist(timeout: 2), "Command-Return should show the steer in the transcript at once.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steersReceived) }, timeout: 10), "Command-Return should steer the active turn with the composer text and image.")
-        // The newer steer starts the newest turn, so the earlier steer now renders lazily and may
-        // be out of view: check each steer's own image rather than counting what is on screen.
+        // The earlier steer may have scrolled out of the lazy stack below the newer one: check
+        // each steer's own image rather than counting what is on screen.
         // The bubble's ID is looked up again on each poll: it changes when the saved message
         // replaces the one the window showed first.
         var uiSteerID = ""

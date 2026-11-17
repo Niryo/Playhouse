@@ -190,7 +190,7 @@ extension PlayhouseCLI {
       playhouse task raw-input-export <task-id> [--agent <id>] [--request <n>] [--format text|json]
       playhouse task raw-input-text <task-id> --item <n> [--agent <id>] [--offset <n>] [--length <n>]
       playhouse task cpu-usage <task-id>
-      playhouse conversation history <task-id> [--limit <messages>] [--before <message-id>] [--defer-images]
+      playhouse conversation history <task-id> [--limit <messages>] [--before <message-id> | --after <message-id> | --page <chat-page-id>] [--defer-images]
       playhouse conversation images <task-id> --message <message-id> [--message <message-id>]...
       playhouse conversation present-image <task-id> --image <path> [--caption <text>]
       playhouse conversation queue <task-id> --message <text> [--image <path>]...

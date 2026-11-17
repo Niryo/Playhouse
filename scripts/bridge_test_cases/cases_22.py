@@ -778,7 +778,7 @@ class BridgeTestCases22:
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
         self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],
                          "Every other atom, including a Button or Link that holds children, is a leaf.")
-# case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, and sends the due message to that same task and conversation, preserving its Claude session or Codex thread identifier. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+# case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, keeps the scheduled message in the composer as its unsent draft while Send returns to sending, and sends the due message, including edits made to that draft since it was scheduled, to that same task and conversation, preserving its Claude session or Codex thread identifier; once it is sent, the draft is cleared from storage and from the open composer. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     def test_schedule_one_time_task_fires_when_due(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-once")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -853,20 +853,30 @@ class BridgeTestCases22:
         )[0])
         self.assertEqual(follow_up["status"], "Review", "Scheduling a follow-up keeps the existing conversation's lifecycle state.")
         self.assertEqual(follow_up["schedule"]["prompt"], "Send a scheduled follow-up.")
+        waiting = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(waiting["savedPrompt"], "Send a scheduled follow-up.", "The scheduled message waits in the composer as its draft.")
+        self.assertTrue(waiting["hasUnsentDraft"], "The scheduled message is an unsent draft until it is sent.")
         recurring_follow_up, _ = self.call_cli(
             "schedule", "set", task_id, "--prompt", "Repeat this", "--repeat", "daily", "--title", "Repeated follow-up", expected_status=1
         )
         self.assert_failure(recurring_follow_up, "invalid_transition")
+        # The message waits in the composer, so an edit made there is what gets sent.
+        self.assert_success(self.call_cli("task", "draft", task_id, "--text", "Send an edited scheduled follow-up.")[0])
         follow_up_run = self.assert_success(self.call_cli(
             "schedule", "tick", "--now", self.schedule_iso(follow_up_at + datetime.timedelta(minutes=10)), extra_environment=environment
         )[0])
         self.assertEqual([run["taskID"] for run in follow_up_run["fired"]], [task_id], "The one-time message runs in the existing task.")
         self.wait_for(
-            lambda: "Send a scheduled follow-up." in self.fixture_user_prompts(executable),
-            "The scheduled follow-up should reach the existing conversation.",
+            lambda: "Send an edited scheduled follow-up." in self.fixture_user_prompts(executable),
+            "The edited scheduled follow-up should reach the existing conversation.",
         )
+        self.assertNotIn("Send a scheduled follow-up.", self.fixture_user_prompts(executable), "The text from before the edit isn't sent.")
         after_follow_up = self.assert_success(self.call_cli("task", "get", task_id)[0])
         self.assertEqual(after_follow_up["claudeSessionID"], original_session_id, "The follow-up stays in the original Claude session.")
+        def draft_cleared():
+            task = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            return task if not task["hasUnsentDraft"] else None
+        self.wait_for(draft_cleared, "Once the scheduled message is sent, it is no longer the composer's draft.")
 
         contents = Path(self.cli).resolve().parent.parent
         bundle_identifier = plistlib.loads((contents / "Info.plist").read_bytes())["CFBundleIdentifier"]
@@ -1012,7 +1022,7 @@ class BridgeTestCases22:
         self.assertIsNone(cleared.get("schedule"))
         self.assertIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "Clearing the schedule puts the task on the board.")
         self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
-    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, Send still sends ordinary messages while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove returns it to an empty composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, the message stays in the composer as its draft and Send sends again while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove leaves the message in the composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     def test_scheduled_task_edit_and_page_management(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-edit")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -1075,7 +1085,9 @@ class BridgeTestCases22:
 
         # An existing conversation's scheduled message can be moved without restating it.
         follow_up_at = fire_at + datetime.timedelta(hours=4)
-        self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Send a scheduled follow-up.", "--once", self.schedule_iso(follow_up_at))[0])
+        scheduled_follow_up = self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Send a scheduled follow-up.", "--once", self.schedule_iso(follow_up_at))[0])
+        self.assertEqual(scheduled_follow_up["savedPrompt"], "Send a scheduled follow-up.", "A scheduled message stays in the composer as its draft.")
+        self.assertTrue(scheduled_follow_up["hasUnsentDraft"])
         self.assert_success(self.call_cli("task", "draft", once_id, "--text", "An unrelated draft.")[0])
         moved_follow_up_at = follow_up_at + datetime.timedelta(hours=1)
         self.assert_success(self.call_cli("schedule", "set", once_id, "--once", self.schedule_iso(moved_follow_up_at))[0])

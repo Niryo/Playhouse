@@ -280,11 +280,10 @@ extension PlayhouseUITests {
         let latestListItem = app.staticTexts
             .matching(NSPredicate(format: "value CONTAINS %@", "5 billion parameters"))
             .firstMatch
-        let conversationScrollView = element("conversation-scroll-view")
-        XCTAssertTrue(waitUntil({
-            latestListItem.frame.maxY <= conversationScrollView.frame.maxY + 2
-                && latestListItem.frame.maxY > conversationScrollView.frame.minY
-        }, timeout: 5), "Reopening a long conversation should position its final message in the visible viewport.")
+        // A reopened conversation opens at its newest question, not its end (the newest-messages
+        // case covers that), so the paragraph is scrolled to rather than expected in view.
+        XCTAssertTrue(scrollFullyIntoView(latestListItem, in: element("conversation-scroll-view")),
+                      "The reply's closing paragraph should be reachable below the table.")
         let startImplementing = element("start-implementing-button")
         XCTAssertTrue(startImplementing.waitToExist(timeout: 5), "Plan mode should offer a dedicated implementation handoff.")
         XCTAssertEqual(element("message-composer").value as? String ?? "", "", "The handoff should be available while the composer is empty.")

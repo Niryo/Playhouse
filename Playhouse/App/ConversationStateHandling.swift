@@ -6,6 +6,8 @@ extension TaskConversationView {
     func loadConversation() async {
         isLoadingHistory = true
         oldestRenderedMessageID = nil
+        renderedWindowEndID = nil
+        chatPageJumpCount += 1
         errorMessage = nil
         let draftAtLoadStart = draft
         // A turn this window didn't send streams once the loaded history is in place.
@@ -28,6 +30,7 @@ extension TaskConversationView {
             flushStreamedTextDeltas()
             messages = history.messages
             earlierStoredMessageCount = history.earlierMessageCount ?? 0
+            historyGap = nil
             // Resolve the window as soon as the messages land. The assignment
             // at the end of the load repeats it once progress collapsing has
             // settled which rows the transcript renders.
@@ -382,7 +385,7 @@ extension TaskConversationView {
             // A provider may not list a running turn's items yet, so mid-turn history can
             // hold less than this window already shows; applying it would blank the turn.
             let historyCount = history.messages.count + (history.earlierMessageCount ?? 0)
-            if keepingShownTurn, historyCount < messages.count + earlierStoredMessageCount { return }
+            if keepingShownTurn, historyCount < messages.count + earlierStoredMessageCount + (historyGap?.storedMessageCount ?? 0) { return }
             applyHistoryMessages(history)
             activities = history.activities
             providerBoundaries = history.providerBoundaries
@@ -403,10 +406,13 @@ extension TaskConversationView {
         isWatchingRunningTurn = true
         let assistantMessageID = UUID().uuidString
         followedTurnStreams += 1
+        streamedReplyTargets[assistantMessageID] = assistantMessageID
         Task { @MainActor in
             defer {
                 followedTurnStreams -= 1
                 isWatchingRunningTurn = false
+                streamedReplyTargets[assistantMessageID] = nil
+                streamedRepliesAboveSteers[assistantMessageID] = nil
             }
             // The turn's prompt is already saved; show it while the rest streams in.
             await refreshGoalConversation(keepingShownTurn: true)
@@ -468,9 +474,12 @@ extension TaskConversationView {
     func refreshChatPageStatus() {
         guard let chatManager = try? StandaloneChatManager(dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]) else {
             chatPagesByTurnID = [:]
+            chatPageAnchors.clear()
             return
         }
         chatPagesByTurnID = (try? chatManager.pageAssignmentsByTurnID()) ?? [:]
+        chatPageAnchors.reload(from: chatManager)
+        markCurrentChatPage()
     }
     func persistPendingAnnotations() {
         let data = PersistedAnnotations.encode(annotations.filter { !inFlightAnnotationIDs.contains($0.id) })
@@ -714,7 +723,36 @@ extension TaskConversationView {
         }
         pendingLocalSteers.append(steer)
         unechoedLocalSteers.append(steer.text)
+        liveSteerMessageIDs.insert(steer.id)
+        moveStreamedRepliesBelowSteer()
         messages.append(ConversationMessage(id: steer.id, role: .user, text: steer.text, imageDataURLs: steer.imageDataURLs))
+    }
+
+    /// A steer closes what the turn has written so far: what streams after it starts a new
+    /// message below the steer instead of growing the one above it.
+    func moveStreamedRepliesBelowSteer() {
+        for (stream, target) in streamedReplyTargets {
+            messages.removeAll { $0.id == target && $0.role == .assistant && $0.text.isEmpty }
+            // Only text the provider has not settled as an item or a final answer yet.
+            if messages.contains(where: { $0.id == target && $0.phase == nil }) {
+                streamedRepliesAboveSteers[stream, default: []].append(target)
+            }
+            streamedReplyTargets[stream] = UUID().uuidString
+        }
+    }
+
+    /// The message above a steer that `text`, now settled by the provider, streamed into, if any.
+    /// It is matched by content: a later item is new work and belongs below the steer.
+    func takeStreamedReplyAboveSteer(stream: String, settling text: String) -> Int? {
+        let settled = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for id in streamedRepliesAboveSteers[stream] ?? [] {
+            guard let index = messages.firstIndex(where: { $0.id == id }) else { continue }
+            let streamed = messages[index].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !streamed.isEmpty, settled.hasPrefix(streamed) else { continue }
+            streamedRepliesAboveSteers[stream]?.removeAll { $0 == id }
+            return index
+        }
+        return nil
     }
 
     /// The provider has the steer, or it was withdrawn: history owns it from here.

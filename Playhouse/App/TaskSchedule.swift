@@ -25,8 +25,8 @@ struct ScheduledRunClaim {
     /// More than the grace period late: the run is placed in Blocked instead of starting.
     var dropped: Bool
     let title: String
-    let prompt: String
-    let imageDataURLs: [String]
+    var prompt: String
+    var imageDataURLs: [String]
     let mode: ConversationMode
     let modelID: String?
     let provider: ConversationProvider

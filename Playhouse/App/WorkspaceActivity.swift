@@ -517,4 +517,7 @@ struct ConversationHistory: Codable, Equatable {
     /// For a page of history, how many messages precede `messages`; nil when
     /// `messages` is the whole conversation.
     var earlierMessageCount: Int?
+    /// For a page of history, how many messages follow `messages`; nil when
+    /// `messages` is the whole conversation.
+    var laterMessageCount: Int?
 }

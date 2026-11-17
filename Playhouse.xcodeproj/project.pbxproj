@@ -94,6 +94,8 @@
 		B10000000000000000000025 /* ConversationTranscriptRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000025 /* ConversationTranscriptRendering.swift */; };
 		B10000000000000000000026 /* ConversationSideChatRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000026 /* ConversationSideChatRendering.swift */; };
 		B10000000000000000000027 /* ConversationTranscriptNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000027 /* ConversationTranscriptNavigation.swift */; };
+		B10000000000000000007A60 /* ConversationChatPageNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A60 /* ConversationChatPageNavigation.swift */; };
+		B10000000000000000007A61 /* ChatPageAnchorsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A61 /* ChatPageAnchorsView.swift */; };
 		B10000000000000000000028 /* ConversationMessageRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000028 /* ConversationMessageRendering.swift */; };
 		B10000000000000000000029 /* ConversationComposerFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000029 /* ConversationComposerFlow.swift */; };
 		B10000000000000000000030 /* ConversationStateHandling.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000030 /* ConversationStateHandling.swift */; };
@@ -281,6 +283,8 @@
 		B20000000000000000000025 /* ConversationTranscriptRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptRendering.swift; sourceTree = "<group>"; };
 		B20000000000000000000026 /* ConversationSideChatRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChatRendering.swift; sourceTree = "<group>"; };
 		B20000000000000000000027 /* ConversationTranscriptNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptNavigation.swift; sourceTree = "<group>"; };
+		B20000000000000000007A60 /* ConversationChatPageNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationChatPageNavigation.swift; sourceTree = "<group>"; };
+		B20000000000000000007A61 /* ChatPageAnchorsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPageAnchorsView.swift; sourceTree = "<group>"; };
 		B20000000000000000000028 /* ConversationMessageRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMessageRendering.swift; sourceTree = "<group>"; };
 		B20000000000000000000029 /* ConversationComposerFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposerFlow.swift; sourceTree = "<group>"; };
 		B20000000000000000000030 /* ConversationStateHandling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStateHandling.swift; sourceTree = "<group>"; };
@@ -577,6 +581,8 @@
 				B20000000000000000000029 /* ConversationComposerFlow.swift */,
 				B20000000000000000000028 /* ConversationMessageRendering.swift */,
 				B20000000000000000000027 /* ConversationTranscriptNavigation.swift */,
+				B20000000000000000007A60 /* ConversationChatPageNavigation.swift */,
+				B20000000000000000007A61 /* ChatPageAnchorsView.swift */,
 				B20000000000000000000026 /* ConversationSideChatRendering.swift */,
 				B20000000000000000000025 /* ConversationTranscriptRendering.swift */,
 				A20000000000000000000014 /* ConversationTranscriptStore.swift */,
@@ -1075,6 +1081,8 @@
 				B10000000000000000000029 /* ConversationComposerFlow.swift in Sources */,
 				B10000000000000000000028 /* ConversationMessageRendering.swift in Sources */,
 				B10000000000000000000027 /* ConversationTranscriptNavigation.swift in Sources */,
+				B10000000000000000007A60 /* ConversationChatPageNavigation.swift in Sources */,
+				B10000000000000000007A61 /* ChatPageAnchorsView.swift in Sources */,
 				B10000000000000000000026 /* ConversationSideChatRendering.swift in Sources */,
 				B10000000000000000000025 /* ConversationTranscriptRendering.swift in Sources */,
 				B10000000000000000000023 /* WorkspaceTaskManagers.swift in Sources */,

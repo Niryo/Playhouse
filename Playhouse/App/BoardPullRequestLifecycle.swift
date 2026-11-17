@@ -306,6 +306,24 @@ extension BoardTaskManager {
         return try await reviewPullRequests(task, includeReviewThreads: includeReviewThreads)
     }
 
+    /// The status read behind `task.pr.status`. Done removes a task's worktrees, so a
+    /// probe of a Done task whose linked worktrees are gone (often one that was already
+    /// running when the task moved) has no state to report; that is not a failure.
+    func pullRequestStatus(_ id: UUID, includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {
+        do {
+            return try await reviewPullRequests(id, includeReviewThreads: includeReviewThreads)
+        } catch {
+            // The move removes the worktrees before it records Done; the lock waits it out.
+            let hasNoStateToReport = try await withTaskOperationLock(id) {
+                let task = try requireTask(id)
+                let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
+                return task.status == .done && !linked.contains { FileManager.default.fileExists(atPath: $0.worktreePath) }
+            }
+            guard hasNoStateToReport else { throw error }
+            return []
+        }
+    }
+
     /// Autopilot also reads unresolved review threads; a plain status probe skips
     /// that GitHub request because nothing acts on it.
     func reviewPullRequests(_ task: BoardTask, includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {

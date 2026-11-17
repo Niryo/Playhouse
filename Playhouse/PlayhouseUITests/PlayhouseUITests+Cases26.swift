@@ -413,6 +413,9 @@ extension PlayhouseUITests {
         attachElementScreenshot(visibleRows.firstMatch, named: "compaction-rows-4-completed-row")
         touch(executable + ".reattach-release")
         XCTAssertTrue(transcriptMessage("After restart.").waitToExist(timeout: 20), "The window streams the end of the reattached turn.")
+        // The turn end reloads the transcript, and the row is absent from the accessibility tree
+        // for an instant while the stored row replaces the live one; count once it is back.
+        XCTAssertTrue(waitUntil({ visibleRows.count >= 1 }, timeout: 10), "The finished turn keeps its compaction row.")
         XCTAssertEqual(visibleRows.count, 1, "The finished turn still shows the compaction once.")
         XCTAssertEqual(spinningRows.count, 0)
         let rows = try compactionRows(taskID, environment: environment)

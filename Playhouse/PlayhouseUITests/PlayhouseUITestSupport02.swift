@@ -662,7 +662,15 @@ extension PlayhouseUITests {
         [row.value as? String, row.buttons.firstMatch.label].compactMap { $0 }.joined(separator: "\n")
     }
     func assertSubagentIconArtwork(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
-        guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        // The row moves while the transcript appends beside it; a capture taken at a frame read
+        // just before a move samples pixels beside the artwork. The sampled image is attached.
+        XCTAssertTrue(waitForStableFrame(element), "The subagent icon should settle before its artwork is sampled.", file: file, line: line)
+        let screenshot = element.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = "Subagent icon artwork sample"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        guard let cgImage = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             XCTFail("Could not read the subagent icon screenshot.", file: file, line: line)
             return
         }

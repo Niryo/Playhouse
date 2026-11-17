@@ -38,13 +38,42 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     var isPlayhouseSent: Bool { role == .user && PlayhouseSentMessage.matches(text) }
 
     /// Where the newest turn the user started begins: what a window opening the conversation shows first.
-    static func latestTurnStartIndex(in messages: [ConversationMessage]) -> Int? {
+    /// `continuingIDs` names live messages that joined a running turn before history gave them its turn ID.
+    static func latestTurnStartIndex(in messages: [ConversationMessage], continuingIDs: Set<String> = []) -> Int? {
         // Prompts Playhouse sends on its own are not a turn the user started: anchoring the
         // window there would hide the conversation the recovery is continuing.
         // When redaction has replaced every user message, the placeholders are all there is to anchor on.
-        messages.lastIndex(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) && !$0.isPlayhouseSent })
+        messages.indices.last(where: { index in
+            !PrivatePromptPlaceholder.matches(messages[index].text)
+                && startsUserTurn(at: index, in: messages, continuingIDs: continuingIDs)
+        })
             ?? messages.lastIndex(where: { $0.role == .user })
             ?? messages.indices.last
+    }
+
+    /// Whether the message at `index` is one the user sent to start a turn: not a prompt
+    /// Playhouse sent on its own, and not a message that joined a turn already under way.
+    static func startsUserTurn(at index: Int, in messages: [ConversationMessage], continuingIDs: Set<String> = []) -> Bool {
+        let message = messages[index]
+        return message.role == .user && !message.isPlayhouseSent
+            && !continuesTurn(at: index, in: messages, continuingIDs: continuingIDs)
+    }
+
+    /// Whether the user message at `index` joined a turn already under way, as a steer or a notice
+    /// the provider's runtime adds does, rather than starting one. Such a message follows the work
+    /// its turn did before it, so it never moves where that turn begins.
+    static func continuesTurn(at index: Int, in messages: [ConversationMessage], continuingIDs: Set<String> = []) -> Bool {
+        let message = messages[index]
+        guard message.role == .user else { return false }
+        if continuingIDs.contains(message.id) { return true }
+        guard let turnID = message.turnID else { return false }
+        // A turn's messages are contiguous, so the scan stops at the first message of another turn.
+        for earlier in messages[..<index].reversed() {
+            guard let earlierTurnID = earlier.turnID else { continue }
+            if earlierTurnID != turnID { return false }
+            if earlier.role == .user { return true }
+        }
+        return false
     }
 
     private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, imagesDeferred, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }

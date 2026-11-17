@@ -92,6 +92,15 @@ struct TaskConversationView: View {
     /// but a reopened window no longer reads that stream, so it shows its own.
     @State var unechoedLocalSteers: [String] = []
     @State var unconfirmedStreamedSteers: [String] = []
+    /// Steer bubbles shown before history gives them their turn's ID. They join the running
+    /// turn, so they never start a turn of their own in the transcript.
+    @State var liveSteerMessageIDs: Set<String> = []
+    /// Each turn stream this window reads, by its reply placeholder's ID, to the message its
+    /// text goes to now. A steer moves what the turn writes after it below the steer.
+    @State var streamedReplyTargets: [String: String] = [:]
+    /// Each turn stream's earlier messages that a steer closed with text still in them. The
+    /// provider's item for that text settles there, above the steer, rather than below it.
+    @State var streamedRepliesAboveSteers: [String: [String]] = [:]
     /// This window's own sends whose turn stream it is reading right now.
     @State var followedTurnStreams = 0
     /// A history reload for another caller's turn is running, and whether a
@@ -114,6 +123,10 @@ struct TaskConversationView: View {
     @State var skillsPresentation = 0
     /// What the composer's `@` menu can mention, read from the daemon when a mention starts.
     @State var mentionCatalog: MentionCatalog?
+    /// The catalog's handles, kept beside it so the composer and each message don't rebuild them on every render.
+    @State var mentionHandles: Set<String> = []
+    /// What the open menu lists, refreshed when the typed mention or the catalog changes rather than on every render.
+    @State var mentionSuggestions: [MentionItem] = []
     @State var isLoadingMentions = false
     /// The highlighted row of the open mention menu.
     @State var mentionSelection = 0
@@ -139,6 +152,8 @@ struct TaskConversationView: View {
     @State var didCopyTaskTitle = false
     @State var taskTitleCopyFeedbackToken = UUID()
     @State var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
+    /// The message at the top of the transcript's viewport, as last reported.
+    @State var topTranscriptRowID: String?
     @State var conversationMode: ConversationMode = .code
     @State var isEnteringGoal = false
     @State var activeGoal: CodexThreadGoal?
@@ -181,6 +196,21 @@ struct TaskConversationView: View {
     /// read a page at a time, and the next page loads once the reader scrolls
     /// past the oldest message already here.
     @State var earlierStoredMessageCount = 0
+    /// The newest message rendered while the reader browses an earlier chat page. The window
+    /// then ends there instead of at the newest message, and grows downward as they scroll.
+    @State var renderedWindowEndID: String?
+    /// Messages left unloaded between a chat page the reader jumped to and the newest ones.
+    @State var historyGap: ConversationHistoryGap?
+    @State var isLoadingNewerConversationMessages = false
+    /// Counts chat page jumps, so a page read that a later jump overtook is dropped.
+    @State var chatPageJumpCount = 0
+    /// The standalone chat's page labels. Only the labels read it, so the page the reader is on
+    /// changes as they scroll without re-rendering the transcript.
+    @State var chatPageAnchors = ChatPageAnchorsModel()
+    @AppStorage(WorkspaceSettings.chatPageAnchorsHiddenKey, store: WorkspaceSettings.preferencesStore)
+    var hidesChatPageAnchors = false
+    /// Earlier chat pages the next message recalls into the agent's context.
+    @State var recalledChatPages: [StandaloneChatPage] = []
     /// The newest question the transcript has presented, which tells one just sent from it.
     @State var lastScrolledUserMessageID: String?
     @State var annotations: [ConversationAnnotation] = []
@@ -408,8 +438,8 @@ struct TaskConversationView: View {
         return "Editor \(monacoPresentation.editorTag) \(reuse), showing \(monacoPresentation.path)"
     }
 
-    /// The turn is the latest one the user started: status nudges Playhouse sends after it
-    /// continue that turn rather than start a new one.
+    /// The user's newest message, steers included: the provider turn answering it is the latest
+    /// one. Status nudges Playhouse sends after it continue that turn rather than start a new one.
     static func latestUserTurnStart(in messages: [ConversationMessage]) -> Int? {
         messages.lastIndex { $0.role == .user && !$0.isPlayhouseSent }
     }
@@ -462,10 +492,11 @@ struct TaskConversationView: View {
     /// top of the viewport with its answer below.
     var latestConversationTurnStartID: String? {
         let allMessages = conversationMessages
-        return ConversationMessage.latestTurnStartIndex(in: allMessages).map { allMessages[$0].id }
+        return ConversationMessage.latestTurnStartIndex(in: allMessages, continuingIDs: liveSteerMessageIDs).map { allMessages[$0].id }
     }
 
-    /// The window runs from `oldestRenderedMessageID` to the newest message.
+    /// The window runs from `oldestRenderedMessageID` to the newest message, or to
+    /// `renderedWindowEndID` while the reader browses an earlier chat page.
     /// A conversation that was empty when it loaded establishes no window of
     /// its own, so it keeps the newest batch rendered as messages arrive.
     var renderedConversationMessages: [ConversationMessage] {
@@ -473,6 +504,9 @@ struct TaskConversationView: View {
         guard let oldestRenderedMessageID,
               let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
             return Array(allMessages.suffix(Self.followedConversationMessageCount))
+        }
+        if let endIndex = renderedWindowEndIndex(in: allMessages, from: startIndex) {
+            return Array(allMessages[startIndex...endIndex])
         }
         return Array(allMessages[startIndex...])
     }
@@ -489,9 +523,23 @@ struct TaskConversationView: View {
         return startIndex > allMessages.startIndex
     }
 
+    /// The turn's work sits above its first reply, or above a message steered into it before
+    /// any reply. A steer continues the turn the user started, so work done before a steer
+    /// never renders below it. When a later provider turn, such as one a Playhouse nudge woke,
+    /// is the turn whose work the disclosure lists, the work sits where that turn's replies begin.
     var activityDisclosureAnchorID: String? {
-        if let latestUserIndex = Self.latestUserTurnStart(in: conversationMessages) {
-            return conversationMessages.dropFirst(latestUserIndex + 1).first(where: { $0.role == .assistant })?.id
+        let messages = conversationMessages
+        if let turnStart = messages.indices.last(where: {
+            ConversationMessage.startsUserTurn(at: $0, in: messages, continuingIDs: liveSteerMessageIDs)
+        }) {
+            let candidates = messages.dropFirst(turnStart + 1).filter {
+                $0.role == .assistant || ($0.role == .user && !$0.isPlayhouseSent)
+            }
+            if let turnID = latestConversationTurnID,
+               let first = candidates.first(where: { $0.turnID == turnID }) {
+                return first.id
+            }
+            return candidates.first?.id
         }
         return conversationMessages.first(where: { $0.role == .assistant })?.id
     }
@@ -601,7 +649,7 @@ struct TaskConversationView: View {
                 conversationMode = mode
             }
             // A task that hasn't started reopens with Send in schedule mode. An existing
-            // conversation's scheduled message stays apart from the composer, so Send still sends.
+            // conversation's scheduled message waits in the composer, and Send sends it now.
             if let schedule = savedSchedule, !isExistingConversation {
                 composerSchedule = schedule
                 scheduleDraft = schedule
@@ -755,6 +803,19 @@ struct TaskConversationView: View {
                 isResponding = false
             }
         }
+        .onChange(of: task.hasUnsentDraft) { wasUnsent, isUnsent in
+            // A scheduled message waits in the composer as its draft. When the scheduler sends
+            // it, the saved draft becomes the sent prompt, and the composer still showing that
+            // message clears; a draft the user changed meanwhile stays.
+            guard wasUnsent, !isUnsent, !isReadOnly else { return }
+            let shown = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !shown.isEmpty || !pendingImages.isEmpty,
+                  shown == (task.savedPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            draftAutosaveTask?.cancel()
+            draft = ""
+            composerDraft.settledText = ""
+            pendingImages = []
+        }
         .onChange(of: conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "")) { _, interrupted in
             // The daemon can report the stop after this window loaded the settled turn.
             if interrupted, !isResponding, !providerTurnIsActive { hasPausedResponse = true }
@@ -873,7 +934,7 @@ struct TaskConversationView: View {
     /// in. Only standalone chat has pages, so task conversations always send an empty list.
     func standaloneChatPageIDs(for pendingAnnotations: [ConversationAnnotation]) -> [String] {
         guard task.isStandaloneChat, !pendingAnnotations.isEmpty else { return [] }
-        let activePageID = messages.last(where: { $0.turnID != nil })?.turnID.flatMap { chatPagesByTurnID[$0]?.id }
+        let activePageID = activeChatPageID
         var pageIDs: [String] = []
         for annotation in pendingAnnotations {
             guard let turnID = messages.first(where: { $0.id == annotation.messageID })?.turnID,
@@ -884,12 +945,17 @@ struct TaskConversationView: View {
         return pageIDs
     }
 
-    /// Composed only of plugin atoms (Plugins/Atoms).
-    func standaloneChatPageSeparator(_ page: StandaloneChatPage) -> some View {
+    /// A page's title between two rules. An earlier page also offers to be recalled: the next
+    /// message then carries that page's conversation to the agent.
+    func standaloneChatPageSeparator(_ page: StandaloneChatPage, canRecall: Bool) -> some View {
         AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(paddingY: 5)) {
             transcriptRule(opacity: 0.13)
+            // The title gives way to the button in a narrow chat.
             AtomText(props: TextProps(text: page.title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "chat-page-separator"))
-                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
+            if canRecall {
+                ChatPageRecallButton(pageID: page.id) { recallChatPage(page) }
+            }
             transcriptRule(opacity: 0.13)
         }
     }

@@ -4,16 +4,26 @@ import Foundation
 
 /// What an `@` mention in the composer can name, in the order the mention menu lists them.
 enum MentionKind: String, Codable, Sendable, CaseIterable {
-    case rule, skill, mcp, agent, repository, task
+    case skill, mcp, agent, repository, task
 
+    /// What a row says it is, and what the menu's section of them is called.
     var title: String {
         switch self {
-        case .rule: "Rule"
         case .skill: "Skill"
         case .mcp: "MCP"
         case .agent: "Agent"
         case .repository: "Repository"
         case .task: "Task"
+        }
+    }
+
+    var sectionTitle: String {
+        switch self {
+        case .skill: "Skills"
+        case .mcp: "MCP servers"
+        case .agent: "Agents"
+        case .repository: "Repositories"
+        case .task: "Tasks"
         }
     }
 }
@@ -31,7 +41,7 @@ struct MentionItem: Codable, Equatable, Identifiable, Sendable {
     let reference: String
 }
 
-/// Everything a task's composer can mention, ordered rules, skills, MCP servers, agents,
+/// Everything a task's composer can mention, ordered skills, MCP servers, agents,
 /// repositories, then other tasks, plus the IDs of the most recently sent mentions.
 struct MentionCatalog: Codable, Equatable, Sendable {
     static let recentLimit = 10
@@ -54,11 +64,18 @@ struct MentionCatalog: Codable, Equatable, Sendable {
             let recent = recent
             return recent.isEmpty ? items : recent
         }
-        let matching = items.filter {
-            $0.handle.lowercased().contains(needle) || $0.title.lowercased().contains(needle) || $0.detail.lowercased().contains(needle)
+        // One pass, lowering each field at most once: the menu asks on every keystroke.
+        var prefixed: [MentionItem] = []
+        var containing: [MentionItem] = []
+        for item in items {
+            let handle = item.handle.lowercased()
+            if handle.hasPrefix(needle) {
+                prefixed.append(item)
+            } else if handle.contains(needle) || item.title.lowercased().contains(needle) || item.detail.lowercased().contains(needle) {
+                containing.append(item)
+            }
         }
-        let prefixed = matching.filter { $0.handle.lowercased().hasPrefix(needle) }
-        return prefixed + matching.filter { !$0.handle.lowercased().hasPrefix(needle) }
+        return prefixed + containing
     }
 
     /// The items `text` mentions, in order of first mention, each once.
@@ -172,7 +189,7 @@ enum MentionText {
 
 // MARK: - Manager
 
-/// Builds a task's mention catalog from the same skill, rule and MCP catalogs the Skills page
+/// Builds a task's mention catalog from the same skill and MCP catalogs the Skills page
 /// shows, the agents both providers define, the repositories under the repository root and the
 /// other board tasks; expands a sent message's mentions; and remembers the recent ones. The GUI
 /// and the CLI reach it through the same bridge command, and every send goes through `expand`.
@@ -183,15 +200,13 @@ final class MentionCatalogManager {
     private let environment: SkillEnvironment
     private let preferences: UserDefaults
     private let skills: SkillCatalogManager
-    private let rules: RuleCatalogManager
     private let mcp: McpCatalogManager
     private let fileManager = FileManager.default
 
-    init(environment: SkillEnvironment, preferences: UserDefaults, skills: SkillCatalogManager, rules: RuleCatalogManager, mcp: McpCatalogManager) {
+    init(environment: SkillEnvironment, preferences: UserDefaults, skills: SkillCatalogManager, mcp: McpCatalogManager) {
         self.environment = environment
         self.preferences = preferences
         self.skills = skills
-        self.rules = rules
         self.mcp = mcp
     }
 
@@ -208,7 +223,6 @@ final class MentionCatalogManager {
     func catalog(for task: any ConversationSubject, tasks: BoardTaskManager, settings: WorkspaceSettingsManager) async -> MentionCatalog {
         let roots = SkillRoot.roots(for: task)
         var items: [MentionItem] = []
-        items += ruleItems(rules.catalog(roots: roots))
         items += skillItems(skills.catalog(roots: roots))
         items += mcpItems(mcp.catalog(roots: roots))
         items += agentItems(roots: roots, provider: task.conversationProvider)
@@ -229,21 +243,6 @@ final class MentionCatalogManager {
     }
 
     // MARK: Sources
-
-    private func ruleItems(_ catalog: RuleCatalog) -> [MentionItem] {
-        catalog.allRules.filter(\.enabled).map { rule in
-            let handle: String
-            switch rule.scope {
-            case .repo: handle = Self.handle(URL(fileURLWithPath: rule.repositoryPath ?? "").lastPathComponent + "/" + rule.name)
-            case .global: handle = Self.handle(rule.name)
-            case .managed: handle = "managed/CLAUDE.md"
-            }
-            return MentionItem(
-                id: "rule:" + rule.id, kind: .rule, handle: handle, title: rule.name, detail: rule.summary,
-                reference: "the rule file `\(rule.filePath)`; read it and follow it."
-            )
-        }
-    }
 
     private func skillItems(_ catalog: SkillCatalog) -> [MentionItem] {
         catalog.allSkills.filter { $0.enabled && !$0.providers.isEmpty }.map { skill in
