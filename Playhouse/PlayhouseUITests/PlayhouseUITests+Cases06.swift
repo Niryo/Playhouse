@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review. Each transition into Waiting Response plays Ping and each transition into Review plays Glass; rejected and repeated moves play no sound.
+    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which Waiting Response and Blocked cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review. Each transition into Waiting Response plays Ping and each transition into Review plays Glass; rejected and repeated moves play no sound.
     func test_waiting_response_task_moves_to_review_manually() throws {
         let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: questionFixture.path))
@@ -43,7 +43,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
         element("task-card-\(backlogTaskID)").rightClick()
         XCTAssertTrue(element("rename-task-menu-item").waitToExist(timeout: 5))
-        XCTAssertFalse(element("move-task-to-review-menu-item").exists, "Only Waiting Response cards offer Move to Review.")
+        XCTAssertFalse(element("move-task-to-review-menu-item").exists, "A Backlog card offers no Move to Review.")
         app.typeKey(.escape, modifierFlags: [])
 
         // A pending blocking question shows Waiting Response while its turn still runs.
@@ -181,6 +181,163 @@ extension PlayhouseUITests {
                        "The waiting and review transitions play distinct sounds; a repeated move is silent.")
         moveTaskToDone(taskID: dragTaskID)
         assertTaskVisible("Manual review menu", inColumn: "Review")
+        XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
+    }
+
+    // case-contract: test_waiting_and_blocked_tasks_move_directly_to_review_and_done | A task in Waiting Response moves straight to Done, and a Blocked task moves to Review or straight to Done, through the CLI and on the board: Waiting Response and Blocked cards offer Move to Done in their context menu, Blocked cards also offer Move to Review, a Blocked card dragged onto the Review column lands in Review, and a Blocked card dragged onto the Done drawer lands in Done; a Backlog card offers neither and a Backlog task is still rejected for both moves and keeps its status. Moving a Waiting Response task to Done while its blocking question's turn still runs is rejected as still running, shown on the board in a Couldn't move task to Done alert, and keeps the task in Waiting Response with its worktree in place; once the turn finishes, Move to Done reaches Done and removes the task's clean Playhouse worktree as a move from Review does. Moving a Blocked task to Review clears its blocked reason and plays Glass; moving one to Done clears it too. Each move persists across a fresh CLI/XPC read, and a task already in Done is returned unchanged.
+    func test_waiting_and_blocked_tasks_move_directly_to_review_and_done() throws {
+        let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: questionFixture.path))
+        codexFixtureExecutable = questionFixture.path
+        let emptyFixture = try makeCodexFixture(emptyQuestions: true)
+        launchApp(defaultParent: fixture.parent.path)
+
+        func blockedTask(_ title: String) throws -> String {
+            let created = try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.secondary.path])
+            let id = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+            assertCLIError(
+                try runCLI(
+                    ["conversation", "send", id, "--message", "Please ask your questions."],
+                    expectedStatus: 1,
+                    extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": emptyFixture.path]
+                ),
+                code: "operation_failed"
+            )
+            XCTAssertEqual(try taskRecord(id: id)?["status"] as? String, "Blocked")
+            XCTAssertNotNil(try taskRecord(id: id)?["statusMessage"] as? String, "A blocked task carries the reason it is blocked.")
+            return id
+        }
+        func statusSounds(_ id: String) throws -> [String] {
+            try diagnosticEvents().filter {
+                $0["event"] as? String == "task.status_sound.played" && $0["taskID"] as? String == id
+            }.compactMap { $0["sound"] as? String }
+        }
+        let moveToDone = element("move-task-to-done-menu-item")
+        let moveToReview = element("move-task-to-review-menu-item")
+
+        // Backlog still can't skip ahead to Done or Review.
+        try createTaskFixture(title: "Direct move backlog", roots: [fixture.alternate.path])
+        let backlogTaskID = try taskID(named: "Direct move backlog")
+        assertCLIError(try runCLI(["task", "move", backlogTaskID, "Done"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["task", "move", backlogTaskID, "Review"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
+        element("task-card-\(backlogTaskID)").rightClick()
+        XCTAssertTrue(element("rename-task-menu-item").waitToExist(timeout: 5))
+        XCTAssertFalse(moveToDone.exists, "A Backlog card offers no Move to Done.")
+        XCTAssertFalse(moveToReview.exists, "A Backlog card offers no Move to Review.")
+        app.typeKey(.escape, modifierFlags: [])
+
+        // Waiting Response -> Done, refused while the question's turn still runs.
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Direct waiting done", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let waitingTaskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Direct waiting done")
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
+        modeMenu.click()
+        app.menuItems["Plan mode"].click()
+        element("message-composer").click()
+        element("message-composer").typeText("Please share your plan.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: waitingTaskID)?["status"] as? String, "Waiting Response")
+        let record = try XCTUnwrap((try taskRecord(id: waitingTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+        assertTaskVisible("Direct waiting done", inColumn: "Waiting Response")
+
+        let waitingCard = element("task-card-\(waitingTaskID)")
+        let doneRejection = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        waitingCard.rightClick()
+        XCTAssertTrue(moveToDone.waitToExist(timeout: 5), "A Waiting Response card should offer Move to Done.")
+        XCTAssertTrue(moveToReview.exists, "A Waiting Response card still offers Move to Review.")
+        moveToDone.click()
+        XCTAssertTrue(doneRejection.waitToExist(timeout: 10), "Moving a task whose turn is still running to Done should explain the rejection.")
+        XCTAssertTrue(doneRejection.staticTexts.matching(NSPredicate(format: "value == %@", "Couldn't move task to Done")).firstMatch.exists)
+        XCTAssertTrue(doneRejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "still running")).firstMatch.exists)
+        attachScreenshot(named: "Move to Done is refused while the question's turn still runs")
+        doneRejection.buttons["OK"].click()
+        XCTAssertEqual(try taskRecord(id: waitingTaskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.path), "A refused move must leave the running turn's worktree in place.")
+        assertTaskVisible("Direct waiting done", inColumn: "Waiting Response")
+
+        openTask(named: "Direct waiting done")
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 5))
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitToExist(timeout: 10))
+        let threadID = try XCTUnwrap(try taskRecord(id: waitingTaskID)?["codexThreadID"] as? String)
+        XCTAssertTrue(waitUntil({
+            let runtime = (try? self.runCLI(["conversation", "runtime"]))?["result"] as? [String: Any]
+            return runtime != nil && !((runtime?["activeThreadIDs"] as? [String] ?? []).contains(threadID))
+                && (try? self.taskRecord(id: waitingTaskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 30), "The answered turn should finish in Waiting Response.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+        waitingCard.rightClick()
+        XCTAssertTrue(moveToDone.waitToExist(timeout: 5))
+        attachScreenshot(named: "A Waiting Response card offers Move to Done")
+        attachElementScreenshot(app.menus.firstMatch, named: "Waiting Response card menu close-up with Move to Done")
+        moveToDone.click()
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: waitingTaskID)?["status"] as? String) == "Done"
+        }, timeout: 15), "Move to Done should take a Waiting Response task straight to Done.")
+        XCTAssertNil(try taskRecord(id: waitingTaskID)?["statusMessage"] as? String)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: worktree.path) }, timeout: 10),
+                      "Done removes the task's clean Playhouse worktree as it does from Review.")
+        XCTAssertTrue(waitUntil({ !waitingCard.exists }, timeout: 10), "The Done task leaves the board.")
+        XCTAssertFalse(doneRejection.exists)
+
+        // Blocked -> Review clears the blocked reason and plays the Review sound.
+        let reviewTaskID = try blockedTask("Direct blocked review")
+        assertTaskVisible("Direct blocked review", inColumn: "Blocked")
+        let blockedSoundCount = try statusSounds(reviewTaskID).count
+        element("task-card-\(reviewTaskID)").rightClick()
+        XCTAssertTrue(moveToReview.waitToExist(timeout: 5), "A Blocked card should offer Move to Review.")
+        XCTAssertTrue(moveToDone.exists, "A Blocked card should offer Move to Done.")
+        attachScreenshot(named: "A Blocked card offers Move to Review and Move to Done")
+        attachElementScreenshot(app.menus.firstMatch, named: "Blocked card menu close-up with Move to Review and Move to Done")
+        moveToReview.click()
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: reviewTaskID)?["status"] as? String) == "Review"
+        }, timeout: 15), "Move to Review should take a Blocked task to Review.")
+        XCTAssertNil(try taskRecord(id: reviewTaskID)?["statusMessage"] as? String)
+        assertTaskVisible("Direct blocked review", inColumn: "Review")
+        XCTAssertEqual(Array(try statusSounds(reviewTaskID).dropFirst(blockedSoundCount)), ["Glass"])
+
+        // Blocked -> Review by dragging the card onto the Review column.
+        let dragReviewTaskID = try blockedTask("Direct blocked review drag")
+        assertTaskVisible("Direct blocked review drag", inColumn: "Blocked")
+        let reviewColumn = element("column-review")
+        XCTAssertTrue(reviewColumn.waitToExist(timeout: 5))
+        XCTAssertTrue(waitForStableFrame(element("task-card-\(dragReviewTaskID)")), "The card should settle in Blocked before the drag.")
+        element("task-card-\(dragReviewTaskID)").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.5, thenDragTo: reviewColumn.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: dragReviewTaskID)?["status"] as? String) == "Review"
+        }, timeout: 15), "Dropping a Blocked card on Review should persist the Review status.")
+        XCTAssertNil(try taskRecord(id: dragReviewTaskID)?["statusMessage"] as? String)
+        assertDoneDrawerResting("after a Blocked card is dropped on Review")
+        assertTaskVisible("Direct blocked review drag", inColumn: "Review")
+
+        // Blocked -> Done by dragging the card onto the Done drawer.
+        let doneTaskID = try blockedTask("Direct blocked done")
+        assertTaskVisible("Direct blocked done", inColumn: "Blocked")
+        XCTAssertTrue(waitForStableFrame(element("task-card-\(doneTaskID)")), "The card should settle in Blocked before the drag.")
+        moveTaskToDone(taskID: doneTaskID)
+        XCTAssertNil(try taskRecord(id: doneTaskID)?["statusMessage"] as? String)
+        assertDoneDrawerResting("after a Blocked card is dropped on Done")
+        XCTAssertFalse(element("column-heading-blocked").exists, "Blocked hides once its tasks moved on.")
+        XCTAssertEqual(
+            (try runCLI(["task", "move", doneTaskID, "Done"])["result"] as? [String: Any])?["status"] as? String,
+            "Done",
+            "A task already in Done is returned unchanged."
+        )
+        assertTaskVisible("Direct blocked review", inColumn: "Review")
+        attachScreenshot(named: "Blocked and Waiting Response tasks moved on directly")
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
     // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome and with nothing left running receives exactly one private recovery prompt that offers only the stopping outcomes; a completed report during it moves the task to Review, a waiting-response report during it leaves the task in Waiting Response, and no report by its end marks the task Blocked with the missing-outcome reason rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work; they offer no outcome for unfinished work and tell the agent to keep awaiting a required command within the turn. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A recovery prompt Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those prompts also retains the latest ordinary-turn diff while showing their replies. Completed and waiting-response outcomes start Glass and Ping respectively when their turns settle.

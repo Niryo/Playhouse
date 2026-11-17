@@ -150,7 +150,7 @@ struct KanbanColumnView: View {
     @ViewBuilder
     private var dropTarget: some View {
         if status == .review {
-            // Waiting Response cards drop here; the board ignores any other source.
+            // Waiting Response and Blocked cards drop here; the board ignores any other source.
             columnContent
                 .onDrop(of: [.plainText], isTargeted: $isDropTargeted) { providers in
                     guard acceptsDraggedTask, let provider = providers.first else { return false }
@@ -191,10 +191,10 @@ struct KanbanColumnView: View {
             pluginActions: pluginActions,
             onOpenPlugin: { onOpenPlugin($0, task) },
             onAddPlugin: onAddPlugin,
-            onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil,
-            onMoveToReview: task.status == .waitingResponse ? { onMoveTask(task.id, .review) } : nil
+            onMoveToDone: TaskStatus.manualDoneSources.contains(task.status) ? { onMoveTask(task.id, .done) } : nil,
+            onMoveToReview: TaskStatus.manualReviewSources.contains(task.status) ? { onMoveTask(task.id, .review) } : nil
         )
-        if task.status == .waitingResponse || task.status == .review {
+        if TaskStatus.manualDoneSources.contains(task.status) {
             card.onDrag {
                 draggedTaskID = task.id
                 return NSItemProvider(object: task.id.uuidString as NSString)

@@ -18,6 +18,11 @@ enum TaskStatus: String, CaseIterable, Identifiable {
         rawValue.lowercased().replacingOccurrences(of: " ", with: "-")
     }
 
+    /// The statuses a user may move to Review by hand.
+    static let manualReviewSources: Set<TaskStatus> = [.waitingResponse, .blocked]
+    /// The statuses a user may move to Done by hand.
+    static let manualDoneSources: Set<TaskStatus> = [.review, .waitingResponse, .blocked]
+
     var accent: Color {
         switch self {
         case .backlog: Color(red: 0.52, green: 0.57, blue: 0.66)
