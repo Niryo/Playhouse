@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too: a follow-up to it returns it to In Progress before its turn starts, and `task repository renew` on a Done task does the same, each with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request); that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
+    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both, and a pull request status read of the Done task, whose worktree was removed, reports no state instead of failing. A Done task renews too: a follow-up to it returns it to In Progress before its turn starts, and `task repository renew` on a Done task does the same, each with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request); that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
     func test_merged_task_renew_opens_fresh_worktree_and_new_pr() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -119,6 +119,14 @@ extension PlayhouseUITests {
 
         try "123=merged\n501=merged\n".write(to: stateURL, atomically: true, encoding: .utf8)
         XCTAssertEqual((try runCLI(["task", "move", taskID, "Done"], extraEnvironment: ghEnvironment)["result"] as? [String: Any])?["status"] as? String, "Done")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: freshWorktree.path))
+        let doneStates = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]]
+        XCTAssertEqual(doneStates?.count, 0, "A Done task whose worktree was removed has no pull request state to report.")
+        // A shared read may reuse the card's own probe from just before the move for a few seconds.
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["task", "pr", "status", taskID, "--shared"], extraEnvironment: ghEnvironment))?["result"] as? [[String: Any]])?.isEmpty == true
+        }, timeout: 10), "A shared status read of the Done task reports no state either.")
+        XCTAssertFalse(app.staticTexts["Pull request operation failed"].exists, "A probe still running when the task moved to Done raises no alert.")
         element("done-archive-button").click()
         XCTAssertTrue(element("done-archive-task-\(taskID)").waitToExist(timeout: 10))
         let archivedMerged = app.links["done-archive-pr-link-\(taskID)-123"]
