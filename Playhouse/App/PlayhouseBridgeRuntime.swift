@@ -376,7 +376,7 @@ final class PlayhouseBridgeRuntime {
                 let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
                 let limit = request.arguments["limit"]?.string.flatMap(Int.init) ?? 50
                 result = .object([
-                    "pages": try Self.value(chatManager.listPages(limit: limit)),
+                    "pages": try Self.value(chatManager.listPages(limit: limit, titleContaining: request.arguments["title"]?.string)),
                     "archiveDirectory": .string(chatManager.pageFilesDirectoryURL.path),
                 ])
             case "chat.page.search":
