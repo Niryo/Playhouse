@@ -207,8 +207,15 @@ struct TaskConversationView: View {
     /// The standalone chat's page labels. Only the labels read it, so the page the reader is on
     /// changes as they scroll without re-rendering the transcript.
     @State var chatPageAnchors = ChatPageAnchorsModel()
-    @AppStorage(WorkspaceSettings.chatPageAnchorsHiddenKey, store: WorkspaceSettings.preferencesStore)
-    var hidesChatPageAnchors = false
+    @AppStorage(WorkspaceSettings.chatPageAnchorsPinnedKey, store: WorkspaceSettings.preferencesStore)
+    var pinsChatPageAnchors = false
+    /// Whether hovering the handle slid the unlocked page labels out.
+    @State var revealsChatPageAnchors = false
+    /// Folds the hovered-out labels back in after a short grace, so the pointer can cross from
+    /// the handle to the labels without them closing.
+    @State var chatPageAnchorsCollapse: Task<Void, Never>?
+    /// Which of the handle and the slid-out labels the pointer is over.
+    @State var hoveredChatPageAnchorsParts: Set<ChatPageAnchorsHoverPart> = []
     /// Earlier chat pages the next message recalls into the agent's context.
     @State var recalledChatPages: [StandaloneChatPage] = []
     /// The newest question the transcript has presented, which tells one just sent from it.

@@ -116,10 +116,15 @@ extension TaskConversationView {
             .overlay(alignment: .leading) {
                 chatPageAnchorsOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
             }
-            .overlay(alignment: .topLeading) {
-                chatPageAnchorsToggleOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
-            }
             .overlay(alignment: .bottom) { jumpToLatestButton }
+            .onChange(of: offersChatPageAnchors(transcriptWidth: viewport.size.width)) { _, offers in
+                // Labels slid out before the chat grew too narrow for them stay folded when it widens,
+                // and the parts that vanished under the pointer no longer count as hovered.
+                if !offers {
+                    revealsChatPageAnchors = false
+                    hoveredChatPageAnchorsParts = []
+                }
+            }
             .onChange(of: isLoadingHistory) { _, isLoading in
                 // Every completed history load reopens on the newest turn,
                 // including reloads that leave the messages unchanged.

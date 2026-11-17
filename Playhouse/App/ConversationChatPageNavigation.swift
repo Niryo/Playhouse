@@ -315,38 +315,78 @@ extension TaskConversationView {
         }
     }
 
-    /// Whether the page labels show beside the transcript: only the standalone chat has pages,
-    /// and a narrow chat keeps its width for messages.
-    func showsChatPageAnchors(transcriptWidth: CGFloat) -> Bool {
-        task.isStandaloneChat && !hidesChatPageAnchors && !chatPageAnchors.pages.isEmpty
+    /// Whether the chat has page labels to offer: only the standalone chat has pages, and a
+    /// narrow chat keeps its width for messages.
+    func offersChatPageAnchors(transcriptWidth: CGFloat) -> Bool {
+        task.isStandaloneChat && !chatPageAnchors.pages.isEmpty
             && transcriptWidth >= ChatPageAnchorsLayout.minimumTranscriptWidth
     }
 
-    /// The page labels over the transcript's leading edge, halfway down it.
+    /// Whether the page labels show beside the transcript: locked open from their handle, or
+    /// slid out from it while hovered.
+    func showsChatPageAnchors(transcriptWidth: CGFloat) -> Bool {
+        offersChatPageAnchors(transcriptWidth: transcriptWidth) && (pinsChatPageAnchors || revealsChatPageAnchors)
+    }
+
+    /// The handle at the transcript's leading edge, halfway down it, and the page labels it
+    /// slides out beside it while hovered or locked. Each part tracks its own hover, because a
+    /// hover handler on a container around the handle gives the handle's accessibility element
+    /// the container's whole frame.
     @ViewBuilder
     func chatPageAnchorsOverlay(showsLabels: Bool, transcriptWidth: CGFloat) -> some View {
-        if showsLabels {
-            ChatPageAnchorsView(
-                model: chatPageAnchors,
-                // The labels end a little before the rows start.
-                width: ChatPageAnchorsLayout.rowInset(transcriptWidth: transcriptWidth)
-                    + ChatPageAnchorsLayout.transcriptPadding - ChatPageAnchorsLayout.leadingInset - 12,
-                jump: { jumpToChatPage($0) },
-                jumpToBottom: { returnToLatestMessages() }
-            )
-            .padding(.leading, ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth) + ChatPageAnchorsLayout.leadingInset)
-            // Clear of the toggle in the transcript's corner.
-            .padding(.vertical, 26)
+        if offersChatPageAnchors(transcriptWidth: transcriptWidth) {
+            let leading = ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth)
+            HStack(spacing: ChatPageAnchorsLayout.labelsHandleGap) {
+                ChatPageAnchorsHandle(
+                    isOpen: showsLabels,
+                    isLocked: pinsChatPageAnchors,
+                    toggleLock: { pinsChatPageAnchors.toggle() },
+                    hover: { hoverChatPageAnchors(.handle, $0) }
+                )
+                if showsLabels {
+                    ChatPageAnchorsView(
+                        model: chatPageAnchors,
+                        width: ChatPageAnchorsLayout.labelsWidth(transcriptWidth: transcriptWidth),
+                        jump: { jumpToChatPage($0) },
+                        jumpToBottom: { returnToLatestMessages() }
+                    )
+                    // Room for the arrow below the labels, inside the hovered area.
+                    .padding(.vertical, 26)
+                    .contentShape(Rectangle())
+                    .onHover { hoverChatPageAnchors(.labels, $0) }
+                    // Labels that fold away under the pointer get no hover exit.
+                    .onDisappear { hoveredChatPageAnchorsParts.remove(.labels) }
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+            }
+            .padding(.leading, leading + ChatPageAnchorsLayout.handleInset)
         }
     }
 
-    /// Hides the page labels, or brings them back, from the transcript's top corner.
-    @ViewBuilder
-    func chatPageAnchorsToggleOverlay(showsLabels: Bool, transcriptWidth: CGFloat) -> some View {
-        if showsLabels || (task.isStandaloneChat && hidesChatPageAnchors && !chatPageAnchors.pages.isEmpty) {
-            ChatPageAnchorsToggle(isHidden: !showsLabels) { hidesChatPageAnchors = showsLabels }
-                .padding(.leading, ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth) + ChatPageAnchorsLayout.leadingInset)
-                .padding(.top, 6)
+    /// Slides the unlocked labels out while the pointer is over their handle or them, and back
+    /// in a moment after it leaves both; the delay also carries the pointer across the gap
+    /// between them.
+    func hoverChatPageAnchors(_ part: ChatPageAnchorsHoverPart, _ isHovering: Bool) {
+        if isHovering {
+            // Folding labels slide left across the strip beside them, so a pointer resting there,
+            // off the open labels, would catch them, bring them back out off the pointer, and fold
+            // them again, over and over. Only labels that are out count as hovered.
+            guard part == .handle || revealsChatPageAnchors || pinsChatPageAnchors else { return }
+            hoveredChatPageAnchorsParts.insert(part)
+        } else {
+            hoveredChatPageAnchorsParts.remove(part)
+        }
+        chatPageAnchorsCollapse?.cancel()
+        chatPageAnchorsCollapse = nil
+        if !hoveredChatPageAnchorsParts.isEmpty {
+            guard !revealsChatPageAnchors else { return }
+            withAnimation(ChatPageAnchorsLayout.slideAnimation) { revealsChatPageAnchors = true }
+        } else if revealsChatPageAnchors {
+            chatPageAnchorsCollapse = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                withAnimation(ChatPageAnchorsLayout.slideAnimation) { revealsChatPageAnchors = false }
+            }
         }
     }
 

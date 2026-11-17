@@ -62,7 +62,6 @@ final class ChatPageAnchorsModel {
 enum ChatPageAnchorsLayout {
     /// Below this transcript width the labels would leave too little room for messages.
     static let minimumTranscriptWidth: CGFloat = 380
-    static let leadingInset: CGFloat = 12
     /// Where the transcript's rows start without the labels.
     static let transcriptPadding: CGFloat = 28
     static let transcriptMaxWidth: CGFloat = 820
@@ -82,6 +81,21 @@ enum ChatPageAnchorsLayout {
     static let labelsVerticalPadding: CGFloat = 6
     /// The gap between the last label and the jump-to-bottom button below it.
     static let jumpToBottomSpacing: CGFloat = 4
+    /// Where the labels' handle sits from the transcript column's edge.
+    static let handleInset: CGFloat = 2
+    /// The handle's target, which the open labels start just beyond.
+    static let handleWidth: CGFloat = 12
+    /// How far right of the handle the open labels start.
+    static let labelsHandleGap: CGFloat = 2
+    /// Where the open labels start from the transcript column's edge: just right of the handle.
+    static let labelsLeading = handleInset + handleWidth + labelsHandleGap
+
+    /// The labels' width: up to a little before the rows start.
+    static func labelsWidth(transcriptWidth: CGFloat) -> CGFloat {
+        rowInset(transcriptWidth: transcriptWidth) + transcriptPadding - labelsLeading - 12
+    }
+    /// How the labels slide out from their handle, pushing the messages right, and back in.
+    static let slideAnimation = Animation.easeInOut(duration: 0.22)
 
     /// The height that shows `count` labels, at most `visibleLabelCount` of them.
     static func labelsHeight(count: Int) -> CGFloat {
@@ -218,24 +232,63 @@ private struct ChatJumpToBottomButton: View {
     }
 }
 
-/// Hides the page labels, or brings them back from the transcript's edge.
-struct ChatPageAnchorsToggle: View {
-    let isHidden: Bool
-    let action: () -> Void
+/// The parts of the page labels column whose hover keeps the unlocked labels slid out.
+enum ChatPageAnchorsHoverPart: Hashable {
+    case handle
+    case labels
+}
+
+/// The handle at the transcript's leading edge, halfway down it. Folded, it is a faint thin line
+/// that slides the labels out while hovered; beside the open labels it thickens under a small
+/// open lock, and clicking it locks them open, which closes the lock, or unlocks them again.
+struct ChatPageAnchorsHandle: View {
+    let isOpen: Bool
+    let isLocked: Bool
+    let toggleLock: () -> Void
+    let hover: (Bool) -> Void
+    @State private var isHovering = false
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 18, height: 18)
+        Button(action: toggleLock) {
+            Capsule()
+                .fill(fill)
+                .frame(width: isOpen || isLocked ? 5 : 3, height: 64)
+                // A wider, taller target than the line itself, so it is easy to find.
+                .frame(width: ChatPageAnchorsLayout.handleWidth, height: 108)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
-        .nativeHelp(isHidden ? "Show the chat's pages" : "Hide the chat's pages")
-        .accessibilityLabel(isHidden ? "Show chat pages" : "Hide chat pages")
-        .accessibilityValue(isHidden ? "hidden" : "shown")
-        .accessibilityIdentifier("chat-page-anchors-toggle")
+        .nativeHelp(isLocked ? "Unlock the chat's pages, so they fold away when the pointer leaves" : "Lock the chat's pages open")
+        .onHover {
+            isHovering = $0
+            hover($0)
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .accessibilityLabel(isLocked ? "Unlock chat pages" : "Lock chat pages open")
+        .accessibilityValue(isLocked ? "locked" : isOpen ? "open" : "folded")
+        .accessibilityIdentifier("chat-page-anchors-handle")
+        // Above the line, inside the handle's target, so hovering or clicking it is the handle's.
+        // Laid over the button after its accessibility modifiers, so it is its own element.
+        .overlay(alignment: .top) {
+            if isOpen || isLocked {
+                Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(isLocked || isHovering ? Color.primary : Color.secondary)
+                    .frame(width: ChatPageAnchorsLayout.handleWidth, height: 14)
+                    .padding(.top, 5)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                    .accessibilityLabel(isLocked ? "Chat pages locked" : "Chat pages unlocked")
+                    .accessibilityValue(isLocked ? "locked" : "unlocked")
+                    .accessibilityIdentifier("chat-page-anchors-lock")
+            }
+        }
+    }
+
+    private var fill: Color {
+        // The lock above it shows whether the labels are locked; the line looks the same either way.
+        if isOpen || isLocked { return Color.primary.opacity(isHovering ? 0.5 : 0.34) }
+        return Color.primary.opacity(isHovering ? 0.32 : 0.16)
     }
 }

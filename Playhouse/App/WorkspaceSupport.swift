@@ -102,8 +102,9 @@ enum WorkspaceSettings {
     static let appearanceKey = "appearance"
     /// Whether the task view's sidebar is hidden to a narrow rail; one value shared by every task.
     static let taskSidebarCollapsedKey = "taskSidebarCollapsed"
-    /// Whether the standalone chat's page labels beside its transcript are hidden.
-    static let chatPageAnchorsHiddenKey = "chatPageAnchorsHidden"
+    /// Whether the standalone chat's page labels are locked open beside its transcript by a click
+    /// on their handle, rather than sliding out from it only while hovered.
+    static let chatPageAnchorsPinnedKey = "chatPageAnchorsPinned"
     /// Whether the Changes section inside the task sidebar was collapsed, before the
     /// built-in Changes plugin kept it in its plugin state; read once to carry it over.
     static let workspaceChangesSectionCollapsedKey = "workspaceChangesSectionCollapsed"
