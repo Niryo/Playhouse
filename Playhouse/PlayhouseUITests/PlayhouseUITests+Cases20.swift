@@ -407,8 +407,10 @@ extension PlayhouseUITests {
         let composer = element("message-composer")
         composer.click()
         composer.typeText("/plan")
-        XCTAssertEqual(composer.value as? String, "")
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Typing /plan should switch modes without sending a message.")
+        XCTAssertTrue(element("slash-command-plan").waitToExist(timeout: 5), "Typing /plan offers the command.")
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 5), "Choosing /plan removes the typed command.")
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Choosing /plan should switch modes without sending a message.")
 
         assertCLIError(
             try runCLI(

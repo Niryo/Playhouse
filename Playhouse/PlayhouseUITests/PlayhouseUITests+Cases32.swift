@@ -1539,3 +1539,257 @@ extension PlayhouseUITests {
         attachScreenshot(named: "The built-in Scheduled Tasks page, enabled again")
     }
 }
+
+extension PlayhouseUITests {
+    // case-contract: test_slash_commands_menu_lists_commands_and_items | Typing / where a word starts anywhere in the composer opens a command menu listing /mcp, /plan, /goal, /skill, /login and /plugin in that order, narrowed to the commands whose name starts with what follows the /. On a Claude task /goal can't be chosen and says goal mode isn't supported by Claude, while on a Codex task it can. Choosing /plan turns plan mode on and choosing /goal on a Codex task opens the goal entry, each removing the typed command from the draft. Typing a command with its own list in full lists its items, narrowed by text after a space: /mcp lists the MCP servers the composer can mention, and asked with sign-in status marks each server with the agents that need a sign-in to it (shown as a Sign in button per agent on its row); /skill lists the mentionable skills, editable ones with a working gear and built-in ones with a disabled gear; choosing either mentions it as @handle in place of the command. /login lists both agents, the task's own first, and choosing one starts that agent's sign-in. /plugin lists Create Plugin first, which turns on Add Plugin mode, then the user's own plugins (never built-in ones), disabled ones marked so, each with edit, which opens the plugin's editor conversation, delete, which asks first, and a settings gear that stays disabled until plugins have settings. In the window an MCP server's gear opens the MCP page with that server's editor, its Sign in button opens the MCP page filtered to it and starts that agent's sign-in, and every choice removes the typed command. Listing without a task is a usage error and for an unknown task is not_found.
+    func test_slash_commands_menu_lists_commands_and_items() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let codexPath = try XCTUnwrap(codexFixtureExecutable)
+        let codexSidecars = [".mcp-status", ".mcp-login"].map { URL(fileURLWithPath: codexPath + $0) }
+        codexSidecars.forEach { try? FileManager.default.removeItem(at: $0) }
+        addTeardownBlock { codexSidecars.forEach { try? FileManager.default.removeItem(at: $0) } }
+        let repository = try makeSkillRepository("slash-repo", skills: [
+            ".agents/skills/slash-skill/SKILL.md": skillManifest("slash-skill", "A skill the slash menu lists"),
+            ".mcp.json": #"{"mcpServers": {"slash-docs": {"type": "stdio", "command": "node", "args": ["docs.js"]}}}"#,
+        ])
+        try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "slash-system-skill", "Bundled with Codex")
+        try writeMcpJSON(mcpClaudeState, ["mcpServers": ["slash-remote": ["type": "http", "url": "https://remote.example.com/mcp"]]])
+        let claude = try installSkillsClaudeFixture("claude-fixture-slash")
+        let claudeAuth = URL(fileURLWithPath: claude.path + ".auth-state")
+        try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [["name": "slash-remote", "status": "needs-auth"]])
+        try writeMcpJSON(URL(fileURLWithPath: codexPath + ".mcp-status"), [["name": "slash-remote", "authStatus": "notLoggedIn", "tools": [:]]])
+        try writeInstalledPlugin("slash-panel", source: "function Panel() { return h(Text, null, 'hi'); }", placement: "conversationToolbar", presentation: "modal")
+        try writeInstalledPlugin("slash-doomed", source: "function Panel() { return h(Text, null, 'bye'); }", placement: "conversationToolbar", presentation: "modal")
+        try writeInstalledPlugin("slash-off", source: "function Panel() { return h(Text, null, 'off'); }", placement: "conversationToolbar", presentation: "modal")
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["plugin", "disable", "--id", "slash-off"])
+        let task = try createSkillsTask("Slash task", repositories: [repository], provider: "claude")
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        _ = try createSkillsTask("Slash Codex task", repositories: [repository], provider: "codex")
+
+        let menu = element("slash-menu")
+        let composer = element("message-composer")
+        func clearComposer() {
+            composer.click()
+            composer.typeKey("a", modifierFlags: .command)
+            composer.typeKey(.delete, modifierFlags: [])
+            XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5))
+        }
+        func slashRows() -> [String] {
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "slash-command-")).allElementsBoundByIndex
+                .filter { $0.exists }.sorted { $0.frame.minY < $1.frame.minY }
+                .map { String($0.identifier.dropFirst("slash-command-".count)) }
+        }
+        /// A real click at the row's center: XCUITest reports rows of the floating menu as not hittable.
+        func clickRow(_ row: XCUIElement) {
+            XCTAssertTrue(row.waitToExist(timeout: 10), "\(row) shows.")
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        }
+
+        openTask(named: "Slash task")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
+        XCTAssertFalse(modeMenu.label.contains("Plan mode"), "The task starts outside plan mode.")
+        composer.click()
+        composer.typeText("Draft first, then /")
+        XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing / where a word starts, anywhere in the draft, opens the command menu.")
+        XCTAssertLessThanOrEqual(menu.frame.maxY, composer.frame.minY + 1, "The menu opens above the composer.")
+        XCTAssertEqual(slashRows(), ["mcp", "plan", "goal", "skill", "login", "plugin"], "Every command is listed, in order.")
+        let goal = element("slash-command-goal")
+        XCTAssertFalse(goal.isEnabled, "Claude can't run goal mode, so /goal can't be chosen.")
+        // The row shows why; the button carries the same text as its accessibility value.
+        let reason = goal.value as? String ?? ""
+        XCTAssertTrue(reason.contains("isn't supported by Claude"), "The row says why: \(reason)")
+        attachScreenshot(named: "Typing / lists the commands; goal mode isn't supported by Claude")
+        attachElementScreenshot(menu, named: "Command menu with /goal disabled on Claude")
+        clickRow(goal)
+        XCTAssertEqual(composer.value as? String, "Draft first, then /", "A disabled command does nothing when clicked.")
+
+        composer.typeText("pl")
+        XCTAssertTrue(waitUntil({ slashRows() == ["plan", "plugin"] }, timeout: 5), "Typing after the / narrows the commands by prefix.")
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Draft first, then " }, timeout: 5), "Choosing /plan removes the typed command and keeps the rest.")
+        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Plan mode") }, timeout: 5), "Choosing /plan turns plan mode on.")
+        XCTAssertTrue(waitForDisappearance(menu))
+        attachScreenshot(named: "Choosing /plan turns plan mode on and removes the command")
+        clearComposer()
+
+        // /mcp: choosing a server mentions it.
+        composer.typeText("/mcp")
+        XCTAssertTrue(element("slash-item-mcp-slash-docs").waitToExist(timeout: 10), "Typing /mcp lists the MCP servers.")
+        XCTAssertTrue(element("slash-item-mcp-slash-remote").exists)
+        XCTAssertEqual(accessibleLabelOrValue(of: element("slash-menu-title")), "MCP servers")
+        let claudeSignIn = element("slash-signin-mcp-slash-remote-claude")
+        XCTAssertTrue(claudeSignIn.waitToExist(timeout: 30), "A server Claude needs a sign-in to shows a Sign in button for Claude.")
+        XCTAssertTrue(element("slash-signin-mcp-slash-remote-codex").exists, "and one for Codex, on the same row.")
+        XCTAssertFalse(element("slash-signin-mcp-slash-docs-claude").exists, "A server that needs no sign-in has no button.")
+        XCTAssertTrue(element("slash-gear-mcp-slash-docs").isEnabled, "Every server has a gear.")
+        attachScreenshot(named: "/mcp lists servers, with Sign in buttons and gears")
+        attachElementScreenshot(menu, named: "/mcp list with sign-in buttons")
+        composer.typeText(" doc")
+        XCTAssertTrue(waitForDisappearance(element("slash-item-mcp-slash-remote")), "Text after a space narrows the servers.")
+        clickRow(element("slash-item-mcp-slash-docs"))
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@slash-docs " }, timeout: 5), "Choosing a server mentions it in place of the command.")
+        XCTAssertTrue(waitForDisappearance(menu))
+
+        // The gear opens the server's editor on the MCP page.
+        composer.typeText("/mcp")
+        clickRow(element("slash-gear-mcp-slash-remote"))
+        XCTAssertTrue(element("mcp-page").waitToExist(timeout: 10), "The gear opens the MCP page.")
+        XCTAssertTrue(element("mcp-editor-panel").waitToExist(timeout: 10), "with the server's editor open.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-editor-title")), "slash-remote", "The editor is the server's own.")
+        attachScreenshot(named: "The /mcp gear opens the server's editor")
+        element("mcp-editor-cancel").click()
+        XCTAssertTrue(waitForDisappearance(element("mcp-editor-panel")))
+        element("skills-back-button").click()
+        XCTAssertTrue(waitForDisappearance(element("skills-page"), timeout: 10))
+        XCTAssertEqual(composer.value as? String, "@slash-docs ", "The gear removes the typed command.")
+
+        // Sign in opens the MCP page on that server and starts that agent's sign-in.
+        composer.click()
+        composer.typeText("/mcp")
+        let signIn = element("slash-signin-mcp-slash-remote-claude")
+        XCTAssertTrue(signIn.waitToExist(timeout: 30))
+        clickRow(signIn)
+        XCTAssertTrue(element("mcp-page").waitToExist(timeout: 10), "Sign in opens the MCP page.")
+        XCTAssertEqual(element("mcp-search").value as? String, "slash-remote", "The page is narrowed to the server.")
+        let pageBadge = element("mcp-signin-slash-remote-claude")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: pageBadge).contains("Waiting for sign-in") }, timeout: 20),
+                      "Claude's sign-in to the server has started.")
+        func logged(_ path: String) -> [[String: String]] {
+            ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(separator: "\n").compactMap {
+                (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: String]
+            }
+        }
+        XCTAssertTrue(waitUntil({ logged(claude.path + ".mcp-authenticate") == [["serverName": "slash-remote"]] }, timeout: 20),
+                      "Claude Code is asked to sign in to that server only.")
+        XCTAssertTrue(logged(codexPath + ".mcp-login").isEmpty, "Codex is not asked.")
+        attachScreenshot(named: "/mcp Sign in starts Claude's sign-in on the MCP page")
+        element("skills-back-button").click()
+        XCTAssertTrue(waitForDisappearance(element("skills-page"), timeout: 10))
+        XCTAssertEqual(composer.value as? String, "@slash-docs ", "Sign in removes the typed command.")
+
+        // /skill: choosing a skill mentions it; its gear opens its editor.
+        composer.click()
+        composer.typeText("/skill slash")
+        let skillRow = element("slash-item-skill-slash-skill")
+        XCTAssertTrue(skillRow.waitToExist(timeout: 10), "Typing /skill lists the skills.")
+        XCTAssertTrue(element("slash-gear-skill-slash-skill").isEnabled, "A repository skill's gear can open its editor.")
+        attachElementScreenshot(menu, named: "/skill list narrowed by its filter")
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@slash-docs @slash-skill " }, timeout: 5), "Return mentions the highlighted skill in place of the command.")
+        composer.typeText("/skill")
+        clickRow(element("slash-gear-skill-slash-skill"))
+        XCTAssertTrue(element("skill-editor-panel").waitToExist(timeout: 10), "The skill's gear opens its editor on the Skills page.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("skill-editor-name")), "slash-skill", "The editor is that skill's.")
+        attachScreenshot(named: "The /skill gear opens the skill's editor")
+        element("skill-editor-cancel").click()
+        XCTAssertTrue(waitForDisappearance(element("skill-editor-panel")))
+        element("skills-back-button").click()
+        XCTAssertTrue(waitForDisappearance(element("skills-page"), timeout: 10))
+        XCTAssertEqual(composer.value as? String, "@slash-docs @slash-skill ")
+        clearComposer()
+
+        // /login lists both agents, the task's own first; choosing one starts its sign-in.
+        composer.typeText("/login")
+        XCTAssertTrue(element("slash-item-login-claude").waitToExist(timeout: 10))
+        XCTAssertTrue(element("slash-item-login-codex").exists)
+        XCTAssertLessThan(element("slash-item-login-claude").frame.minY, element("slash-item-login-codex").frame.minY, "The task's own agent comes first.")
+        attachElementScreenshot(menu, named: "/login lists both agents, the task's own first")
+        composer.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(menu), "Escape closes the menu.")
+        XCTAssertEqual(composer.value as? String, "/login", "Escape keeps the typed text.")
+        clearComposer()
+        try JSONSerialization.data(withJSONObject: ["loggedIn": false]).write(to: claudeAuth)
+        composer.typeText("Before /login")
+        clickRow(element("slash-item-login-claude"))
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Before " }, timeout: 5), "Choosing an agent removes the typed command.")
+        XCTAssertTrue(waitUntil({ ((try? String(contentsOf: claudeAuth, encoding: .utf8)) ?? "").contains("claude-second@example.com") }, timeout: 20),
+                      "Choosing Claude runs Claude Code's sign-in.")
+        clearComposer()
+
+        // /plugin: Create Plugin, then the user's plugins with edit, delete and a settings gear.
+        composer.typeText("/plugin")
+        let create = element("slash-item-create-plugin")
+        XCTAssertTrue(create.waitToExist(timeout: 10), "Typing /plugin offers Create Plugin.")
+        XCTAssertTrue(element("slash-item-plugin-slash-panel").exists, "and lists the user's plugins.")
+        XCTAssertTrue(element("slash-item-plugin-slash-doomed").exists)
+        XCTAssertFalse(element("slash-item-plugin-scheduled-tasks").exists, "Built-in plugins are not listed.")
+        XCTAssertLessThan(create.frame.minY, element("slash-item-plugin-slash-panel").frame.minY, "Create Plugin comes first.")
+        XCTAssertTrue(element("slash-edit-plugin-slash-panel").isEnabled, "Each plugin has an edit button.")
+        XCTAssertTrue(element("slash-delete-plugin-slash-panel").isEnabled, "and a delete button.")
+        let pluginGear = element("slash-gear-plugin-slash-panel")
+        XCTAssertTrue(pluginGear.exists, "and a settings gear,")
+        XCTAssertFalse(pluginGear.isEnabled, "disabled until plugins have settings.")
+        XCTAssertTrue(element("slash-item-plugin-slash-off").exists, "A disabled plugin is listed too,")
+        XCTAssertEqual(element("slash-item-plugin-slash-off").value as? String, "Conversation sidebar toolbar (Disabled)", "marked as disabled.")
+        XCTAssertEqual(element("slash-item-plugin-slash-panel").value as? String, "Conversation sidebar toolbar", "An enabled plugin isn't marked.")
+        attachScreenshot(named: "/plugin offers Create Plugin and the user's plugins")
+        attachElementScreenshot(menu, named: "/plugin list with edit, delete and settings")
+        clickRow(element("slash-delete-plugin-slash-doomed"))
+        let confirm = app.dialogs.buttons["Delete"].firstMatch
+        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Deleting asks for confirmation.")
+        XCTAssertTrue(app.dialogs.staticTexts["Delete the plugin Slash Doomed?"].exists, "The confirmation names the plugin.")
+        confirm.click()
+        XCTAssertTrue(waitUntil({ (try? self.installedPluginIDs())?.contains("slash-doomed") == false }, timeout: 10), "Confirming deletes the plugin.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent("slash-doomed").path))
+        XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5), "Delete removes the typed command.")
+        composer.click()
+        composer.typeText("/plugin")
+        XCTAssertTrue(create.waitToExist(timeout: 10))
+        XCTAssertFalse(element("slash-item-plugin-slash-doomed").exists, "A deleted plugin is no longer listed.")
+        clickRow(element("slash-edit-plugin-slash-panel"))
+        XCTAssertTrue(app.staticTexts["Plugin editor"].waitToExist(timeout: 15), "Edit opens the plugin's editor conversation.")
+        let editors = try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
+        XCTAssertTrue(editors.contains { $0["authoredPluginID"] as? String == "slash-panel" }, "The editor is that plugin's.")
+        attachScreenshot(named: "Edit in /plugin opens the plugin's editor")
+        element("back-to-board-button").click()
+        openTask(named: "Slash task")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5), "Edit removes the typed command.")
+        composer.click()
+        composer.typeText("/plugin")
+        XCTAssertTrue(create.waitToExist(timeout: 10))
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("plugin-mode-banner").waitToExist(timeout: 10), "Create Plugin turns on Add Plugin mode.")
+        XCTAssertTrue(try pluginMode())
+        XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5), "Create Plugin removes the typed command.")
+        attachScreenshot(named: "Create Plugin turns on Add Plugin mode")
+        element("plugin-mode-close").click()
+        XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner")))
+
+        // On a Codex task, /goal can be chosen and opens the goal entry.
+        openTask(named: "Slash Codex task")
+        let codexComposer = element("message-composer")
+        XCTAssertTrue(codexComposer.waitToExist(timeout: 10))
+        codexComposer.click()
+        codexComposer.typeText("/skill slash")
+        let systemGear = element("slash-gear-skill-slash-system-skill")
+        XCTAssertTrue(systemGear.waitToExist(timeout: 10), "Codex's built-in skills are listed on a Codex task.")
+        XCTAssertFalse(systemGear.isEnabled, "A built-in skill's gear is disabled.")
+        XCTAssertTrue(element("slash-gear-skill-slash-skill").isEnabled)
+        attachElementScreenshot(menu, named: "/skill on a Codex task: a built-in skill's gear is disabled")
+        codexComposer.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(menu))
+        codexComposer.typeKey("a", modifierFlags: .command)
+        codexComposer.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (codexComposer.value as? String ?? "").isEmpty }, timeout: 5))
+        codexComposer.typeText("/go")
+        let codexGoal = element("slash-command-goal")
+        XCTAssertTrue(codexGoal.waitToExist(timeout: 10))
+        XCTAssertTrue(codexGoal.isEnabled, "Codex runs goal mode.")
+        XCTAssertEqual(codexGoal.value as? String, "Turn on goal mode", "An enabled /goal shows its description, not an unsupported reason.")
+        codexComposer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (codexComposer.value as? String ?? "").isEmpty }, timeout: 5), "Choosing /goal removes the typed command.")
+        XCTAssertTrue(waitUntil({ self.element("conversation-mode-menu").label.contains("Goal") }, timeout: 5), "Choosing /goal opens the goal entry.")
+        attachScreenshot(named: "Choosing /goal on a Codex task opens the goal entry")
+
+        let listed = try XCTUnwrap(try runCLI(["slash-commands", "list", "--task", taskID])["result"] as? [String: Any])
+        let commands = try XCTUnwrap(listed["commands"] as? [[String: Any]])
+        XCTAssertEqual(commands.compactMap { $0["command"] as? String }, ["mcp", "plan", "goal", "skill", "login", "plugin"])
+        XCTAssertEqual(commands.first { $0["command"] as? String == "goal" }?["enabled"] as? Bool, false)
+        assertCLIError(try runCLI(["slash-commands", "list"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["slash-commands", "list", "--task", UUID().uuidString], expectedStatus: 3), code: "not_found")
+    }
+}

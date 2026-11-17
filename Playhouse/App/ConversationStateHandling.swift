@@ -969,12 +969,6 @@ extension TaskConversationView {
         sendMessage(overrideText: "Continue with the same request from where you left off.")
     }
 
-    func activatePlanMode() {
-        isEnteringGoal = false
-        setConversationMode(.plan)
-        draft = ""
-    }
-
     var conversationModeDefaultsKey: String {
         TaskPreferenceKeys.conversationMode(taskID: task.id)
     }

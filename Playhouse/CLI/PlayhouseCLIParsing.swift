@@ -722,6 +722,15 @@ extension PlayhouseCLI {
             var arguments: [String: BridgeValue] = ["taskID": .string(try requiredFlag("--task", flags: flags).first!)]
             if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
             return BridgeRequest(command: "mentions.list", arguments: arguments)
+        case "slash-commands":
+            let use = "Use: playhouse slash-commands list --task <task-id> [--query <text>] [--status]"
+            guard rest.first == "list" else { throw CLIError.usage(use) }
+            let options = Array(rest.dropFirst())
+            let flags = try parseFlags(options.filter { $0 != "--status" }, valueFlags: ["--task", "--query"])
+            var arguments: [String: BridgeValue] = ["taskID": .string(try requiredFlag("--task", flags: flags).first!)]
+            if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
+            if options.contains("--status") { arguments["includeStatus"] = .boolean(true) }
+            return BridgeRequest(command: "slash.list", arguments: arguments)
         case "schedule":
             guard let operation = rest.first else {
                 throw CLIError.usage("Use: playhouse schedule list|set|clear|pause|resume|run-now|tick ...")

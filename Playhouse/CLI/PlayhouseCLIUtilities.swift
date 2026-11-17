@@ -162,6 +162,7 @@ extension PlayhouseCLI {
       playhouse skills fix --task <task-id> --skill <skill-id> [--skill <skill-id>...]
       playhouse skills bridge --task <task-id> [--message <text>]
       playhouse mentions list --task <task-id> [--query <text>]
+      playhouse slash-commands list --task <task-id> [--query <text>] [--status]
       playhouse rules list [--task <task-id>]
       playhouse rules get --rule <rule-id> [--task <task-id>]
       playhouse rules create --scope <repo|global> [--name <name>] [--path <glob>...] --body <text> [--task <task-id>] [--root <repo-path>]

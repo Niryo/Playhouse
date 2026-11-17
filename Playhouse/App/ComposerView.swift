@@ -460,3 +460,200 @@ struct ComposerMentionMenu: View {
         }
     }
 }
+
+/// What the `/` menu's rows do: choosing a row (by its keyboard index) and the buttons at
+/// the end of an item's row.
+struct ComposerSlashActions {
+    var choose: (Int) -> Void
+    var gear: (SlashCommandItem) -> Void
+    var signIn: (SlashCommandItem, ConversationProvider) -> Void
+    var edit: (SlashCommandItem) -> Void
+    var delete: (SlashCommandItem) -> Void
+}
+
+/// The `/` command menu above the composer: the matching commands, or a command's own list
+/// (MCP servers, skills, agents to sign in to, plugins), the highlighted row first in keyboard
+/// order. A command the task's agent can't run is listed disabled with why. Rows are plugin
+/// atoms, as in the mention menu.
+struct ComposerSlashMenu: View {
+    let menu: SlashCommandMenu
+    let isLoading: Bool
+    /// Both agents are still asked which MCP servers need a sign-in.
+    let isCheckingSignIn: Bool
+    let selectedIndex: Int
+    let actions: ComposerSlashActions
+
+    static let rowHeight: CGFloat = 34
+
+    private var rowCount: Int { menu.command == nil ? menu.commands.count : menu.items.count }
+
+    var body: some View {
+        AtomPanel(
+            props: PanelProps(spacing: 4, fill: "panel", fillOpacity: 1, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.14),
+            common: AtomCommon(testID: "slash-menu", label: "Commands", value: title, width: 480, padding: 6)
+        ) {
+            AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(paddingX: 8, paddingY: 3)) {
+                AtomText(
+                    props: TextProps(text: title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1, truncation: "tail"),
+                    common: AtomCommon(testID: "slash-menu-title")
+                )
+                AtomSpacer(props: SpacerProps(minLength: 6))
+                if isCheckingSignIn {
+                    AtomText(
+                        props: TextProps(text: "Checking sign-in…", size: 11, color: "tertiary", lineLimit: 1),
+                        common: AtomCommon(testID: "slash-menu-checking")
+                    )
+                }
+            }
+            if rowCount == 0 {
+                AtomText(
+                    props: TextProps(text: emptyText, size: 12, color: "tertiary"),
+                    common: AtomCommon(testID: "slash-menu-empty", paddingX: 8, paddingY: 6)
+                )
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 1) {
+                            if menu.command == nil {
+                                ForEach(Array(menu.commands.enumerated()), id: \.element.id) { index, entry in
+                                    commandRow(entry, index: index).id(index)
+                                }
+                            } else {
+                                ForEach(Array(menu.items.enumerated()), id: \.element.id) { index, item in
+                                    itemRow(item, index: index).id(index)
+                                }
+                            }
+                        }
+                        .hoverRevealScrollers()
+                    }
+                    // Nine rows show before the list scrolls.
+                    .frame(height: min(CGFloat(rowCount) * (Self.rowHeight + 1), (Self.rowHeight + 1) * 9))
+                    .onChange(of: selectedIndex) { _, index in
+                        if index < rowCount { proxy.scrollTo(index) }
+                    }
+                }
+            }
+        }
+    }
+
+    private var title: String {
+        switch menu.command {
+        case nil: menu.query.isEmpty ? "Commands" : "Commands matching “/\(menu.query)”"
+        case .mcp: "MCP servers"
+        case .skill: "Skills"
+        case .login: "Sign in"
+        case .plugin: "Plugins"
+        case .plan, .goal: ""
+        }
+    }
+
+    private var emptyText: String {
+        if isLoading { return "Loading…" }
+        guard let command = menu.command else { return "No command matches “/\(menu.query)”" }
+        let what = command == .mcp ? "MCP server" : command == .skill ? "skill" : "item"
+        return menu.filter.isEmpty ? "No \(what)s" : "No \(what) matches “\(menu.filter)”"
+    }
+
+    private func commandRow(_ entry: SlashCommandEntry, index: Int) -> some View {
+        let selected = index == selectedIndex
+        return AtomButton(
+            props: ButtonProps(disabled: !entry.enabled, selected: selected),
+            common: AtomCommon(
+                testID: "slash-command-\(entry.command.rawValue)", label: "/" + entry.command.rawValue,
+                value: entry.enabled ? entry.detail : entry.disabledReason, help: entry.disabledReason ?? entry.detail
+            ),
+            action: { actions.choose(index) }
+        ) {
+            AtomStack(
+                props: StackProps(axis: "h", spacing: 8, fill: selected ? "accent" : nil, fillOpacity: 0.16, cornerRadius: 7),
+                common: AtomCommon(minHeight: Self.rowHeight, fillWidth: true, paddingX: 8, opacity: entry.enabled ? 1 : 0.6)
+            ) {
+                AtomIcon(props: IconProps(name: entry.command.icon, size: 12, weight: "medium", color: "secondary"), common: AtomCommon(width: 16))
+                AtomText(props: TextProps(text: "/" + entry.command.rawValue, size: 13, weight: "semibold", color: entry.enabled ? "accent" : "secondary", lineLimit: 1))
+                AtomSpacer(props: SpacerProps(minLength: 6))
+                AtomText(props: TextProps(text: entry.disabledReason ?? entry.detail, size: 11, color: entry.enabled ? "secondary" : "tertiary", lineLimit: 2, truncation: "tail"))
+            }
+        }
+    }
+
+    /// The suffix of an item's identifiers: the handle for an MCP server or skill.
+    static func key(_ item: SlashCommandItem) -> String {
+        switch item.kind {
+        case .mcp, .skill: "\(item.kind.rawValue)-\(item.handle ?? item.targetID)"
+        case .login, .plugin: "\(item.kind.rawValue)-\(item.targetID)"
+        case .createPlugin: "create-plugin"
+        }
+    }
+
+    private func itemRow(_ item: SlashCommandItem, index: Int) -> some View {
+        let selected = index == selectedIndex
+        let key = Self.key(item)
+        return AtomStack(
+            props: StackProps(axis: "h", spacing: 4, fill: selected ? "accent" : nil, fillOpacity: 0.16, cornerRadius: 7),
+            common: AtomCommon(minHeight: Self.rowHeight, fillWidth: true, paddingX: 4)
+        ) {
+            AtomButton(
+                props: ButtonProps(selected: selected),
+                common: AtomCommon(testID: "slash-item-\(key)", label: item.handle.map { "@" + $0 } ?? item.title, value: item.detail, help: itemHelp(item)),
+                action: { actions.choose(index) }
+            ) {
+                AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(minHeight: Self.rowHeight, fillWidth: true, paddingX: 4)) {
+                    AtomIcon(props: IconProps(name: icon(item), size: 12, weight: "medium", color: "secondary"), common: AtomCommon(width: 16))
+                    AtomText(props: TextProps(text: item.handle.map { "@" + $0 } ?? item.title, size: 13, weight: "semibold", color: "accent", lineLimit: 1, truncation: "middle"))
+                    AtomSpacer(props: SpacerProps(minLength: 6))
+                    AtomText(props: TextProps(text: item.detail, size: 11, color: "secondary", lineLimit: 1, truncation: "tail"))
+                }
+            }
+            ForEach(item.needsSignIn, id: \.self) { provider in
+                AtomButton(
+                    props: ButtonProps(style: "bordered", controlSize: "small"),
+                    common: AtomCommon(testID: "slash-signin-\(key)-\(provider.rawValue)", label: "Sign in for \(provider.displayName)", help: "Sign in to \(item.title) for \(provider.displayName)"),
+                    action: { actions.signIn(item, provider) }
+                ) {
+                    AtomLabel(props: LabelProps(text: "Sign in · \(provider.displayName)", icon: "key", size: 11, weight: "medium"))
+                }
+            }
+            if item.kind == .plugin {
+                iconButton("pencil", testID: "slash-edit-\(key)", label: "Edit", help: "Open this plugin's editor") { actions.edit(item) }
+                iconButton("trash", testID: "slash-delete-\(key)", label: "Delete", help: "Delete this plugin's folder", destructive: true) { actions.delete(item) }
+                // Plugin settings don't exist yet; the gear stays where they will open.
+                iconButton("gearshape", testID: "slash-gear-\(key)", label: "Settings", help: "Plugin settings are not available yet", disabled: true) {}
+            } else if item.kind == .mcp || item.kind == .skill {
+                iconButton(
+                    "gearshape", testID: "slash-gear-\(key)", label: "Manage",
+                    help: item.editable ? "Open \(item.title) in the \(item.kind == .mcp ? "MCP" : "Skills") page" : "Built-in skills can't be edited",
+                    disabled: !item.editable
+                ) { actions.gear(item) }
+            }
+        }
+    }
+
+    private func iconButton(_ icon: String, testID: String, label: String, help: String, destructive: Bool = false, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        AtomButton(
+            props: ButtonProps(style: "borderless", emphasis: 4, disabled: disabled, destructive: destructive),
+            common: AtomCommon(testID: testID, label: label, help: help, width: 26, height: 26),
+            action: action
+        ) {
+            AtomIcon(props: IconProps(name: icon, size: 12, weight: "medium", color: destructive ? "red" : "secondary"))
+        }
+    }
+
+    private func itemHelp(_ item: SlashCommandItem) -> String {
+        switch item.kind {
+        case .mcp, .skill: "Mention \(item.title)"
+        case .login: item.title
+        case .createPlugin: item.detail
+        case .plugin: "Open this plugin's editor"
+        }
+    }
+
+    private func icon(_ item: SlashCommandItem) -> String {
+        switch item.kind {
+        case .mcp: ComposerMentionMenu.icon(.mcp)
+        case .skill: ComposerMentionMenu.icon(.skill)
+        case .login: "person.crop.circle"
+        case .createPlugin: "plus"
+        case .plugin: "puzzlepiece.extension"
+        }
+    }
+}
