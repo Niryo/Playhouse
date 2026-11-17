@@ -92,6 +92,15 @@ struct TaskConversationView: View {
     /// but a reopened window no longer reads that stream, so it shows its own.
     @State var unechoedLocalSteers: [String] = []
     @State var unconfirmedStreamedSteers: [String] = []
+    /// Steer bubbles shown before history gives them their turn's ID. They join the running
+    /// turn, so they never start a turn of their own in the transcript.
+    @State var liveSteerMessageIDs: Set<String> = []
+    /// Each turn stream this window reads, by its reply placeholder's ID, to the message its
+    /// text goes to now. A steer moves what the turn writes after it below the steer.
+    @State var streamedReplyTargets: [String: String] = [:]
+    /// Each turn stream's earlier messages that a steer closed with text still in them. The
+    /// provider's item for that text settles there, above the steer, rather than below it.
+    @State var streamedRepliesAboveSteers: [String: [String]] = [:]
     /// This window's own sends whose turn stream it is reading right now.
     @State var followedTurnStreams = 0
     /// A history reload for another caller's turn is running, and whether a
@@ -418,8 +427,8 @@ struct TaskConversationView: View {
         return "Editor \(monacoPresentation.editorTag) \(reuse), showing \(monacoPresentation.path)"
     }
 
-    /// The turn is the latest one the user started: status nudges Playhouse sends after it
-    /// continue that turn rather than start a new one.
+    /// The user's newest message, steers included: the provider turn answering it is the latest
+    /// one. Status nudges Playhouse sends after it continue that turn rather than start a new one.
     static func latestUserTurnStart(in messages: [ConversationMessage]) -> Int? {
         messages.lastIndex { $0.role == .user && !$0.isPlayhouseSent }
     }
@@ -472,7 +481,7 @@ struct TaskConversationView: View {
     /// top of the viewport with its answer below.
     var latestConversationTurnStartID: String? {
         let allMessages = conversationMessages
-        return ConversationMessage.latestTurnStartIndex(in: allMessages).map { allMessages[$0].id }
+        return ConversationMessage.latestTurnStartIndex(in: allMessages, continuingIDs: liveSteerMessageIDs).map { allMessages[$0].id }
     }
 
     /// The window runs from `oldestRenderedMessageID` to the newest message, or to
@@ -503,9 +512,23 @@ struct TaskConversationView: View {
         return startIndex > allMessages.startIndex
     }
 
+    /// The turn's work sits above its first reply, or above a message steered into it before
+    /// any reply. A steer continues the turn the user started, so work done before a steer
+    /// never renders below it. When a later provider turn, such as one a Playhouse nudge woke,
+    /// is the turn whose work the disclosure lists, the work sits where that turn's replies begin.
     var activityDisclosureAnchorID: String? {
-        if let latestUserIndex = Self.latestUserTurnStart(in: conversationMessages) {
-            return conversationMessages.dropFirst(latestUserIndex + 1).first(where: { $0.role == .assistant })?.id
+        let messages = conversationMessages
+        if let turnStart = messages.indices.last(where: {
+            ConversationMessage.startsUserTurn(at: $0, in: messages, continuingIDs: liveSteerMessageIDs)
+        }) {
+            let candidates = messages.dropFirst(turnStart + 1).filter {
+                $0.role == .assistant || ($0.role == .user && !$0.isPlayhouseSent)
+            }
+            if let turnID = latestConversationTurnID,
+               let first = candidates.first(where: { $0.turnID == turnID }) {
+                return first.id
+            }
+            return candidates.first?.id
         }
         return conversationMessages.first(where: { $0.role == .assistant })?.id
     }

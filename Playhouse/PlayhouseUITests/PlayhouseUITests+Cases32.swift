@@ -1212,7 +1212,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Codex waiting message: Continue remains for the first stopped turn")
     }
 
-    // case-contract: test_claude_steer_during_turn_launch_reaches_started_turn | A steer sent while Claude Code is still starting the session waits for the turn instead of missing it: once the turn has started the steer reaches it as a next-priority message, the turn answers it, and it is not queued for a turn of its own. In the window the steer's bubble joins the transcript and the composer clears at once, while the session is still starting and has not received it.
+    // case-contract: test_claude_steer_during_turn_launch_reaches_started_turn | A steer sent while Claude Code is still starting the session waits for the turn instead of missing it: once the turn has started the steer reaches it as a next-priority message, the turn answers it, and it is not queued for a turn of its own. The steer is recorded inside the turn it steered, before any reply in it. In the window the steer's bubble joins the transcript and the composer clears at once, while the session is still starting and has not received it, and the turn's work stays above the bubble while it waits, while Claude Code holds it unanswered, and after its answer renders below it.
     func test_claude_steer_during_turn_launch_reaches_started_turn() throws {
         let title = "Claude steer during launch"
         let steerText = "Steer the session that is still starting."
@@ -1235,14 +1235,37 @@ extension PlayhouseUITests {
         XCTAssertFalse(launchMarkerExists(executable, "steer-ready"), "The session has not started the turn, so it cannot have the steer yet.")
         attachScreenshot(named: "Claude launch: the steer shows before Claude Code has it")
         attachElementScreenshot(transcriptMessage(steerText), named: "Claude launch: the steer's bubble")
+        assertWorkStaysAboveSteer(steerText, state: "while the steer waits for the session")
+        // Claude Code takes the steer but holds its answer, so the steer is the turn's newest message.
+        try writeLaunchMarker(executable, "steer-answer-pause")
         try? FileManager.default.removeItem(atPath: executable + ".launch-pause")
         try writeLaunchMarker(executable, "launch-release")
-        XCTAssertTrue(transcriptMessage("STEERED: \(steerText)").waitToExist(timeout: 20), "Claude Code should answer the steer inside the launched turn.")
+        XCTAssertTrue(waitUntil({ self.launchMarkerExists(executable, "steer-answer-ready") }, timeout: 20), "Claude Code should take the steer before answering it.")
+        assertWorkStaysAboveSteer(steerText, state: "while Claude Code holds the steer unanswered")
+        attachScreenshot(named: "Claude launch: the turn's work stays above the unanswered steer")
+        try writeLaunchMarker(executable, "steer-answer-release")
+        let answer = transcriptMessage("STEERED: \(steerText)")
+        XCTAssertTrue(answer.waitToExist(timeout: 20), "Claude Code should answer the steer inside the launched turn.")
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The steered turn should finish.")
+        assertWorkStaysAboveSteer(steerText, state: "after the turn ends")
+        XCTAssertLessThanOrEqual(transcriptMessage(steerText).frame.maxY, answer.frame.minY, "The steer's answer renders below it.")
         XCTAssertEqual((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.count, 0, "The steer should not be queued for a turn of its own.")
         let steerBubbles = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", steerText))
         XCTAssertEqual(steerBubbles.count, 1, "The delivered steer should stay in the transcript exactly once.")
         attachScreenshot(named: "Claude launch: the steer was answered in the launched turn")
+    }
+
+    /// The work a turn did before a steer stays above the steer, even when no reply came before it.
+    /// A running turn with no work yet shows its Thinking row in the same place as the work list.
+    func assertWorkStaysAboveSteer(_ steer: String, state: String, file: StaticString = #filePath, line: UInt = #line) {
+        let bubble = transcriptMessage(steer)
+        let work = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier IN %@", ["codex-activity-disclosure", "codex-activity-thinking"])
+        ).firstMatch
+        XCTAssertTrue(bubble.waitToExist(timeout: 10) && work.waitToExist(timeout: 10),
+                      "The steer and the turn's work are both shown \(state).", file: file, line: line)
+        XCTAssertLessThanOrEqual(work.frame.maxY, bubble.frame.minY,
+                                 "The turn's work stays above the steered message \(state).", file: file, line: line)
     }
 
     /// Points the provider at a shared fixture and clears the launch markers earlier cases left.
@@ -1251,7 +1274,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable), "The UI runner should have prepared \(name).")
         for suffix in ["thread-start-pause", "thread-start-ready", "thread-start-release", "turn-start-pause", "turn-start-ready", "turn-start-release",
                        "launch-pause", "launch-ready", "launch-release", "interrupt-ready", "interrupt-received", "interrupt-release",
-                       "steer-ready", "resolve-ready", "resolve-continue", "reject-next-steer", "steers-received", "held-turns", "history",
+                       "steer-ready", "steer-answer-pause", "steer-answer-ready", "steer-answer-release", "resolve-ready", "resolve-continue", "reject-next-steer", "steers-received", "held-turns", "history",
                        "serial-first-turn", "serial-second-turn-started"] {
             try? FileManager.default.removeItem(atPath: executable + ".\(suffix)")
         }

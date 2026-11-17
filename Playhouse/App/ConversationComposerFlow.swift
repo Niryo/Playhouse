@@ -571,7 +571,12 @@ extension TaskConversationView {
                 return
             }
             followedTurnStreams += 1
-            defer { followedTurnStreams -= 1 }
+            streamedReplyTargets[assistantMessageID] = assistantMessageID
+            defer {
+                followedTurnStreams -= 1
+                streamedReplyTargets[assistantMessageID] = nil
+                streamedRepliesAboveSteers[assistantMessageID] = nil
+            }
             do {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
                 awaitsDispatch = false
@@ -700,6 +705,9 @@ extension TaskConversationView {
     /// Applies one update of a turn this window streams: its own send, or a running turn it
     /// watches (a CLI send, a schedule, or a turn the daemon reattached after a restart).
     func applyStreamedUpdate(_ update: ConversationUpdate, assistantMessageID: String, pendingAnnotations: [ConversationAnnotation] = []) {
+        let streamID = assistantMessageID
+        // After a steer the stream writes below it, into the message it moved on to.
+        let assistantMessageID = streamedReplyTargets[streamID] ?? streamID
         if update.type == "text_delta" {
             guard let delta = update.text else { return }
             bufferStreamedTextDelta(delta, messageID: assistantMessageID)
@@ -710,8 +718,18 @@ extension TaskConversationView {
         switch update.type {
         case "assistant_final":
             guard let text = update.text else { return }
-            if let messageIndex = messages.lastIndex(where: { $0.role == .assistant }),
-               messages[messageIndex].asyncQuestions == nil {
+            // A reply that streamed before a steer finishes where it streamed; any other reply
+            // above a newer user message, such as a steer, is not the one finishing.
+            if let earlierIndex = takeStreamedReplyAboveSteer(stream: streamID, settling: text) {
+                messages[earlierIndex].text = text
+                messages[earlierIndex].phase = "final_answer"
+                // Whatever of it streamed on after the steer is now part of that answer.
+                if let continuationIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
+                    messages[continuationIndex].text = ""
+                }
+            } else if let messageIndex = messages.lastIndex(where: { $0.role == .assistant }),
+               messages[messageIndex].asyncQuestions == nil,
+               !messages[messageIndex...].contains(where: { $0.role == .user }) {
                 messages[messageIndex].text = text
                 messages[messageIndex].phase = "final_answer"
             } else {
@@ -728,6 +746,15 @@ extension TaskConversationView {
                 messages[index].text = text
                 messages[index].phase = update.phase
                 messages[index].asyncQuestions = update.asyncQuestions
+            } else if let earlierIndex = takeStreamedReplyAboveSteer(stream: streamID, settling: text) {
+                // Text that streamed before a steer becomes its item where it streamed.
+                messages[earlierIndex] = ConversationMessage(
+                    id: itemID,
+                    role: .assistant,
+                    text: text,
+                    phase: update.phase,
+                    asyncQuestions: update.asyncQuestions
+                )
             } else if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
                 messages.insert(ConversationMessage(
                     id: itemID,
@@ -813,7 +840,10 @@ extension TaskConversationView {
                 unechoedLocalSteers.remove(at: index)
             } else {
                 unconfirmedStreamedSteers.append(steered)
-                messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: steered, imageDataURLs: update.imageDataURLs ?? []))
+                let steerID = UUID().uuidString
+                liveSteerMessageIDs.insert(steerID)
+                moveStreamedRepliesBelowSteer()
+                messages.append(ConversationMessage(id: steerID, role: .user, text: steered, imageDataURLs: update.imageDataURLs ?? []))
             }
             if let message = update.message, MentionText.sameUserText(draft, message) { draft = "" }
         case "action_notice":

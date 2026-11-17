@@ -406,10 +406,13 @@ extension TaskConversationView {
         isWatchingRunningTurn = true
         let assistantMessageID = UUID().uuidString
         followedTurnStreams += 1
+        streamedReplyTargets[assistantMessageID] = assistantMessageID
         Task { @MainActor in
             defer {
                 followedTurnStreams -= 1
                 isWatchingRunningTurn = false
+                streamedReplyTargets[assistantMessageID] = nil
+                streamedRepliesAboveSteers[assistantMessageID] = nil
             }
             // The turn's prompt is already saved; show it while the rest streams in.
             await refreshGoalConversation(keepingShownTurn: true)
@@ -720,7 +723,36 @@ extension TaskConversationView {
         }
         pendingLocalSteers.append(steer)
         unechoedLocalSteers.append(steer.text)
+        liveSteerMessageIDs.insert(steer.id)
+        moveStreamedRepliesBelowSteer()
         messages.append(ConversationMessage(id: steer.id, role: .user, text: steer.text, imageDataURLs: steer.imageDataURLs))
+    }
+
+    /// A steer closes what the turn has written so far: what streams after it starts a new
+    /// message below the steer instead of growing the one above it.
+    func moveStreamedRepliesBelowSteer() {
+        for (stream, target) in streamedReplyTargets {
+            messages.removeAll { $0.id == target && $0.role == .assistant && $0.text.isEmpty }
+            // Only text the provider has not settled as an item or a final answer yet.
+            if messages.contains(where: { $0.id == target && $0.phase == nil }) {
+                streamedRepliesAboveSteers[stream, default: []].append(target)
+            }
+            streamedReplyTargets[stream] = UUID().uuidString
+        }
+    }
+
+    /// The message above a steer that `text`, now settled by the provider, streamed into, if any.
+    /// It is matched by content: a later item is new work and belongs below the steer.
+    func takeStreamedReplyAboveSteer(stream: String, settling text: String) -> Int? {
+        let settled = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for id in streamedRepliesAboveSteers[stream] ?? [] {
+            guard let index = messages.firstIndex(where: { $0.id == id }) else { continue }
+            let streamed = messages[index].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !streamed.isEmpty, settled.hasPrefix(streamed) else { continue }
+            streamedRepliesAboveSteers[stream]?.removeAll { $0 == id }
+            return index
+        }
+        return nil
     }
 
     /// The provider has the steer, or it was withdrawn: history owns it from here.
