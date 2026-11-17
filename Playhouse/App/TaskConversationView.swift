@@ -476,6 +476,20 @@ struct TaskConversationView: View {
     /// more page each time the rendered window reaches the oldest loaded one.
     static let historyPageSize = 80
 
+    /// Builds the Swift runtime metadata of this view's body type, which the first
+    /// open of a conversation otherwise builds on the main thread before its first
+    /// frame. The runtime caches it for the session and is safe from any thread.
+    @discardableResult
+    nonisolated static func prepareBodyTypeMetadata() -> any View.Type {
+        prepareBodyTypeMetadata(of: Self.self)
+    }
+
+    /// Reached generically, as SwiftUI reaches it: that path resolves the body's
+    /// conformances, which naming the concrete `Body` type directly leaves for later.
+    private nonisolated static func prepareBodyTypeMetadata<V: View>(of _: V.Type) -> any View.Type {
+        V.Body.self
+    }
+
     /// First message of the newest user turn. Opening a conversation renders
     /// this message and everything after it, so the latest question sits at the
     /// top of the viewport with its answer below.
@@ -700,13 +714,26 @@ struct TaskConversationView: View {
             // fresh model list are still round-tripping through the bridge.
             if !isReadOnly { primeModelOptionsFromCache() }
             if !isReadOnly { refreshQueuedMessages() }
-            if !isReadOnly {
-                _ = try? await conversationManager.reconcileLifecycleStatusOnOpen(taskID: task.id)
+            // The transcript read is the slow part of opening a long conversation and
+            // doesn't depend on reconciling the task's status, so it runs meanwhile.
+            // Applying it waits for the reconciled task, whose draft and pending
+            // prompt it restores from the daemon's returned record. The request leaves now rather than once the main actor
+            // is free: building a conversation's first frame keeps it busy, longest
+            // on the first open of a session, and the daemon reads meanwhile.
+            let historyRead = if #available(macOS 26.0, *) {
+                Task.immediate { try await readLatestHistoryPage() }
+            } else {
+                Task { try await readLatestHistoryPage() }
             }
-            if !isReadOnly, let request = providerPendingUserInputRequest, request.threadID == task.activeConversationID {
-                userInputRequest = request
+            await withTaskCancellationHandler {
+                let reconciled = isReadOnly ? nil : try? await conversationManager.reconcileLifecycleStatusOnOpen(taskID: task.id)
+                if !isReadOnly, let request = providerPendingUserInputRequest, request.threadID == task.activeConversationID {
+                    userInputRequest = request
+                }
+                await loadConversation(pendingRead: historyRead, reconciled: reconciled)
+            } onCancel: {
+                historyRead.cancel()
             }
-            await loadConversation()
             if !isReadOnly {
                 refreshQueuedMessages()
                 await loadModels()

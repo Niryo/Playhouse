@@ -335,6 +335,10 @@ extension PlayhouseUITests {
         element("back-to-board-button").click()
         openTask(named: "Never started recovery")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: neverStartedID)?["status"] as? String) == "Waiting Response" }, timeout: 15))
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String)?.contains("Recover this prompt") == true }, timeout: 15), "A prompt whose turn never started should return to the composer.")
+        XCTAssertFalse(transcriptMessage("Recover this prompt").exists, "A never-started prompt returns as a draft, not as a sent message.")
+        XCTAssertFalse(element("pause-response-button").exists, "A recovered never-started prompt leaves no turn running.")
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 5), "A recovered never-started prompt can be continued.")
         XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "task.status_sound.played" && $0["taskID"] as? String == neverStartedID }.compactMap { $0["sound"] as? String }, ["Ping"])
         element("back-to-board-button").click()
 

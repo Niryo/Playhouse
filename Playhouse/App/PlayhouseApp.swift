@@ -131,6 +131,8 @@ private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegat
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Monaco loads once per session, so the first diff opens into a warm editor.
         MonacoDiffWebViewHost.shared.prewarm()
+        // The first open of a conversation otherwise builds its view's type metadata on the main thread.
+        Task.detached(priority: .utility) { TaskConversationView.prepareBodyTypeMetadata() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
