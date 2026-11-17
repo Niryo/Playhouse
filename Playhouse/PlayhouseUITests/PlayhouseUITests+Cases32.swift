@@ -1550,7 +1550,7 @@ extension PlayhouseUITests {
         }
         Playhouse.render(h(Page));
         """
-    // case-contract: test_plugin_main_sidebar_schedules_context_and_new_task | A plugin at the board's mainSidebar placement gets `props.schedules`: `tasks`, the scheduled tasks exactly as `schedule list` returns them (soonest first, each with its schedule's kind and paused state), and `needsLoginItemsApproval`; with no schedules the list is empty, and a conversation sidebar plugin gets no schedules. ui.newTask (with schedule "recurring", "once" or none) and ui.openLoginItems are host calls only the board answers: a conversation sidebar plugin is refused as unavailable, and any other schedule is invalid_argument. The board's Scheduled Tasks button and page are the built-in scheduled-tasks plugin, which can't be rendered headlessly (invalid_argument). In the window, a mainSidebar page plugin lists the schedules and follows them live as one is paused, and its ui.newTask opens a new task with the schedule picker up; disabling the built-in Scheduled Tasks removes its sidebar button, and enabling it brings back the button, which opens the Scheduled Tasks page.
+    // case-contract: test_plugin_main_sidebar_schedules_context_and_new_task | A plugin at the board's mainSidebar placement gets `props.schedules`: `tasks`, the scheduled tasks exactly as `schedule list` returns them (soonest first, each with its schedule's kind and paused state), and `needsLoginItemsApproval`; with no schedules the list is empty, and a conversation sidebar plugin gets no schedules. ui.newTask (with schedule "recurring", "once" or none) and ui.openLoginItems are host calls only the board answers: a conversation sidebar plugin is refused as unavailable, and any other schedule is invalid_argument. The board's Scheduled Tasks button and popover are the built-in scheduled-tasks popover plugin, which can't be rendered headlessly (invalid_argument). In the window, a mainSidebar page plugin lists the schedules and follows them live as one is paused, and its ui.newTask opens a new task with the schedule picker up; disabling the built-in Scheduled Tasks removes its sidebar button, and enabling it brings back the button, which opens the Scheduled Tasks popover.
     func test_plugin_main_sidebar_schedules_context_and_new_task() throws {
         try writeInstalledPlugin("schedules-probe", source: Self.schedulesPageSource, placement: "mainSidebar", presentation: "page", name: "Schedules Probe", icon: "calendar")
         launchApp(defaultParent: fixture.parent.path)
@@ -1613,12 +1613,10 @@ extension PlayhouseUITests {
         attachElementScreenshot(element(withAccessibilityLabel: "Kanban sidebar"), named: "The board's sidebar with Scheduled Tasks disabled")
         _ = try runCLI(["plugin", "enable", "--id", "scheduled-tasks"])
         XCTAssertTrue(scheduledEntry.waitToExist(timeout: 10), "Enabling it brings the button back.")
-        scheduledEntry.click()
-        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10), "The button opens the Scheduled Tasks page.")
-        XCTAssertTrue(element("scheduled-task-row-\(onceID)").waitToExist(timeout: 10), "The page lists the one-time schedule.")
-        XCTAssertTrue(element("scheduled-task-row-\(dailyID)").exists, "The page lists the recurring schedule.")
-        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The page finishes sliding in.")
-        attachScreenshot(named: "The built-in Scheduled Tasks page, enabled again")
+        openScheduledTasksPopover()
+        XCTAssertTrue(element("scheduled-task-row-\(onceID)").waitToExist(timeout: 10), "The popover lists the one-time schedule.")
+        XCTAssertTrue(element("scheduled-task-row-\(dailyID)").exists, "The popover lists the recurring schedule.")
+        attachScreenshot(named: "The built-in Scheduled Tasks popover, enabled again")
     }
 }
 

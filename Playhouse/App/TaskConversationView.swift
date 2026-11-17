@@ -72,7 +72,7 @@ struct TaskConversationView: View {
     var initialDraft: String? = nil
     /// Shows another task's conversation, sending it the prompt once it opens.
     var onOpenTask: (UUID, String) -> Void = { _, _ in }
-    /// Opens with the schedule hint showing, set to this kind (the Scheduled Tasks page's New Task).
+    /// Opens with the schedule hint showing, set to this kind (the Scheduled Tasks popover's New Task).
     var presentScheduleOnAppear: TaskScheduleKind? = nil
     let onBack: () -> Void
 

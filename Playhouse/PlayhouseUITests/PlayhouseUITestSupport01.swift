@@ -490,8 +490,28 @@ extension PlayhouseUITests {
         }
         element("back-to-board-button").click()
         XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the task conversation.")
-        XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 10), "Going back returns to the empty Scheduled Tasks page.")
-        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The page should finish sliding back in.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "Going back returns to the board.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The Scheduled Tasks popover closed for the task.")
+        openScheduledTasksPopover()
+        XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 10), "The reopened Scheduled Tasks popover is still empty.")
+    }
+    /// Opens the Scheduled Tasks popover from the board's sidebar and waits for it to settle,
+    /// since clicks during its opening animation can miss.
+    func openScheduledTasksPopover() {
+        let entry = element("plugin-entry-scheduled-tasks")
+        XCTAssertTrue(waitUntil({ entry.exists && entry.isHittable }, timeout: 10), "The board's sidebar shows the Scheduled Tasks button.")
+        entry.click()
+        let surface = element("plugin-surface-scheduled-tasks")
+        XCTAssertTrue(surface.waitToExist(timeout: 10), "The Scheduled Tasks button opens its popover.")
+        XCTAssertTrue(waitForStableFrame(surface), "The Scheduled Tasks popover should finish opening.")
+        XCTAssertTrue(waitUntil({ entry.frame.maxX <= surface.frame.minX + 1 }, timeout: 5), "The popover opens beside the sidebar button, not over the board: \(surface.frame) vs \(entry.frame).")
+    }
+    /// Closes the Scheduled Tasks popover with Escape.
+    func closeScheduledTasksPopover() {
+        let surface = element("plugin-surface-scheduled-tasks")
+        guard surface.exists else { return }
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(surface, timeout: 5), "Escape closes the Scheduled Tasks popover.")
     }
     func openScheduleHint() -> XCUIElement {
         let button = element("schedule-task-button")

@@ -59,6 +59,8 @@ private struct PluginEntryButton: View {
     /// Its modal, sidebar or page is presented.
     let isOpen: Bool
     @State private var isPopoverPresented = false
+    /// The popover's own `ui.confirm` dialog: one over the window would close it.
+    @State private var confirmations = PluginConfirmations()
 
     var body: some View {
         let isSelected = isPopoverPresented || isOpen
@@ -78,15 +80,45 @@ private struct PluginEntryButton: View {
         }
         .popover(isPresented: $isPopoverPresented, arrowEdge: placement == .composerActions ? .top : .trailing) {
             PluginPropsScope {
-                PluginSurfaceView(plugin: plugin, props: props(plugin), actions: popoverActions)
-                    .frame(width: plugin.surfaceSize.width, height: plugin.surfaceSize.height)
+                Group {
+                    if plugin.builtIn {
+                        // A built-in draws its own chrome; the container carries the
+                        // surface's identifier, as an installed plugin's surface does.
+                        BuiltInPluginView(plugin: plugin, props: props(plugin), actions: popoverActions)
+                            .accessibilityElement(children: .contain)
+                            .accessibilityIdentifier("plugin-surface-\(plugin.id)")
+                    } else {
+                        PluginSurfaceView(plugin: plugin, props: props(plugin), actions: popoverActions)
+                    }
+                }
+                .frame(width: plugin.surfaceSize.width, height: plugin.surfaceSize.height)
+                .modifier(PluginConfirmationModifier(confirmations: confirmations))
             }
+        }
+        // A question still pending when the popover closes is declined, so its plugin call returns.
+        .onChange(of: isPopoverPresented) { _, shown in
+            if !shown { confirmations.answer(false) }
         }
     }
 
+    /// Opening a task or a new task leaves the button's view, so the popover closes first,
+    /// and a confirmation is asked inside the popover, where the window can ask at all.
     private var popoverActions: PluginUIActions {
         var popoverActions = actions
         popoverActions.close = { isPopoverPresented = false }
+        let confirmations = confirmations
+        popoverActions.confirm = actions.confirm.map { _ in { await confirmations.ask($0) } }
+        let openTask = actions.openTask
+        popoverActions.openTask = { id in
+            isPopoverPresented = false
+            openTask(id)
+        }
+        popoverActions.newTask = actions.newTask.map { newTask in
+            { schedule in
+                isPopoverPresented = false
+                newTask(schedule)
+            }
+        }
         return popoverActions
     }
 }
