@@ -252,9 +252,9 @@ struct ChatPageAnchorsHandle: View {
         Button(action: toggleLock) {
             Capsule()
                 .fill(fill)
-                .frame(width: isOpen || isLocked ? 5 : 3, height: 44)
+                .frame(width: isOpen || isLocked ? 5 : 3, height: 64)
                 // A wider, taller target than the line itself, so it is easy to find.
-                .frame(width: ChatPageAnchorsLayout.handleWidth, height: 88)
+                .frame(width: ChatPageAnchorsLayout.handleWidth, height: 108)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

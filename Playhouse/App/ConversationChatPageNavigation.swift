@@ -368,6 +368,10 @@ extension TaskConversationView {
     /// between them.
     func hoverChatPageAnchors(_ part: ChatPageAnchorsHoverPart, _ isHovering: Bool) {
         if isHovering {
+            // Folding labels slide left across the strip beside them, so a pointer resting there,
+            // off the open labels, would catch them, bring them back out off the pointer, and fold
+            // them again, over and over. Only labels that are out count as hovered.
+            guard part == .handle || revealsChatPageAnchors || pinsChatPageAnchors else { return }
             hoveredChatPageAnchorsParts.insert(part)
         } else {
             hoveredChatPageAnchorsParts.remove(part)

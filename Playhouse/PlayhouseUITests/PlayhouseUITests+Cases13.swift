@@ -304,7 +304,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(texts.contains("OK."))
     }
 
-    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in. The handle stays beside the open labels, thicker, and clicking it locks them open after the pointer leaves, marking the handle locked in the accent color, which persists across a relaunch; clicking it again unlocks them, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, and clicking it locks them open after the pointer leaves, marking the handle locked in the accent color, which persists across a relaunch; clicking it again unlocks them, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_anchors_jump_and_recall() throws {
         executionTimeAllowance = 360 // It walks 45 pages: jumps, Latest, Jump to bottom, recall, a turn and a relaunch.
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-anchors")
@@ -384,6 +384,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(anchors.exists, "Unlocked labels stay folded until the handle is hovered.")
         XCTAssertEqual(handle.value as? String, "folded")
         XCTAssertLessThanOrEqual(handle.frame.width, 20, "The handle is thin.")
+        XCTAssertEqual(handle.frame.height, 108, accuracy: 2, "The handle is a long target.")
         XCTAssertLessThan(handle.frame.minX - scrollView.frame.minX, 40, "The handle sits at the transcript's leading edge.")
         XCTAssertEqual(handle.frame.midY, scrollView.frame.midY, accuracy: 4, "The handle sits halfway down the transcript.")
         XCTAssertTrue(scrollTranscriptUntilExists(wideReply), "The newest page's last reply should be reachable.")
@@ -411,6 +412,25 @@ extension PlayhouseUITests {
         anchors.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
         _ = waitUntil({ false }, timeout: 0.6)
         XCTAssertTrue(anchors.exists && handle.value as? String == "open", "Labels stay open while the pointer moves from the handle onto them.")
+        // Folding, the labels slide left across the strip beside them; a pointer resting there, off
+        // the open labels, lets them fold without catching them and bringing them back out, over and over.
+        XCTAssertLessThan(anchors.frame.minY + 12, handle.frame.minY, "The labels reach above the handle.")
+        let windowFrame = app.windows.firstMatch.frame
+        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: handle.frame.midX - windowFrame.minX, dy: anchors.frame.minY + 12 - windowFrame.minY))
+            .hover()
+        var foldStates: [String] = []
+        let foldStart = Date()
+        while Date().timeIntervalSince(foldStart) < 3 {
+            let value = handle.value as? String ?? "?"
+            if foldStates.last != value { foldStates.append(value) }
+        }
+        XCTAssertEqual(Array(foldStates.drop(while: { $0 == "open" })), ["folded"],
+                       "Labels left with the pointer beside them fold once and stay folded; states \(foldStates).")
+        XCTAssertFalse(anchors.exists, "The folded labels stay folded.")
+        handle.hover()
+        XCTAssertTrue(waitUntil({ anchors.exists && handle.value as? String == "open" }, timeout: 5))
+        anchors.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
         moveOffLabels()
         XCTAssertTrue(waitUntil({ !anchors.exists && handle.value as? String == "folded" && abs(wideReply.frame.minX - foldedReplyLeft) < 2 }, timeout: 5),
                       "Moving the pointer off the labels folds them back and gives the messages their width back; reply left \(wideReply.frame.minX).")
