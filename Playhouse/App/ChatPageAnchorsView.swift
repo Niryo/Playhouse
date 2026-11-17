@@ -144,8 +144,9 @@ struct ChatPageAnchorsView: View {
         }
         .frame(width: width, alignment: .leading)
         .frame(maxHeight: ChatPageAnchorsLayout.labelsHeight(count: model.pages.count))
-        // Hangs below the labels, so the labels themselves stay centered on the transcript.
-        .overlay(alignment: .bottomLeading) {
+        // Hangs below the labels, centered across them, so the labels themselves stay centered
+        // on the transcript.
+        .overlay(alignment: .bottom) {
             ChatJumpToBottomButton(action: jumpToBottom)
                 .alignmentGuide(.bottom) { $0[.top] - ChatPageAnchorsLayout.jumpToBottomSpacing }
         }
@@ -194,24 +195,19 @@ private struct ChatPageAnchorLabel: View {
     }
 }
 
-/// Below the page labels: jumps to the bottom of the chat at once, from an earlier page or
-/// from anywhere the reader scrolled up to.
+/// Below the page labels, an arrow that jumps to the bottom of the chat at once, from an
+/// earlier page or from anywhere the reader scrolled up to.
 private struct ChatJumpToBottomButton: View {
     let action: () -> Void
     @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.down.to.line")
-                    .font(.system(size: 9, weight: .semibold))
-                Text("Jump to bottom")
-                    .font(.system(size: 11))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(isHovering ? Color.primary : Color.secondary)
-            .frame(height: ChatPageAnchorsLayout.labelHeight)
-            .contentShape(Rectangle())
+            Image(systemName: "arrow.down.to.line")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isHovering ? Color.primary : Color.secondary)
+                .frame(width: 24, height: ChatPageAnchorsLayout.labelHeight + 4)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
