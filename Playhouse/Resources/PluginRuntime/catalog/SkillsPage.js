@@ -1,11 +1,11 @@
-// The Skills page's header, tabs and skill gallery, composed in JavaScript from
-// the same atoms the native SkillsPageHeader, SkillsPageTabs and
+// The Skills page's header (with its tabs) and skill gallery, composed in
+// JavaScript from the same atoms the native SkillsPageHeader and
 // SkillGalleryView (Playhouse/App/SkillGalleryView.swift) use, from the same display model
-// (Playhouse.props.skillsPage). Above it, the composer's Skills button
-// (SkillsButton) opens it, its close button closes it, and a readout names the
-// last action. The demo keeps the page's own state: the kind picker, the
-// group the anchors last scrolled to, the search text, the switches and the
-// selection.
+// (Playhouse.props.skillsPage). Above it, the Skills button (SkillsButton)
+// opens it, its close button closes it, and a readout names the last action.
+// The demo keeps the page's own state: the kind picker, the group the anchors
+// last scrolled to, the search text, the collapsed groups, each skill's
+// Enable/Disable and the selection.
 
 function SkillsButton(props) {
   return h(Button, { testID: props.testID, label: "Skills", help: "Skills", onPress: props.onPress },
@@ -25,13 +25,20 @@ function rowsOf(model) {
   return rows;
 }
 
+// The page's icon (named by its title), the Skills | Rules | MCP tabs in the title's place, and the close button.
 function Header(props) {
   var model = props.model, on = props.on, prefix = model.prefix, selection = model.selection;
   var selecting = selection != null;
   var children = [
-    h(Stack, { fill: "accent", fillOpacity: 0.14, cornerRadius: 7, width: 26, height: 26 },
-      h(Icon, { name: "sparkles", size: 13, weight: "semibold", color: "accent" })),
-    h(Text, { size: 15, weight: "semibold", testID: prefix + "skills-title" }, model.title),
+    h(Stack, {
+      fill: "accent", fillOpacity: 0.14, cornerRadius: 7, summary: true, width: 26, height: 26,
+      testID: prefix + "skills-title", label: model.title, help: model.title
+    }, h(Icon, { name: "sparkles", size: 13, weight: "semibold", color: "accent" })),
+    h(Segmented, {
+      options: model.kinds, selected: model.kind, disabled: selecting || model.panelOpen,
+      testID: prefix + "skills-kind-picker", label: "Show",
+      help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools", onChange: on.selectKind
+    }),
     h(Spacer),
     h(Button, {
       shortcut: model.panelOpen || selecting ? undefined : "cancel", testID: prefix + "skills-back-button",
@@ -39,20 +46,7 @@ function Header(props) {
     }, h(Stack, { fill: "primary", fillOpacity: 0.07, capsule: true, width: 22, height: 22 },
       h(Icon, { name: "xmark", size: 9, weight: "bold", color: "secondary" })))
   ];
-  return h(Stack, { axis: "h", spacing: 10, paddingX: 20, paddingY: 14 }, children.map(keyed));
-}
-
-// The Skills | Rules | MCP tabs, centered at the top of the modal's body.
-function Tabs(props) {
-  var model = props.model, on = props.on;
-  return h(Stack, { axis: "h", paddingX: 20, paddingY: 14 },
-    h(Spacer),
-    h(Segmented, {
-      options: model.kinds, selected: model.kind, disabled: model.selection != null || model.panelOpen,
-      testID: model.prefix + "skills-kind-picker", label: "Show",
-      help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools", onChange: on.selectKind
-    }),
-    h(Spacer));
+  return h(Stack, { axis: "h", spacing: 10, paddingX: 20, paddingY: 12 }, children.map(keyed));
 }
 
 // The anchors scroll the list to a group; they are not tabs.
@@ -112,6 +106,18 @@ function badge(badge, testID) {
     h(Label, { text: badge.text, icon: badge.icon, size: 10, weight: "medium", color: badge.color }));
 }
 
+// The menu's first group, from the row's current state (SkillsPageModel.leadingMenu): Use, then Enable or Disable.
+function leadingMenu(row) {
+  return [
+    { id: "use", title: "Use", help: "Insert /" + row.name + " into the message", disabled: !row.enabled || !row.usable, testID: "skill-use-" + row.name },
+    {
+      id: "toggle", title: row.enabled ? "Disable" : "Enable",
+      help: row.enabled ? "Turn the skill off in Playhouse sessions" : "Turn the skill on in Playhouse sessions",
+      testID: "skill-toggle-" + row.name
+    }
+  ];
+}
+
 function Controls(model, row, on) {
   var prefix = model.prefix, name = row.name;
   return [
@@ -119,20 +125,11 @@ function Controls(model, row, on) {
       style: "bordered", disabled: model.isFixing, controlSize: "small", testID: prefix + "skill-fix-" + name,
       help: "Open a task whose agent fixes " + name, onPress: function () { on.fix(row.id); }
     }, h(Label, { text: "Fix", icon: "wand.and.stars" })) : null,
-    h(Toggle, {
-      isOn: row.enabled, size: "mini", testID: prefix + "skill-toggle-" + name, label: name + " enabled",
-      help: row.enabled ? "Turn the skill off in Playhouse sessions" : "Turn the skill on in Playhouse sessions",
-      onToggle: function () { on.toggle(row.id); }
-    }),
-    h(Button, {
-      style: "bordered", disabled: !row.enabled || !row.usable, controlSize: "small", testID: prefix + "skill-use-" + name,
-      help: "Insert /" + name + " into the message", onPress: function () { on.use(row.id); }
-    }, h(Text, null, "Use")),
     h(Menu, {
       icon: "ellipsis", size: 12, weight: "semibold",
-      items: row.menu.map(function (group) {
+      items: [leadingMenu(row)].concat(row.menu).map(function (group) {
         return group.map(function (item) {
-          return { id: item.id, title: item.title, destructive: item.destructive, help: item.help, testID: prefix + item.testID };
+          return { id: item.id, title: item.title, destructive: item.destructive, help: item.help, testID: prefix + item.testID, disabled: item.disabled };
         });
       }),
       testID: prefix + "skill-actions-" + name, label: "Actions for " + name, help: "More actions for " + name, width: 22, height: 22,
@@ -141,7 +138,7 @@ function Controls(model, row, on) {
   ];
 }
 
-// A skill's details, shown beside its row while the pointer rests on it.
+// A skill's details, shown left of its row while the pointer rests on it.
 function Hint(props) {
   var model = props.model, row = props.row, prefix = model.prefix, name = row.name;
   var badges = (row.flag ? [badge(row.flag, undefined)] : [])
@@ -168,20 +165,26 @@ function Row(props) {
       testID: prefix + "skill-select-" + name, label: selected ? "Selected" : "Not selected"
     }) : null,
     h(Text, { size: 13, weight: "medium", lineLimit: 1, testID: prefix + "skill-name-" + name }, name),
-    row.flag ? h(Icon, { name: row.flag.icon, size: 11, color: row.flag.color, testID: prefix + row.flag.testID, label: row.flag.text, help: row.flag.text }) : null
-  ].concat(row.providers.map(function (each) { return badge(each, prefix + each.testID); }), [h(Spacer, { minLength: 8 })]);
+    row.flag ? h(Icon, { name: row.flag.icon, size: 11, color: row.flag.color, testID: prefix + row.flag.testID, label: row.flag.text, help: row.flag.text }) : null,
+    row.provider ? h(Icon, {
+      name: row.provider.icon, asset: row.provider.asset, size: 11, color: row.provider.color, width: 12, height: 12,
+      testID: prefix + row.provider.testID, label: row.provider.label, help: row.provider.label
+    }) : null,
+    h(Spacer, { minLength: 8 })
+  ];
   // A press and hold starts selecting; a click opens the skill, or selects while
   // selecting. Only the skill's own text takes them.
   var children = [
     h(PressArea, {
-      pointer: selecting ? row.editable : row.opensOnClick, testID: prefix + "skill-text-" + name, hint: row.description,
+      pointer: selecting ? row.editable : row.opensOnClick, testID: prefix + "skill-text-" + name, label: row.enabled ? name : name + ", off", hint: row.description,
       onPress: function () { on.press(row.id); }, onLongPress: function () { on.longPress(row.id); }
     }, h(Stack, { axis: "h", spacing: 8 }, text.map(keyed)))
   ].concat(selecting ? [] : Controls(model, row, on));
-  return h(Popover, { isPresented: false, arrowEdge: "trailing", width: 300, inset: 12, hover: true, onDismiss: function () {} },
+  return h(Popover, { isPresented: false, arrowEdge: "leading", width: 200, inset: 12, hover: true, onDismiss: function () {} },
+    // Off, the row dims but every control in it still responds.
     h(Stack, {
       axis: "h", spacing: 8, fill: selected ? "accent" : undefined, fillOpacity: selected ? 0.12 : undefined, group: true,
-      testID: prefix + "skill-row-" + name, fillWidth: true, paddingX: 12, paddingY: 6
+      testID: prefix + "skill-row-" + name, fillWidth: true, paddingX: 12, paddingY: 6, opacity: row.enabled ? undefined : 0.45
     }, children.map(keyed)),
     h(Hint, { model: model, row: row }));
 }
@@ -195,11 +198,18 @@ function Card(props) {
     }, []));
 }
 
+// The group's name and count in one button with a chevron that collapses and expands it.
 function GroupHeader(props) {
-  var model = props.model, group = props.group, prefix = model.prefix;
+  var model = props.model, group = props.group, on = props.on, prefix = model.prefix;
   var children = [
-    h(Text, { size: 11, weight: "semibold", color: "secondary", tracking: 0.6 }, group.label.toUpperCase()),
-    h(Text, { size: 11, color: "tertiary", monospacedDigits: true }, String(group.count)),
+    h(Button, {
+      testID: prefix + "skills-collapse-" + group.value, label: group.label, value: group.collapsed ? "Collapsed" : "Expanded",
+      help: (group.collapsed ? "Show " : "Hide ") + group.label, onPress: function () { on.toggleGroup(group.value); }
+    }, h(Stack, { axis: "h", spacing: 6 },
+      h(Icon, { name: group.collapsed ? "chevron.right" : "chevron.down", size: 9, weight: "bold", color: "tertiary", width: 10 }),
+      h(Stack, { axis: "h", spacing: 6 },
+        h(Text, { size: 11, weight: "semibold", color: "secondary", tracking: 0.6 }, group.label.toUpperCase()),
+        h(Text, { size: 11, color: "tertiary", monospacedDigits: true }, String(group.count))))),
     group.loading ? h(Spinner, { size: "mini", testID: prefix + "skills-" + group.value + "-loading" }) : null,
     h(Spacer),
     h(Icon, { name: "info.circle", size: 11, color: "tertiary", testID: prefix + "skills-intro-" + group.value, label: "About " + group.label, help: group.intro })
@@ -209,9 +219,9 @@ function GroupHeader(props) {
 
 function Group(props) {
   var model = props.model, group = props.group, on = props.on, prefix = model.prefix;
-  var children = [h(GroupHeader, { key: "header", model: model, group: group })];
-  if (group.empty) children.push(emptyState(prefix, group.empty));
-  group.sections.forEach(function (section, index) {
+  var children = [h(GroupHeader, { key: "header", model: model, group: group, on: on })];
+  if (!group.collapsed && group.empty) children.push(emptyState(prefix, group.empty));
+  if (!group.collapsed) group.sections.forEach(function (section, index) {
     if (section.title != null) {
       children.push(h(Text, { key: "title-" + index, size: 12, weight: "semibold", paddingX: 4, testID: prefix + "skills-repo-section-" + section.title }, section.title));
     }
@@ -256,6 +266,7 @@ function Demo() {
   var search = React.useState(sample.search);
   var selection = React.useState(null);
   var switched = React.useState({});
+  var collapsed = React.useState({});
   var last = React.useState("none");
 
   // The page's state applied to the sample, as SkillsPageView applies it to the catalog.
@@ -266,6 +277,7 @@ function Demo() {
     canFixSelection: chosen.some(function (row) { return row.fixable; }),
     groups: sample.groups.map(function (each) {
       return Object.assign({}, each, {
+        collapsed: collapsed[0][each.value] == null ? each.collapsed : collapsed[0][each.value],
         sections: each.sections.map(function (section) {
           return Object.assign({}, section, {
             rows: section.rows.map(function (row) {
@@ -280,7 +292,14 @@ function Demo() {
   var on = {
     back: function () { open[1](false); last[1]("back"); },
     selectKind: function (value) { kind[1](value); last[1]("kind " + value); },
-    jump: function (value) { scrollTo[1](value); scrollRequest[1](scrollRequest[0] + 1); last[1]("jump " + value); },
+    jump: function (value) {
+      var next = Object.assign({}, collapsed[0]);
+      next[value] = false;
+      collapsed[1](next);
+      scrollTo[1](value);
+      scrollRequest[1](scrollRequest[0] + 1);
+      last[1]("jump " + value);
+    },
     search: function (text) { search[1](text); last[1]("search " + text); },
     newSkill: function () { last[1]("new skill"); },
     fixSelected: function () { last[1]("fix " + selection[0].length + " selected"); },
@@ -303,25 +322,33 @@ function Demo() {
       last[1]("select " + row.name);
     },
     fix: function (id) { last[1]("fix " + name(id)); },
-    toggle: function (id) {
-      var row = rowNamed(model, id);
-      var next = Object.assign({}, switched[0]);
-      next[id] = !row.enabled;
-      switched[1](next);
-      last[1]("toggle " + row.name + (row.enabled ? " off" : " on"));
+    toggleGroup: function (value) {
+      var group = model.groups.filter(function (each) { return each.value === value; })[0];
+      var next = Object.assign({}, collapsed[0]);
+      next[value] = !group.collapsed;
+      collapsed[1](next);
+      last[1]((group.collapsed ? "expand " : "collapse ") + value);
     },
-    use: function (id) { last[1]("use " + name(id)); },
-    menu: function (id, item) { last[1]("menu " + name(id) + " " + item); }
+    menu: function (id, item) {
+      var row = rowNamed(model, id);
+      if (item === "toggle") {
+        var next = Object.assign({}, switched[0]);
+        next[id] = !row.enabled;
+        switched[1](next);
+        last[1]("toggle " + row.name + (row.enabled ? " off" : " on"));
+      } else {
+        last[1](item === "use" ? "use " + row.name : "menu " + row.name + " " + item);
+      }
+    }
   };
   var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14, width: 480, height: 520, padding: 0, testID: model.prefix + "skills-page" },
     h(Header, { model: model, on: on }),
     h(Divider),
-    h(Tabs, { model: model, on: on }),
     model.kind === "skills" ? h(Gallery, { model: model, on: on })
       : h(Text, { size: 12, color: "secondary", padding: 20, testID: model.prefix + "skills-native-list" }, "The Rules and MCP lists stay native.")) : null;
   return h(Stack, { axis: "v", spacing: 12, align: "leading" },
     h(Stack, { axis: "h", spacing: 8 },
-      h(Text, { size: 11, color: "secondary" }, "Composer button"),
+      h(Text, { size: 11, color: "secondary" }, "Skills button"),
       h(SkillsButton, { testID: model.prefix + "open-skills-button", onPress: function () { open[1](true); last[1]("open"); } }),
       h(Text, { size: 11, color: "secondary", testID: "js-last-action" }, "Last: ", last[0])),
     page);

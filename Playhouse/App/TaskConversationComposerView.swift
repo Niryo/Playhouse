@@ -40,6 +40,7 @@ extension TaskConversationView {
                 ? "Archived conversation, read-only."
                 : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
                     : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
+            skills: !hasTaskSidebar,
             modeMenu: .init(
                 text: isEnteringGoal ? "Goal" : (conversationMode == .plan ? "Plan" : nil),
                 badgeIcon: isEnteringGoal ? "scope" : nil,
@@ -166,10 +167,7 @@ extension TaskConversationView {
                 catch { errorMessage = error.localizedDescription }
             },
             selectionChange: { composerDraft.selection = $0 },
-            openSkills: {
-                skillsPresentation += 1
-                isShowingSkills = true
-            },
+            openSkills: openSkills,
             modeMenu: { id in
                 if id == "goal" {
                     isEnteringGoal = true
@@ -339,6 +337,11 @@ extension TaskConversationView {
     }
 
     static let placeholderTitles: Set<String> = ["Untitled task", "Generating title…"]
+    func openSkills() {
+        skillsPresentation += 1
+        isShowingSkills = true
+    }
+
     func useSkill(_ skill: SkillRecord) {
         let token = skill.invocationToken
         let rest = draft.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -280,7 +280,12 @@ struct AtomScroll<Content: View>: View {
             scrollView
                 .onChange(of: props.scrollRequest) {
                     guard let target = props.scrollTo else { return }
-                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(target, anchor: .top) }
+                    // The request often lands with the content that grows to
+                    // reach the target (a collapsed section expanding), so it
+                    // scrolls on the next turn, once that content is laid out.
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(target, anchor: .top) }
+                    }
                 }
         }
         .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })

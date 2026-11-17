@@ -8,6 +8,7 @@
     "focused": false,
     "focusRequest": 0,
     "editorHelp": "",
+    "skills": true,
     "modeMenu": {
       "active": false,
       "label": "Conversation mode: Code mode",

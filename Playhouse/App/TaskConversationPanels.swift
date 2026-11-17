@@ -21,6 +21,9 @@ extension TaskConversationView {
             // Inline sidebar plugins (the built-in Changes) show their rail form here.
             PluginInlineSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions)
             Spacer(minLength: 0)
+            // The command row's Skills button stays reachable while the sidebar is collapsed.
+            sidebarSkillsButton
+                .padding(.bottom, 6)
         }
         .padding(.top, 12)
         .frame(width: Self.collapsedSidebarWidth)

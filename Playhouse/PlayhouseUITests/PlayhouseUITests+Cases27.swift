@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. The small switch flips as soon as it is clicked, and turning a skill on disk on or off never starts a Claude Code session. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
+    // case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. The row's actions menu has Disable, or Enable for a skill that is off, which takes effect as soon as it is chosen; a skill that is off shows grayed out, its menu's Use is disabled, and the row still responds, and turning a skill on disk on or off never starts a Claude Code session. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
     func test_skills_enable_state_and_outside_links_persist() throws {
         let repository = try makeSkillRepository("skills-link-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Repository agents skill"),
@@ -36,14 +36,14 @@ extension PlayhouseUITests {
         openSkillsPage()
         selectSkillsTab("Global")
 
-        let toggle = element("skill-toggle-global-agents")
-        XCTAssertTrue(toggle.waitToExist(timeout: 10))
-        XCTAssertTrue(isOn(toggle))
+        XCTAssertTrue(element("skill-row-global-agents").waitToExist(timeout: 10))
+        XCTAssertTrue(isSkillOn("global-agents"))
+        XCTAssertFalse(element("skill-row-global-agents").switches.firstMatch.exists, "A row has no switch; its menu turns it on or off.")
         // The page reads Claude Code's built-ins once when it opens.
         XCTAssertTrue(waitUntil({ claudeSessions() > sessionsAtLaunch }, timeout: 20), "Opening the Skills page reads Claude Code's built-ins.")
         let sessionsBeforeToggle = claudeSessions()
-        toggle.click()
-        XCTAssertTrue(waitUntil({ !self.isOn(toggle) }, timeout: 0.75), "The switch flips as soon as it is clicked.")
+        toggleSkill("global-agents")
+        XCTAssertTrue(waitUntil({ self.isSkillOff("global-agents") }, timeout: 0.75), "Disable takes effect as soon as it is chosen.")
         XCTAssertTrue(waitUntil({ ((try? globalSkill("global-agents"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a skill off is saved where a fresh CLI process reads it.")
         XCTAssertFalse(waitUntil({ claudeSessions() > sessionsBeforeToggle }, timeout: 3),
@@ -53,12 +53,21 @@ extension PlayhouseUITests {
         element("skills-back-button").click()
         openSkillsPage()
         selectSkillsTab("Global")
-        XCTAssertTrue(waitUntil({ self.element("skill-toggle-global-agents").exists && !self.isOn(self.element("skill-toggle-global-agents")) }, timeout: 10),
+        XCTAssertTrue(waitUntil({ self.element("skill-row-global-agents").exists && self.isSkillOff("global-agents") }, timeout: 10),
                       "The off state survives reopening the Skills page.")
-        attachScreenshot(named: "A skill turned off in the Global section")
+        attachScreenshot(named: "A skill turned off in the Global section, grayed out")
+        // A grayed-out skill still responds: its menu opens, with Use disabled and Enable offered.
+        element("skill-actions-global-agents").click()
+        let disabledUse = app.menuItems.matching(identifier: "skill-use-global-agents").firstMatch
+        XCTAssertTrue(disabledUse.waitToExist(timeout: 5), "A skill that is off still opens its menu.")
+        XCTAssertFalse(disabledUse.isEnabled, "A skill that is off can't be used.")
+        XCTAssertTrue(app.menuItems["Enable"].exists, "A skill that is off offers Enable.")
+        attachScreenshot(named: "The menu of a skill that is off: Use disabled, Enable offered")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !disabledUse.exists }, timeout: 5))
         let sessionsBeforeTurningOn = claudeSessions()
-        element("skill-toggle-global-agents").click()
-        XCTAssertTrue(waitUntil({ self.isOn(self.element("skill-toggle-global-agents")) }, timeout: 0.75), "The switch flips back at once.")
+        toggleSkill("global-agents")
+        XCTAssertTrue(waitUntil({ self.isSkillOn("global-agents") }, timeout: 0.75), "Enable takes effect at once.")
         XCTAssertTrue(waitUntil({ ((try? globalSkill("global-agents"))??["enabled"] as? Bool) == true }, timeout: 10))
         XCTAssertFalse(waitUntil({ claudeSessions() > sessionsBeforeTurningOn }, timeout: 3),
                        "Turning a skill on disk back on must not start a Claude Code session.")
@@ -131,7 +140,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("skill-editor-panel").exists, "A press and hold selects rather than opening the editor.")
         element("skills-selection-done").click()
         XCTAssertTrue(waitUntil({ !self.element("skill-select-repo-one").exists }, timeout: 5), "Done stops selecting.")
-        XCTAssertTrue(element("skill-toggle-repo-one").exists, "Rows show their controls again.")
+        XCTAssertTrue(element("skill-actions-repo-one").exists, "Rows show their controls again.")
 
         // Press and hold a row to start selecting with it.
         element("skill-row-repo-one").press(forDuration: 1.0)
@@ -139,7 +148,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(selectionCount(), "1 selected", "The pressed skill is selected.")
         XCTAssertEqual(element("skill-select-repo-one").label, "Selected", "The pressed skill's checkbox is checked.")
         XCTAssertEqual(element("skill-select-repo-keep").label, "Not selected")
-        XCTAssertFalse(element("skill-toggle-repo-one").exists, "Selecting hides a row's own controls.")
+        XCTAssertFalse(element("skill-actions-repo-one").exists, "Selecting hides a row's own controls.")
         selectSkillsTab("Global")
         element("skill-row-global-one").click()
         element("skill-row-global-two").click()
@@ -307,17 +316,15 @@ extension PlayhouseUITests {
         }
         openTask(named: "Claude skills")
         openSkillsPage()
-        let offToggle = element("skill-toggle-repo-off")
-        XCTAssertTrue(offToggle.waitToExist(timeout: 10))
-        offToggle.click()
-        XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-repo-off")) }, timeout: 10))
+        XCTAssertTrue(element("skill-row-repo-off").waitToExist(timeout: 10))
+        toggleSkill("repo-off")
+        XCTAssertTrue(waitUntil({ self.isSkillOff("repo-off") }, timeout: 10))
         selectSkillsTab("Built-in")
-        let bundledToggle = element("skill-toggle-simplify")
-        XCTAssertTrue(bundledToggle.waitToExist(timeout: 20), "Claude Code's built-ins load in the Built-in section.")
-        bundledToggle.click()
-        XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-simplify")) }, timeout: 10))
+        XCTAssertTrue(element("skill-row-simplify").waitToExist(timeout: 20), "Claude Code's built-ins load in the Built-in section.")
+        toggleSkill("simplify")
+        XCTAssertTrue(waitUntil({ self.isSkillOff("simplify") }, timeout: 10))
         selectSkillsTab("Repo")
-        element("skill-use-repo-agents").click()
+        useSkill("repo-agents")
         XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Use returns to the conversation.")
         let composer = element("message-composer")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "/repo-agents " }, timeout: 5), "Use puts /skill-name at the start of the composer.")
@@ -345,12 +352,12 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 20))
 
         openSkillsPage()
-        element("skill-toggle-repo-off").click()
-        XCTAssertTrue(waitUntil({ self.isOn(self.element("skill-toggle-repo-off")) }, timeout: 10))
+        toggleSkill("repo-off")
+        XCTAssertTrue(waitUntil({ self.isSkillOn("repo-off") }, timeout: 10))
         selectSkillsTab("Built-in")
-        XCTAssertTrue(element("skill-toggle-simplify").waitToExist(timeout: 20))
-        element("skill-toggle-simplify").click()
-        XCTAssertTrue(waitUntil({ self.isOn(self.element("skill-toggle-simplify")) }, timeout: 10))
+        XCTAssertTrue(element("skill-row-simplify").waitToExist(timeout: 20))
+        toggleSkill("simplify")
+        XCTAssertTrue(waitUntil({ self.isSkillOn("simplify") }, timeout: 10))
         element("skills-back-button").click()
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
         composer.click()
@@ -403,11 +410,10 @@ extension PlayhouseUITests {
 
         openTask(named: "Codex skills")
         openSkillsPage()
-        let offToggle = element("skill-toggle-repo-off")
-        XCTAssertTrue(offToggle.waitToExist(timeout: 10))
-        offToggle.click()
-        XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-repo-off")) }, timeout: 10))
-        element("skill-use-repo-claude").click()
+        XCTAssertTrue(element("skill-row-repo-off").waitToExist(timeout: 10))
+        toggleSkill("repo-off")
+        XCTAssertTrue(waitUntil({ self.isSkillOff("repo-off") }, timeout: 10))
+        useSkill("repo-claude")
         let composer = element("message-composer")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "/repo-claude " }, timeout: 5), "Use puts /skill-name in the composer.")
         composer.typeText("Complete this task.")
@@ -477,7 +483,7 @@ extension PlayhouseUITests {
         }
         func privateRecord(_ id: String = taskID) throws -> [String: Any]? { try section(id).first { $0["id"] as? String == privateID } }
         openTask(named: "Private skills")
-        // Where the composer's Skills button sits, so a later step can click it while the
+        // Where the sidebar's Skills button sits, so a later step can click it while the
         // Skills page is still sliding out and covers it.
         let skillsButton = element("open-skills-button")
         XCTAssertTrue(waitUntil({ skillsButton.exists && skillsButton.isHittable }, timeout: 15))
@@ -529,7 +535,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("skill-private-committed").exists, "A committed skill's hint has no Private badge.")
         revealSkillHint("deploy-notes")
         XCTAssertTrue(element("skill-private-deploy-notes").waitToExist(timeout: 5), "The private skill's hint has a Private badge.")
-        XCTAssertTrue(rowBadge("skill-provider-deploy-notes-claude").exists && rowBadge("skill-provider-deploy-notes-codex").exists)
+        XCTAssertTrue(rowBadge("skill-provider-deploy-notes-both").exists)
         XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-deploy-notes")).hasPrefix("Private to skills-private-repo"), "The hint names the repository it belongs to.")
         attachScreenshot(named: "A private skill's hint with its Private badge")
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8),
@@ -707,7 +713,7 @@ extension PlayhouseUITests {
         openSkillsPage()
         revealSkillHint("release-check")
         XCTAssertTrue(element("skill-private-release-check").waitToExist(timeout: 10))
-        element("skill-use-release-check").click()
+        useSkill("release-check")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "/release-check " }, timeout: 5), "Use puts /skill-name at the start of the composer.")
         send("/release-check Run it.", typed: "Run it.")
         let first = try XCTUnwrap(turn("/release-check Run it."))
@@ -732,10 +738,9 @@ extension PlayhouseUITests {
         let enabledBridge = try XCTUnwrap(try runCLI(["skills", "bridge", "--task", taskID])["result"] as? [String: Any])
         let oldCodexRelease = URL(fileURLWithPath: try XCTUnwrap((enabledBridge["codexLinks"] as? [[String: String]])?.first { $0["name"] == "release-check" }?["link"]))
         openSkillsPage()
-        let toggle = element("skill-toggle-release-check")
-        XCTAssertTrue(toggle.waitToExist(timeout: 10))
-        toggle.click()
-        XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-release-check")) }, timeout: 10))
+        XCTAssertTrue(element("skill-row-release-check").waitToExist(timeout: 10))
+        toggleSkill("release-check")
+        XCTAssertTrue(waitUntil({ self.isSkillOff("release-check") }, timeout: 10))
         element("skills-back-button").click()
         send("Run it again.")
         let resumed = try XCTUnwrap(turn("Run it again."))
@@ -766,9 +771,12 @@ extension PlayhouseUITests {
                        "The badge shows the namespaced name to type.")
         XCTAssertLessThan(namespacedBadge.frame.height, 30, "The namespaced name sits on one line of its own instead of wrapping beside the chips.")
         attachScreenshot(named: "Two repositories' private skills with the same name, the later one namespaced")
-        let uses = app.descendants(matching: .any).matching(identifier: "skill-use-shared-name")
-        XCTAssertEqual(uses.count, 2, "Each repository lists its own shared-name.")
-        uses.element(boundBy: 1).click()
+        let sharedNameMenus = app.descendants(matching: .any).matching(identifier: "skill-actions-shared-name")
+        XCTAssertEqual(sharedNameMenus.count, 2, "Each repository lists its own shared-name.")
+        sharedNameMenus.element(boundBy: 1).click()
+        let secondUse = app.menuItems.matching(identifier: "skill-use-shared-name").firstMatch
+        XCTAssertTrue(secondUse.waitToExist(timeout: 5), "The later shared-name's menu offers Use.")
+        secondUse.click()
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "/skills-private-second:shared-name " }, timeout: 5), "Use inserts the namespaced name.")
         send("/skills-private-second:shared-name Go.", typed: "Go.")
         let bothTurn = try XCTUnwrap(turn("/skills-private-second:shared-name Go."))
@@ -793,7 +801,7 @@ extension PlayhouseUITests {
         openSkillsPage()
         revealSkillHint("shared-name")
         XCTAssertTrue(element("skill-private-shared-name").waitToExist(timeout: 10))
-        element("skill-use-shared-name").click()
+        useSkill("shared-name")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "/shared-name " }, timeout: 5))
         composer.typeText("Complete this task.")
         element("send-message-button").click()

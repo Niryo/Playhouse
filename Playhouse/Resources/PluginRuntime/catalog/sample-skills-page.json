@@ -24,6 +24,7 @@
         "count": 3,
         "intro": "Skills in the task's repositories. They live in .agents/skills or .claude/skills, and Playhouse shares each one with both Claude and Codex.",
         "loading": false,
+        "collapsed": false,
         "sections": [
           {
             "title": "login-app",
@@ -31,20 +32,12 @@
               {
                 "id": "repo:/tmp/repos/login-app#release-notes",
                 "name": "release-notes",
-                "providers": [
-                  {
-                    "text": "Claude",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-release-notes-claude"
-                  },
-                  {
-                    "text": "Codex",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-release-notes-codex"
-                  }
-                ],
+                "provider": {
+                  "label": "Claude and Codex",
+                  "icon": "checkmark.circle.fill",
+                  "color": "green",
+                  "testID": "skill-provider-release-notes-both"
+                },
                 "badges": [],
                 "location": ".agents/skills",
                 "editable": true,
@@ -104,20 +97,12 @@
               {
                 "id": "repo:/tmp/repos/login-app#review-login",
                 "name": "review-login",
-                "providers": [
-                  {
-                    "text": "Claude",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-review-login-claude"
-                  },
-                  {
-                    "text": "Codex",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-review-login-codex"
-                  }
-                ],
+                "provider": {
+                  "label": "Claude and Codex",
+                  "icon": "checkmark.circle.fill",
+                  "color": "green",
+                  "testID": "skill-provider-review-login-both"
+                },
                 "badges": [],
                 "location": ".agents/skills · .claude/skills",
                 "editable": true,
@@ -177,7 +162,6 @@
               {
                 "id": "repo:/tmp/repos/login-app#broken-skill",
                 "name": "broken-skill",
-                "providers": [],
                 "badges": [],
                 "location": ".agents/skills",
                 "editable": true,
@@ -258,26 +242,19 @@
         "count": 2,
         "intro": "Your skills for every repository, from ~/.agents/skills and Claude's and Codex's own skill folders.",
         "loading": false,
+        "collapsed": false,
         "sections": [
           {
             "rows": [
               {
                 "id": "global:shared-notes",
                 "name": "shared-notes",
-                "providers": [
-                  {
-                    "text": "Claude",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-shared-notes-claude"
-                  },
-                  {
-                    "text": "Codex",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-shared-notes-codex"
-                  }
-                ],
+                "provider": {
+                  "label": "Claude and Codex",
+                  "icon": "checkmark.circle.fill",
+                  "color": "green",
+                  "testID": "skill-provider-shared-notes-both"
+                },
                 "badges": [
                   {
                     "text": "Linked",
@@ -344,20 +321,12 @@
               {
                 "id": "global:quiet-skill",
                 "name": "quiet-skill",
-                "providers": [
-                  {
-                    "text": "Claude",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-quiet-skill-claude"
-                  },
-                  {
-                    "text": "Codex",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-quiet-skill-codex"
-                  }
-                ],
+                "provider": {
+                  "label": "Claude and Codex",
+                  "icon": "checkmark.circle.fill",
+                  "color": "green",
+                  "testID": "skill-provider-quiet-skill-both"
+                },
                 "badges": [],
                 "location": ".agents/skills",
                 "editable": true,
@@ -424,20 +393,19 @@
         "count": 2,
         "intro": "Skills and commands that come with each provider. Each one works only with the provider it ships with.",
         "loading": false,
+        "collapsed": true,
         "sections": [
           {
             "rows": [
               {
                 "id": "builtin:claude#simplify",
                 "name": "simplify",
-                "providers": [
-                  {
-                    "text": "Claude",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-simplify-claude"
-                  }
-                ],
+                "provider": {
+                  "label": "Claude only",
+                  "asset": "ClaudeLogo",
+                  "color": "#D97757",
+                  "testID": "skill-provider-simplify-claude"
+                },
                 "badges": [],
                 "location": "Claude Code built-in",
                 "editable": false,
@@ -453,14 +421,12 @@
               {
                 "id": "builtin:codex#skill-creator",
                 "name": "skill-creator",
-                "providers": [
-                  {
-                    "text": "Codex",
-                    "icon": "checkmark",
-                    "color": "green",
-                    "testID": "skill-provider-skill-creator-codex"
-                  }
-                ],
+                "provider": {
+                  "label": "Codex only",
+                  "asset": "CodexLogo",
+                  "color": "primary",
+                  "testID": "skill-provider-skill-creator-codex"
+                },
                 "badges": [],
                 "location": "Codex built-in",
                 "editable": false,
@@ -491,7 +457,7 @@
     "selectionCount": "0 selected",
     "canFixSelection": false,
     "isFixing": false,
-    "hint": "Hover a skill for its details, click it to open it, or press and hold one to select several. Turning a skill on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.",
+    "hint": "Hover a skill for its details, click it to open it, or press and hold one to select several. Use a skill or turn it on or off from its menu; the change reaches Claude on its next turn, and a Codex conversation the next time its thread starts.",
     "selectingHint": "Click skills to select them. Built-in skills can't be selected.",
     "loaded": true,
     "panelOpen": false
