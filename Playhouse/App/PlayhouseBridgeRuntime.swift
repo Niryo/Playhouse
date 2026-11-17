@@ -765,7 +765,7 @@ final class PlayhouseBridgeRuntime {
                         // The board's agents: the last-known usage and each provider's running tasks.
                         var agents: PluginAgentsContext?
                         if command.placement == .mainSidebarBottom {
-                            let report = try await AgentUsageService.report(clients: conversationClients(), refresh: false)
+                            let report = await AgentUsageService.report(clients: conversationClients(), refresh: false)
                             agents = PluginAgentsContext(
                                 usage: PluginValue(bridge: try Self.value(report)),
                                 runningTasks: try taskManager.list(status: .inProgress).reduce(into: [:]) { $0[$1.conversationProvider, default: 0] += 1 }
