@@ -754,7 +754,7 @@ struct ModalProps: AtomPropsDecodable, Equatable {
 }
 
 /// A page that slides in from the trailing edge over its first child and
-/// covers all of it (the Scheduled Tasks page over the board), showing the
+/// covers all of it (a main sidebar page plugin over the board), showing the
 /// rest in a leading column on the window background. The first child stays
 /// laid out as usual and sizes the atom. It is controlled: the page shows
 /// while `isPresented` is true, and the owner closes it with its own control

@@ -1,12 +1,13 @@
 import SwiftUI
 
-/// The board sidebar's Scheduled Tasks page (`BuiltInPlugins.scheduledTasksID`):
+/// The board sidebar's Scheduled Tasks popover (`BuiltInPlugins.scheduledTasksID`):
 /// every scheduled task from `props.schedules`. A schedule is created and
-/// edited in the ordinary task conversation, so the page only lists, pauses,
+/// edited in the ordinary task conversation, so the popover only lists, pauses,
 /// runs and deletes them, through `schedule.pause`, `schedule.resume`,
 /// `schedule.run-now` and `task.delete`; opening a row returns to that
-/// conversation with `ui.openTask`, and `ui.close` goes back to the board.
-/// Composed only of atoms; the delete question is the board's `ui.confirm`.
+/// conversation with `ui.openTask`, which closes the popover, as clicking
+/// outside it or Escape does.
+/// Composed only of atoms; the delete question is `ui.confirm`, asked inside the popover.
 struct ScheduledTasksPlugin: View {
     let host: PluginHost
     let props: [String: PluginValue]
@@ -31,11 +32,11 @@ struct ScheduledTasksPlugin: View {
             if let errorMessage = errorMessage ?? decodeError {
                 AtomText(
                     props: TextProps(text: errorMessage, size: 12, color: "red"),
-                    common: AtomCommon(testID: "scheduled-tasks-error", fillWidth: true, paddingX: 20, paddingY: 8)
+                    common: AtomCommon(testID: "scheduled-tasks-error", fillWidth: true, paddingX: 16, paddingY: 8)
                 )
             }
             if schedules["needsLoginItemsApproval"]?.bool == true {
-                AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(paddingX: 20)) {
+                AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(paddingX: 16)) {
                     AtomText(props: TextProps(text: "Allow Playhouse in Login Items so scheduled tasks run while it's closed.", size: 10, color: "secondary"))
                     AtomButton(
                         props: ButtonProps(style: "link"),
@@ -64,7 +65,7 @@ struct ScheduledTasksPlugin: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                AtomScroll(props: ScrollProps(spacing: 10, inset: 20, lazy: true), common: AtomCommon(testID: "scheduled-tasks-list")) {
+                AtomScroll(props: ScrollProps(spacing: 8, inset: 16, lazy: true), common: AtomCommon(testID: "scheduled-tasks-list")) {
                     // `schedule.list` is already soonest first.
                     section("Recurring", tasks: tasks.filter { $0.schedule?.kind == TaskScheduleKind.recurring.rawValue }, identifier: "scheduled-tasks-recurring")
                     section("One-time", tasks: tasks.filter { $0.schedule?.kind == TaskScheduleKind.once.rawValue }, identifier: "scheduled-tasks-one-time")
@@ -72,27 +73,16 @@ struct ScheduledTasksPlugin: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(WorkspaceTheme.windowBackground)
     }
 
     private var header: some View {
-        AtomStack(props: StackProps(axis: "h", spacing: 12), common: AtomCommon(paddingX: 20, paddingY: 12)) {
-            AtomButton(
-                props: ButtonProps(shortcut: "cancel"),
-                common: AtomCommon(testID: "scheduled-tasks-back-button", label: "Back to the board", help: "Back to the board"),
-                action: { perform { try await host.call("ui", "close") } }
-            ) {
-                AtomPanel(props: PanelProps(fillOpacity: 0.07, capsule: true, align: "center"), common: AtomCommon(width: 26, height: 26, padding: 0)) {
-                    AtomIcon(props: IconProps(name: "chevron.left", size: 13, weight: "semibold"))
-                }
-            }
-
-            AtomText(props: TextProps(text: "Scheduled Tasks", size: 17, weight: "semibold"), common: AtomCommon(testID: "scheduled-tasks-title"))
+        AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 16, paddingY: 12)) {
+            AtomLabel(props: LabelProps(text: "Scheduled Tasks", icon: "clock", size: 15, weight: "semibold"), common: AtomCommon(testID: "scheduled-tasks-title"))
 
             AtomSpacer()
 
             AtomButton(
-                props: ButtonProps(style: "automatic"),
+                props: ButtonProps(style: "automatic", controlSize: "small"),
                 common: AtomCommon(testID: "scheduled-new-task-button", help: "Write a task and choose when it runs"),
                 action: newTask
             ) {
@@ -116,9 +106,9 @@ struct ScheduledTasksPlugin: View {
         let repositories = task.repositoryWorktrees.map { URL(fileURLWithPath: $0.repositoryPath).lastPathComponent }
         return AtomPanel(
             props: PanelProps(fill: "panel", fillOpacity: 1, cornerRadius: 10),
-            common: AtomCommon(testID: "scheduled-task-row-\(id)", padding: 0, paddingX: 14, paddingY: 10)
+            common: AtomCommon(testID: "scheduled-task-row-\(id)", padding: 0, paddingX: 12, paddingY: 9)
         ) {
-            AtomStack(props: StackProps(axis: "h", spacing: 12)) {
+            AtomStack(props: StackProps(axis: "h", spacing: 10)) {
                 // A press area rather than a Button: a Button folds its label into one element,
                 // which would hide the title and summary from accessibility. The press area
                 // covers its column, so the full-width title makes the whole row clickable.
@@ -199,17 +189,14 @@ struct ScheduledTasksPlugin: View {
         perform { try await host.call("ui", "newTask", ["schedule": .string(TaskScheduleKind.recurring.rawValue)]) }
     }
 
-    /// The page stays up behind the task, so closing the task returns here.
+    /// The popover closes for the task.
     private func open(_ taskID: UUID) {
         perform { try await host.call("ui", "openTask", ["taskID": .string(taskID.uuidString)]) }
     }
 
-    /// The run is an ordinary task, so the page closes for it.
+    /// The run is an ordinary task, and the popover closes for it too.
     private func openLastRun(_ taskID: UUID) {
-        perform {
-            try await host.call("ui", "close")
-            try await host.call("ui", "openTask", ["taskID": .string(taskID.uuidString)])
-        }
+        perform { try await host.call("ui", "openTask", ["taskID": .string(taskID.uuidString)]) }
     }
 
     private func setPaused(_ task: BoardTaskRecord, _ paused: Bool) {

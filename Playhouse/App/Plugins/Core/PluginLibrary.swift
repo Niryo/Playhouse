@@ -179,7 +179,7 @@ enum BuiltInPlugins {
     /// The board sidebar's bottom section with each agent's usage and
     /// account, from `props.agents`.
     static let agentsInfoID = "agents-info"
-    /// The board sidebar's Scheduled Tasks page, listing `props.schedules`.
+    /// The board sidebar's Scheduled Tasks popover, listing `props.schedules`.
     static let scheduledTasksID = "scheduled-tasks"
 
     static let manifests: [PluginManifest] = [
@@ -187,7 +187,7 @@ enum BuiltInPlugins {
         PluginManifest(id: pullRequestModeID, name: "Pull request mode", version: 1, icon: "arrow.triangle.branch", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: pullRequestsID, name: "Pull requests", version: 1, icon: "arrow.triangle.pull", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: agentsInfoID, name: "Agents info", version: 1, icon: "gauge.with.dots.needle.33percent", placement: PluginPlacement.mainSidebarBottom.rawValue, presentation: PluginPresentation.section.rawValue),
-        PluginManifest(id: scheduledTasksID, name: "Scheduled Tasks", version: 1, icon: "clock", placement: PluginPlacement.mainSidebar.rawValue, presentation: PluginPresentation.page.rawValue)
+        PluginManifest(id: scheduledTasksID, name: "Scheduled Tasks", version: 1, icon: "clock", placement: PluginPlacement.mainSidebar.rawValue, presentation: PluginPresentation.popover.rawValue, width: 400, height: 460)
     ]
 
     static func isBuiltIn(_ id: String) -> Bool { manifests.contains { $0.id == id } }
