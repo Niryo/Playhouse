@@ -197,15 +197,26 @@ enum PlanImplementationHandoff {
     }
 }
 
-/// How a task's terminal panel starts its shell. `environment` holds only the variables
+/// How a task's terminal panel starts its shells. `environment` holds only the variables
 /// Playhouse sets on top of the app's own environment.
 struct TaskTerminalLaunch: Codable, Equatable {
     let taskID: UUID
+    /// The first pane's folder, where a single-repository task's one shell runs.
     let directory: String
     let shell: String
     /// The shell runs as a login shell, as Terminal.app starts it, so the user's profile applies.
     let arguments: [String]
     let environment: [String: String]
+    /// One shell per created worktree, in the task's repository order; a task with several
+    /// repositories opens them as a split view, each shell in its own worktree.
+    let panes: [Pane]
+
+    struct Pane: Codable, Equatable {
+        let repositoryPath: String
+        /// The source repository's folder name, which labels the pane.
+        let name: String
+        let directory: String
+    }
 
     /// Why a task can't open a terminal yet, or nil when it has a created worktree. The terminal
     /// only runs in a worktree, and opening it never creates one: a pending worktree is named
