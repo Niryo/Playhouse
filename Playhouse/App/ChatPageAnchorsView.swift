@@ -62,7 +62,6 @@ final class ChatPageAnchorsModel {
 enum ChatPageAnchorsLayout {
     /// Below this transcript width the labels would leave too little room for messages.
     static let minimumTranscriptWidth: CGFloat = 380
-    static let leadingInset: CGFloat = 12
     /// Where the transcript's rows start without the labels.
     static let transcriptPadding: CGFloat = 28
     static let transcriptMaxWidth: CGFloat = 820
@@ -80,11 +79,21 @@ enum ChatPageAnchorsLayout {
     static let labelHeight: CGFloat = 14
     static let labelSpacing: CGFloat = 12
     static let labelsVerticalPadding: CGFloat = 6
-    /// The gap between the last label and the jump-to-bottom button below it, and between the
-    /// pin button and the first label above it.
+    /// The gap between the last label and the jump-to-bottom button below it.
     static let jumpToBottomSpacing: CGFloat = 4
-    /// Where the handle of the unpinned labels sits from the transcript column's edge.
-    static let handleInset: CGFloat = 6
+    /// Where the labels' handle sits from the transcript column's edge.
+    static let handleInset: CGFloat = 2
+    /// The handle's target, which the open labels start just beyond.
+    static let handleWidth: CGFloat = 12
+    /// How far right of the handle the open labels start.
+    static let labelsHandleGap: CGFloat = 2
+    /// Where the open labels start from the transcript column's edge: just right of the handle.
+    static let labelsLeading = handleInset + handleWidth + labelsHandleGap
+
+    /// The labels' width: up to a little before the rows start.
+    static func labelsWidth(transcriptWidth: CGFloat) -> CGFloat {
+        rowInset(transcriptWidth: transcriptWidth) + transcriptPadding - labelsLeading - 12
+    }
     /// How the labels slide out from their handle, pushing the messages right, and back in.
     static let slideAnimation = Animation.easeInOut(duration: 0.22)
 
@@ -104,14 +113,12 @@ enum ChatPageAnchorsLayout {
 /// well apart from each other and a few at a time; scrolling it, with no scroll bar, reaches
 /// older ones. Clicking one jumps to its page; the page the transcript shows is marked, and
 /// the column scrolls to keep it in view. Below the labels, a button jumps straight to the
-/// bottom of the chat; above them, a pin keeps them open instead of only while hovered.
+/// bottom of the chat.
 struct ChatPageAnchorsView: View {
     let model: ChatPageAnchorsModel
     let width: CGFloat
-    let isPinned: Bool
     let jump: (StandaloneChatPage) -> Void
     let jumpToBottom: () -> Void
-    let togglePin: () -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -156,11 +163,6 @@ struct ChatPageAnchorsView: View {
         .overlay(alignment: .bottom) {
             ChatJumpToBottomButton(action: jumpToBottom)
                 .alignmentGuide(.bottom) { $0[.top] - ChatPageAnchorsLayout.jumpToBottomSpacing }
-        }
-        // Hangs above the labels as the arrow hangs below them.
-        .overlay(alignment: .top) {
-            ChatPageAnchorsPinButton(isPinned: isPinned, action: togglePin)
-                .alignmentGuide(.top) { $0[.bottom] + ChatPageAnchorsLayout.jumpToBottomSpacing }
         }
     }
 
@@ -230,49 +232,47 @@ private struct ChatJumpToBottomButton: View {
     }
 }
 
-/// Above the page labels, a pin that keeps them open beside the transcript, or lets them fold
-/// back into their handle when the pointer leaves.
-private struct ChatPageAnchorsPinButton: View {
-    let isPinned: Bool
-    let action: () -> Void
+/// The parts of the page labels column whose hover keeps the unlocked labels slid out.
+enum ChatPageAnchorsHoverPart: Hashable {
+    case handle
+    case labels
+}
+
+/// The handle at the transcript's leading edge, halfway down it. Folded, it is a faint thin line
+/// that slides the labels out while hovered; beside the open labels it thickens, and clicking it
+/// locks them open, which turns it the accent color, or unlocks them again.
+struct ChatPageAnchorsHandle: View {
+    let isOpen: Bool
+    let isLocked: Bool
+    let toggleLock: () -> Void
+    let hover: (Bool) -> Void
     @State private var isHovering = false
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: isPinned ? "pin.fill" : "pin")
-                .font(.system(size: 10, weight: .semibold))
-                .rotationEffect(.degrees(45))
-                .foregroundStyle(isPinned ? Color.accentColor : isHovering ? Color.primary : Color.secondary)
-                .frame(width: 24, height: ChatPageAnchorsLayout.labelHeight + 4)
+        Button(action: toggleLock) {
+            Capsule()
+                .fill(fill)
+                .frame(width: isOpen || isLocked ? 5 : 3, height: 44)
+                // A wider, taller target than the line itself, so it is easy to find.
+                .frame(width: ChatPageAnchorsLayout.handleWidth, height: 88)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
-        .onHover { isHovering = $0 }
-        .nativeHelp(isPinned ? "Show the chat's pages only while hovering their handle" : "Keep the chat's pages open")
-        .accessibilityLabel(isPinned ? "Unpin chat pages" : "Pin chat pages open")
-        .accessibilityValue(isPinned ? "pinned" : "unpinned")
-        .accessibilityIdentifier("chat-page-anchors-pin")
+        .nativeHelp(isLocked ? "Unlock the chat's pages, so they fold away when the pointer leaves" : "Lock the chat's pages open")
+        .onHover {
+            isHovering = $0
+            hover($0)
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .accessibilityLabel(isLocked ? "Unlock chat pages" : "Lock chat pages open")
+        .accessibilityValue(isLocked ? "locked" : isOpen ? "open" : "folded")
+        .accessibilityIdentifier("chat-page-anchors-handle")
     }
-}
 
-/// The thin handle at the transcript's leading edge, halfway down it, that slides the unpinned
-/// page labels out while hovered.
-struct ChatPageAnchorsHandle: View {
-    @State private var isHovering = false
-
-    var body: some View {
-        Capsule()
-            .fill(Color.primary.opacity(isHovering ? 0.32 : 0.16))
-            .frame(width: 3, height: 44)
-            // A wider, taller target than the line itself, so it is easy to find.
-            .frame(width: 14, height: 88)
-            .contentShape(Rectangle())
-            .onHover { isHovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: isHovering)
-            .accessibilityElement()
-            .accessibilityLabel("Show chat pages")
-            .accessibilityHint("Hover to show the chat's pages")
-            .accessibilityIdentifier("chat-page-anchors-handle")
+    private var fill: Color {
+        if isLocked { return Color.accentColor.opacity(isHovering ? 1 : 0.85) }
+        if isOpen { return Color.primary.opacity(isHovering ? 0.5 : 0.34) }
+        return Color.primary.opacity(isHovering ? 0.32 : 0.16)
     }
 }
