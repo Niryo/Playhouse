@@ -134,6 +134,17 @@ struct TaskConversationView: View {
     @State var mentionEdit: ChatEditorEdit?
     /// The `@` whose menu Escape closed; it stays closed until another mention starts.
     @State var dismissedMentionLocation: Int?
+    /// The items of the command the `/` menu lists, read from the daemon when that list opens.
+    @State var slashItems: [SlashCommandItem]?
+    @State var slashItemsCommand: SlashCommand?
+    /// Both agents are still asked which MCP servers in the `/mcp` list need a sign-in.
+    @State var isCheckingSlashSignIn = false
+    /// The highlighted row of the open `/` menu.
+    @State var slashSelection = 0
+    /// The `/` whose menu Escape closed; it stays closed until another command starts.
+    @State var dismissedSlashLocation: Int?
+    /// What the next Skills page opening shows first, set by a `/mcp` or `/skill` row's buttons.
+    @State var skillsFocus: SkillsPageFocus?
     /// Whether the composer's editor has the keyboard, as the editor itself reports it.
     @State var isComposerEditing = false
     @State var selectedChatImage: NSImage?

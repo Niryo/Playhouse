@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+/// What a Skills page opened from the composer's `/` menu shows first: a skill's
+/// editor, an MCP server's editor, or an MCP server's sign-in with one agent.
+enum SkillsPageFocus: Equatable {
+    case skill(id: String)
+    case mcpServer(id: String)
+    case mcpSignIn(name: String, provider: ConversationProvider)
+}
+
 /// The task's skill gallery, agent rules and MCP servers: its repositories'
 /// skills, instruction files and servers, the user's global ones, and the ones
 /// that came with each provider. Every skill, rule or server a user adds works with both Claude and Codex,
@@ -23,7 +31,10 @@ struct SkillsPageView: View {
     let onFixTask: (UUID, String) -> Void
     let onClose: () -> Void
 
-    @State private var kind: Kind = .skills
+    @State private var kind: Kind
+    /// What the page opens first; dropped once opened or once the user picks another tab,
+    /// so returning to a tab doesn't open it again.
+    @State private var focus: SkillsPageFocus?
     /// A rule's editor or New Rule panel is open over the Rules list.
     @State private var isPresentingRulePanel = false
     /// A server's editor is open over the MCP list.
@@ -60,6 +71,22 @@ struct SkillsPageView: View {
 
     private static let panelAnimation = Animation.spring(response: 0.34, dampingFraction: 0.9)
 
+    init(
+        task: any ConversationSubject, manager: RemoteConversationManager, focus: SkillsPageFocus? = nil,
+        onUse: @escaping (SkillRecord) -> Void, onFixTask: @escaping (UUID, String) -> Void, onClose: @escaping () -> Void
+    ) {
+        self.task = task
+        self.manager = manager
+        _focus = State(initialValue: focus)
+        self.onUse = onUse
+        self.onFixTask = onFixTask
+        self.onClose = onClose
+        switch focus {
+        case .mcpServer, .mcpSignIn: _kind = State(initialValue: .mcp)
+        case .skill, nil: _kind = State(initialValue: .skills)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SkillsPageHeader(model: model, actions: actions)
@@ -68,7 +95,8 @@ struct SkillsPageView: View {
             switch kind {
             case .skills: skillsBody
             case .rules: RulesSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingRulePanel, onFixTask: onFixTask)
-            case .mcp: McpServersSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingMcpPanel, onFixTask: onFixTask)
+            case .mcp:
+                McpServersSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingMcpPanel, onFixTask: onFixTask, focus: focus)
             }
         }
         .background(WorkspaceTheme.windowBackground)
@@ -91,7 +119,7 @@ struct SkillsPageView: View {
     private var actions: SkillsPageActions {
         SkillsPageActions(
             back: onClose,
-            selectKind: { if let kind = Kind(rawValue: $0) { self.kind = kind } },
+            selectKind: { if let kind = Kind(rawValue: $0) { self.kind = kind; focus = nil } },
             jump: jump,
             search: { search = $0 },
             newSkill: { withAnimation(Self.panelAnimation) { panel = .creating } },
@@ -114,7 +142,13 @@ struct SkillsPageView: View {
 
     private var skillsBody: some View {
         SkillGalleryView(model: model, actions: actions)
-            .task { await reload() }
+            .task {
+                await reload()
+                if case .skill(let id) = focus {
+                    focus = nil
+                    if let skill = catalog?.skill(id: id), skill.folderPath != nil { openEditor(skill) }
+                }
+            }
             .alert(
                 pendingDelete.count == 1 ? "Delete \(pendingDelete[0].name)?" : "Delete \(pendingDelete.count) skills?",
                 isPresented: Binding(get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } }),

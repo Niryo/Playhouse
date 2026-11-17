@@ -379,6 +379,123 @@ extension ComposerView where Header == EmptyView, ScheduleContent == EmptyView {
     }
 }
 
+/// The pieces the composer's suggestion menus (`@` mentions and `/` commands) are built from,
+/// so both share one look: a floating panel, section headers, a list that keeps the
+/// highlighted row in view, and rows where only the highlighted one draws a surface.
+enum ComposerSuggestionMenu {
+    static let width: CGFloat = 460
+    static let inset: CGFloat = 8
+    static let rowHeight: CGFloat = 32
+    static let headerHeight: CGFloat = 30
+    static let maxListHeight: CGFloat = 360
+
+    /// The floating panel the menu sits in.
+    struct Panel<Content: View>: View {
+        let testID: String
+        let label: String
+        let value: String
+        @ViewBuilder let content: Content
+
+        var body: some View {
+            AtomPanel(
+                props: PanelProps(spacing: 0, fill: "panel", fillOpacity: 1, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.1),
+                common: AtomCommon(testID: testID, label: label, value: value, width: Double(width), padding: Double(inset))
+            ) {
+                content
+            }
+            .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
+        }
+    }
+
+    /// A section's title, with an optional note at its end.
+    struct Header: View {
+        let text: String
+        let testID: String
+        var note: String? = nil
+        var noteTestID: String? = nil
+
+        var body: some View {
+            AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(height: Double(headerHeight), fillWidth: true, paddingX: 12)) {
+                AtomText(
+                    props: TextProps(text: text, size: 12, weight: "medium", color: "secondary", lineLimit: 1, truncation: "tail"),
+                    common: AtomCommon(testID: testID)
+                )
+                AtomSpacer(props: SpacerProps(minLength: 6))
+                if let note {
+                    AtomText(props: TextProps(text: note, size: 12, color: "tertiary", lineLimit: 1), common: AtomCommon(testID: noteTestID))
+                }
+            }
+        }
+    }
+
+    /// The line shown instead of rows when there are none.
+    struct Empty: View {
+        let text: String
+        let testID: String
+
+        var body: some View {
+            AtomText(props: TextProps(text: text, size: 13, color: "tertiary"), common: AtomCommon(testID: testID, fillWidth: true, paddingX: 12, paddingY: 8))
+        }
+    }
+
+    /// The rows, scrolling past `maxListHeight` and following the highlighted row's id.
+    struct List<ID: Hashable, Content: View>: View {
+        /// The rows' and headers' natural height.
+        let contentHeight: CGFloat
+        let selectedID: ID?
+        @ViewBuilder let content: Content
+
+        var body: some View {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) { content }
+                        .hoverRevealScrollers()
+                }
+                .frame(height: min(contentHeight, maxListHeight))
+                .onChange(of: selectedID) { _, id in
+                    if let id { proxy.scrollTo(id) }
+                }
+            }
+        }
+    }
+
+    /// A row's surface: only the highlighted row draws one; a fill on every row read as a stack of cards.
+    struct RowSurface<Content: View>: View {
+        let selected: Bool
+        var opacity: Double = 1
+        @ViewBuilder let content: Content
+
+        var body: some View {
+            AtomStack(
+                props: StackProps(axis: "h", spacing: 10, fill: selected ? "primary" : nil, fillOpacity: selected ? 0.09 : nil, cornerRadius: 9),
+                common: AtomCommon(minHeight: Double(rowHeight), fillWidth: true, paddingX: 12, opacity: opacity)
+            ) {
+                content
+            }
+        }
+    }
+
+    /// A row's icon, title and detail.
+    struct RowLabel: View {
+        let icon: String
+        let title: String
+        let detail: String
+        var detailColor = "secondary"
+
+        var body: some View {
+            AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(minHeight: Double(rowHeight), fillWidth: true)) {
+                AtomIcon(props: IconProps(name: icon, size: 13, weight: "regular", color: "secondary"), common: AtomCommon(width: 18))
+                AtomText(props: TextProps(text: title, size: 13, color: "primary", lineLimit: 1, truncation: "tail"))
+                    .layoutPriority(1)
+                if !detail.isEmpty {
+                    AtomText(props: TextProps(text: detail, size: 13, color: detailColor, lineLimit: 1, truncation: "tail"))
+                }
+                AtomSpacer(props: SpacerProps(minLength: 0))
+            }
+        }
+    }
+}
+
 /// The `@` mention menu above the composer: the suggestions for what follows the `@`, the
 /// highlighted one first in keyboard order. Browsing everything groups the rows under a header
 /// per kind; recent mentions and a query's matches are one list under one header. Rows and
@@ -393,12 +510,6 @@ struct ComposerMentionMenu: View {
     let selectedIndex: Int
     let select: (MentionItem) -> Void
 
-    private static let width: CGFloat = 460
-    private static let inset: CGFloat = 8
-    private static let rowHeight: CGFloat = 32
-    private static let headerHeight: CGFloat = 30
-    private static let maxListHeight: CGFloat = 360
-
     private struct Section: Identifiable {
         let id: String
         let title: String
@@ -409,38 +520,25 @@ struct ComposerMentionMenu: View {
     }
 
     var body: some View {
-        AtomPanel(
-            props: PanelProps(spacing: 0, fill: "panel", fillOpacity: 1, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.1),
-            common: AtomCommon(testID: "mention-menu", label: "Mentions", value: title, width: Double(Self.width), padding: Double(Self.inset))
-        ) {
+        ComposerSuggestionMenu.Panel(testID: "mention-menu", label: "Mentions", value: title) {
             if items.isEmpty {
-                header(title, testID: "mention-menu-title")
-                AtomText(
-                    props: TextProps(text: isLoading ? "Loading…" : "Nothing to mention matches “\(query)”", size: 13, color: "tertiary"),
-                    common: AtomCommon(testID: "mention-menu-empty", fillWidth: true, paddingX: 12, paddingY: 8)
-                )
+                ComposerSuggestionMenu.Header(text: title, testID: "mention-menu-title")
+                ComposerSuggestionMenu.Empty(text: isLoading ? "Loading…" : "Nothing to mention matches “\(query)”", testID: "mention-menu-empty")
             } else {
                 let sections = sections
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(sections) { section in
-                                header(section.title, testID: section.testID)
-                                ForEach(section.rows, id: \.item.id) { row in
-                                    self.row(row.item, selected: row.index == selectedIndex).id(row.item.id)
-                                }
-                            }
+                ComposerSuggestionMenu.List(
+                    contentHeight: sections.reduce(0) { $0 + ComposerSuggestionMenu.headerHeight + CGFloat($1.rows.count) * ComposerSuggestionMenu.rowHeight },
+                    selectedID: items.indices.contains(selectedIndex) ? items[selectedIndex].id : nil
+                ) {
+                    ForEach(sections) { section in
+                        ComposerSuggestionMenu.Header(text: section.title, testID: section.testID)
+                        ForEach(section.rows, id: \.item.id) { row in
+                            self.row(row.item, selected: row.index == selectedIndex).id(row.item.id)
                         }
-                        .hoverRevealScrollers()
-                    }
-                    .frame(height: min(Self.listHeight(sections), Self.maxListHeight))
-                    .onChange(of: selectedIndex) { _, index in
-                        if items.indices.contains(index) { proxy.scrollTo(items[index].id) }
                     }
                 }
             }
         }
-        .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
     }
 
     private var title: String {
@@ -466,17 +564,6 @@ struct ComposerMentionMenu: View {
         return sections
     }
 
-    private static func listHeight(_ sections: [Section]) -> CGFloat {
-        sections.reduce(0) { $0 + headerHeight + CGFloat($1.rows.count) * rowHeight }
-    }
-
-    private func header(_ text: String, testID: String) -> some View {
-        AtomText(
-            props: TextProps(text: text, size: 12, weight: "medium", color: "secondary", lineLimit: 1, truncation: "tail"),
-            common: AtomCommon(testID: testID, height: Double(Self.headerHeight), fillWidth: true, paddingX: 12)
-        )
-    }
-
     private func row(_ item: MentionItem, selected: Bool) -> some View {
         AtomButton(
             props: ButtonProps(selected: selected),
@@ -487,18 +574,8 @@ struct ComposerMentionMenu: View {
             ),
             action: { select(item) }
         ) {
-            // Only the highlighted row draws a surface; a fill on every row read as a stack of cards.
-            AtomStack(
-                props: StackProps(axis: "h", spacing: 10, fill: selected ? "primary" : nil, fillOpacity: selected ? 0.09 : nil, cornerRadius: 9),
-                common: AtomCommon(height: Double(Self.rowHeight), fillWidth: true, paddingX: 12)
-            ) {
-                AtomIcon(props: IconProps(name: Self.icon(item.kind), size: 13, weight: "regular", color: "secondary"), common: AtomCommon(width: 18))
-                AtomText(props: TextProps(text: item.title, size: 13, color: "primary", lineLimit: 1, truncation: "tail"))
-                    .layoutPriority(1)
-                if !item.detail.isEmpty {
-                    AtomText(props: TextProps(text: item.detail, size: 13, color: "secondary", lineLimit: 1, truncation: "tail"))
-                }
-                AtomSpacer(props: SpacerProps(minLength: 0))
+            ComposerSuggestionMenu.RowSurface(selected: selected) {
+                ComposerSuggestionMenu.RowLabel(icon: Self.icon(item.kind), title: item.title, detail: item.detail)
             }
         }
     }
@@ -510,6 +587,166 @@ struct ComposerMentionMenu: View {
         case .agent: "person.crop.circle"
         case .repository: "folder"
         case .task: "checklist"
+        }
+    }
+}
+
+/// What the `/` menu's rows do: choosing a row (by its keyboard index) and the buttons at
+/// the end of an item's row.
+struct ComposerSlashActions {
+    var choose: (Int) -> Void
+    var gear: (SlashCommandItem) -> Void
+    var signIn: (SlashCommandItem, ConversationProvider) -> Void
+    var edit: (SlashCommandItem) -> Void
+    var delete: (SlashCommandItem) -> Void
+}
+
+/// The `/` command menu above the composer: the matching commands, or a command's own list
+/// (MCP servers, skills, agents to sign in to, plugins), the highlighted row first in keyboard
+/// order. A command the task's agent can't run is listed disabled with why. Rows are plugin
+/// atoms, as in the mention menu.
+struct ComposerSlashMenu: View {
+    let menu: SlashCommandMenu
+    let isLoading: Bool
+    /// Both agents are still asked which MCP servers need a sign-in.
+    let isCheckingSignIn: Bool
+    let selectedIndex: Int
+    let actions: ComposerSlashActions
+
+    private var rowCount: Int { menu.command == nil ? menu.commands.count : menu.items.count }
+
+    var body: some View {
+        ComposerSuggestionMenu.Panel(testID: "slash-menu", label: "Commands", value: title) {
+            ComposerSuggestionMenu.Header(
+                text: title, testID: "slash-menu-title",
+                note: isCheckingSignIn ? "Checking sign-in…" : nil, noteTestID: "slash-menu-checking"
+            )
+            if rowCount == 0 {
+                ComposerSuggestionMenu.Empty(text: emptyText, testID: "slash-menu-empty")
+            } else {
+                ComposerSuggestionMenu.List(contentHeight: CGFloat(rowCount) * ComposerSuggestionMenu.rowHeight, selectedID: selectedIndex < rowCount ? selectedIndex : nil) {
+                    if menu.command == nil {
+                        ForEach(Array(menu.commands.enumerated()), id: \.element.id) { index, entry in
+                            commandRow(entry, index: index).id(index)
+                        }
+                    } else {
+                        ForEach(Array(menu.items.enumerated()), id: \.element.id) { index, item in
+                            itemRow(item, index: index).id(index)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var title: String {
+        switch menu.command {
+        case nil: menu.query.isEmpty ? "Commands" : "Commands matching “/\(menu.query)”"
+        case .mcp: "MCP servers"
+        case .skill: "Skills"
+        case .login: "Sign in"
+        case .plugin: "Plugins"
+        case .plan, .goal: ""
+        }
+    }
+
+    private var emptyText: String {
+        if isLoading { return "Loading…" }
+        guard let command = menu.command else { return "No command matches “/\(menu.query)”" }
+        let what = command == .mcp ? "MCP server" : command == .skill ? "skill" : "item"
+        return menu.filter.isEmpty ? "No \(what)s" : "No \(what) matches “\(menu.filter)”"
+    }
+
+    private func commandRow(_ entry: SlashCommandEntry, index: Int) -> some View {
+        let selected = index == selectedIndex
+        return AtomButton(
+            props: ButtonProps(disabled: !entry.enabled, selected: selected),
+            common: AtomCommon(
+                testID: "slash-command-\(entry.command.rawValue)", label: "/" + entry.command.rawValue,
+                value: entry.enabled ? entry.detail : entry.disabledReason, help: entry.disabledReason ?? entry.detail
+            ),
+            action: { actions.choose(index) }
+        ) {
+            ComposerSuggestionMenu.RowSurface(selected: selected, opacity: entry.enabled ? 1 : 0.6) {
+                ComposerSuggestionMenu.RowLabel(
+                    icon: entry.command.icon, title: "/" + entry.command.rawValue, detail: entry.disabledReason ?? entry.detail,
+                    detailColor: entry.enabled ? "secondary" : "tertiary"
+                )
+            }
+        }
+    }
+
+    /// The suffix of an item's identifiers: the handle for an MCP server or skill.
+    static func key(_ item: SlashCommandItem) -> String {
+        switch item.kind {
+        case .mcp, .skill: "\(item.kind.rawValue)-\(item.handle ?? item.targetID)"
+        case .login, .plugin: "\(item.kind.rawValue)-\(item.targetID)"
+        case .createPlugin: "create-plugin"
+        }
+    }
+
+    private func itemRow(_ item: SlashCommandItem, index: Int) -> some View {
+        let selected = index == selectedIndex
+        let key = Self.key(item)
+        return ComposerSuggestionMenu.RowSurface(selected: selected) {
+            AtomButton(
+                props: ButtonProps(selected: selected),
+                common: AtomCommon(testID: "slash-item-\(key)", label: item.handle.map { "@" + $0 } ?? item.title, value: item.detail, help: itemHelp(item)),
+                action: { actions.choose(index) }
+            ) {
+                ComposerSuggestionMenu.RowLabel(icon: icon(item), title: item.handle.map { "@" + $0 } ?? item.title, detail: item.detail)
+            }
+            ForEach(item.needsSignIn, id: \.self) { provider in
+                AtomButton(
+                    props: ButtonProps(style: "bordered", controlSize: "small"),
+                    common: AtomCommon(testID: "slash-signin-\(key)-\(provider.rawValue)", label: "Sign in for \(provider.displayName)", help: "Sign in to \(item.title) for \(provider.displayName)"),
+                    action: { actions.signIn(item, provider) }
+                ) {
+                    // The agent's name alone keeps the row's title readable; the key and the help say it signs in.
+                    AtomLabel(props: LabelProps(text: provider.displayName, icon: "key", size: 11, weight: "medium"))
+                }
+            }
+            if item.kind == .plugin {
+                iconButton("pencil", testID: "slash-edit-\(key)", label: "Edit", help: "Open this plugin's editor") { actions.edit(item) }
+                iconButton("trash", testID: "slash-delete-\(key)", label: "Delete", help: "Delete this plugin's folder", destructive: true) { actions.delete(item) }
+                // Plugin settings don't exist yet; the gear stays where they will open.
+                iconButton("gearshape", testID: "slash-gear-\(key)", label: "Settings", help: "Plugin settings are not available yet", disabled: true) {}
+            } else if item.kind == .mcp || item.kind == .skill {
+                iconButton(
+                    "gearshape", testID: "slash-gear-\(key)", label: "Manage",
+                    help: item.editable ? "Open \(item.title) in the \(item.kind == .mcp ? "MCP" : "Skills") page" : "Built-in skills can't be edited",
+                    disabled: !item.editable
+                ) { actions.gear(item) }
+            }
+        }
+    }
+
+    private func iconButton(_ icon: String, testID: String, label: String, help: String, destructive: Bool = false, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        AtomButton(
+            props: ButtonProps(style: "borderless", emphasis: 4, disabled: disabled, destructive: destructive),
+            common: AtomCommon(testID: testID, label: label, help: help, width: 26, height: 26),
+            action: action
+        ) {
+            AtomIcon(props: IconProps(name: icon, size: 12, weight: "medium", color: destructive ? "red" : "secondary"))
+        }
+    }
+
+    private func itemHelp(_ item: SlashCommandItem) -> String {
+        switch item.kind {
+        case .mcp, .skill: "Mention \(item.title)"
+        case .login: item.title
+        case .createPlugin: item.detail
+        case .plugin: "Open this plugin's editor"
+        }
+    }
+
+    private func icon(_ item: SlashCommandItem) -> String {
+        switch item.kind {
+        case .mcp: ComposerMentionMenu.icon(.mcp)
+        case .skill: ComposerMentionMenu.icon(.skill)
+        case .login: "person.crop.circle"
+        case .createPlugin: "plus"
+        case .plugin: "puzzlepiece.extension"
         }
     }
 }

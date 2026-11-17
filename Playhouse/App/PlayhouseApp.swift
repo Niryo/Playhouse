@@ -314,6 +314,19 @@ struct PluginsMenuContent: View {
     }
 
     private func edit(_ pluginID: String) {
+        PluginManagement.edit(pluginID, registry: registry)
+    }
+
+    private func confirmDelete(_ pluginID: String, name: String, detail: String) {
+        PluginManagement.confirmDelete(pluginID, name: name, detail: detail, registry: registry)
+    }
+}
+
+/// Editing and deleting a plugin, shared by the Plugins menu and the composer's `/plugin` list.
+@MainActor
+enum PluginManagement {
+    /// Opens the plugin's editor conversation, creating it the first time.
+    static func edit(_ pluginID: String, registry: PluginRegistry) {
         Task { @MainActor in
             do {
                 if let existing = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) {
@@ -328,7 +341,8 @@ struct PluginsMenuContent: View {
         }
     }
 
-    private func confirmDelete(_ pluginID: String, name: String, detail: String) {
+    /// Asks first, then deletes the plugin's folder and its editor conversation.
+    static func confirmDelete(_ pluginID: String, name: String, detail: String, registry: PluginRegistry) {
         let alert = NSAlert()
         alert.messageText = "Delete the plugin \(name)?"
         alert.informativeText = detail

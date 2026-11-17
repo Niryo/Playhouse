@@ -900,6 +900,24 @@ final class PlayhouseBridgeRuntime {
                     "recentIDs": try Self.value(catalog.recentIDs),
                     "suggestions": try Self.value(catalog.suggestions(query: request.arguments["query"]?.string ?? "")),
                 ])
+            case "slash.list":
+                // The composer's `/` menu for the text typed after the `/`; a command's own list
+                // reads only its source, and `/mcp` asks both agents for sign-ins on request.
+                let task = try taskManager.conversationSubject(request.requiredUUID("taskID"))
+                let includeStatus = request.arguments["includeStatus"]?.bool == true
+                let menu = try await SlashCommandManager(mentions: mentions, skills: skills).menu(
+                    query: request.arguments["query"]?.string ?? "", task: task, tasks: taskManager, settings: settings,
+                    mcpStatus: includeStatus ? {
+                        await ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                            .mcpStatus(taskID: task.id, provider: nil)
+                    } : nil,
+                    plugins: {
+                        let library = try pluginLibrary()
+                        let disabled = settings.disabledPluginIDs
+                        return await Task.detached { library.list(disabled: disabled) }.value
+                    }
+                )
+                result = try Self.value(menu)
             case "rules.list":
                 result = try Self.value(rules.catalog(roots: skillRoots()))
             case "rules.get":

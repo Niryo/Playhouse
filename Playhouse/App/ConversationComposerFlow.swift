@@ -91,6 +91,177 @@ extension TaskConversationView {
         )
         mentionSelection = 0
     }
+
+    // MARK: / commands
+
+    /// The `/` command being typed before the caret, whether or not its menu was dismissed.
+    /// A mention being typed takes the keys instead.
+    var typedSlash: (location: Int, length: Int, query: String)? {
+        guard !isReadOnly, isComposerEditing, composerDraft.selection.length == 0, typedMention == nil else { return nil }
+        return SlashCommandText.activeQuery(in: draft, caret: composerDraft.selection.location)
+    }
+
+    var activeSlash: (location: Int, length: Int, query: String)? {
+        guard let typed = typedSlash, typed.location != dismissedSlashLocation else { return nil }
+        return typed
+    }
+
+    /// The command whose own list the open menu shows.
+    var activeSlashCommand: SlashCommand? { activeSlash.flatMap { SlashCommandCatalog.listedCommand($0.query) } }
+
+    var isLoadingSlashItems: Bool {
+        activeSlashCommand != nil && (slashItemsCommand != activeSlashCommand || slashItems == nil)
+    }
+
+    /// The open menu, or nil when nothing matches what was typed: a `/` that names no command
+    /// (a path, say) or prose after a command's list shows no menu at all.
+    var slashMenuModel: SlashCommandMenu? {
+        guard let active = activeSlash else { return nil }
+        let menu = SlashCommandCatalog.menu(query: active.query, provider: provider) { command in
+            command == slashItemsCommand ? (slashItems ?? []) : []
+        }
+        if menu.command == nil { return menu.commands.isEmpty ? nil : menu }
+        return menu.items.isEmpty && !menu.filter.isEmpty && !isLoadingSlashItems ? nil : menu
+    }
+
+    @ViewBuilder
+    var slashMenu: some View {
+        if let menu = slashMenuModel, let active = activeSlash {
+            let count = menu.command == nil ? menu.commands.count : menu.items.count
+            ComposerSlashMenu(
+                menu: menu,
+                isLoading: isLoadingSlashItems,
+                isCheckingSignIn: menu.command == .mcp && isCheckingSlashSignIn,
+                selectedIndex: min(slashSelection, max(count - 1, 0)),
+                actions: ComposerSlashActions(
+                    choose: { chooseSlashRow($0, in: menu, at: active) },
+                    gear: { item in
+                        replaceSlash(active, with: "")
+                        openSkillsPage(focus: item.kind == .mcp ? .mcpServer(id: item.targetID) : .skill(id: item.targetID))
+                    },
+                    signIn: { item, provider in
+                        replaceSlash(active, with: "")
+                        openSkillsPage(focus: .mcpSignIn(name: item.title, provider: provider))
+                    },
+                    edit: { item in
+                        replaceSlash(active, with: "")
+                        PluginManagement.edit(item.targetID, registry: pluginRegistry)
+                    },
+                    delete: { item in
+                        replaceSlash(active, with: "")
+                        PluginManagement.confirmDelete(
+                            item.targetID, name: item.title, detail: "Its folder is removed.", registry: pluginRegistry
+                        )
+                    }
+                )
+            )
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 14)
+            .padding(.bottom, 8)
+        }
+    }
+
+    /// Reads the items of the command the menu now lists; `/mcp` then asks both agents
+    /// which servers need a sign-in, which can take a few seconds.
+    func loadSlashItems(_ command: SlashCommand) async {
+        slashItemsCommand = command
+        slashItems = nil
+        let quick = try? await conversationManager.slashCommands(taskID: task.id, query: command.rawValue)
+        guard slashItemsCommand == command else { return }
+        slashItems = quick?.items ?? []
+        guard command == .mcp else { return }
+        isCheckingSlashSignIn = true
+        let checked = try? await conversationManager.slashCommands(taskID: task.id, query: command.rawValue, includeStatus: true)
+        isCheckingSlashSignIn = false
+        if slashItemsCommand == command, let checked { slashItems = checked.items }
+    }
+
+    /// The open `/` menu's keys, then the `@` menu's.
+    func handleComposerKey(_ key: ChatEditorKey) -> Bool {
+        handleSlashKey(key) || handleMentionKey(key)
+    }
+
+    /// The arrows move the highlight, Return or Tab chooses it, Escape closes the menu.
+    func handleSlashKey(_ key: ChatEditorKey) -> Bool {
+        guard let active = activeSlash, let menu = slashMenuModel else { return false }
+        let count = menu.command == nil ? menu.commands.count : menu.items.count
+        switch key {
+        case .up:
+            slashSelection = max(0, min(slashSelection, count - 1) - 1)
+        case .down:
+            slashSelection = min(max(count - 1, 0), slashSelection + 1)
+        case .accept:
+            guard count > 0 else { return false }
+            chooseSlashRow(min(slashSelection, count - 1), in: menu, at: active)
+        case .dismiss:
+            dismissedSlashLocation = active.location
+        }
+        return true
+    }
+
+    /// A command with its own list completes to `/name ` and shows the list; any other
+    /// choice removes the typed command, then acts: an MCP server or skill is mentioned.
+    func chooseSlashRow(_ index: Int, in menu: SlashCommandMenu, at active: (location: Int, length: Int, query: String)) {
+        guard menu.command != nil else {
+            guard menu.commands.indices.contains(index) else { return }
+            let entry = menu.commands[index]
+            guard entry.enabled else { return }
+            if entry.command.hasItems {
+                replaceSlash(active, with: "/" + entry.command.rawValue + " ")
+                return
+            }
+            replaceSlash(active, with: "")
+            if entry.command == .goal {
+                isEnteringGoal = true
+            } else {
+                isEnteringGoal = false
+                setConversationMode(.plan)
+            }
+            return
+        }
+        guard menu.items.indices.contains(index) else { return }
+        let item = menu.items[index]
+        switch item.kind {
+        case .mcp, .skill:
+            replaceSlash(active, with: "@" + (item.handle ?? item.title) + " ")
+        case .login:
+            replaceSlash(active, with: "")
+            if let provider = ConversationProvider(rawValue: item.targetID) { login(provider) }
+        case .createPlugin:
+            replaceSlash(active, with: "")
+            PluginRegistry.setAddMode(true)
+        case .plugin:
+            replaceSlash(active, with: "")
+            PluginManagement.edit(item.targetID, registry: pluginRegistry)
+        }
+    }
+
+    /// Replaces the typed `/command` (up to the caret) with `text`.
+    func replaceSlash(_ active: (location: Int, length: Int, query: String), with text: String) {
+        mentionEdit = ChatEditorEdit(id: (mentionEdit?.id ?? 0) + 1, range: NSRange(location: active.location, length: active.length), text: text)
+        slashSelection = 0
+    }
+
+    func openSkillsPage(focus: SkillsPageFocus?) {
+        skillsFocus = focus
+        skillsPresentation += 1
+        isShowingSkills = true
+    }
+
+    /// Starts the agent's sign-in as the Agents info section's Log in does, opening the link
+    /// Codex returns (a test build never opens a browser).
+    func login(_ provider: ConversationProvider) {
+        Task { @MainActor in
+            do {
+                guard let link = try await conversationManager.login(provider: provider), let url = URL(string: link),
+                      !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) else { return }
+                NSWorkspace.shared.open(url)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func userInputForm(_ request: ConversationUserInputRequest) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("A few questions")
@@ -452,10 +623,6 @@ extension TaskConversationView {
             !annotationPageIDs.contains($0) && $0 != activeChatPageID
         }
         let resolutionAttempt = conflictResolutionAttempt
-        if usesComposerDraft && pendingAnnotations.isEmpty && text == "/plan" {
-            activatePlanMode()
-            return
-        }
         if usesComposerDraft && isEnteringGoal && pendingAnnotations.isEmpty {
             isPreparingSubmittedMessage = true
             draft = ""

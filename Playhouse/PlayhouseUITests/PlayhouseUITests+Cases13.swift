@@ -349,7 +349,7 @@ extension PlayhouseUITests {
             return current.count == 1 ? current.firstMatch.label : nil
         }
         func separatorTop(_ title: String) -> CGFloat? {
-            chatPageSeparators(title).first.map { $0.frame.minY - scrollView.frame.minY }
+            chatPageSeparators(title).first.map { $0.minY - scrollView.frame.minY }
         }
         /// Scrolls the labels until `title`'s label can be clicked.
         func revealLabel(_ title: String) -> Bool {

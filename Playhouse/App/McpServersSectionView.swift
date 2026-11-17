@@ -15,6 +15,8 @@ struct McpServersSectionView: View {
     let manager: RemoteConversationManager
     @Binding var isPresentingPanel: Bool
     let onFixTask: (UUID, String) -> Void
+    /// A server's editor, or its sign-in with one agent, to open once the list loads.
+    var focus: SkillsPageFocus? = nil
 
     /// The section the list last scrolled to, and how many times it has.
     @State private var scrollTarget: String?
@@ -33,6 +35,7 @@ struct McpServersSectionView: View {
     /// A toggle shows its new state at once; the daemon's answer settles it.
     @State private var enabledOverrides: [String: Bool] = [:]
     @State private var isFixing = false
+    @State private var didOpenFocus = false
 
     private static let panelAnimation = Animation.spring(response: 0.34, dampingFraction: 0.9)
 
@@ -113,6 +116,7 @@ struct McpServersSectionView: View {
             // Opening the page asks both agents which servers need a sign-in, while the list loads.
             async let statuses: Void = checkStatus()
             await reload()
+            openFocus()
             await statuses
         }
         .alert(
@@ -591,6 +595,22 @@ struct McpServersSectionView: View {
         perform(reloading: false) {
             let config = try await manager.mcpServerConfig(taskID: task.id, serverID: server.id)
             setPanel(.editing(server, config))
+        }
+    }
+
+    /// The composer's `/mcp` gear opens the server's editor; its sign-in button narrows the
+    /// list to the server and starts that agent's sign-in, whose badge then shows the wait.
+    private func openFocus() {
+        guard !didOpenFocus else { return }
+        didOpenFocus = true
+        switch focus {
+        case .mcpServer(let id):
+            if let server = catalog?.server(id: id) { openEditor(server) }
+        case .mcpSignIn(let name, let provider):
+            search = name
+            signIn(name: name, provider: provider)
+        case .skill, nil:
+            break
         }
     }
 

@@ -629,13 +629,16 @@ extension TaskConversationView {
             }, scheduleContent: { scheduleHint }, pluginActions: isReadOnly ? nil : AnyView(
                 PluginSlot(placement: .composerActions, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
             ), mentions: ChatEditorMentions(
-                handles: mentionHandles, edit: mentionEdit, onKey: handleMentionKey,
+                handles: mentionHandles, edit: mentionEdit, onKey: handleComposerKey,
                 onEditingChange: { isComposerEditing = $0 }
             ))
                 // A zero-height strip along the composer's top edge, so the menu grows upward over the
                 // transcript rather than covering the text being typed.
                 .overlay(alignment: .top) {
-                    Color.clear.frame(height: 0).overlay(alignment: .bottomLeading) { mentionMenu }
+                    Color.clear.frame(height: 0).overlay(alignment: .bottomLeading) {
+                        mentionMenu
+                        slashMenu
+                    }
                 }
                 .onChange(of: typedMention?.location) { _, location in
                     if location != dismissedMentionLocation { dismissedMentionLocation = nil }
@@ -650,16 +653,16 @@ extension TaskConversationView {
                     mentionSelection = 0
                     refreshMentionSuggestions()
                 }
-                .task(id: task.id) { await loadMentions() }
-                .onChange(of: draft) { _, newValue in
-                    if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
-                        activatePlanMode()
-                    } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal", provider.supportsGoals {
-                        isEnteringGoal = true
-                        draft = ""
-                    }
-                    scheduleDraftAutosave(newValue)
+                .onChange(of: typedSlash?.location) { _, location in
+                    if location != dismissedSlashLocation { dismissedSlashLocation = nil }
                 }
+                .onChange(of: activeSlash?.query) { _, _ in slashSelection = 0 }
+                .onChange(of: activeSlashCommand) { _, command in
+                    // Each opening reads the list again, so it shows the latest servers, skills and plugins.
+                    if let command { Task { await loadSlashItems(command) } }
+                }
+                .task(id: task.id) { await loadMentions() }
+                .onChange(of: draft) { _, newValue in scheduleDraftAutosave(newValue) }
         }
         .padding(.horizontal, 28)
         .padding(.top, 14)

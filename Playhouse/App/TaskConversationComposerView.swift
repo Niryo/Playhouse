@@ -166,10 +166,7 @@ extension TaskConversationView {
                 catch { errorMessage = error.localizedDescription }
             },
             selectionChange: { composerDraft.selection = $0 },
-            openSkills: {
-                skillsPresentation += 1
-                isShowingSkills = true
-            },
+            openSkills: { openSkillsPage(focus: nil) },
             modeMenu: { id in
                 if id == "goal" {
                     isEnteringGoal = true
@@ -365,7 +362,7 @@ extension TaskConversationView {
                             .accessibilityHidden(true)
                             .transition(.opacity)
                         SkillsPageView(
-                            task: task, manager: conversationManager, onUse: useSkill,
+                            task: task, manager: conversationManager, focus: skillsFocus, onUse: useSkill,
                             onFixTask: { taskID, prompt in
                                 isShowingSkills = false
                                 onOpenTask(taskID, prompt)
