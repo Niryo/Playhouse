@@ -113,6 +113,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/SkillCatalog.swift"
   "${repository_root}/Playhouse/App/RuleCatalog.swift"
   "${repository_root}/Playhouse/App/MentionCatalog.swift"
+  "${repository_root}/Playhouse/App/SlashCommandCatalog.swift"
   "${repository_root}/Playhouse/App/McpCatalog.swift"
   "${repository_root}/Playhouse/App/CodexConfigTOML.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"

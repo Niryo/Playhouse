@@ -167,7 +167,7 @@ extension TaskConversationView {
                 catch { errorMessage = error.localizedDescription }
             },
             selectionChange: { composerDraft.selection = $0 },
-            openSkills: openSkills,
+            openSkills: { openSkillsPage(focus: nil) },
             modeMenu: { id in
                 if id == "goal" {
                     isEnteringGoal = true
@@ -337,11 +337,6 @@ extension TaskConversationView {
     }
 
     static let placeholderTitles: Set<String> = ["Untitled task", "Generating title…"]
-    func openSkills() {
-        skillsPresentation += 1
-        isShowingSkills = true
-    }
-
     func useSkill(_ skill: SkillRecord) {
         let token = skill.invocationToken
         let rest = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -368,7 +363,7 @@ extension TaskConversationView {
                             .accessibilityHidden(true)
                             .transition(.opacity)
                         SkillsPageView(
-                            task: task, manager: conversationManager, onUse: useSkill,
+                            task: task, manager: conversationManager, focus: skillsFocus, onUse: useSkill,
                             onFixTask: { taskID, prompt in
                                 isShowingSkills = false
                                 onOpenTask(taskID, prompt)

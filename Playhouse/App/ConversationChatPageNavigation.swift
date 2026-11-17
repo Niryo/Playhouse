@@ -331,7 +331,8 @@ extension TaskConversationView {
                 // The labels end a little before the rows start.
                 width: ChatPageAnchorsLayout.rowInset(transcriptWidth: transcriptWidth)
                     + ChatPageAnchorsLayout.transcriptPadding - ChatPageAnchorsLayout.leadingInset - 12,
-                jump: { jumpToChatPage($0) }
+                jump: { jumpToChatPage($0) },
+                jumpToBottom: { returnToLatestMessages() }
             )
             .padding(.leading, ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth) + ChatPageAnchorsLayout.leadingInset)
             // Clear of the toggle in the transcript's corner.

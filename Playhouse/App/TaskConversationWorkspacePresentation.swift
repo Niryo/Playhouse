@@ -101,7 +101,7 @@ extension TaskConversationView {
 
     /// Opens the Skills, Rules & MCP page; beside the terminal button, styled like it.
     var sidebarSkillsButton: some View {
-        Button(action: openSkills) {
+        Button { openSkillsPage(focus: nil) } label: {
             Image(systemName: "sparkles")
                 .font(.system(size: 12, weight: .medium))
                 .frame(width: 26, height: 24)

@@ -705,7 +705,7 @@ class BridgeTestCases13:
             'WorkspaceChanges', 'CodexAppServerClient', 'CodexBackgroundJobs', 'CodexSocketConnection', 'ConversationModel',
             'ClaudeCodeClient', 'ProviderRequestLog', 'ProcessCPUSampler', 'AgentRunHost',
             'ContextCompaction', 'AgentUsage', 'AgentUsageStore', 'ConversationTranscriptStore',
-            'StandaloneChatStore', 'SkillCatalog', 'RuleCatalog', 'MentionCatalog',
+            'StandaloneChatStore', 'SkillCatalog', 'RuleCatalog', 'MentionCatalog', 'SlashCommandCatalog',
             'McpCatalog', 'CodexConfigTOML', 'BridgeCore', 'TaskSchedule',
             'BoardConversationStorage', 'BoardLifecycleStatus', 'BoardOperationLocks', 'BoardPromptPersistence',
             'BoardPullRequestLifecycle', 'BoardRepositoryLifecycle', 'BoardScheduling', 'BoardTaskCRUD',

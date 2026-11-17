@@ -304,8 +304,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(texts.contains("OK."))
     }
 
-    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages. The labels can be hidden and shown again, which persists across a relaunch, and agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. The labels can be hidden and shown again, which persists across a relaunch, and agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_anchors_jump_and_recall() throws {
+        executionTimeAllowance = 360 // It walks 45 pages: jumps, Latest, Jump to bottom, recall, a turn and a relaunch.
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-anchors")
         try copyFixtureFile(
             at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
@@ -445,6 +446,40 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ currentLabelTitle() == "Harbor" && labelIsInView("Harbor") }, timeout: 10),
                       "The labels scroll by themselves to the page now in view; current=\(String(describing: currentLabelTitle())).")
         XCTAssertTrue(waitUntil({ wideReply.exists && scrollView.frame.intersects(wideReply.frame) }, timeout: 10), "The newest reply is in view again.")
+
+        // Below the labels, Jump to bottom takes an earlier page straight to the chat's end.
+        let jumpToBottom = element("chat-page-anchors-jump-to-bottom")
+        XCTAssertTrue(jumpToBottom.exists, "The labels end with a Jump to bottom arrow.")
+        XCTAssertEqual(jumpToBottom.label, "Jump to bottom of chat")
+        XCTAssertGreaterThanOrEqual(jumpToBottom.frame.minY, anchors.frame.maxY, "The button sits below the labels.")
+        XCTAssertLessThan(jumpToBottom.frame.minY - anchors.frame.maxY, 16, "The button sits right under the last label.")
+        XCTAssertEqual(jumpToBottom.frame.midX, anchors.frame.midX, accuracy: 2, "The arrow is centered across the labels.")
+        XCTAssertLessThanOrEqual(jumpToBottom.frame.width, 30, "The button is an arrow alone, without text.")
+        XCTAssertLessThan(jumpToBottom.frame.maxY, scrollView.frame.maxY, "The button stays over the transcript.")
+        XCTAssertEqual(anchors.frame.midY, scrollView.frame.midY, accuracy: 4, "The button leaves the labels halfway down the transcript.")
+        jump(to: "Topic 40")
+        XCTAssertTrue(transcriptValue().hasPrefix("Showing earlier "), transcriptValue())
+        XCTAssertFalse(wideReply.exists && scrollView.frame.intersects(wideReply.frame), "An earlier page is in view, away from the bottom.")
+        attachScreenshot(named: "chat-page-anchors-jump-to-bottom-button")
+        attachElementScreenshot(anchors, named: "chat-page-anchors-labels-closeup")
+        attachElementScreenshot(jumpToBottom, named: "chat-page-anchors-jump-to-bottom-button-closeup")
+        jumpToBottom.click()
+        XCTAssertTrue(waitUntil({ transcriptValue().hasPrefix("Showing latest ") && !self.element("chat-jump-to-latest").exists
+                && wideReply.exists && scrollView.frame.intersects(wideReply.frame) }, timeout: 3),
+                      "Jump to bottom shows the chat's last reply at once; transcript=\(transcriptValue()).")
+        XCTAssertTrue(waitUntil({ currentLabelTitle() == "Harbor" }, timeout: 10), "The newest page's label is marked again; current=\(String(describing: currentLabelTitle())).")
+        attachScreenshot(named: "chat-page-anchors-after-jump-to-bottom")
+        // It also returns from the newest messages scrolled up, where Latest is not offered.
+        scrollView.scroll(byDeltaX: 0, deltaY: 3_000)
+        for _ in 0..<5 where wideReply.exists && scrollView.frame.intersects(wideReply.frame) {
+            scrollView.scroll(byDeltaX: 0, deltaY: 1_500)
+        }
+        XCTAssertFalse(wideReply.exists && scrollView.frame.intersects(wideReply.frame), "Scrolling up should take the last reply out of view.")
+        XCTAssertTrue(transcriptValue().hasPrefix("Showing latest "), transcriptValue())
+        XCTAssertFalse(element("chat-jump-to-latest").exists, "Latest is only offered on an earlier page.")
+        jumpToBottom.click()
+        XCTAssertTrue(waitUntil({ wideReply.exists && scrollView.frame.intersects(wideReply.frame) }, timeout: 3),
+                      "Jump to bottom returns from the scrolled-up newest messages to the last reply at once; transcript=\(transcriptValue()).")
 
         // A page whose messages are already loaded is shown without reading it again, and its
         // title offers Recall; the page the next message continues does not.

@@ -490,6 +490,9 @@ extension PlayhouseUITests {
         let composer = element("message-composer")
         composer.click()
         composer.typeText("/goal")
+        XCTAssertTrue(element("slash-command-goal").waitToExist(timeout: 5), "Typing /goal offers the command.")
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 5), "Choosing /goal removes the typed command.")
         let modeMenu = element("conversation-mode-menu")
         XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
         XCTAssertTrue(modeMenu.label.contains("Goal"))
@@ -582,6 +585,8 @@ extension PlayhouseUITests {
         let secondObjective = "Write a one-line rhyme about a cat, mark this Goal complete, and finish the task with no follow-up needed."
         composer.click()
         composer.typeText("/goal")
+        XCTAssertTrue(element("slash-command-goal").waitToExist(timeout: 5))
+        composer.typeKey(.return, modifierFlags: [])
         modeMenu.click()
         app.menuItems["conversation-mode-goal"].click()
         composer.click()

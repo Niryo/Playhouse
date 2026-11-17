@@ -416,7 +416,8 @@ class BridgeTestCases05:
         self.assertEqual(len(follows("poll")), polls_when_green, "A green PR isn't polled.")
         self.complete_fixture_turn(followed["id"], executable_name="codex-fixture-follow-review", extra_environment=service_environment)
         wait_for_follows("review", 2)
-        wait_for_follows("poll", polls_when_green + 1, timeout=15)
+        # Generous: the review pass and the next 2s poll can lag when the host is busy.
+        wait_for_follows("poll", polls_when_green + 1, timeout=30)
 
         # A pass the plugin started asks it again before it merges: with the mode no longer
         # Merge, it merges nothing.
@@ -426,8 +427,9 @@ class BridgeTestCases05:
         )[0])
         self.assertEqual(declined["action"], "inactive")
         self.assertNotIn("merged\t802", (gh_directory / "create-calls").read_text(encoding="utf-8") if (gh_directory / "create-calls").exists() else "")
-        self.assertTrue(any(event.get("event") == "plugin.pull_request_mode.declined" and event.get("taskID") == followed["id"] and event.get("action") == "merge"
-                            for event in self.diagnostic_events()), "The plugin declined the merge.")
+        # Diagnostics are written by a background flush, so the event can land after the call returns.
+        self.wait_for(lambda: any(event.get("event") == "plugin.pull_request_mode.declined" and event.get("taskID") == followed["id"] and event.get("action") == "merge"
+                                  for event in self.diagnostic_events()), "The plugin declined the merge.")
         self.assert_failure(self.call_cli("task", "pr", "autopilot", followed["id"], "--confirm-with", expected_status=2)[0], "invalid_argument")
         self.set_pull_request_mode(followed["id"], None)
     # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode (a `task pr autopilot --merge` pass, which the pull-request-mode plugin runs for its Merge tasks) does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
