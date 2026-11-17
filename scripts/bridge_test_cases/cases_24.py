@@ -284,3 +284,40 @@ Playhouse.render(h(Page));
         self.assertIn("anchor-page:Topic-03:1", recalled["userText"], "The recalled page travels with the turn.")
         self.assertIn("Topic 03 reply 1.", recalled["userText"])
         self.assertNotIn("Topic 04 reply 1.", recalled["userText"], "Only the recalled page is carried.")
+    # case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest forty labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    def test_standalone_chat_page_labels_search(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-page-search"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+
+        def cli(*arguments, **options):
+            return self.call_cli(*arguments, extra_environment=environment, **options)[0]
+
+        def titles(*flags):
+            return [page["title"] for page in self.assert_success(cli("chat", "page", "list", *flags))["pages"] if page["messageCount"] > 0]
+
+        # The oldest page lies beyond the newest forty the labels read at first.
+        topics = ["Kyoto temples"] + [f"Topic {number:02d}" for number in range(1, 43)] + ["Kyoto ramen", "Harbor"]
+        for title in topics:
+            self.assert_success(cli("conversation", "send", chat_id, "--message", f"anchor-page:{title.replace(' ', '-')}:1"))
+        self.assertNotIn("Kyoto temples", titles("--limit", "40"), "The oldest page is not among the newest forty.")
+
+        # The title search reads matches from the whole chat, newest first, ignoring case.
+        self.assertEqual(titles("--title", "kyoto"), ["Kyoto ramen", "Kyoto temples"])
+        self.assertEqual(titles("--title", "KYOTO", "--limit", "1"), ["Kyoto ramen"], "The limit applies to the matches.")
+        self.assertEqual(titles("--title", "  Topic 4  "), ["Topic 42", "Topic 41", "Topic 40"], "Surrounding spaces are ignored.")
+        # It matches titles only, and its wildcard characters only themselves.
+        self.assertEqual(titles("--title", "reply"), [], "Message text is not searched.")
+        self.assertEqual(titles("--title", "%"), [])
+        self.assertEqual(titles("--title", "_"), [])
+        self.assertEqual(titles("--title", "nothing like this"), [])
+        # Blank search text lists the newest pages as without it.
+        self.assertEqual(titles("--title", "   ", "--limit", "5"), titles("--limit", "5"))
+        self.assert_failure(cli("chat", "page", "list", "--title", expected_status=2), "invalid_argument")

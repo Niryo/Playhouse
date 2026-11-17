@@ -348,14 +348,19 @@ extension TaskConversationView {
                         model: chatPageAnchors,
                         width: ChatPageAnchorsLayout.labelsWidth(transcriptWidth: transcriptWidth),
                         jump: { jumpToChatPage($0) },
-                        jumpToBottom: { returnToLatestMessages() }
+                        jumpToBottom: { returnToLatestMessages() },
+                        searchFocusChanged: { hoverChatPageAnchors(.search, $0) }
                     )
-                    // Room for the arrow below the labels, inside the hovered area.
+                    // Room for the search above the labels and the arrow below them, inside the
+                    // hovered area.
                     .padding(.vertical, 26)
                     .contentShape(Rectangle())
                     .onHover { hoverChatPageAnchors(.labels, $0) }
                     // Labels that fold away under the pointer get no hover exit.
-                    .onDisappear { hoveredChatPageAnchorsParts.remove(.labels) }
+                    .onDisappear {
+                        hoveredChatPageAnchorsParts.remove(.labels)
+                        hoveredChatPageAnchorsParts.remove(.search)
+                    }
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
             }
@@ -363,9 +368,9 @@ extension TaskConversationView {
         }
     }
 
-    /// Slides the unlocked labels out while the pointer is over their handle or them, and back
-    /// in a moment after it leaves both; the delay also carries the pointer across the gap
-    /// between them.
+    /// Slides the unlocked labels out while the pointer is over their handle or them, or their
+    /// search has the keyboard, and back in a moment after it leaves both; the delay also
+    /// carries the pointer across the gap between them.
     func hoverChatPageAnchors(_ part: ChatPageAnchorsHoverPart, _ isHovering: Bool) {
         if isHovering {
             // Folding labels slide left across the strip beside them, so a pointer resting there,

@@ -134,7 +134,7 @@ extension PlayhouseCLI {
       playhouse task delete-check <task-id>
       playhouse chat open
       playhouse chat status
-      playhouse chat page list [--limit <n>]
+      playhouse chat page list [--limit <n>] [--title <text>]
       playhouse chat page search <query>
       playhouse chat page read <page-id>
       playhouse chat page new --title <title>
