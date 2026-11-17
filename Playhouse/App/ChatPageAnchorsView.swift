@@ -239,8 +239,8 @@ enum ChatPageAnchorsHoverPart: Hashable {
 }
 
 /// The handle at the transcript's leading edge, halfway down it. Folded, it is a faint thin line
-/// that slides the labels out while hovered; beside the open labels it thickens, and clicking it
-/// locks them open, which turns it the accent color, or unlocks them again.
+/// that slides the labels out while hovered; beside the open labels it thickens under a small
+/// open lock, and clicking it locks them open, which closes the lock, or unlocks them again.
 struct ChatPageAnchorsHandle: View {
     let isOpen: Bool
     let isLocked: Bool
@@ -268,11 +268,27 @@ struct ChatPageAnchorsHandle: View {
         .accessibilityLabel(isLocked ? "Unlock chat pages" : "Lock chat pages open")
         .accessibilityValue(isLocked ? "locked" : isOpen ? "open" : "folded")
         .accessibilityIdentifier("chat-page-anchors-handle")
+        // Above the line, inside the handle's target, so hovering or clicking it is the handle's.
+        // Laid over the button after its accessibility modifiers, so it is its own element.
+        .overlay(alignment: .top) {
+            if isOpen || isLocked {
+                Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(isLocked || isHovering ? Color.primary : Color.secondary)
+                    .frame(width: ChatPageAnchorsLayout.handleWidth, height: 14)
+                    .padding(.top, 5)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                    .accessibilityLabel(isLocked ? "Chat pages locked" : "Chat pages unlocked")
+                    .accessibilityValue(isLocked ? "locked" : "unlocked")
+                    .accessibilityIdentifier("chat-page-anchors-lock")
+            }
+        }
     }
 
     private var fill: Color {
-        if isLocked { return Color.accentColor.opacity(isHovering ? 1 : 0.85) }
-        if isOpen { return Color.primary.opacity(isHovering ? 0.5 : 0.34) }
+        // The lock above it shows whether the labels are locked; the line looks the same either way.
+        if isOpen || isLocked { return Color.primary.opacity(isHovering ? 0.5 : 0.34) }
         return Color.primary.opacity(isHovering ? 0.32 : 0.16)
     }
 }
