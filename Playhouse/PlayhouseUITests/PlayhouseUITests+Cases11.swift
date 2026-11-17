@@ -169,6 +169,9 @@ extension PlayhouseUITests {
         openTask(named: neverStarted)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == submitted + "\n\n" + laterDraft }, timeout: 15), "A prompt whose turn never started should return to the composer with the draft typed after it.")
         XCTAssertEqual(try taskRecord(id: neverStartedID)?["status"] as? String, "Waiting Response")
+        XCTAssertFalse(transcriptMessage(submitted).exists, "A never-started prompt returns as a draft, not as a sent message.")
+        XCTAssertFalse(element("pause-response-button").exists, "A recovered never-started prompt leaves no turn running.")
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 5), "A recovered never-started prompt can be sent again.")
         attachScreenshot(named: "Never-started prompt returns with the later draft")
 
         let neverStartedImage = "Image prompt whose turn never started"
@@ -180,6 +183,9 @@ extension PlayhouseUITests {
         openTask(named: neverStartedImage)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == submitted }, timeout: 15), "A never-started prompt should return to the composer.")
         XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "A never-started prompt should return with its image.")
+        XCTAssertFalse(transcriptMessage(submitted).exists, "A never-started prompt returns as a draft, not as a sent message.")
+        XCTAssertFalse(element("pause-response-button").exists, "A recovered never-started prompt leaves no turn running.")
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 5), "A recovered never-started prompt can be sent again.")
         attachScreenshot(named: "Never-started prompt returns with its image")
     }
     // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. In the UI the transcript's scroller stays hidden while the pointer is over the composer, shows at a subdued opacity only while the transcript is hovered, and hides again when the pointer leaves. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Stop is enabled as soon as the message is sent, while the turn is still launching and not yet interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.

@@ -3,7 +3,23 @@ import SwiftData
 import SwiftUI
 
 extension TaskConversationView {
-    func loadConversation() async {
+    /// The newest page of history, as `loadConversation` reads it. Opening a task
+    /// starts this read before reconciling the task's status, which it doesn't depend on.
+    func readLatestHistoryPage() async throws -> ConversationHistory {
+        try await conversationManager.history(
+            taskID: task.id,
+            messageLimit: Self.historyPageSize,
+            onActionRequest: { actionNotice = approvalNotice }
+        )
+    }
+
+    /// Applies the newest page of history, read here or by a `pendingRead` already in flight.
+    /// A `reconciled` record, just returned by the daemon, decides the draft and pending
+    /// prompt in place of the task model, which picks up that write asynchronously.
+    func loadConversation(
+        pendingRead: Task<ConversationHistory, Error>? = nil,
+        reconciled: BoardTaskRecord? = nil
+    ) async {
         isLoadingHistory = true
         oldestRenderedMessageID = nil
         errorMessage = nil
@@ -19,11 +35,11 @@ extension TaskConversationView {
             // Standalone chat rotates one session per page, so the transcript asks for the
             // earlier pages to be restored from the local archive alongside the live session.
             // Only the newest page is read; older pages load as the reader scrolls up.
-            let history = try await conversationManager.history(
-                taskID: task.id,
-                messageLimit: Self.historyPageSize,
-                onActionRequest: { actionNotice = approvalNotice }
-            )
+            let history = if let pendingRead {
+                try await pendingRead.value
+            } else {
+                try await readLatestHistoryPage()
+            }
             // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
             flushStreamedTextDeltas()
             messages = history.messages
@@ -78,15 +94,18 @@ extension TaskConversationView {
             // A pending submitted prompt is shown as a bubble unless its text is already in the
             // loaded transcript. Only the flag decides draft restoration: `savedPrompt` otherwise
             // holds the last sent prompt, which can sit beyond the loaded page.
-            let hasPendingSubmittedPrompt = task.pendingSubmittedPrompt != nil
-            if let submittedPrompt = task.pendingSubmittedPrompt,
+            let pendingSubmittedPrompt = reconciled.map(\.pendingSubmittedPrompt) ?? task.pendingSubmittedPrompt
+            let hasUnsentDraft = reconciled?.hasUnsentDraft ?? task.hasUnsentDraft
+            let status = reconciled.flatMap { TaskStatus(rawValue: $0.status) } ?? task.status
+            let hasPendingSubmittedPrompt = pendingSubmittedPrompt != nil
+            if let submittedPrompt = pendingSubmittedPrompt,
                !submittedPrompt.isEmpty,
                !history.messages.contains(where: { $0.role == .user && MentionText.sameUserText($0.text, submittedPrompt) }) {
                 messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
             // A marked draft is unsent by definition: steering, queueing, and sending clear it.
-            let savedDraft = task.hasUnsentDraft ? task.savedPrompt ?? "" : ""
-            let restoresDraftImages = task.hasUnsentDraft
+            let savedDraft = hasUnsentDraft ? (reconciled.map(\.savedPrompt) ?? task.savedPrompt) ?? "" : ""
+            let restoresDraftImages = hasUnsentDraft
             // Unsent composer text is never replaced by a saved draft, which can only be older.
             // A composer the user just cleared is unsaved, and stays cleared.
             if draft == draftAtLoadStart, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isDraftUnsaved {
@@ -97,7 +116,7 @@ extension TaskConversationView {
                 persistDraft()
             }
             if restoresDraftImages && pendingImages.isEmpty {
-                pendingImages = task.draftImageDataURLs.compactMap { dataURL in
+                pendingImages = (reconciled?.draftImageDataURLs ?? task.draftImageDataURLs).compactMap { dataURL in
                     guard let comma = dataURL.firstIndex(of: ","),
                           let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
                           let image = NSImage(data: data) else { return nil }
@@ -105,11 +124,11 @@ extension TaskConversationView {
                 }
             }
             isResponding = hasPendingSubmittedPrompt
-                && (task.status == .inProgress || task.status == .waitingResponse)
+                && (status == .inProgress || status == .waitingResponse)
             if let threadID = task.activeConversationID {
                 isResponding = isResponding || conversationRuntime.isTurnActive(threadID: threadID)
                 // A turn paused while this view was closed can still be continued.
-                if !isResponding, task.status == .waitingResponse, conversationRuntime.wasLastTurnInterrupted(threadID: threadID) {
+                if !isResponding, status == .waitingResponse, conversationRuntime.wasLastTurnInterrupted(threadID: threadID) {
                     hasPausedResponse = true
                 }
             }
