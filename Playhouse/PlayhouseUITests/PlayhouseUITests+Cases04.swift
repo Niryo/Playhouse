@@ -620,10 +620,14 @@ extension PlayhouseUITests {
         }, timeout: 20), "The linked conflicting PR should show the existing Fix Conflicts action.")
         attachScreenshot(named: "A linked conflicting PR shows the Fix Conflicts action")
     }
-    // case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, a board probe that was already running when it moved raises no alert, and `task pr status` of the Done task reports no state instead of the GitHub CLI's error.
+    // case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, a board probe that was already running when it moved raises no alert, and `task pr status` of the Done task lists only its recorded pull request, without probing, instead of the GitHub CLI's error.
     func test_review_probe_failure_alerts_only_while_in_review() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        launchApp(defaultParent: fixture.parent.path)
+        // PR 999 is never probed, so every probe of 123 waits for it, then fails: a probe error
+        // that holds for about two seconds before it is reported. The first launch gets it too:
+        // a task in Review is checked for pull requests its agent opened, even in Manual mode.
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 999])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Review probe failure UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
@@ -638,9 +642,6 @@ extension PlayhouseUITests {
         XCTAssertTrue(terminateAppAndWait(app))
         try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/playhouse-test/fixture/pull/123")
 
-        // PR 999 is never probed, so every probe of 123 waits for it, then fails: a probe error
-        // that holds for about two seconds before it is reported.
-        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 999])
         let startedDirectory = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STARTED_DIRECTORY"]))
         let started = startedDirectory.appendingPathComponent("123")
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment.merging(Self.prCheckCooldownEnvironment) { $1 })
@@ -673,7 +674,8 @@ extension PlayhouseUITests {
         XCTAssertFalse(waitUntil({ alert.exists }, timeout: 5), "A probe that failed after its task left Review raises no alert.")
         attachScreenshot(named: "No alert for a probe that failed after the task moved to Done")
         let doneStates = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]]
-        XCTAssertEqual(doneStates?.count, 0, "A Done task whose worktree was removed has no pull request state to report.")
+        XCTAssertEqual(doneStates?.compactMap { $0["number"] as? Int }, [123], "A Done task whose worktree was removed lists only its recorded pull request, without probing GitHub.")
+        XCTAssertNil(doneStates?.first?["past"])
     }
     // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint saying a follow-up reopens the task in a fresh worktree from the merge target, instead of a read-only notice; its changes read reports no changes rather than a Git error for the removed worktree, and switching its provider is rejected. A follow-up sent from a Done task moves it back to In Progress before the turn starts, so it shows in the board's In Progress column while the agent works, with a fresh worktree renewed for the removed one. The real provider turn runs in that fresh worktree and is told it as an active task worktree rather than that the task is archived; its completed outcome moves the task to Review, the removed worktree stays removed, and the follow-up and its reply persist in the history across fresh reads. A Done task with no worktree to renew (one with only a context root) reopens to In Progress for its follow-up the same way, keeps that root, and its completed outcome moves it to Review.
     func test_done_task_accepts_follow_up_conversation() throws {

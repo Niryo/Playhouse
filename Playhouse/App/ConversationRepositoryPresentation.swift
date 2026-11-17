@@ -25,9 +25,11 @@ extension TaskConversationView {
         }
         Task { @MainActor in
             do {
+                let current = currentRepositoryRecord(original)
+                let index = task.repositoryWorktrees.firstIndex { $0.isSameWorktree(as: current) }
                 let saved = try await BoardTaskManager(modelContext: modelContext).updateRepository(
                     task.id,
-                    repositoryPath: original.repositoryPath,
+                    worktree: .record(current),
                     branch: branch,
                     branchFrom: branchFrom,
                     mergeTarget: mergeTarget.isEmpty ? nil : mergeTarget
@@ -37,7 +39,8 @@ extension TaskConversationView {
                     editingRepositoryField = nil
                     // Show what was saved, which can differ from what was typed: a branch-from
                     // found only on the remote is saved as its remote-tracking branch.
-                    if let record = saved.repositoryWorktrees.first(where: { $0.repositoryPath == original.repositoryPath }) {
+                    if let index, saved.repositoryWorktrees.indices.contains(index) {
+                        let record = saved.repositoryWorktrees[index]
                         editedBranch = record.branch
                         editedBranchFrom = record.branchFrom
                         editedMergeTarget = record.mergeTarget ?? ""
@@ -52,7 +55,7 @@ extension TaskConversationView {
 
     /// The stored settings for a repository, read fresh so an edit starts from what is saved.
     func currentRepositoryRecord(_ repository: RepositoryWorktreeRecord) -> RepositoryWorktreeRecord {
-        task.repositoryWorktrees.first { $0.repositoryPath == repository.repositoryPath } ?? repository
+        task.repositoryWorktrees.first { $0.isSameWorktree(as: repository) } ?? repository
     }
 
     func resetRepositoryEdits(to repository: RepositoryWorktreeRecord) {
@@ -74,6 +77,32 @@ extension TaskConversationView {
         resetRepositoryEdits(to: repository)
         editingRepositoryField = nil
         focusedRepositoryField = nil
+    }
+
+    /// The worktree's pull request, as the task last recorded it, linking to GitHub.
+    func repositoryPullRequestRow(_ repository: RepositoryWorktreeRecord, number: Int) -> some View {
+        let state = repository.isPullRequestMerged ? "merged" : repository.isPullRequestClosed ? "closed" : "open"
+        let text = "#\(number) · \(state)"
+        return HStack(spacing: 12) {
+            Text("Pull request").foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
+                .allowsHitTesting(false)
+            Group {
+                if let url = repository.pullRequestURL.flatMap(URL.init(string:)) {
+                    Link(text, destination: url)
+                        .buttonHoverPointer()
+                        .nativeHelp("Open pull request #\(number) on GitHub")
+                } else {
+                    Text(text)
+                }
+            }
+            .fontWeight(.medium)
+            .lineLimit(1)
+            .accessibilityLabel(text)
+            .accessibilityValue(state)
+            .accessibilityIdentifier("conversation-repository-pull-request")
+            Spacer(minLength: 0)
+        }
+        .frame(minHeight: 34)
     }
 
     @ViewBuilder
@@ -151,13 +180,40 @@ extension TaskConversationView {
         .frame(minHeight: 34)
     }
 
-    func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
+    /// The chip settings' Add worktree: another worktree of the same repository on its
+    /// own branch (the typed one, or one named from the task title).
+    func addConversationWorktree(_ repository: RepositoryWorktreeRecord) {
+        guard !isAddingWorktree else { return }
+        isAddingWorktree = true
+        let branch = newWorktreeBranch.trimmingCharacters(in: .whitespacesAndNewlines)
         Task { @MainActor in
+            defer { isAddingWorktree = false }
             do {
                 _ = try await WorkspaceManager(
                     taskManager: BoardTaskManager(modelContext: modelContext)
-                ).removeRepository(repository.repositoryPath, from: task.id)
-                if repositoryBeingEdited?.repositoryPath == repository.repositoryPath { repositoryBeingEdited = nil }
+                ).addWorktree(repository.repositoryPath, to: task.id, branch: branch.isEmpty ? nil : branch)
+                newWorktreeBranch = ""
+                repositoryBeingEdited = nil
+                errorMessage = nil
+                await refreshWorkspaceChanges()
+            } catch {
+                errorMessage = "Couldn't add a worktree: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
+        Task { @MainActor in
+            let edited = repositoryBeingEdited
+            do {
+                _ = try await WorkspaceManager(
+                    taskManager: BoardTaskManager(modelContext: modelContext)
+                ).removeRepository(.record(repository), from: task.id)
+                // A pending chip's key is its position, so removing an earlier sibling moves
+                // the key onto another record: the open editor closes rather than follow it.
+                if let edited, edited.isSameWorktree(as: repository) || repositoryBeingEdited?.isSameWorktree(as: edited) != true {
+                    repositoryBeingEditedKey = nil
+                }
                 errorMessage = nil
                 loadRecentRepositories()
                 await refreshWorkspaceChanges()

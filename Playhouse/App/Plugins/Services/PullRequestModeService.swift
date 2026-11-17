@@ -163,6 +163,9 @@ final class PullRequestModeService: PluginService {
             PlayhouseDiagnostics.record("task.pr.autopilot.failed", fields: ["taskID": taskID, "error": "\(error)"])
             return
         }
+        PlayhouseDiagnostics.record("plugin.pull_request_mode.followed", fields: [
+            "taskID": taskID, "trigger": trigger, "action": outcome["action"]?.string ?? ""
+        ])
         switch outcome["action"]?.string {
         case "pending":
             // Checks still running: look again in a few minutes.

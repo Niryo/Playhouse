@@ -23,19 +23,25 @@ extension PlayhouseBridgeRuntime {
             let taskID = try request.requiredUUID("taskID")
             try Self.rejectStandaloneChat(taskManager, taskID)
             return .object(["repositories": .array(try workspaces.recentRepositorySuggestions(for: taskID).map(BridgeValue.string))])
+        case "task.repository.add-worktree":
+            try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
+            return try Self.value(await workspaces.addWorktree(
+                request.requiredString("repositoryPath"), to: request.requiredUUID("taskID"),
+                branch: request.arguments["branch"]?.string, branchFrom: request.arguments["branchFrom"]?.string
+            ))
         case "task.repository.edit":
             try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
             return try Self.value(await taskManager.updateRepository(
-                request.requiredUUID("taskID"), repositoryPath: request.requiredString("repositoryPath"),
+                request.requiredUUID("taskID"), worktree: Self.worktreeSelector(request),
                 branch: request.requiredString("branch"), branchFrom: request.requiredString("branchFrom"),
                 mergeTarget: request.arguments["mergeTarget"]?.string
             ))
         case "task.repository.renew":
             try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
-            return try Self.value(await workspaces.renewRepository(request.requiredString("repositoryPath"), on: request.requiredUUID("taskID")))
+            return try Self.value(await workspaces.renewRepository(Self.worktreeSelector(request), on: request.requiredUUID("taskID")))
         case "task.repository.remove":
             // Removal remains available to clean up repositories from older standalone chats.
-            return try Self.value(await workspaces.removeRepository(request.requiredString("repositoryPath"), from: request.requiredUUID("taskID")))
+            return try Self.value(await workspaces.removeRepository(Self.worktreeSelector(request), from: request.requiredUUID("taskID")))
         case "task.prompt.save":
             let status = try request.arguments["status"]?.string.map { value -> TaskStatus in
                 guard let status = TaskStatus(rawValue: value) else { throw PlayhouseManagerError.invalidStatus(value) }
@@ -132,5 +138,22 @@ extension PlayhouseBridgeRuntime {
         default:
             throw BridgeCommandError(code: "unsupported_command", message: "Unsupported task workspace command: \(request.command).")
         }
+    }
+}
+
+extension PlayhouseBridgeRuntime {
+    /// The worktree a request names: `repositoryPath` when the task has one worktree
+    /// of it, else `worktreePath`; `worktreeBranch` picks among records not started yet.
+    static func worktreeSelector(_ request: BridgeRequest) throws -> RepositoryWorktreeSelector {
+        func value(_ name: String) -> String? {
+            request.arguments[name]?.string.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        }
+        let selector = RepositoryWorktreeSelector(
+            repositoryPath: value("repositoryPath"), worktreePath: value("worktreePath"), branch: value("worktreeBranch")
+        )
+        guard selector.repositoryPath != nil || selector.worktreePath != nil else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Missing required argument: repositoryPath or worktreePath.")
+        }
+        return selector
     }
 }

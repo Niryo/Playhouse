@@ -96,7 +96,8 @@ extension PlayhouseCLI {
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
       playhouse task move <task-id> Done --discard-changes
-      playhouse task pr create <task-id> [--if-needed]
+      playhouse task pr create <task-id> [--if-needed] [--title <title>] [--body <text>]
+      playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>   (register a PR opened outside Playhouse; its head must be the worktree's branch)
       playhouse task pr status <task-id> [--review-threads] [--shared]
       playhouse task pr verify <task-id>
       playhouse task pr sync <task-id>
@@ -113,10 +114,13 @@ extension PlayhouseCLI {
       playhouse schedule tick
       playhouse task repository add <task-id> --repo <path>
       playhouse task repository add-batch <task-id> --repo <path> [--repo <path>...]
+      playhouse task repository add-worktree <task-id> --repo <path> [--branch <name>] [--branch-from <ref>]   (another worktree, on its own branch, of a repository the task already has)
       playhouse task repository replace <task-id> --repo <path> [--repo <path>...]
-      playhouse task repository edit <task-id> --repo <path> --branch <name> --branch-from <ref> [--merge-target <ref>]
-      playhouse task repository remove <task-id> --repo <path>
-      playhouse task repository renew <task-id> --repo <path>   (after its pull request merged: fresh worktree from the merge target)
+      playhouse task repository edit <task-id> (--repo <path>|--worktree <path>) --branch <name> --branch-from <ref> [--merge-target <ref>]
+      playhouse task repository remove <task-id> (--repo <path>|--worktree <path>)
+      playhouse task repository renew <task-id> (--repo <path>|--worktree <path>)   (after its pull request merged: fresh worktree from the merge target)
+        --repo works when the task has one worktree of that repository; otherwise pass --worktree <path>,
+        plus --worktree-branch <branch> to pick a worktree that isn't started yet.
       playhouse task repository recent <task-id>
       playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
       playhouse task draft <task-id> --text <draft> [--image <path>...]

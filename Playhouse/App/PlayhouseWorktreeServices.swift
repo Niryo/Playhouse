@@ -73,7 +73,7 @@ enum PlayhouseWorktreeManager {
     ) throws -> RepositoryWorktreeRecord {
         let repository = try repositoryRoot(spec.repositoryPath)
         let requested = spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let isAuto = requested.isEmpty || requested == "auto"
+        let isAuto = requested.isEmpty || RepositoryWorktreeRecord.isAutomaticBranch(requested)
         var branch = isAuto ? branchSlug(title) : requested
         guard !branch.hasPrefix("-") else {
             throw BridgeCommandError(code: "invalid_argument", message: "Branch names can't begin with a hyphen.")
@@ -155,7 +155,8 @@ enum PlayhouseWorktreeManager {
         let defaults = try defaultBranchOptionsIfNeeded(repository: repository, spec: spec)
         let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom, defaults: defaults)
         let mergeTarget = try resolveMergeTarget(repository: repository, requested: spec.mergeTarget, defaults: defaults)
-        let branch = spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let branch = (spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines))
+            .flatMap { RepositoryWorktreeRecord.isAutomaticBranch($0) ? nil : $0 }
         if let branch, !branch.isEmpty {
             guard !branch.hasPrefix("-"), try git(repository, ["check-ref-format", "--branch", branch], allowFailure: true).status == 0 else {
                 throw BridgeCommandError(code: "invalid_argument", message: "'\(branch)' isn't a valid Git branch name.")
@@ -278,6 +279,13 @@ enum PlayhouseWorktreeManager {
                 message: "The task worktree \(record.worktreePath) is on \(checkedOut), not its pull request branch '\(record.branch)'. Switch it back to '\(record.branch)' and sync again."
             )
         }
+    }
+
+    /// The branch the worktree has checked out, or nil on a detached HEAD.
+    static func checkedOutBranch(_ record: RepositoryWorktreeRecord) throws -> String? {
+        let current = try git(record.worktreePath, ["branch", "--show-current"]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return current.isEmpty ? nil : current
     }
 
     static func hasChanges(_ record: RepositoryWorktreeRecord) throws -> Bool {
@@ -838,6 +846,14 @@ struct PlayhouseWorktreeService {
         try await perform("git.fetch_branch_state", record: record) {
             try await PlayhouseBackgroundOperation.run {
                 try PlayhouseWorktreeManager.fetchRemoteBranchState(record)
+            }
+        }
+    }
+
+    func checkedOutBranch(_ record: RepositoryWorktreeRecord) async throws -> String? {
+        try await perform("git.checked_out_branch", record: record) {
+            try await PlayhouseBackgroundOperation.run {
+                try PlayhouseWorktreeManager.checkedOutBranch(record)
             }
         }
     }

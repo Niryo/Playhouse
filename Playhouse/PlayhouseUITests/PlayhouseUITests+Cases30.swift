@@ -871,4 +871,412 @@ extension PlayhouseUITests {
         pressPanelClose()
         XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "The close button closes the leading panel too.")
     }
+
+    func worktreeRecords(_ taskID: String) throws -> [[String: Any]] {
+        try XCTUnwrap(try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])
+    }
+
+    func pastPullRequestNumbers(_ taskID: String) throws -> [Int] {
+        ((try taskRecord(id: taskID)?["pastRepositoryWorktrees"] as? [[String: Any]]) ?? []).compactMap { $0["pullRequestNumber"] as? Int }
+    }
+
+    func cliErrorMessage(_ response: [String: Any]) -> String {
+        (response["error"] as? [String: Any])?["message"] as? String ?? ""
+    }
+
+    // case-contract: test_task_repository_add_worktree_keeps_several_worktrees_per_repository | `task repository add-worktree` gives a task another worktree of a repository it already has, created at once on its own new branch (the given name, or a fresh one from the task title), and adding an already attached repository again does the same, so one repository can hold several worktrees, each listed with its own path and branch and persisted across fresh reads. A second worktree on a branch the task already uses is rejected and leaves the task unchanged. While a repository has several worktrees, `--repo` alone no longer picks one: remove, renew, edit and pr link fail with an error naming each worktree path and asking for `--worktree`, and `--worktree <path>`, like that worktree's chip remove badge, removes just that worktree and its folder. Each worktree's chip opens that worktree's settings. The next agent turn lists every worktree mapping and is told to open pull requests with task pr create or register them with task pr link, never to switch a worktree's branch, and to use add-worktree for another branch. `task create` can list a repository more than once: each entry is its own pending worktree with its own chip, the further automatic ones waiting as auto 2, auto 3 and so on, so each can be edited or removed on its own (with `--worktree-branch` naming it on the CLI), and starting the task gives each its own branch; giving two of them the same branch is rejected as invalid_argument and creates no task.
+    func test_task_repository_add_worktree_keeps_several_worktrees_per_repository() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        // Started worktrees without a pull request are looked up on GitHub by the card's probe.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: try makeGitHubStateFixture(expectedNumbers: []))
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Several worktrees UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Several worktrees UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Several worktrees UI")
+        let first = try XCTUnwrap(try worktreeRecords(taskID).first)
+        let firstBranch = try XCTUnwrap(first["branch"] as? String)
+        let firstPath = try XCTUnwrap(first["worktreePath"] as? String)
+
+        // The chip's settings add another worktree of the same repository on a typed branch.
+        let badge = element("conversation-repository-badge-primary")
+        XCTAssertTrue(badge.waitToExist(timeout: 10), app.debugDescription)
+        // A chip with a branch beside the name is wider than the name-only chip, unless the header squeezes it.
+        let nameOnlyChipWidth = badge.frame.width
+        badge.click()
+        let branchField = element("conversation-repository-new-worktree-branch")
+        XCTAssertTrue(branchField.waitToExist(timeout: 5), app.debugDescription)
+        replaceText(branchField, with: "second-line")
+        attachScreenshot(named: "Repository settings offer another worktree on its own branch")
+        attachElementScreenshot(app.popovers.firstMatch, named: "The repository settings' Add worktree section")
+        element("conversation-repository-add-worktree-button").click()
+        let secondBadge = element("conversation-repository-badge-primary-second-line")
+        let firstBadge = element("conversation-repository-badge-primary-\(firstBranch)")
+        XCTAssertTrue(secondBadge.waitToExist(timeout: 20), app.debugDescription)
+        XCTAssertTrue(firstBadge.waitToExist(timeout: 5), "Each worktree of the repository gets its own chip, named by its branch.")
+        let records = try worktreeRecords(taskID)
+        XCTAssertEqual(records.count, 2)
+        let second = try XCTUnwrap(records.last)
+        let secondPath = try XCTUnwrap(second["worktreePath"] as? String)
+        XCTAssertEqual(second["branch"] as? String, "second-line")
+        XCTAssertEqual(second["isPending"] as? Bool, false, "An added worktree is created at once.")
+        XCTAssertEqual(second["repositoryPath"] as? String, first["repositoryPath"] as? String)
+        XCTAssertNotEqual(secondPath, firstPath)
+        XCTAssertEqual(try runGitOutput(URL(fileURLWithPath: secondPath), "branch", "--show-current").trimmingCharacters(in: .whitespacesAndNewlines), "second-line")
+        for chip in [firstBadge, secondBadge] {
+            XCTAssertGreaterThan(chip.frame.width, nameOnlyChipWidth + 20, "A worktree chip shows its name and branch untruncated: \(chip.frame) vs \(nameOnlyChipWidth)")
+        }
+        attachScreenshot(named: "Two worktrees of one repository, one chip per branch")
+        attachElementScreenshot(secondBadge, named: "The second worktree's chip with its branch")
+
+        // Each chip opens the settings of its own worktree.
+        let branchValue = element("conversation-repository-branch-value")
+        secondBadge.click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: branchValue).contains("second-line") }, timeout: 5),
+                      "The second chip opens the second worktree's settings: \(accessibleLabelOrValue(of: branchValue))")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !branchField.exists }, timeout: 5))
+
+        // The same branch again is rejected in the window and leaves the task unchanged.
+        firstBadge.click()
+        XCTAssertTrue(branchField.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: branchValue).contains(firstBranch) }, timeout: 5),
+                      "The first chip opens the first worktree's settings: \(accessibleLabelOrValue(of: branchValue))")
+        replaceText(branchField, with: "second-line")
+        element("conversation-repository-add-worktree-button").click()
+        let error = element("codex-chat-error")
+        XCTAssertTrue(error.waitToExist(timeout: 10), app.debugDescription)
+        XCTAssertTrue(accessibleLabelOrValue(of: error).contains("already has a worktree on branch 'second-line'"), accessibleLabelOrValue(of: error))
+        XCTAssertEqual(try worktreeRecords(taskID).count, 2)
+        app.typeKey(.escape, modifierFlags: [])
+        let duplicate = try runCLI(["task", "repository", "add-worktree", taskID, "--repo", fixture.primary.path, "--branch", "second-line"], expectedStatus: 2)
+        assertCLIError(duplicate, code: "invalid_argument")
+
+        // Adding the attached repository again is one more worktree, on a fresh branch.
+        let third = try XCTUnwrap(((try runCLI(["task", "repository", "add", taskID, "--repo", fixture.primary.path])["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.last)
+        let thirdBranch = try XCTUnwrap(third["branch"] as? String)
+        let thirdPath = try XCTUnwrap(third["worktreePath"] as? String)
+        XCTAssertNotEqual(thirdBranch, firstBranch)
+        XCTAssertTrue(thirdBranch.hasPrefix("several-worktrees-ui"), thirdBranch)
+        let thirdBadge = element("conversation-repository-badge-primary-\(thirdBranch)")
+        XCTAssertTrue(thirdBadge.waitToExist(timeout: 10), app.debugDescription)
+        XCTAssertEqual(try worktreeRecords(taskID).compactMap { $0["worktreePath"] as? String }, [firstPath, secondPath, thirdPath], "Every worktree persists.")
+
+        for command in [
+            ["task", "repository", "remove", taskID, "--repo", fixture.primary.path],
+            ["task", "repository", "renew", taskID, "--repo", fixture.primary.path],
+            ["task", "repository", "edit", taskID, "--repo", fixture.primary.path, "--branch", "x", "--branch-from", "main"],
+            ["task", "pr", "link", taskID, "--repo", fixture.primary.path, "--url", "https://github.com/playhouse-test/fixture/pull/1"],
+        ] {
+            let ambiguous = try runCLI(command, expectedStatus: 2)
+            assertCLIError(ambiguous, code: "invalid_argument")
+            let message = cliErrorMessage(ambiguous)
+            XCTAssertTrue(message.contains("has 3 worktrees on this task") && message.contains("--worktree"), message)
+            for path in [firstPath, secondPath, thirdPath] { XCTAssertTrue(message.contains(path), message) }
+        }
+        XCTAssertEqual(try worktreeRecords(taskID).count, 3, "Ambiguous commands change nothing.")
+
+        // The third chip's remove badge removes just that worktree.
+        let removeThird = element("remove-conversation-repository-primary-\(thirdBranch)")
+        XCTAssertTrue(removeThird.waitToExist(timeout: 5), app.debugDescription)
+        removeThird.click()
+        XCTAssertTrue(waitUntil({ !thirdBadge.exists }, timeout: 10), "The removed worktree's chip goes away.")
+        XCTAssertTrue(secondBadge.exists && firstBadge.exists)
+        XCTAssertEqual(try worktreeRecords(taskID).compactMap { $0["worktreePath"] as? String }, [firstPath, secondPath])
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: thirdPath) }, timeout: 20), "Removing a worktree removes its folder.")
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Several worktrees UI", prompt: "Keep going on both lines.")
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))) as? [String: Any]
+        let instructions = ([history?["threadStartDeveloperInstructions"]] + ((history?["threadResumeDeveloperInstructions"] as? [Any]) ?? []))
+            .compactMap { $0 as? String }.joined(separator: "\n")
+        let repositoryPath = try XCTUnwrap(first["repositoryPath"] as? String)
+        XCTAssertTrue(instructions.contains("\(repositoryPath) -> \(firstPath)"))
+        XCTAssertTrue(instructions.contains("\(repositoryPath) -> \(secondPath)"))
+        XCTAssertTrue(instructions.contains("task repository add-worktree \(taskID) --repo <path>"))
+        XCTAssertTrue(instructions.contains("task pr link \(taskID) --worktree <path> --url <pr-url>"))
+        XCTAssertTrue(instructions.contains("Never switch the branch checked out in a task worktree"))
+
+        // A new task can list one repository twice: each gets its own chip and, once started, its own branch.
+        let repeated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Repeated repository UI", "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path, "--repo", fixture.primary.path, "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let repeatedID = try XCTUnwrap(repeated["id"] as? String)
+        XCTAssertEqual(try worktreeRecords(repeatedID).map { "\($0["branch"] as? String ?? "") \($0["isPending"] as? Bool ?? false)" },
+                       ["auto true", "auto 2 true", "auto 3 true"])
+        openTask(named: "Repeated repository UI")
+        XCTAssertTrue(element("conversation-repository-badge-primary-auto").waitToExist(timeout: 10), app.debugDescription)
+        let secondPending = element("conversation-repository-badge-primary-auto 2")
+        XCTAssertTrue(secondPending.exists, "Each pending worktree of one repository keeps its own chip.")
+        XCTAssertTrue(element("conversation-repository-badge-primary-auto 3").exists)
+        for name in ["auto", "auto 2", "auto 3"] {
+            let chip = element("conversation-repository-badge-primary-\(name)")
+            XCTAssertGreaterThan(chip.frame.width, nameOnlyChipWidth + 20, "Three chips of one repository still show name and branch: \(name) \(chip.frame)")
+        }
+        XCTAssertGreaterThan(element("task-view-title").frame.width, 100, "The title keeps room beside three chips.")
+        attachScreenshot(named: "A new task lists one repository three times")
+        attachRegionScreenshot(of: ["auto", "auto 2", "auto 3"].map { element("conversation-repository-badge-primary-\($0)") },
+                               named: "One chip per pending worktree: auto, auto 2, auto 3")
+
+        // Each pending duplicate is edited and removed on its own.
+        secondPending.click()
+        let pendingBranchEdit = element("conversation-repository-branch-edit")
+        XCTAssertTrue(pendingBranchEdit.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertEqual(accessibleLabelOrValue(of: element("conversation-repository-branch-value")), "auto 2")
+        pendingBranchEdit.click()
+        let pendingBranchField = element("conversation-repository-branch")
+        XCTAssertTrue(pendingBranchField.waitToExist(timeout: 5))
+        replaceText(pendingBranchField, with: "repeated-second-ui")
+        element("conversation-repository-branch-save").click()
+        XCTAssertTrue(waitUntil({
+            (try? self.worktreeRecords(repeatedID).compactMap { $0["branch"] as? String }) == ["auto", "repeated-second-ui", "auto 3"]
+        }, timeout: 10), "Saving the second chip's branch changes only that worktree.")
+        app.typeKey(.escape, modifierFlags: [])
+        element("remove-conversation-repository-primary-auto 3").click()
+        XCTAssertTrue(waitUntil({
+            (try? self.worktreeRecords(repeatedID).compactMap { $0["branch"] as? String }) == ["auto", "repeated-second-ui"]
+        }, timeout: 10), "Removing the third chip removes only that worktree.")
+        XCTAssertTrue(waitForDisappearance(element("conversation-repository-badge-primary-auto 3"), timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-primary-repeated-second-ui").waitToExist(timeout: 10), app.debugDescription)
+        XCTAssertTrue(element("conversation-repository-badge-primary-auto").exists)
+        attachRegionScreenshot(of: ["auto", "repeated-second-ui"].map { element("conversation-repository-badge-primary-\($0)") },
+                               named: "The edited and remaining pending worktree chips")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Repeated repository UI")
+        let started = try worktreeRecords(repeatedID)
+        let startedBranches = started.compactMap { $0["branch"] as? String }
+        XCTAssertEqual(Set(startedBranches).count, 2, "Each worktree starts on its own branch: \(startedBranches)")
+        XCTAssertEqual(Set(started.compactMap { $0["worktreePath"] as? String }).count, 2)
+        for record in started {
+            let path = try XCTUnwrap(record["worktreePath"] as? String)
+            XCTAssertEqual(try runGitOutput(URL(fileURLWithPath: path), "branch", "--show-current").trimmingCharacters(in: .whitespacesAndNewlines), record["branch"] as? String)
+        }
+        for branch in startedBranches {
+            XCTAssertTrue(element("conversation-repository-badge-primary-\(branch)").waitToExist(timeout: 10), app.debugDescription)
+        }
+        attachScreenshot(named: "Both worktrees of the repeated repository started on their own branches")
+        attachRegionScreenshot(of: startedBranches.map { element("conversation-repository-badge-primary-\($0)") },
+                               named: "The repeated repository's started worktree chips")
+        let tasksBefore = ((try runCLI(["board", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count
+        let sameBranch = try runCLI([
+            "task", "create", "--title", "Same branch twice UI", "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path, "--repo", fixture.primary.path, "--branch", "\(fixture.primary.path)=twice",
+        ], expectedStatus: 2)
+        assertCLIError(sameBranch, code: "invalid_argument")
+        XCTAssertTrue(cliErrorMessage(sameBranch).contains("needs its own branch"), cliErrorMessage(sameBranch))
+        XCTAssertEqual(((try runCLI(["board", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count, tasksBefore, "A rejected create adds no task.")
+    }
+
+    // case-contract: test_task_pr_status_detects_branch_pull_requests_and_switched_branches | A pull request status read looks up the pull request GitHub has for each started worktree's checked-out branch, so one opened outside Playhouse (for example with gh pr create) is recorded with its number and URL and listed by `task get` and `task pr status` with the worktree it belongs to. Two worktrees of one repository each get their own. When a worktree's branch was switched by hand, the read records the branch actually checked out, keeps the earlier pull request listed with the task's past pull requests, and finds the new branch's pull request; a closed pull request is recorded as closed, and `task pr status` lists it with closed health beside the open one and the earlier one marked past; a later one for that branch replaces it. After one worktree's pull request merges, `task repository renew --worktree <path>` gives just that worktree a fresh branch, lists the merged pull request once with the past ones, and leaves the other worktree and its pull request as they were. A read that finds nothing leaves the task unchanged, and a Done task is never probed: its status read lists only its recorded pull requests.
+    func test_task_pr_status_detects_branch_pull_requests_and_switched_branches() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
+        let detectLogURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_DETECT_LOG"]))
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Detect pull requests UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Detect pull requests UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Detect pull requests UI")
+        element("back-to-board-button").click()
+        let first = try XCTUnwrap(try worktreeRecords(taskID).first)
+        let firstBranch = try XCTUnwrap(first["branch"] as? String)
+        let firstPath = try XCTUnwrap(first["worktreePath"] as? String)
+        let second = try XCTUnwrap(((try runCLI(["task", "repository", "add-worktree", taskID, "--repo", fixture.primary.path, "--branch", "detect-second"])["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.last)
+        let secondPath = try XCTUnwrap(second["worktreePath"] as? String)
+
+        let nothing = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]]
+        XCTAssertEqual(nothing?.count, 0, "No pull request exists yet.")
+        let probes = (try? String(contentsOf: detectLogURL, encoding: .utf8)) ?? ""
+        XCTAssertTrue(probes.contains("--head \(firstBranch) --state all") && probes.contains("--head detect-second --state all"), probes)
+        XCTAssertEqual(try worktreeRecords(taskID).compactMap { $0["pullRequestNumber"] as? Int }, [])
+
+        // Both PRs were opened with gh pr create, outside Playhouse. The card's own probe finds them:
+        // a third worktree changes its branches, so it looks again without any CLI status read.
+        try "head.\(firstBranch)=611\nhead.detect-second=612\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        let probe = try XCTUnwrap(((try runCLI(["task", "repository", "add-worktree", taskID, "--repo", fixture.primary.path, "--branch", "detect-probe"])["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.last)
+        let link611 = app.links["task-pr-link-\(taskID)-611"]
+        let link612 = app.links["task-pr-link-\(taskID)-612"]
+        XCTAssertTrue(link611.waitToExist(timeout: 30), "The card probed its worktrees' branches: \(app.debugDescription)")
+        XCTAssertTrue(link612.waitToExist(timeout: 15), "The card lists each worktree's detected pull request.")
+        XCTAssertEqual(try worktreeRecords(taskID).compactMap { $0["pullRequestNumber"] as? Int }, [611, 612])
+        _ = try runCLI(["task", "repository", "remove", taskID, "--worktree", try XCTUnwrap(probe["worktreePath"] as? String)])
+        let status = try XCTUnwrap(try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]])
+        XCTAssertEqual(Set(status.compactMap { item in (item["number"] as? Int).map { "\($0) \(item["worktreePath"] as? String ?? "")" } }),
+                       ["611 \(firstPath)", "612 \(secondPath)"])
+        revealOnBoard(link612)
+        attachScreenshot(named: "Card lists both detected pull requests")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "The card's pull request links, one per worktree")
+
+        // Someone switches the second worktree to another branch by hand and opens a PR there, later closed.
+        try runGit(URL(fileURLWithPath: secondPath), "checkout", "-q", "-b", "detect-switched")
+        try "head.\(firstBranch)=611\nhead.detect-second=612\nhead.detect-switched=613\n613.closed=true\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        let switchedStatus = try XCTUnwrap(try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]])
+        XCTAssertEqual(
+            switchedStatus.map { "\($0["number"] as? Int ?? 0) closed=\($0["closed"] as? Bool ?? false) past=\($0["past"] as? Bool ?? false)" }.sorted(),
+            ["611 closed=false past=false", "612 closed=false past=true", "613 closed=true past=false"],
+            "The status read lists the open PR, the closed one and the earlier branch's PR, marked past."
+        )
+        XCTAssertEqual(switchedStatus.first { $0["number"] as? Int == 613 }?["health"] as? String, "closed")
+        let switched = try XCTUnwrap(try worktreeRecords(taskID).last)
+        XCTAssertEqual(switched["branch"] as? String, "detect-switched", "The checked-out branch replaces the recorded one.")
+        XCTAssertEqual(switched["pullRequestNumber"] as? Int, 613)
+        XCTAssertEqual(switched["isPullRequestClosed"] as? Bool, true)
+        XCTAssertEqual(try pastPullRequestNumbers(taskID), [612], "The earlier branch's PR stays listed.")
+        XCTAssertEqual(try worktreeRecords(taskID).first?["pullRequestNumber"] as? Int, 611, "The other worktree keeps its PR.")
+        let link613 = app.links["task-pr-link-\(taskID)-613"]
+        XCTAssertTrue(link613.waitToExist(timeout: 15), app.debugDescription)
+        XCTAssertTrue(waitUntil({ link613.value as? String == "closed" }, timeout: 10), "A closed PR reads as closed: \(String(describing: link613.value))")
+        XCTAssertTrue(link612.exists && link611.exists, "The earlier PRs stay on the card.")
+        revealOnBoard(link613)
+        attachScreenshot(named: "Switched branch: earlier PR kept, closed PR shown")
+
+        // The closed PR is replaced by a fresh one for the same branch.
+        try "head.\(firstBranch)=611\nhead.detect-switched=614\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        _ = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)
+        XCTAssertEqual(try worktreeRecords(taskID).last?["pullRequestNumber"] as? Int, 614)
+        XCTAssertEqual(try pastPullRequestNumbers(taskID), [612, 613])
+        XCTAssertTrue(app.links["task-pr-link-\(taskID)-614"].waitToExist(timeout: 15), app.debugDescription)
+
+        // The first worktree's PR merges; renewing just that worktree gives it a fresh branch.
+        try "611=merged\nhead.\(firstBranch)=611\nhead.detect-switched=614\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        _ = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)
+        XCTAssertEqual(try worktreeRecords(taskID).first?["isPullRequestMerged"] as? Bool, true)
+        let renewed = try XCTUnwrap((try runCLI(["task", "repository", "renew", taskID, "--worktree", firstPath])["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(renewed.count, 2)
+        XCTAssertNotEqual(renewed[0]["branch"] as? String, firstBranch, "The renewed worktree is on a fresh branch.")
+        XCTAssertNil(renewed[0]["pullRequestNumber"] as? Int)
+        XCTAssertEqual(renewed[1]["worktreePath"] as? String, secondPath)
+        XCTAssertEqual(renewed[1]["branch"] as? String, "detect-switched")
+        XCTAssertEqual(renewed[1]["pullRequestNumber"] as? Int, 614, "The other worktree and its PR are unchanged.")
+        XCTAssertEqual(try pastPullRequestNumbers(taskID).sorted(), [611, 612, 613], "The merged PR is listed once with the past ones.")
+        XCTAssertTrue(waitUntil({ self.app.links["task-pr-link-\(taskID)-611"].value as? String == "merged" }, timeout: 15),
+                      "The card keeps the merged PR, read as merged.")
+        XCTAssertTrue(app.links["task-pr-link-\(taskID)-614"].exists, "The sibling's PR stays on the card.")
+        attachScreenshot(named: "Renewed worktree: merged PR kept, sibling unchanged")
+
+        try "611=merged\n614=merged\nhead.detect-switched=614\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        XCTAssertEqual((try runCLI(["task", "move", taskID, "Done"], extraEnvironment: ghEnvironment)["result"] as? [String: Any])?["status"] as? String, "Done")
+        let probesAtDone = (try? String(contentsOf: detectLogURL, encoding: .utf8)) ?? ""
+        let doneStatus = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]]
+        XCTAssertEqual(
+            (doneStatus ?? []).map { "\($0["number"] as? Int ?? 0) past=\($0["past"] as? Bool ?? false)" }.sorted(),
+            ["611 past=true", "612 past=true", "613 past=true", "614 past=false"],
+            "A Done task lists its recorded pull requests without probing."
+        )
+        XCTAssertEqual((try? String(contentsOf: detectLogURL, encoding: .utf8)) ?? "", probesAtDone, "A Done task is never probed.")
+        element("done-archive-button").click()
+        XCTAssertTrue(element("done-archive-task-\(taskID)").waitToExist(timeout: 10))
+        for number in [611, 612, 613, 614] {
+            let link = app.links["done-archive-pr-link-\(taskID)-\(number)"]
+            XCTAssertTrue(link.waitToExist(timeout: 10), "The Done archive row lists PR #\(number).")
+            // Four links beside the title keep each number on one line: a wrapped
+            // number would shrink its link to the 30 pt minimum.
+            XCTAssertGreaterThan(link.frame.width, 31, "PR #\(number) isn't wrapped: \(link.frame)")
+        }
+        XCTAssertEqual(app.links["done-archive-pr-link-\(taskID)-613"].value as? String, "closed")
+        XCTAssertEqual(app.links["done-archive-pr-link-\(taskID)-614"].value as? String, "merged")
+        attachElementScreenshot(element("done-archive-task-\(taskID)"), named: "The Done archive row's pull request links")
+        attachScreenshot(named: "Done archive lists every pull request of the task")
+    }
+
+    // case-contract: test_task_pr_link_registers_pull_request_for_worktree_branch | `task pr link <task-id> --worktree <path> --url <pr-url>` reads the pull request from GitHub and records it on that worktree when its head branch is the worktree's checked-out branch, so `task get` and `task pr status` list it. A pull request for another branch is rejected with an error naming both branches, an invalid URL and a pull request GitHub can't find are rejected, and each failure leaves the task unchanged. With one worktree of the repository `--repo` selects it; a pull request GitHub later closes is recorded as closed on the next read, and the worktree's chip settings in the task header show it as #N · closed, linking to it; linking again replaces the link and keeps the earlier pull request listed with the task's past pull requests. A worktree switched by hand to a branch that can't be a task branch (the repository's default branch) keeps its recorded branch and pull request on a read, and linking that branch's pull request is rejected. Linking is rejected on a Done task.
+    func test_task_pr_link_registers_pull_request_for_worktree_branch() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Link pull requests UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Link pull requests UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Link pull requests UI")
+        element("back-to-board-button").click()
+        let record = try XCTUnwrap(try worktreeRecords(taskID).first)
+        let branch = try XCTUnwrap(record["branch"] as? String)
+        let worktreePath = try XCTUnwrap(record["worktreePath"] as? String)
+        // Only the other branch's PR exists yet, so the card's own probe has nothing to detect.
+        try "head.someone-else=622\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        let link = ["task", "pr", "link", taskID, "--worktree", worktreePath, "--url"]
+
+        assertCLIError(try runCLI(link + ["not a url"], expectedStatus: 2, extraEnvironment: ghEnvironment), code: "invalid_argument")
+        let mismatch = try runCLI(link + ["https://github.com/playhouse-test/fixture/pull/622"], expectedStatus: 2, extraEnvironment: ghEnvironment)
+        assertCLIError(mismatch, code: "invalid_argument")
+        XCTAssertTrue(cliErrorMessage(mismatch).contains("is for branch 'someone-else'"), cliErrorMessage(mismatch))
+        XCTAssertTrue(cliErrorMessage(mismatch).contains("is on branch '\(branch)'"), cliErrorMessage(mismatch))
+        let missing = try runCLI(link + ["https://github.com/playhouse-test/fixture/pull/699"], expectedStatus: 1, extraEnvironment: ghEnvironment)
+        XCTAssertEqual(missing["ok"] as? Bool, false)
+        XCTAssertNil(try worktreeRecords(taskID).first?["pullRequestNumber"] as? Int, "Failed links change nothing.")
+        XCTAssertFalse(app.links["task-pr-link-\(taskID)-622"].exists)
+
+        try "head.\(branch)=621\nhead.someone-else=622\nhead.\(branch)-later=623\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        let linked = try XCTUnwrap(((try runCLI(link + ["https://github.com/playhouse-test/fixture/pull/621"], extraEnvironment: ghEnvironment)["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(linked["pullRequestNumber"] as? Int, 621)
+        XCTAssertEqual(linked["pullRequestURL"] as? String, "https://github.com/playhouse-test/fixture/pull/621")
+        let status = try XCTUnwrap(try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]])
+        XCTAssertEqual(status.compactMap { $0["number"] as? Int }, [621])
+        XCTAssertEqual(status.first?["worktreePath"] as? String, worktreePath)
+        let link621 = app.links["task-pr-link-\(taskID)-621"]
+        XCTAssertTrue(link621.waitToExist(timeout: 15), app.debugDescription)
+        revealOnBoard(link621)
+        attachScreenshot(named: "Linked pull request on the card")
+
+        // GitHub closes the linked PR: the next read records it as closed.
+        try "head.\(branch)=621\n621.closed=true\nhead.someone-else=622\nhead.\(branch)-later=623\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        _ = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)
+        let closed = try XCTUnwrap(try worktreeRecords(taskID).first)
+        XCTAssertEqual(closed["pullRequestNumber"] as? Int, 621)
+        XCTAssertEqual(closed["isPullRequestClosed"] as? Bool, true, "A PR closed on GitHub is recorded as closed.")
+        XCTAssertEqual(closed["isPullRequestMerged"] as? Bool, false)
+        XCTAssertTrue(waitUntil({ link621.value as? String == "closed" }, timeout: 15), "The card reads the PR as closed: \(String(describing: link621.value))")
+        // The task header's chip settings show the worktree's pull request and its state.
+        openTask(named: "Link pull requests UI")
+        let badge = element("conversation-repository-badge-primary")
+        XCTAssertTrue(badge.waitToExist(timeout: 10), app.debugDescription)
+        badge.click()
+        // A recorded URL makes the row a link to the pull request on GitHub.
+        let headerPullRequest = app.links["conversation-repository-pull-request"]
+        XCTAssertTrue(headerPullRequest.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertEqual(headerPullRequest.label, "#621 · closed", "The worktree's settings name its pull request and state.")
+        XCTAssertEqual(headerPullRequest.value as? String, "closed")
+        attachScreenshot(named: "Worktree settings list its closed pull request")
+        attachElementScreenshot(app.popovers.firstMatch, named: "The worktree settings' pull request row")
+        app.typeKey(.escape, modifierFlags: [])
+        element("back-to-board-button").click()
+
+        // With a single worktree of the repository, --repo selects it.
+        try runGit(URL(fileURLWithPath: worktreePath), "checkout", "-q", "-b", "\(branch)-later")
+        let relinked = try XCTUnwrap(try runCLI([
+            "task", "pr", "link", taskID, "--repo", fixture.primary.path, "--url", "https://github.com/playhouse-test/fixture/pull/623",
+        ], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
+        let relinkedRecord = try XCTUnwrap((relinked["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(relinkedRecord["pullRequestNumber"] as? Int, 623)
+        XCTAssertEqual(relinkedRecord["branch"] as? String, "\(branch)-later", "Linking records the branch the PR is for.")
+        XCTAssertEqual(try pastPullRequestNumbers(taskID), [621])
+        let link623 = app.links["task-pr-link-\(taskID)-623"]
+        XCTAssertTrue(link623.waitToExist(timeout: 15), app.debugDescription)
+        XCTAssertTrue(link621.exists, "The earlier linked PR stays on the card.")
+        attachScreenshot(named: "Relinked pull request beside the earlier one")
+
+        // A worktree switched to a branch that can't be a task branch (the default branch) keeps its record.
+        let defaultBranch = try runGitOutput(fixture.primary, "branch", "--show-current").trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(URL(fileURLWithPath: worktreePath), "checkout", "-q", "--ignore-other-worktrees", defaultBranch)
+        try "head.\(branch)-later=623\nhead.\(defaultBranch)=624\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        _ = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)
+        let guarded = try XCTUnwrap(try worktreeRecords(taskID).first)
+        XCTAssertEqual(guarded["branch"] as? String, "\(branch)-later", "A read doesn't adopt the default branch.")
+        XCTAssertEqual(guarded["pullRequestNumber"] as? Int, 623)
+        let refused = try runCLI(link + ["https://github.com/playhouse-test/fixture/pull/624"], expectedStatus: 2, extraEnvironment: ghEnvironment)
+        assertCLIError(refused, code: "invalid_argument")
+        XCTAssertTrue(cliErrorMessage(refused).contains("is on branch '\(defaultBranch)', which can't be a task branch"), cliErrorMessage(refused))
+        XCTAssertFalse(app.links["task-pr-link-\(taskID)-624"].waitToExist(timeout: 3), "The default branch's PR never reaches the card.")
+        try runGit(URL(fileURLWithPath: worktreePath), "checkout", "-q", "\(branch)-later")
+
+        try "623=merged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        XCTAssertEqual((try runCLI(["task", "move", taskID, "Done"], extraEnvironment: ghEnvironment)["result"] as? [String: Any])?["status"] as? String, "Done")
+        assertCLIError(try runCLI(link + ["https://github.com/playhouse-test/fixture/pull/621"], expectedStatus: 1, extraEnvironment: ghEnvironment), code: "invalid_transition")
+    }
 }

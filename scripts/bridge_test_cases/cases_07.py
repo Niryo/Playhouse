@@ -713,13 +713,11 @@ class BridgeTestCases07:
         self.assertTrue(added["mergeTarget"])
         self.assertEqual(updated["workspaceRoots"], [added["worktreePath"]])
         self.assertEqual(updated["contextFolders"], [])
-        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary, expected_status=2)
-        self.assert_failure(duplicate, "invalid_argument")
         invalid, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.custom, expected_status=1)
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
-    # case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
+    # case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, adding an attached repository again gives it another worktree on its own branch, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
     def test_conversation_repository_picker_add_and_replace_buttons(self):
         # The catalog exercises the same Overlay atom used by the native picker.
         # Pointer tracking itself is presentation state, checked by the paired UI case.
@@ -739,8 +737,11 @@ class BridgeTestCases07:
         response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary)
         added = self.assert_success(response)
         self.assertEqual([item["repositoryPath"] for item in added["repositoryWorktrees"]], [str(self.primary), str(self.secondary)])
-        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary, expected_status=2)
-        self.assert_failure(duplicate, "invalid_argument")
+        # Adding an attached repository again gives it another worktree on its own branch.
+        response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary)
+        again = self.assert_success(response)["repositoryWorktrees"]
+        self.assertEqual([item["repositoryPath"] for item in again], [str(self.primary), str(self.secondary), str(self.secondary)])
+        self.assertNotEqual(again[1]["branch"], again[2]["branch"])
         response, _ = self.call_cli("task", "repository", "replace", task_id, "--repo", self.primary)
         replaced = self.assert_success(response)
         self.assertEqual([item["repositoryPath"] for item in replaced["repositoryWorktrees"]], [str(self.primary)])

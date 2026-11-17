@@ -41,7 +41,14 @@ extension PlayhouseBridgeRuntime {
                 return try Self.value(BoardTaskRecord(task: taskManager.taskModel(taskID)))
             }
             return try Self.value(await taskManager.createPullRequests(
-                taskID, clients: conversationClients(), settingsManager: settings
+                taskID, clients: conversationClients(), settingsManager: settings,
+                title: request.arguments["title"]?.string, body: request.arguments["body"]?.string
+            ))
+        case "task.pr.link":
+            let taskID = try request.requiredUUID("taskID")
+            defer { PullRequestStatusCache.invalidate(request, taskID: taskID) }
+            return try Self.value(await taskManager.linkPullRequest(
+                taskID, worktree: Self.worktreeSelector(request), url: request.requiredString("url")
             ))
         case "task.pr.conflicts":
             return .object(["repositories": .array(try await taskManager.pullRequestConflictRepositories(request.requiredUUID("taskID")).map(BridgeValue.string))])
@@ -49,12 +56,15 @@ extension PlayhouseBridgeRuntime {
             let taskID = try request.requiredUUID("taskID")
             let reviewThreads = request.arguments["reviewThreads"]?.bool ?? false
             // `shared`: a probe that may reuse another caller's recent answer.
-            guard request.arguments["shared"]?.bool == true else {
-                return try Self.value(await taskManager.pullRequestStatus(taskID, includeReviewThreads: reviewThreads))
-            }
-            return try Self.value(await PullRequestStatusCache.states(request, taskID: taskID, reviewThreads: reviewThreads) {
-                try await taskManager.pullRequestStatus(taskID, includeReviewThreads: reviewThreads)
-            })
+            let probed = request.arguments["shared"]?.bool == true
+                ? try await PullRequestStatusCache.states(request, taskID: taskID, reviewThreads: reviewThreads) {
+                    try await taskManager.pullRequestStatus(taskID, includeReviewThreads: reviewThreads)
+                }
+                : try await taskManager.pullRequestStatus(taskID, includeReviewThreads: reviewThreads)
+            // `all` (the CLI's default) also lists what the probe leaves out: closed, Done
+            // and retired worktrees' pull requests. The card's probe asks without it.
+            guard request.arguments["all"]?.bool == true else { return try Self.value(probed) }
+            return try Self.value(probed + taskManager.recordedPullRequests(taskID, besides: probed))
         case "task.pr.verify":
             return .object(["status": .string(try await taskManager.verifyPullRequestResolution(request.requiredUUID("taskID")).rawValue)])
         case "task.pr.resolve":
