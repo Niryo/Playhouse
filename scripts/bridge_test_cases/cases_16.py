@@ -128,7 +128,7 @@ class BridgeTestCases16:
         self.assertTrue(any("Playhouse internal outcome nudge:" in m["text"] for m in later_turn[1:] if m["role"] == "user"),
                         "The later turn reported no outcome, so it got its own shown nudge.")
         assert_nudged_work(later["messages"][:later_start], "after a later turn")
-    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. Fresh history shows the nudge prompt Playhouse sent exactly once as its own message, with no placeholder replacing it; after a later ordinary turn the earlier nudge stays shown, the later turn's own nudge appears after its message, and no placeholder replaces either.
+    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. Fresh history shows the nudge prompt Playhouse sent exactly once as its own message, with no placeholder replacing it; after a later ordinary turn the earlier nudge stays shown, the later turn's own nudge appears after its message, and no placeholder replaces either. The steered message is recorded inside the nudge turn it joined rather than as a turn of its own, and the transcript shows the turn's work above it and the final answer below it. The work the turn streams after the steer follows it, and while the turn still runs it renders below the steered message.
     def test_codex_nudged_turn_work_stays_in_conversation(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-nudged-work-success"
@@ -142,6 +142,7 @@ class BridgeTestCases16:
         steer_pause = Path(f"{executable}.nudged-steer-pause")
         steer_ready = Path(f"{executable}.nudged-steer-ready")
         steer_pause.write_text("Hold the nudged turn for a steer.\n", encoding="utf-8")
+        Path(f"{executable}.nudged-final-pause").write_text("Hold the nudged turn's final answer.\n", encoding="utf-8")
         send_command = ("conversation", "send", task_id, "--message", "Start the work.")
         process = self.start_cli(*send_command, extra_environment=env)
         try:
@@ -153,6 +154,12 @@ class BridgeTestCases16:
                 "conversation", "steer", task_id, "--message", "Also double check the docs.", extra_environment=env,
             )[0])
             self.assertTrue(steered["accepted"], "A user can steer the running nudge turn.")
+            final_ready = Path(f"{executable}.nudged-final-ready")
+            deadline = time.monotonic() + 60
+            while not final_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(final_ready.exists(), "The steered nudge turn keeps working before its final answer.")
+            Path(f"{executable}.nudged-final-release").write_text("Finish the nudged turn.\n", encoding="utf-8")
             response, events = self.finish_cli(process, send_command, timeout=60)
         finally:
             if process.poll() is None:
@@ -164,6 +171,12 @@ class BridgeTestCases16:
         final_report = "Codex finished the remaining check after the nudge. Everything is done."
         finals = [event["payload"]["text"] for event in events if event["type"] == "assistant_final"]
         self.assertEqual(finals[-1:], [final_report], "The nudged turn's final answer should stream.")
+        streamed = [(event["type"], event["payload"].get("message") or event["payload"].get("text")) for event in events]
+        steer_at = streamed.index(("steered_message", "Also double check the docs."))
+        self.assertLess(steer_at, streamed.index(("assistant_progress", commentary)),
+                        "The work the turn streams after the steer follows the steered message.")
+        self.assertLess(steer_at, len(streamed) - 1 - streamed[::-1].index(("assistant_final", final_report)),
+                        "The final answer streamed after the steer follows the steered message.")
         self.assertIn("item_nudged_check_1", [event["payload"]["activity"]["id"] for event in events if event["type"] == "activity"],
                       "The nudged turn's shell command should stream live.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
@@ -176,6 +189,11 @@ class BridgeTestCases16:
             assistant = [(m.get("phase"), m["text"]) for m in history["messages"] if m["role"] == "assistant"]
             self.assertIn("Also double check the docs.", [m["text"] for m in history["messages"] if m["role"] == "user"],
                           f"{label}: the steered message that joined the nudge turn should stay in the conversation.")
+            steer = next(m for m in history["messages"] if m["role"] == "user" and m["text"] == "Also double check the docs.")
+            nudge = next(m for m in history["messages"] if m["role"] == "user" and "Playhouse internal outcome nudge:" in m["text"])
+            self.assertIsNotNone(steer.get("turnID"))
+            self.assertEqual(steer.get("turnID"), nudge.get("turnID"),
+                             f"{label}: the steered message is recorded inside the nudge turn it joined, not as a turn of its own.")
             self.assertGreater(len(assistant), 2, f"{label}: the earlier answer should stay ahead of the nudged work.")
             self.assertNotIn(assistant[0], [("commentary", commentary), ("final_answer", final_report)])
             self.assertEqual(assistant[1:3], [("commentary", commentary), ("final_answer", final_report)],

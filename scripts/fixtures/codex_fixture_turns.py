@@ -188,6 +188,16 @@ def start_turn(runtime, _session_state, message):
             runtime.Path(str(runtime.sys.argv[0]) + ".nudged-steer-pause").unlink(missing_ok=True)
             runtime.Path(str(runtime.sys.argv[0]) + ".nudged-steer-ready").unlink(missing_ok=True)
         for _session_state.item in runtime.nudged_work_items(len(saved.get("turns", [])) - 1):
+            nudged_final = runtime.Path(str(runtime.sys.argv[0]) + ".nudged-final")
+            if _session_state.item.get("phase") == "final_answer" and runtime.Path(f"{nudged_final}-pause").exists():
+                # The test reads the transcript while the steered turn is still running.
+                runtime.Path(f"{nudged_final}-ready").write_text("The nudged turn worked after the steer.\n", encoding="utf-8")
+                final_deadline = runtime.time.monotonic() + 60
+                while not runtime.Path(f"{nudged_final}-release").exists() and runtime.time.monotonic() < final_deadline:
+                    _session_state.drain_pending_stdin()
+                    runtime.time.sleep(0.02)
+                for suffix in ("pause", "ready", "release"):
+                    runtime.Path(f"{nudged_final}-{suffix}").unlink(missing_ok=True)
             if _session_state.item["type"] == "commandExecution":
                 runtime.write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID, "item": {**_session_state.item, "status": "inProgress"},

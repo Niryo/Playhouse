@@ -184,7 +184,7 @@ class BridgeTestCases23:
             "Codex should have received one turn only.",
         )
 
-    # case-contract: test_claude_steer_during_turn_launch_reaches_started_turn | A steer sent while Claude Code is still starting the session waits for the turn instead of missing it: once the turn has started the steer reaches it as a next-priority message, the turn answers it, and it is not queued for a turn of its own. In the window the steer's bubble joins the transcript and the composer clears at once, while the session is still starting and has not received it.
+    # case-contract: test_claude_steer_during_turn_launch_reaches_started_turn | A steer sent while Claude Code is still starting the session waits for the turn instead of missing it: once the turn has started the steer reaches it as a next-priority message, the turn answers it, and it is not queued for a turn of its own. The steer is recorded inside the turn it steered, before any reply in it. In the window the steer's bubble joins the transcript and the composer clears at once, while the session is still starting and has not received it, and the turn's work stays above the bubble while it waits, while Claude Code holds it unanswered, and after its answer renders below it.
     def test_claude_steer_during_turn_launch_reaches_started_turn(self):
         task = self.create_task("Claude steer during launch", provider="claude")
         executable = self.install_provider_fixture("claude", "claude-fixture-launch-steer")
@@ -206,6 +206,15 @@ class BridgeTestCases23:
         texts = [message["text"] for message in history["messages"]]
         self.assertEqual(texts.count(steer_text), 1, f"The steer should appear once in the turn it steered: {texts}")
         self.assertIn(f"STEERED: {steer_text}", texts, "Claude Code should have answered the steer inside the launched turn.")
+        messages = history["messages"]
+        question_index = texts.index("Hold for a steer.")
+        steer_index = texts.index(steer_text)
+        self.assertIsNotNone(messages[steer_index].get("turnID"), "The steer should be recorded inside a turn.")
+        self.assertEqual(messages[steer_index]["turnID"], messages[question_index].get("turnID"),
+                         "The steer should join the turn it steered rather than start a turn of its own.")
+        self.assertEqual([message["role"] for message in messages[question_index + 1:steer_index]], [],
+                         "The steer arrived before any reply in its turn.")
+        self.assertGreater(texts.index(f"STEERED: {steer_text}"), steer_index, "The steer's answer follows it.")
 
     # case-contract: test_long_command_activity_title_is_previewed | A tool call whose command is long keeps its whole command: the streamed activity and fresh CLI/XPC history carry its title as Running followed by every line of a heredoc or every character of a long single-line command, and a short command's title is recorded unchanged. While the heredoc still runs, its live command row shows only the title's first line ending in an ellipsis, with no expand control. In the transcript's Worked for list a long title shows its first line, cut to 160 characters and ending in an ellipsis, with an expand control whose accessibility label names expanding the activity title; expanding reveals all of the command and collapsing restores the preview, while the row's accessibility label keeps the full title. A short command's row shows its whole title with no control, and reopening the task shows the long title collapsed again. The preview is Playhouse-owned presentation in the activity row both providers share, and both build a command's title as Running followed by the whole command, so Claude is the representative provider.
     def test_long_command_activity_title_is_previewed(self):
