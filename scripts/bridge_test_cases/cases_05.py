@@ -422,9 +422,14 @@ class BridgeTestCases05:
         # A pass the plugin started asks it again before it merges: with the mode no longer
         # Merge, it merges nothing.
         gh_state.write_text("802=unmerged\n802.checks=success\n", encoding="utf-8")
-        declined = self.assert_success(self.call_cli(
-            "task", "pr", "autopilot", followed["id"], "--merge", "--confirm-with", "pull-request-mode", extra_environment=gh_environment,
-        )[0])
+        # The plugin's own poll pass may still be running (its follow event is logged as it
+        # starts), which turns this pass away before it asks; ask again once that pass ends.
+        def merge_pass():
+            outcome = self.assert_success(self.call_cli(
+                "task", "pr", "autopilot", followed["id"], "--merge", "--confirm-with", "pull-request-mode", extra_environment=gh_environment,
+            )[0])
+            return None if outcome.get("reason") == "Autopilot is already handling this task." else outcome
+        declined = self.wait_for(merge_pass, "A merge pass should run once the plugin's pass ends.")
         self.assertEqual(declined["action"], "inactive")
         self.assertNotIn("merged\t802", (gh_directory / "create-calls").read_text(encoding="utf-8") if (gh_directory / "create-calls").exists() else "")
         # Diagnostics are written by a background flush, so the event can land after the call returns.
