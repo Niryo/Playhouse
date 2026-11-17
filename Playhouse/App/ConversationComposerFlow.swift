@@ -284,14 +284,9 @@ extension TaskConversationView {
             return
         }
         // Done on a task that is already scheduled saves the edit at once, so leaving the
-        // conversation keeps it. A task that hasn't started saves its draft as the prompt, as Send
-        // would. An existing conversation with an empty composer only moves its scheduled
-        // message; with a draft, Done arms Send to schedule that draft in its place.
+        // conversation keeps it, with the composer's draft as the scheduled message, as Send
+        // would. With an empty composer it only moves the scheduled message.
         let isEmptyDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty
-        if isExistingConversation && !isEmptyDraft {
-            composerSchedule = schedule
-            return
-        }
         if !isExistingConversation { composerSchedule = schedule }
         var request = schedule.request(
             prompt: isEmptyDraft ? "" : draft,
@@ -316,7 +311,8 @@ extension TaskConversationView {
     }
 
     /// Remove turns scheduling off. A schedule already saved on the task is cleared too, and an
-    /// existing conversation's scheduled message returns to an empty composer as its draft.
+    /// existing conversation's scheduled message stays in the composer as its draft (or returns
+    /// to an empty composer).
     func removeSchedule() {
         composerSchedule = nil
         isSchedulePopoverPresented = false
@@ -397,12 +393,9 @@ extension TaskConversationView {
             do {
                 _ = try await BoardTaskManager(modelContext: modelContext).setSchedule(taskID, request)
                 composerDraft.settledText = draft
-                if existingConversation {
-                    draft = ""
-                    pendingImages = []
-                    _ = try await BoardTaskManager(modelContext: modelContext).saveDraft(taskID, prompt: "", imageDataURLs: [])
-                    composerSchedule = nil
-                }
+                // The scheduled message stays in the composer, saved as its draft, until it is
+                // sent; Send then sends it now instead of scheduling it again.
+                if existingConversation { composerSchedule = nil }
                 PlayhouseDiagnostics.record("ui.task.scheduled", fields: ["taskID": taskID.uuidString, "kind": schedule.kind.rawValue])
                 // A one-time task waits on the board, so the daemon names it now as a first send would.
                 if schedule.kind == .once {

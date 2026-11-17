@@ -315,7 +315,7 @@ extension TaskConversationView {
                 if composerSchedule != nil || savedSchedule != nil {
                     Button("Remove", action: removeSchedule)
                     .buttonHoverPointer()
-                    .nativeHelp(isExistingConversation ? "Cancel the scheduled message" : "Stop scheduling; Send runs the task now")
+                    .nativeHelp(isExistingConversation ? "Cancel the scheduled message; it stays in the composer" : "Stop scheduling; Send runs the task now")
                     .accessibilityIdentifier("schedule-remove-button")
                 }
                 Spacer()
