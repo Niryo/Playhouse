@@ -265,6 +265,9 @@ extension PlayhouseUITests {
         toggle.click()
         let panel = element("task-terminal-panel")
         XCTAssertTrue(panel.waitToExist(timeout: 5))
+        XCTAssertTrue(element("task-terminal-view").waitToExist(timeout: 10))
+        XCTAssertFalse(element("task-terminal-split").exists, "A single-repository task opens one shell, not a split.")
+        XCTAssertFalse(element("task-terminal-pane-name").exists, "A lone shell has no per-repository header.")
         XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - window.frame.maxX) <= 2 }, timeout: 5), "The panel settles against the window's right edge.")
         XCTAssertGreaterThan(panel.frame.minX, sidebar.frame.maxX, "The panel opens on the right, leaving the sidebar in place.")
         XCTAssertLessThan(panel.frame.minX, conversation.frame.maxX, "The panel floats over the conversation's right side.")
@@ -419,6 +422,126 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
         XCTAssertTrue(element("message-composer").waitToExist(timeout: 10))
         XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
+    }
+    // case-contract: test_task_terminal_splits_per_repository_worktree | A task with more than one created repository worktree opens its terminal as a split view with one shell per worktree. The CLI reports one pane per created worktree, in the task's repository order, each naming its source repository's folder and opening in that repository's worktree, never in a source repository, and the launch's directory is the first pane's; a single-repository task reports exactly one pane, and a worktree that no longer exists is left out while the others still open. In the app, opening the terminal for a two-repository task stacks one terminal pane per worktree in the panel, the first above the second, each headed by its repository's name and each shell running in its own worktree as a different process; hiding and reopening the panel keeps both shells. Exiting one pane's shell offers Restart only in that pane while the other shell keeps running, and Restart starts a new shell in that pane's worktree. A repository added to the task while its shells run gets its own pane when the panel is next opened, while the existing shells keep running.
+    func test_task_terminal_splits_per_repository_worktree() throws {
+        func makeRepository(_ name: String) throws -> URL {
+            let repository = runDirectory.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+            try "\(name)\n".write(to: repository.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try runGit(repository, "init", "--initial-branch=main")
+            try runGit(repository, "config", "user.name", "Playhouse UI Test")
+            try runGit(repository, "config", "user.email", "playhouse-ui-test@example.invalid")
+            try runGit(repository, "add", "README.md")
+            try runGit(repository, "commit", "-m", "Baseline")
+            return repository
+        }
+        // `pwd -P` keeps the /private prefix that Foundation's symlink resolution drops for /tmp.
+        func resolved(_ path: String) throws -> String {
+            try XCTUnwrap(realpath(path, nil).map { pointer in
+                defer { free(pointer) }
+                return String(cString: pointer)
+            })
+        }
+        let repositories = try ["split-web", "split-api", "split-docs"].map(makeRepository)
+        let created = try runCLI(["task", "create", "--title", "Split Terminal Task", "--prompt", "Fixture task description."])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        var worktrees: [String] = []
+        for repository in repositories.prefix(2) {
+            let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
+            let records = try XCTUnwrap((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])
+            let record = try XCTUnwrap(records.first { $0["repositoryPath"] as? String == repository.path })
+            XCTAssertEqual(record["isPending"] as? Bool, false)
+            worktrees.append(try resolved(try XCTUnwrap(record["worktreePath"] as? String)))
+        }
+        let launch = try XCTUnwrap(try runCLI(["task", "terminal", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((launch["panes"] as? [[String: Any]])?.compactMap { $0["name"] as? String }, ["split-web", "split-api"])
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Split Terminal Task")
+        let toggle = element("toggle-terminal-button")
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
+        toggle.click()
+        let panel = element("task-terminal-panel")
+        XCTAssertTrue(panel.waitToExist(timeout: 5))
+        XCTAssertTrue(element("task-terminal-split").waitToExist(timeout: 10), "A two-repository task opens a split terminal.")
+        let panes = app.descendants(matching: .any).matching(identifier: "task-terminal-pane")
+        XCTAssertTrue(waitUntil({ panes.count == 2 }, timeout: 10), "One pane per worktree: \(panes.count)")
+        func pane(_ index: Int) -> XCUIElement { panes.element(boundBy: index) }
+        func paneElement(_ index: Int, _ identifier: String) -> XCUIElement {
+            pane(index).descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        for (index, name) in ["split-web", "split-api"].enumerated() {
+            let title = paneElement(index, "task-terminal-pane-name")
+            XCTAssertTrue(title.waitToExist(timeout: 5))
+            XCTAssertEqual(title.value as? String ?? title.label, name, "Each pane is headed by its repository's name.")
+        }
+        XCTAssertLessThanOrEqual(pane(0).frame.maxY, pane(1).frame.minY + 2, "The first worktree's shell sits above the second's.")
+        XCTAssertEqual(pane(0).frame.width, pane(1).frame.width, accuracy: 2, "The panes share the panel's width.")
+        XCTAssertGreaterThanOrEqual(pane(0).frame.height, 80)
+        XCTAssertGreaterThanOrEqual(pane(1).frame.height, 80)
+
+        func shellPID(in index: Int, worktree: String, tag: String) -> String? {
+            let terminal = paneElement(index, "task-terminal-view")
+            guard terminal.waitToExist(timeout: 10) else { return nil }
+            terminal.click()
+            terminal.typeText("printf '\(tag)=%s pid=%s;\\n' \"$(pwd -P)\" \"$$\"\n")
+            var pid: String?
+            _ = waitUntil({
+                pid = self.terminalNumber(after: "\(tag)=\(worktree) pid=", in: terminal)
+                return pid != nil
+            }, timeout: 20)
+            return pid
+        }
+        let webPID = try XCTUnwrap(shellPID(in: 0, worktree: worktrees[0], tag: "web"), "The first pane's shell runs in the first worktree.")
+        let apiPID = try XCTUnwrap(shellPID(in: 1, worktree: worktrees[1], tag: "api"), "The second pane's shell runs in the second worktree.")
+        XCTAssertNotEqual(webPID, apiPID, "Each pane runs its own shell.")
+        attachScreenshot(named: "Two-repository task opens a split terminal, one shell per worktree")
+
+        element("close-terminal-button").click()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5))
+        toggle.click()
+        XCTAssertTrue(waitUntil({ panes.count == 2 }, timeout: 10))
+        XCTAssertEqual(shellPID(in: 0, worktree: worktrees[0], tag: "webagain"), webPID, "Reopening keeps the first shell.")
+        XCTAssertEqual(shellPID(in: 1, worktree: worktrees[1], tag: "apiagain"), apiPID, "Reopening keeps the second shell.")
+
+        // Exiting one shell offers Restart only in its own pane; the other keeps running.
+        let apiTerminal = paneElement(1, "task-terminal-view")
+        apiTerminal.click()
+        apiTerminal.typeText("exit\n")
+        XCTAssertTrue(paneElement(1, "task-terminal-exit-status").waitToExist(timeout: 10), "The exited pane reports its shell exited.")
+        // Locate the exit reports by frame: XCUI can resolve a descendant query scoped to one
+        // split pane against its sibling, so pane-scoped existence alone can't prove absence.
+        let exitReports = app.descendants(matching: .any).matching(identifier: "task-terminal-exit-status")
+        let restartButtons = app.descendants(matching: .any).matching(identifier: "restart-terminal-button")
+        XCTAssertEqual(exitReports.count, 1, "The other pane's shell is unaffected.")
+        XCTAssertEqual(restartButtons.count, 1, "Only the exited pane offers Restart.")
+        XCTAssertTrue(pane(1).frame.contains(exitReports.firstMatch.frame), "The exit report sits in the exited pane.")
+        XCTAssertTrue(pane(1).frame.contains(restartButtons.firstMatch.frame), "Restart sits in the exited pane.")
+        XCTAssertFalse(pane(0).frame.intersects(restartButtons.firstMatch.frame), "The running pane offers no Restart.")
+        XCTAssertEqual(shellPID(in: 0, worktree: worktrees[0], tag: "webstill"), webPID, "The first shell keeps running.")
+        attachScreenshot(named: "One pane's shell exited; Restart is offered only there")
+        restartButtons.firstMatch.click()
+        XCTAssertTrue(waitUntil({ exitReports.count == 0 }, timeout: 5), "Restart clears that pane's exit report.")
+        let restartedPID = try XCTUnwrap(shellPID(in: 1, worktree: worktrees[1], tag: "apinew"), "Restart opens a shell in that pane's worktree.")
+        XCTAssertNotEqual(restartedPID, apiPID, "Restart starts a new shell process.")
+        XCTAssertEqual(shellPID(in: 0, worktree: worktrees[0], tag: "webafter"), webPID, "Restarting one pane leaves the other shell running.")
+
+        // A repository added while the shells run gets its own pane the next time the panel opens.
+        let added = try runCLI(["task", "repository", "add", taskID, "--repo", repositories[2].path])
+        let docsRecord = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?
+            .first { $0["repositoryPath"] as? String == repositories[2].path })
+        let docsWorktree = try resolved(try XCTUnwrap(docsRecord["worktreePath"] as? String))
+        element("close-terminal-button").click()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5))
+        toggle.click()
+        XCTAssertTrue(waitUntil({ panes.count == 3 }, timeout: 10), "The added repository's worktree gets a pane: \(panes.count)")
+        let docsTitle = paneElement(2, "task-terminal-pane-name")
+        XCTAssertEqual(docsTitle.value as? String ?? docsTitle.label, "split-docs")
+        XCTAssertNotNil(shellPID(in: 2, worktree: docsWorktree, tag: "docs"), "The new pane's shell runs in the added worktree.")
+        XCTAssertEqual(shellPID(in: 0, worktree: worktrees[0], tag: "webkept"), webPID, "Existing shells keep running.")
+        XCTAssertEqual(shellPID(in: 1, worktree: worktrees[1], tag: "apikept"), restartedPID)
+        attachScreenshot(named: "A repository added later gets its own pane in the split")
     }
     // case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, keeps the scheduled message in the composer as its unsent draft while Send returns to sending, and sends the due message, including edits made to that draft since it was scheduled, to that same task and conversation, preserving its Claude session or Codex thread identifier; once it is sent, the draft is cleared from storage and from the open composer. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     func test_schedule_one_time_task_fires_when_due() throws {

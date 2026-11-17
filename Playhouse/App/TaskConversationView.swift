@@ -646,6 +646,7 @@ struct TaskConversationView: View {
                                 TaskTerminalPanel(
                                     session: terminalSession,
                                     onRestart: { terminalSession.restart(workspaceManager: workspaceManager) },
+                                    onRestartPane: { terminalSession.restart($0, workspaceManager: workspaceManager) },
                                     onClose: { setTerminalPresented(false) }
                                 )
                             }
