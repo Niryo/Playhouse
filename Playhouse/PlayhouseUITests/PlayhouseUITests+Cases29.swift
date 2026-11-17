@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name and Claude and Codex badges for the agents that start it in Playhouse sessions, without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider badge: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
+    // case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name led by one icon for the agents that start it in Playhouse sessions (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider icon: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
     func test_mcp_catalog_lists_repo_global_and_managed_servers() throws {
         let working = try makeSkillRepository("mcp-catalog-repo", skills: [
             ".mcp.json": #"{"mcpServers": {"repo-docs": {"type": "stdio", "command": "node", "args": ["docs.js"], "env": {"DOCS_TOKEN": "${DOCS_TOKEN}", "DOCS_MODE": "secret-mode-value"}}, "repo-sse": {"type": "sse", "url": "https://sse.example.com/mcp"}}}"#,
@@ -59,21 +59,24 @@ extension PlayhouseUITests {
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-env-\(docs)")), "Environment: DOCS_MODE, DOCS_TOKEN",
                        "Only the names of its environment variables are shown.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'secret-mode-value'")).firstMatch.exists, "Values are never shown.")
-        XCTAssertTrue(rowBadge("mcp-provider-\(docs)-claude").exists && rowBadge("mcp-provider-\(docs)-codex").exists, "The agents that start it show on its row.")
+        XCTAssertEqual(rowProviders("mcp-provider-\(docs)"), ["claude", "codex"], "The agents that start it show on its row.")
+        XCTAssertEqual(rowBadge("mcp-provider-\(docs)-both").label, "Claude and Codex", "One green icon marks a server both agents start.")
         XCTAssertFalse(revealMcpHint(docs).descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'mcp-provider-'")).firstMatch.exists,
                        "The agents show on the row, not in the hint.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-\(docs)")), "Playhouse passes it to Codex.", ".mcp.json is Claude's own.")
         let sse = "mcp-catalog-repo:repo-sse"
-        XCTAssertTrue(rowBadge("mcp-provider-\(sse)-claude").exists)
-        XCTAssertFalse(rowBadge("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
+        XCTAssertEqual(rowProviders("mcp-provider-\(sse)"), ["claude"], "Codex can't run an SSE server.")
+        XCTAssertEqual(rowBadge("mcp-provider-\(sse)-claude").label, "Claude only", "A Claude-only server shows the Claude logo.")
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-limitation-\(sse)")).contains("SSE"))
         XCTAssertTrue(element("mcp-row-mcp-catalog-repo:repo-codex").exists, "The worktree's .codex/config.toml servers are listed.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-mcp-other-repo:other-api")), "Playhouse passes it to Claude and Codex.",
                        "Neither agent reads another task repository's servers on its own.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-env-mcp-other-repo:other-api")), "Headers: Authorization")
         assertSkillsModalLayout(search: "mcp-search", newButton: "new-mcp-server-button", anchors: "mcp-tab-picker")
+        assertRowFitsSkillsModal("mcp-row-\(docs)", name: "mcp-name-\(docs)")
         restPointerOffList(hints: "mcp-hint-")
         attachScreenshot(named: "MCP list with each repository's servers")
+        attachElementScreenshot(element("skills-page"), named: "MCP rows led by one provider icon in the narrow modal")
         let search = element("mcp-search")
         typeIntoField(search, text: "docs.js")
         XCTAssertTrue(waitUntil({ !self.element("mcp-row-\(sse)").exists }, timeout: 5), "Search hides servers that don't match.")
@@ -118,9 +121,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-issue-clash")).contains("differently"))
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-claude-only")), "Playhouse passes it to Codex.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-codex-only")), "Playhouse passes it to Claude.")
-        XCTAssertFalse(rowBadge("mcp-provider-folder-tool-claude").exists, "Claude Code can't run a server with a working folder.")
+        XCTAssertFalse(rowProviders("mcp-provider-folder-tool").contains("claude"), "Claude Code can't run a server with a working folder.")
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-limitation-folder-tool")).contains("working folder"))
-        XCTAssertFalse(rowBadge("mcp-provider-off-tool-claude").exists || rowBadge("mcp-provider-off-tool-codex").exists,
+        XCTAssertEqual(rowProviders("mcp-provider-off-tool"), [],
                        "A server Codex's config turns off reaches neither agent.")
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-limitation-off-tool")).contains("enabled = false"))
         XCTAssertTrue(element("mcp-row-inline-tool").exists, "An inline config.toml server is listed.")
@@ -145,8 +148,7 @@ extension PlayhouseUITests {
         let managed = "managed:company"
         XCTAssertTrue(element("mcp-row-\(managed)").waitToExist(timeout: 5), "The managed server is listed.")
         XCTAssertTrue(isListed("mcp-row-\(managed)", inSection: "mcp-group-managed"), "The managed server is in the Managed section.")
-        XCTAssertTrue(rowBadge("mcp-provider-\(managed)-claude").exists)
-        XCTAssertFalse(rowBadge("mcp-provider-\(managed)-codex").exists, "The managed server is Claude's only.")
+        XCTAssertEqual(rowProviders("mcp-provider-\(managed)"), ["claude"], "The managed server is Claude's only.")
         XCTAssertFalse(element("mcp-toggle-\(managed)").exists, "The managed server can't be turned off.")
         attachScreenshot(named: "MCP Managed section")
 
@@ -330,8 +332,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? server("global:claude-tool"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a server off is saved where a fresh CLI process reads it.")
         XCTAssertTrue(hintDetail("mcp-always-on-claude-tool").waitToExist(timeout: 5), "The page says Claude still starts it itself.")
-        XCTAssertTrue(rowBadge("mcp-provider-claude-tool-claude").exists)
-        XCTAssertFalse(rowBadge("mcp-provider-claude-tool-codex").exists, "Turning it off stops Codex getting it.")
+        XCTAssertEqual(rowProviders("mcp-provider-claude-tool"), ["claude"], "Turning it off stops Codex getting it.")
         XCTAssertEqual(try String(contentsOf: mcpClaudeState, encoding: .utf8), beforeClaude, "Claude Code's configuration is not written.")
         XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeCodex, "Codex's configuration is not written.")
         attachScreenshot(named: "A server Claude starts itself, turned off")
@@ -344,11 +345,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? server("global:claude-tool"))??["enabled"] as? Bool) == true }, timeout: 10))
 
         element("mcp-toggle-codex-tool").click()
-        XCTAssertTrue(waitUntil({ !self.rowBadge("mcp-provider-codex-tool-claude").exists && !self.rowBadge("mcp-provider-codex-tool-codex").exists }, timeout: 10),
+        XCTAssertTrue(waitUntil({ self.rowProviders("mcp-provider-codex-tool").isEmpty }, timeout: 10),
                       "A server only Codex defines reaches neither agent once off.")
         XCTAssertFalse(hintDetail("mcp-always-on-codex-tool").exists)
         element("mcp-toggle-codex-tool").click()
-        XCTAssertTrue(waitUntil({ self.rowBadge("mcp-provider-codex-tool-claude").exists }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.rowProviders("mcp-provider-codex-tool").contains("claude") }, timeout: 10))
         assertCLIError(try runCLI(["mcp", "disable", "--task", taskID, "--server", "managed:company"], expectedStatus: 2), code: "invalid_argument")
 
         let actions = element("mcp-actions-clash")
@@ -560,7 +561,7 @@ extension PlayhouseUITests {
         openMcpPage()
         let sse = "mcp-codex-repo:repo-sse"
         XCTAssertTrue(element("mcp-row-\(sse)").waitToExist(timeout: 10))
-        XCTAssertFalse(rowBadge("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
+        XCTAssertFalse(rowProviders("mcp-provider-\(sse)").contains("codex"), "Codex can't run an SSE server.")
         let repoCodexOff = "mcp-codex-repo:repo-codex-off"
         XCTAssertTrue(element("mcp-toggle-\(repoCodexOff)").exists)
         element("mcp-toggle-\(repoCodexOff)").click()
@@ -618,7 +619,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(Set(resumed.keys), ["claude-remote", "repo-codex-off"], "The resumed thread gets the new servers.")
         answerQuestionIfAsked()
     }
-    // case-contract: test_mcp_status_reports_sign_in_per_provider | Opening the MCP page asks both agents on its own, with no button to press, which servers they start and which need a sign-in, showing Checking sign-in… while they answer and asking again whenever the page is opened: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows a Sign in for Claude or Sign in for Codex badge on its row, and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code in the Managed section, a connector that needs a sign-in with the same badge. Asking for one provider only asks that provider. An agent that can't be asked is reported by name on the page while the other agent's answer is still shown.
+    // case-contract: test_mcp_status_reports_sign_in_per_provider | Opening the MCP page asks both agents on its own, with no button to press, which servers they start and which need a sign-in, showing Checking sign-in… while they answer and asking again whenever the page is opened: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows a Sign in badge with the Claude or Codex logo on its row (labelled Sign in for Claude or Sign in for Codex), and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code in the Managed section, a connector that needs a sign-in with the same badge. Asking for one provider only asks that provider. An agent that can't be asked is reported by name on the page while the other agent's answer is still shown.
     func test_mcp_status_reports_sign_in_per_provider() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let codexStatus = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".mcp-status")
@@ -660,6 +661,14 @@ extension PlayhouseUITests {
                       "A server Claude can't start without a sign-in is marked as soon as the page has asked.")
         XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists, "A server Codex can't start without a sign-in is marked.")
         XCTAssertFalse(element("mcp-signin-codex-tool-codex").exists, "A server that needs no sign-in is not marked.")
+        // The narrow card keeps a row's sign-in badge, a provider logo and "Sign in", inside it beside the name.
+        for (server, provider) in [("claude-remote", "Claude"), ("codex-remote", "Codex")] {
+            let badge = element("mcp-signin-\(server)-\(provider.lowercased())")
+            XCTAssertLessThanOrEqual(badge.frame.maxX, element("mcp-row-\(server)").frame.maxX + 1, "\(server)'s sign-in badge fits inside its row.")
+            XCTAssertTrue(accessibleLabelOrValue(of: badge).contains("Sign in for \(provider)"), "The short badge still names its agent to assistive tech.")
+            assertRowFitsSkillsModal("mcp-row-\(server)", name: "mcp-name-\(server)")
+        }
+        attachElementScreenshot(element("skills-page"), named: "Sign-in badges in the narrow MCP modal")
         XCTAssertTrue(waitUntil({ !self.element("mcp-checking-status").exists }, timeout: 30), "The check finishes.")
         XCTAssertFalse(element("mcp-error").exists, "Both agents answered.")
         attachScreenshot(named: "Opening the page marks servers that need a sign-in")
@@ -716,7 +725,7 @@ extension PlayhouseUITests {
         XCTAssertNotNil((noCodex["errors"] as? [String: Any])?["codex"], "An agent that can't be asked is reported by name.")
         XCTAssertTrue(((noCodex["claude"] as? [[String: Any]]) ?? []).contains { $0["name"] as? String == "claude-remote" }, "The other agent's answer is still shown.")
     }
-    // case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in…. A server both agents have shows one Sign in button per agent on the same row: each starts only its own agent's sign-in, waiting on one leaves the other clickable, and each badge clears on its own once that agent is signed in. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
+    // case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in badge with the Claude or Codex logo on a server (labelled Sign in for Claude or Sign in for Codex) is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting… (labelled Waiting for sign-in…). A server both agents have shows one Sign in button per agent on the same row, each just that agent's logo so the name keeps room in the narrow card (labelled the same way): each starts only its own agent's sign-in, waiting on one leaves the other clickable, and each badge clears on its own once that agent is signed in. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
     func test_mcp_authenticate_signs_in_each_provider() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let codexPath = try XCTUnwrap(codexFixtureExecutable)
@@ -760,7 +769,11 @@ extension PlayhouseUITests {
         let sharedCodexBadge = element("mcp-signin-shared-remote-codex")
         XCTAssertTrue(sharedCodexBadge.exists, "A server both agents have gets a sign-in button for each of them on the same row.")
         XCTAssertTrue(element("mcp-row-shared-remote").exists)
-        attachScreenshot(named: "A server both agents have needs a sign-in for each of them")
+        XCTAssertLessThan(sharedCodexBadge.frame.width, element("mcp-signin-codex-remote-codex").frame.width,
+                          "A row with a badge for each agent shows just the logos, narrower than a lone Sign in badge.")
+        // Two sign-in badges, a switch and a menu make this the most crowded row; it still fits the narrow card.
+        assertRowFitsSkillsModal("mcp-row-shared-remote", name: "mcp-name-shared-remote")
+        attachElementScreenshot(element("skills-page"), named: "A server both agents have needs a sign-in for each of them")
 
         // A real click at the badge's position: it starts the sign-in rather than opening the server's editor.
         claudeBadge.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
@@ -774,6 +787,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(logged(codexPath + ".mcp-login").isEmpty, "Claude's sign-in doesn't ask Codex.")
         XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists, "The other agent's badge is unchanged.")
         XCTAssertFalse(claudeBadge.isEnabled, "A sign-in that is waiting can't be started twice.")
+        assertRowFitsSkillsModal("mcp-row-shared-remote", name: "mcp-name-shared-remote")
         attachScreenshot(named: "Claude sign-in waiting for the browser")
         try redirect("shared-remote", to: claude.path + ".mcp-callback")
         XCTAssertTrue(waitUntil({ !self.element("mcp-signin-shared-remote-claude").exists }, timeout: 30),

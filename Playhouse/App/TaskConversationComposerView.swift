@@ -397,7 +397,7 @@ extension TaskConversationView {
     }
 
     /// The Skills modal's width: a narrow column centered over the conversation.
-    static let skillsPageWidth: CGFloat = 480
+    static let skillsPageWidth: CGFloat = 336
     static let skillsPageMaxHeight: CGFloat = 760
 
     /// Summarizes how the selected provider's native configuration differs, so a

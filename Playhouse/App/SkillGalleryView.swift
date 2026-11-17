@@ -213,15 +213,24 @@ extension SkillsPageModel {
         skill.editable && (skill.conflict || skill.issue != nil)
     }
 
-    /// Who can use a skill: one provider's logo, or a green check for both.
-    static func providerMark(_ providers: Set<ConversationProvider>, name: String) -> ProviderMark? {
+    /// The asset of a provider's logo, shared by the row marks and the MCP sign-in badge.
+    static func logoAsset(_ provider: ConversationProvider) -> String {
+        switch provider {
+        case .claude: "ClaudeLogo"
+        case .codex: "CodexLogo"
+        }
+    }
+
+    /// Who can use a skill, rule or MCP server: one provider's logo, or a green
+    /// check for both. `testID` is `<base>-claude`, `<base>-codex` or `<base>-both`.
+    static func providerMark(_ providers: Set<ConversationProvider>, testID base: String) -> ProviderMark? {
         switch (providers.contains(.claude), providers.contains(.codex)) {
         case (true, true):
-            ProviderMark(label: "Claude and Codex", icon: "checkmark.circle.fill", color: "green", testID: "skill-provider-\(name)-both")
+            ProviderMark(label: "Claude and Codex", icon: "checkmark.circle.fill", color: "green", testID: "\(base)-both")
         case (true, false):
-            ProviderMark(label: "Claude only", asset: "ClaudeLogo", color: "#D97757", testID: "skill-provider-\(name)-claude")
+            ProviderMark(label: "Claude only", asset: logoAsset(.claude), color: "#D97757", testID: "\(base)-claude")
         case (false, true):
-            ProviderMark(label: "Codex only", asset: "CodexLogo", color: "primary", testID: "skill-provider-\(name)-codex")
+            ProviderMark(label: "Codex only", asset: logoAsset(.codex), color: "primary", testID: "\(base)-codex")
         case (false, false):
             nil
         }
@@ -265,7 +274,7 @@ extension SkillsPageModel {
             nil
         }
         return Row(
-            id: skill.id, name: name, provider: providerMark(Set(skill.providers), name: name), badges: badges, flag: flag, command: command,
+            id: skill.id, name: name, provider: providerMark(Set(skill.providers), testID: "skill-provider-\(name)"), badges: badges, flag: flag, command: command,
             description: skill.description.isEmpty ? nil : skill.description,
             issue: skill.issue,
             location: isPrivate
@@ -333,6 +342,19 @@ extension SkillsPageModel {
         }
         let delete = [MenuItem(id: "delete", title: "Delete…", help: "Delete the skill from disk", destructive: true, testID: "skill-delete-\(name)")]
         return [open, moves, link, delete]
+    }
+}
+
+/// A provider mark as the small icon that leads a Skills, Rules or MCP row's name.
+struct ProviderMarkIcon: View {
+    let mark: SkillsPageModel.ProviderMark
+    var prefix = ""
+
+    var body: some View {
+        AtomIcon(
+            props: IconProps(name: mark.icon, asset: mark.asset, size: 11, color: mark.color),
+            common: AtomCommon(testID: "\(prefix)\(mark.testID)", label: mark.label, help: mark.label, width: 12, height: 12)
+        )
     }
 }
 
@@ -579,7 +601,7 @@ struct SkillGalleryView: View {
                 common: AtomCommon(testID: "\(prefix)skills-fix-selected", help: "Open a task whose agent fixes the selected conflicting or invalid skills"),
                 action: actions.fixSelected
             ) {
-                AtomLabel(props: LabelProps(text: "Fix with Agent", icon: "wand.and.stars"))
+                AtomLabel(props: LabelProps(text: "Fix", icon: "wand.and.stars"))
             }
             AtomButton(
                 props: ButtonProps(style: "bordered", disabled: model.selection?.isEmpty != false, controlSize: "small", destructive: true),
@@ -683,10 +705,7 @@ struct SkillGalleryView: View {
                         }
                         // Who can use the skill leads its name; its warning follows it.
                         if let mark = row.provider {
-                            AtomIcon(
-                                props: IconProps(name: mark.icon, asset: mark.asset, size: 11, color: mark.color),
-                                common: AtomCommon(testID: "\(prefix)\(mark.testID)", label: mark.label, help: mark.label, width: 12, height: 12)
-                            )
+                            ProviderMarkIcon(mark: mark, prefix: prefix)
                         }
                         AtomText(props: TextProps(text: name, size: 13, weight: "medium", lineLimit: 1), common: AtomCommon(testID: "\(prefix)skill-name-\(name)"))
                         if let flag = row.flag {

@@ -501,8 +501,8 @@ private struct NewSkillPanel: View {
         SkillPanel(identifier: "new-skill-panel") {
             VStack(alignment: .leading, spacing: 12) {
                 Text("New Skill").font(.headline)
-                // The controls get their own row so the panel fits the narrow modal.
-                HStack {
+                // Save to and the Private switch each get their own row so the panel fits the narrow modal.
+                VStack(alignment: .leading, spacing: 8) {
                     Picker("Save to", selection: $destination) {
                         Text("Global (~/.agents/skills)").tag("global")
                         ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }
@@ -521,6 +521,7 @@ private struct NewSkillPanel: View {
                      ? "Private: Playhouse stores the skill itself and writes nothing into the repository or its worktrees. Claude and Codex sessions on this repository use it like any other skill. The name uses lowercase letters, digits, and hyphens."
                      : "Saved in the open Agent Skills layout (.agents/skills). Playhouse shares it with both Claude and Codex. The name uses lowercase letters, digits, and hyphens.")
                     .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("new-skill-destination-note")
                 TextField("skill-name", text: $manifest.name)
                     .textFieldStyle(.roundedBorder)

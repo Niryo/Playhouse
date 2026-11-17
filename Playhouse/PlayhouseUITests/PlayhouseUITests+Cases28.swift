@@ -257,7 +257,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try runCLI(["mentions", "list", "--task", UUID().uuidString], expectedStatus: 3)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "not_found")
         XCTAssertEqual(try runCLI(["mentions", "list"], expectedStatus: 2)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "invalid_argument")
     }
-    // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule row shows only its name and Claude and Codex badges for the agents that follow it, without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider badge: each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
+    // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule row shows only its name led by one icon for the agents that follow it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider icon: each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
     func test_rules_catalog_lists_repo_global_and_managed_rules() throws {
         let working = try makeSkillRepository("rules-catalog-repo", skills: [
             "AGENTS.md": "# Repository conventions\nUse tabs.\n",
@@ -294,7 +294,7 @@ extension PlayhouseUITests {
             XCTAssertFalse(element(detail).exists, "A rule row shows only its name and agents until the pointer rests on it (\(detail)).")
         }
         XCTAssertFalse(app.staticTexts["Repository conventions"].exists, "The rule's summary waits for its hint.")
-        XCTAssertTrue(rowBadge("rule-provider-\(agents)-claude").exists && rowBadge("rule-provider-\(agents)-codex").exists,
+        XCTAssertEqual(rowProviders("rule-provider-\(agents)"), ["claude", "codex"],
                       "Both agents follow the repository's AGENTS.md, marked on its row.")
         XCTAssertFalse(revealRuleHint(agents).descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-provider-'")).firstMatch.exists,
                        "The agents show on the row, not in the hint.")
@@ -308,13 +308,17 @@ extension PlayhouseUITests {
                        "A .claude/rules file shows its paths globs.")
         XCTAssertTrue(hintDetail("rule-linked-rules-linked-repo:AGENTS.md").exists, "A CLAUDE.md symlinked to AGENTS.md is one Linked rule.")
         XCTAssertFalse(element("rule-row-rules-linked-repo:CLAUDE.md").exists, "The symlink is not listed separately.")
-        XCTAssertTrue(rowBadge("rule-provider-rules-override-repo:AGENTS.override.md-codex").exists)
-        XCTAssertFalse(rowBadge("rule-provider-rules-override-repo:AGENTS.override.md-claude").exists, "AGENTS.override.md is Codex's own.")
-        XCTAssertFalse(rowBadge("rule-provider-rules-override-repo:AGENTS.md-codex").exists, "Codex reads the override instead of AGENTS.md.")
-        XCTAssertTrue(rowBadge("rule-provider-rules-override-repo:AGENTS.md-claude").exists, "The AGENTS.md beside the override is left to Claude.")
+        XCTAssertEqual(rowProviders("rule-provider-rules-override-repo:AGENTS.override.md"), ["codex"], "AGENTS.override.md is Codex's own.")
+        XCTAssertEqual(rowBadge("rule-provider-rules-override-repo:AGENTS.override.md-codex").label, "Codex only", "A Codex-only rule shows the Codex logo.")
+        XCTAssertEqual(rowProviders("rule-provider-rules-override-repo:AGENTS.md"), ["claude"],
+                       "Codex reads the override instead of AGENTS.md, which is left to Claude.")
         assertSkillsModalLayout(search: "rules-search", newButton: "new-rule-button", anchors: "rules-tab-picker")
+        // A broken rule's row carries the most controls: its icon, problem mark, Fix, switch and menu.
+        assertRowFitsSkillsModal("rule-row-rules-catalog-repo:CLAUDE.md", name: "rule-name-rules-catalog-repo:CLAUDE.md")
+        assertRowFitsSkillsModal("rule-row-\(agents)", name: "rule-name-\(agents)")
         restPointerOffList(hints: "rule-hint-")
         attachScreenshot(named: "Rules list with each repository's rule files")
+        attachElementScreenshot(element("skills-page"), named: "Rules rows led by one provider icon in the narrow modal")
         let search = element("rules-search")
         typeIntoField(search, text: "CONVENTIONS")
         XCTAssertTrue(waitUntil({ !self.element("rule-row-rules-catalog-repo:CLAUDE.md").exists }, timeout: 5), "Search hides rules that don't match.")
@@ -354,11 +358,13 @@ extension PlayhouseUITests {
         search.typeKey("a", modifierFlags: .command)
         search.typeKey(.delete, modifierFlags: [])
         XCTAssertTrue(element("rule-row-~/.claude/CLAUDE.md").waitToExist(timeout: 5), "Clearing the search shows every global rule again.")
+        // Clearing the search scrolls the list back to the top; jump back to the Global rules.
+        jumpToSection("Global", picker: "rules-tab-picker")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("rule-shared-\(shared)")), "Playhouse shares it with Claude and Codex.",
                        "Neither CLI reads ~/.agents/AGENTS.md on its own.")
         for name in ["~/.claude/CLAUDE.md", "~/.claude/rules/global-style.md"] {
             XCTAssertTrue(element("rule-row-\(name)").exists, "\(name) is a global rule.")
-            XCTAssertTrue(rowBadge("rule-provider-\(name)-claude").exists && rowBadge("rule-provider-\(name)-codex").exists)
+            XCTAssertEqual(rowProviders("rule-provider-\(name)"), ["claude", "codex"])
         }
         let codexName = realPath(skillsCodexHome.appendingPathComponent("AGENTS.md").path)
         XCTAssertTrue(element("rule-row-global:codex/AGENTS.md").exists, "Codex's global AGENTS.md is listed (\(codexName)).")
@@ -568,8 +574,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? rule("repo:\(working.path)#AGENTS.md"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a rule off is saved where a fresh CLI process reads it.")
         XCTAssertTrue(hintDetail("rule-always-on-\(agents)").waitToExist(timeout: 5), "The page says Codex still reads the file itself.")
-        XCTAssertTrue(rowBadge("rule-provider-\(agents)-codex").exists)
-        XCTAssertFalse(rowBadge("rule-provider-\(agents)-claude").exists, "Turning it off stops Claude following it.")
+        XCTAssertEqual(rowProviders("rule-provider-\(agents)"), ["codex"], "Turning it off stops Claude following it.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: skillsCodexHome.appendingPathComponent("config.toml").path), "Codex's config is not written.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: rulesClaudeConfig.appendingPathComponent("settings.json").path), "Claude's settings are not written.")
         attachScreenshot(named: "A rule Codex reads itself, turned off")
@@ -584,11 +589,11 @@ extension PlayhouseUITests {
         let shared = "~/.agents/AGENTS.md"
         XCTAssertTrue(element("rule-toggle-\(shared)").waitToExist(timeout: 5))
         element("rule-toggle-\(shared)").click()
-        XCTAssertTrue(waitUntil({ !self.rowBadge("rule-provider-\(shared)-claude").exists && !self.rowBadge("rule-provider-\(shared)-codex").exists }, timeout: 10),
+        XCTAssertTrue(waitUntil({ self.rowProviders("rule-provider-\(shared)").isEmpty }, timeout: 10),
                       "A rule only Playhouse shares reaches neither agent once off.")
         XCTAssertFalse(hintDetail("rule-always-on-\(shared)").exists)
         element("rule-toggle-\(shared)").click()
-        XCTAssertTrue(waitUntil({ self.rowBadge("rule-provider-\(shared)-codex").exists }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.rowProviders("rule-provider-\(shared)").contains("codex") }, timeout: 10))
         assertCLIError(try runCLI(["rules", "disable", "--task", taskID, "--rule", "managed:claude/CLAUDE.md"], expectedStatus: 2), code: "invalid_argument")
 
         clickRuleMenuItem(rule: shared, item: "rule-link-\(shared)", title: "Make Available Outside Playhouse…")

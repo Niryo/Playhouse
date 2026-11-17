@@ -110,7 +110,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(FileManager.default.fileExists(atPath: skillsHome.appendingPathComponent(".agents/skills/global-agents/SKILL.md").path))
         assertCLIError(try runCLI(["skills", "unlink", "--task", taskID, "--skill", "global:global-agents"], expectedStatus: 2), code: "invalid_argument")
     }
-    // case-contract: test_skills_select_many_and_delete_together | Pressing and holding a skill row starts selecting skills, with no separate Select button: each editable row shows a checkbox that a click toggles, built-in skills show none and cannot be selected, and the header shows how many are selected with Fix with Agent, Delete, and Done. Deleting the selection after one confirmation removes every selected skill folder, repository and global alike, from disk, leaves unselected skills in place, forgets a deleted skill's off state, and ends selecting. A batch that includes a read-only or unknown skill deletes nothing and fails with invalid_argument or not_found.
+    // case-contract: test_skills_select_many_and_delete_together | Pressing and holding a skill row starts selecting skills, with no separate Select button: each editable row shows a checkbox that a click toggles, built-in skills show none and cannot be selected, and the header shows how many are selected with Fix, Delete, and Done. Deleting the selection after one confirmation removes every selected skill folder, repository and global alike, from disk, leaves unselected skills in place, forgets a deleted skill's off state, and ends selecting. A batch that includes a read-only or unknown skill deletes nothing and fails with invalid_argument or not_found.
     func test_skills_select_many_and_delete_together() throws {
         let repository = try makeSkillRepository("skills-select-repo", skills: [
             ".agents/skills/repo-one/SKILL.md": skillManifest("repo-one", "First repository skill"),
@@ -149,6 +149,10 @@ extension PlayhouseUITests {
         XCTAssertEqual(element("skill-select-repo-one").label, "Selected", "The pressed skill's checkbox is checked.")
         XCTAssertEqual(element("skill-select-repo-keep").label, "Not selected")
         XCTAssertFalse(element("skill-actions-repo-one").exists, "Selecting hides a row's own controls.")
+        let card = element("skills-page").frame
+        XCTAssertGreaterThanOrEqual(element("skills-selection-count").frame.minX, card.minX, "The selection's row fits the narrow card.")
+        XCTAssertLessThanOrEqual(element("skills-selection-done").frame.maxX, card.maxX, "The selection's row fits the narrow card.")
+        attachElementScreenshot(element("skills-page"), named: "Selecting in the narrow Skills modal")
         selectSkillsTab("Global")
         element("skill-row-global-one").click()
         element("skill-row-global-two").click()
@@ -193,7 +197,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(skillsByName(try skillCatalog(taskID: taskID)["global"])["global-two"]?["enabled"] as? Bool, true,
                        "Deleting a skill forgets that it was turned off.")
     }
-    // case-contract: test_skills_fix_with_agent_starts_task_for_repo_and_global_skills | A conflicting or invalid skill offers a Fix button on its row (Fix with Agent while selecting), and several selected skills can be fixed in one task. Fixing creates a task, on the source task's provider, whose saved prompt teaches the agent the skill format and lists each skill with its problem: repository skills by repository-relative path, to be fixed in the new task's own worktree of the source repository and committed and pushed like any code change, and global skills by absolute path, to be fixed in place with nothing to commit; the global skill folders are opened to the agent as context folders, and fixing only global skills needs no repository. The view switches to the new task's conversation, which sends that prompt as its own composer draft, leaving the composer empty and no unsent draft behind, so the turn runs in the new task's worktree with the global folders reachable. A skill with no problem, a built-in skill, an unknown skill, and a request without a task are rejected without opening a task.
+    // case-contract: test_skills_fix_with_agent_starts_task_for_repo_and_global_skills | A conflicting or invalid skill offers a Fix button on its row (and in the selection bar while selecting), and several selected skills can be fixed in one task. Fixing creates a task, on the source task's provider, whose saved prompt teaches the agent the skill format and lists each skill with its problem: repository skills by repository-relative path, to be fixed in the new task's own worktree of the source repository and committed and pushed like any code change, and global skills by absolute path, to be fixed in place with nothing to commit; the global skill folders are opened to the agent as context folders, and fixing only global skills needs no repository. The view switches to the new task's conversation, which sends that prompt as its own composer draft, leaving the composer empty and no unsent draft behind, so the turn runs in the new task's worktree with the global folders reachable. A skill with no problem, a built-in skill, an unknown skill, and a request without a task are rejected without opening a task.
     func test_skills_fix_with_agent_starts_task_for_repo_and_global_skills() throws {
         let repository = try makeSkillRepository("skills-fix-repo", skills: [
             ".agents/skills/repo-dup/SKILL.md": skillManifest("repo-dup", "The agents copy"),
@@ -505,6 +509,11 @@ extension PlayhouseUITests {
             option.click()
             let privateSwitch = element("new-skill-private")
             XCTAssertTrue(privateSwitch.waitToExist(timeout: 5), "A repository skill offers the Private switch.")
+            // The narrow modal fits the switch on its own row below Save to, inside the panel.
+            let scopeFrame = element("new-skill-scope").frame
+            XCTAssertGreaterThanOrEqual(privateSwitch.frame.minY, scopeFrame.maxY - 1, "The Private switch sits below Save to.")
+            XCTAssertLessThanOrEqual(privateSwitch.frame.maxX, element("new-skill-panel").frame.maxX + 1, "The Private switch fits inside the panel.")
+            XCTAssertLessThanOrEqual(scopeFrame.maxX, element("new-skill-panel").frame.maxX + 1, "Save to fits inside the panel.")
             if !isOn(privateSwitch) { privateSwitch.click() }
             XCTAssertTrue(waitUntil({ self.isOn(self.element("new-skill-private")) }, timeout: 5))
         }
@@ -526,6 +535,7 @@ extension PlayhouseUITests {
         fillNewSkill(name: "deploy-notes", description: "Write deploy notes", body: "List the deploy steps.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("new-skill-destination-note")).hasPrefix("Private:"), "The panel explains that nothing is written to the repository.")
         attachScreenshot(named: "New Skill with Private on for a repository skill")
+        attachElementScreenshot(element("new-skill-panel"), named: "New Skill in the narrow modal: Save to above Private")
         element("new-skill-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-skill-name").exists }, timeout: 10), "Creating closes the panel.")
         XCTAssertTrue(element("skill-row-deploy-notes").waitToExist(timeout: 10), "The private skill shows in the Repo section.")

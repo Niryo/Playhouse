@@ -86,7 +86,7 @@ function SelectionActions(props) {
     h(Button, {
       style: "bordered", disabled: !model.canFixSelection || model.isFixing, controlSize: "small", testID: prefix + "skills-fix-selected",
       help: "Open a task whose agent fixes the selected conflicting or invalid skills", onPress: on.fixSelected
-    }, h(Label, { text: "Fix with Agent", icon: "wand.and.stars" })),
+    }, h(Label, { text: "Fix", icon: "wand.and.stars" })),
     h(Button, {
       style: "bordered", disabled: selection.length === 0, controlSize: "small", destructive: true, testID: prefix + "skills-delete-selected",
       help: "Delete the selected skills from disk", onPress: on.deleteSelected
@@ -342,7 +342,7 @@ function Demo() {
       }
     }
   };
-  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14, width: 480, height: 520, padding: 0, testID: model.prefix + "skills-page" },
+  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14, width: 336, height: 520, padding: 0, testID: model.prefix + "skills-page" },
     h(Header, { model: model, on: on }),
     h(Divider),
     model.kind === "skills" ? h(Gallery, { model: model, on: on })
