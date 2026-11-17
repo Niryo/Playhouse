@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled rules, then its skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks; before anything was mentioned, an empty query shows that whole list. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
+    // case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks, and never rule files; before anything was mentioned, an empty query shows that whole list, grouped under a header per kind. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
     func test_mentions_menu_lists_expands_and_remembers_recent() throws {
         let repository = try makeSkillRepository("mention-repo", skills: [
             "AGENTS.md": "# Mention repo rules\nKeep it tidy.\n",
@@ -51,7 +51,8 @@ extension PlayhouseUITests {
         }
         let items = try XCTUnwrap(try mentions()["items"] as? [[String: Any]])
         let handles = items.compactMap { $0["handle"] as? String }
-        XCTAssertEqual(items.first?["kind"] as? String, "rule", "Rules come first.")
+        XCTAssertEqual(items.first?["kind"] as? String, "skill", "Skills come first.")
+        XCTAssertFalse(items.contains { ($0["id"] as? String ?? "").hasPrefix("rule:") }, "Rules are not mentionable.")
 
         openTask(named: "Mention task")
         let composer = element("message-composer")
@@ -61,10 +62,32 @@ extension PlayhouseUITests {
         let menu = element("mention-menu")
         XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing @ opens the mention menu.")
         XCTAssertLessThanOrEqual(menu.frame.maxY, composer.frame.minY, "The menu opens above the composer, leaving the typed text visible.")
-        XCTAssertTrue(element("mention-item-mention-repo/AGENTS.md").waitToExist(timeout: 10))
+        XCTAssertTrue(element("mention-item-mention-skill").waitToExist(timeout: 10))
+        XCTAssertFalse(element("mention-item-mention-repo/AGENTS.md").exists, "The repository's rule file is not listed.")
         let rows = menuRows()
-        XCTAssertEqual(rows.first, "mention-repo/AGENTS.md", "Before anything was mentioned, the whole list shows, a rule first.")
-        XCTAssertEqual(rows, Array(handles.prefix(rows.count)), "The menu keeps the catalog's order: rules, skills, MCP servers, agents, repositories, tasks.")
+        XCTAssertEqual(rows.first, handles.first, "Before anything was mentioned, the whole list shows, a skill first.")
+        XCTAssertEqual(rows, Array(handles.prefix(rows.count)), "The menu keeps the catalog's order: skills, MCP servers, agents, repositories, tasks.")
+        // Browsing groups the rows under one header per kind, each between its kind's rows and the previous kind's.
+        let sectionTitles = [("skill", "Skills"), ("mcp", "MCP servers"), ("agent", "Agents"), ("repository", "Repositories"), ("task", "Tasks")]
+        XCTAssertEqual(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "mention-section-")).count, sectionTitles.count,
+                       "Each kind has exactly one header.")
+        var previousLastRow: XCUIElement?
+        for (kind, sectionTitle) in sectionTitles {
+            let header = element("mention-section-\(kind)")
+            XCTAssertEqual(header.value as? String, sectionTitle)
+            let kindHandles = items.filter { $0["kind"] as? String == kind }.compactMap { $0["handle"] as? String }
+            let firstRow = element("mention-item-\(try XCTUnwrap(kindHandles.first))")
+            XCTAssertLessThan(header.frame.midY, firstRow.frame.midY, "The \(sectionTitle) header sits above its rows.")
+            if let previousLastRow {
+                XCTAssertLessThan(previousLastRow.frame.midY, header.frame.midY, "The \(sectionTitle) header sits below the previous kind's rows.")
+            }
+            previousLastRow = element("mention-item-\(try XCTUnwrap(kindHandles.last))")
+        }
+        XCTAssertEqual(element("mention-item-mention-skill").value as? String, "Skill: mention-skill — A skill to mention",
+                       "A row shows the item's title and its detail.")
+        XCTAssertTrue((element("mention-item-Other-mention-task").value as? String ?? "").hasPrefix("Task: Other mention task — "),
+                      "A task's row shows its title, not its handle: \(String(describing: element("mention-item-Other-mention-task").value))")
+        XCTAssertFalse(element("mention-menu-title").exists, "Browsing shows the kind headers instead of one title.")
         for row in ["mention-skill", "docs-server", "reviewer", "mention-repo", "Other-mention-task"] {
             XCTAssertTrue(rows.contains(row), "The menu lists \(row).")
         }
@@ -74,14 +97,16 @@ extension PlayhouseUITests {
         composer.typeKey(.downArrow, modifierFlags: [])
         composer.typeKey(.upArrow, modifierFlags: [])
         XCTAssertTrue(waitUntil({ highlightedRow() == rows[1] }, timeout: 5), "Up moves it back.")
-        attachScreenshot(named: "Mention menu listing rules, skills, MCP servers and agents")
+        XCTAssertEqual(menuRowElements().filter(\.isSelected).count, 1, "Only the highlighted row is selected.")
+        attachScreenshot(named: "Mention menu listing skills, MCP servers and agents under kind headers")
         attachElementScreenshot(menu, named: "Mention menu, full list")
 
         composer.typeText("rev")
         XCTAssertTrue(waitUntil({ menuRows().first == "reviewer" && highlightedRow() == "reviewer" }, timeout: 5),
                       "Typing after @ filters, handle prefixes first, and highlights the first match.")
-        XCTAssertFalse(element("mention-item-mention-repo/AGENTS.md").exists)
+        XCTAssertFalse(element("mention-item-mention-skill").exists, "Rows that don't match the query are filtered out.")
         XCTAssertEqual(element("mention-menu-title").value as? String, "Mention matching “rev”")
+        XCTAssertFalse(element("mention-section-agent").exists, "A query's matches are one list under one header.")
         attachElementScreenshot(menu, named: "Mention menu filtered by the typed query")
         composer.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "@reviewer " }, timeout: 5), "Return inserts the highlighted mention.")
@@ -156,6 +181,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ menuRows() == ["reviewer", "mention-repo", "docs-server"] }, timeout: 10),
                       "An empty query now shows the recent mentions, most recent first.")
         XCTAssertEqual(element("mention-menu-title").value as? String, "Recent mentions")
+        XCTAssertEqual(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "mention-section-")).count, 0,
+                       "Recent mentions are one list under one header, without kind headers.")
         attachElementScreenshot(menu, named: "Mention menu showing recent mentions")
         // Moving the keyboard out of the composer closes the menu; typing there again reopens it.
         // The nudge can push the sent message above the viewport, so click whichever

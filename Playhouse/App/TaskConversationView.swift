@@ -114,6 +114,10 @@ struct TaskConversationView: View {
     @State var skillsPresentation = 0
     /// What the composer's `@` menu can mention, read from the daemon when a mention starts.
     @State var mentionCatalog: MentionCatalog?
+    /// The catalog's handles, kept beside it so the composer and each message don't rebuild them on every render.
+    @State var mentionHandles: Set<String> = []
+    /// What the open menu lists, refreshed when the typed mention or the catalog changes rather than on every render.
+    @State var mentionSuggestions: [MentionItem] = []
     @State var isLoadingMentions = false
     /// The highlighted row of the open mention menu.
     @State var mentionSelection = 0

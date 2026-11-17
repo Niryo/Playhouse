@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases19:
-    # case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled rules, then its skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks; before anything was mentioned, an empty query shows that whole list. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
+    # case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks, and never rule files; before anything was mentioned, an empty query shows that whole list, grouped under a header per kind. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
     def test_mentions_menu_lists_expands_and_remembers_recent(self):
         repository = self.make_skill_repository("mention-repo", {
             "AGENTS.md": "# Mention repo rules\nKeep it tidy.\n",
@@ -23,14 +23,13 @@ class BridgeTestCases19:
         listed = self.assert_success(self.call_cli("mentions", "list", "--task", task_id)[0])
         items = listed["items"]
         by_handle = {item["handle"]: item for item in items}
-        order = ["rule", "skill", "mcp", "agent", "repository", "task"]
+        order = ["skill", "mcp", "agent", "repository", "task"]
         kinds = [item["kind"] for item in items]
-        self.assertEqual(kinds, sorted(kinds, key=order.index), "Rules come first, then skills, MCP servers, agents, repositories and tasks.")
-        self.assertEqual(kinds[0], "rule")
+        self.assertEqual(kinds, sorted(kinds, key=order.index), "Skills come first, then MCP servers, agents, repositories and tasks.")
+        self.assertEqual(kinds[0], "skill")
         self.assertEqual(len(by_handle), len(items), "Every handle is unique.")
-        rule = by_handle["mention-repo/AGENTS.md"]
-        self.assertEqual(rule["kind"], "rule")
-        self.assertSamePath(rule["reference"].split("`")[1], Path(worktree) / "AGENTS.md")
+        self.assertNotIn("mention-repo/AGENTS.md", by_handle, "The repository's rule file is not mentionable.")
+        self.assertFalse(any(item["id"].startswith("rule:") or "AGENTS.md" in item["reference"] for item in items), "No rule is listed.")
         self.assertEqual(by_handle["mention-skill"]["kind"], "skill")
         self.assertIn("mention-skill/SKILL.md", by_handle["mention-skill"]["reference"])
         self.assertEqual(by_handle["docs-server"]["kind"], "mcp")
