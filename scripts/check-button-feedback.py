@@ -169,12 +169,20 @@ def main() -> int:
                     errors.append(f"{location}: {kind} has a missing or generic help hint")
 
     support = (APP / "WorkspaceSupport.swift").read_text(encoding="utf-8")
-    for required in (".onHover", "cursor.push()", "NSCursor.pop()", ".onDisappear"):
-        if required not in support:
-            errors.append(f"Shared cursor handler is missing {required}")
-    # Buttons get the pointing hand through the shared, stack-balanced cursor handler.
+    # Buttons get the pointing hand from a cursor the system re-applies (SwiftUI's pointer style,
+    # or an AppKit cursor rect before macOS 15). A cursor pushed from `onHover` is replaced by the
+    # arrow whenever AppKit re-evaluates the window's cursor, so the hover handler must never push.
     if "hoverCursor(.pointingHand)" not in support:
-        errors.append("buttonHoverPointer() does not use the shared handler with NSCursor.pointingHand")
+        errors.append("buttonHoverPointer() does not use the shared hover cursor with .pointingHand")
+    hover = re.search(r"func hoverCursor\(_ kind: HoverCursorKind\)[^{]*\{(.*?)\n    \}", support, re.S)
+    if not hover:
+        errors.append("WorkspaceSupport.swift does not define hoverCursor(_ kind: HoverCursorKind)")
+    elif "pointerStyle(kind.pointerStyle)" not in hover.group(1) or "HoverCursorRect(" not in hover.group(1):
+        errors.append("hoverCursor() must use SwiftUI's pointer style with the cursor-rect fallback")
+    if "case .pointingHand: .link" not in support or "addCursorRect(bounds, cursor: cursor)" not in support:
+        errors.append("The hover cursor must map the pointing hand to .link and add its cursor rect")
+    if re.search(r"\.onHover[^\n]*\n(?:[^\n]*\n){0,6}?[^\n]*\.push\(\)", support):
+        errors.append("WorkspaceSupport.swift must not push a cursor on hover; a pushed cursor is lost on cursor updates")
 
     if errors:
         print("Button feedback check failed:", file=sys.stderr)
