@@ -590,8 +590,8 @@ class BridgeTestCases07:
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["title"], "Renamed through XPC")
-    # case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
-    def test_task_title_copy_button_copies_persisted_title(self):
+    # case-contract: test_task_title_is_selectable_and_matches_persisted_title | The conversation title has no copy button and its text is selectable: selecting and copying it places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename, and fresh CLI/XPC reads report the same title.
+    def test_task_title_is_selectable_and_matches_persisted_title(self):
         task_id = self.create_task()["id"]
         title = "Café & tea: ready ✓"
         response, _ = self.call_cli("task", "rename", task_id, "--title", title)

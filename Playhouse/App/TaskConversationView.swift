@@ -149,8 +149,6 @@ struct TaskConversationView: View {
     @State var isComposerEditing = false
     @State var selectedChatImage: NSImage?
     @State var isGeneratingTitle = false
-    @State var didCopyTaskTitle = false
-    @State var taskTitleCopyFeedbackToken = UUID()
     @State var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
     /// The message at the top of the transcript's viewport, as last reported.
     @State var topTranscriptRowID: String?
