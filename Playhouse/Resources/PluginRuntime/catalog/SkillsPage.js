@@ -213,7 +213,10 @@ function GroupHeader(props) {
         h(Text, { size: 11, color: "tertiary", monospacedDigits: true }, String(group.count))))),
     group.loading ? h(Spinner, { size: "mini", testID: prefix + "skills-" + group.value + "-loading" }) : null,
     h(Spacer),
-    h(Icon, { name: "info.circle", size: 11, color: "tertiary", testID: prefix + "skills-intro-" + group.value, label: "About " + group.label, help: group.intro })
+    // A hover hint like a skill row's: a tooltip never showed inside the list.
+    h(Popover, { isPresented: false, arrowEdge: "bottom", width: 240, inset: 12, hover: true, onDismiss: function () {} },
+      h(Icon, { name: "info.circle", size: 11, color: "tertiary", testID: prefix + "skills-intro-" + group.value, label: "About " + group.label, hint: group.intro }),
+      h(Text, { size: 12, color: "secondary", wrap: true, testID: prefix + "skills-intro-" + group.value + "-hint" }, group.intro))
   ];
   return h(Stack, { axis: "h", spacing: 6, paddingX: 4 }, children.map(keyed));
 }
