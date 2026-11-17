@@ -680,7 +680,11 @@ extension PlayhouseUITests {
         }
         let composer = element("message-composer")
         func send(_ text: String, typed: String? = nil) {
-            XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+            // Use closes the Skills page and leaves the composer focused. Its hint popover is still
+            // on screen for a moment after it leaves the accessibility tree, and hit-testing the
+            // composer under it fails the test outright, so only a composer about to be clicked is
+            // hit-tested; typing after Use proves the focus by the text that reaches the provider.
+            XCTAssertTrue(waitUntil({ composer.exists && (typed != nil || composer.isHittable) }, timeout: 15))
             if typed == nil { composer.click() }
             composer.typeText(typed ?? text)
             element("send-message-button").click()

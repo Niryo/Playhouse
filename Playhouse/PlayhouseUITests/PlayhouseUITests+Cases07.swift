@@ -350,7 +350,11 @@ extension PlayhouseUITests {
         let title = element("task-view-title")
         XCTAssertTrue(title.waitToExist(timeout: 5))
         XCTAssertGreaterThan(badge.frame.minX, title.frame.maxX, "Repository badges should appear to the right of the task title.")
-        XCTAssertLessThan(abs(badge.frame.midY - title.frame.midY), 8, "Repository badges should share the title row.")
+        // The badges sit beside the title, centered on the header's title and status lines together.
+        let status = element("task-header-status")
+        XCTAssertTrue(status.waitToExist(timeout: 5))
+        let headerMidY = { (title.frame.minY + status.frame.maxY) / 2 }
+        XCTAssertLessThan(abs(badge.frame.midY - headerMidY()), 4, "Repository badges should be vertically centered in the task header.")
         let record = try XCTUnwrap(taskRecord(named: "Header repository picker"))
         let repositories = try XCTUnwrap(record["repositoryWorktrees"] as? [[String: Any]])
         let primary = try XCTUnwrap(repositories.first { ($0["repositoryPath"] as? String) == fixture.primary.path })
@@ -422,7 +426,7 @@ extension PlayhouseUITests {
         let badgeAfterSend = element("conversation-repository-badge-secondary")
         XCTAssertTrue(badgeAfterSend.exists, "Compact repository badges should remain in the fixed task header after the timeline scrolls.")
         XCTAssertGreaterThan(badgeAfterSend.frame.minX, title.frame.maxX, "Repository badges should remain beside the task title after a message is sent.")
-        XCTAssertLessThan(abs(badgeAfterSend.frame.midY - title.frame.midY), 8, "Repository badges should stay on the fixed title row after the timeline scrolls.")
+        XCTAssertLessThan(abs(badgeAfterSend.frame.midY - headerMidY()), 4, "Repository badges should stay vertically centered in the fixed task header after the timeline scrolls.")
     }
     // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
     func test_conversation_repository_picker_add_and_replace_buttons() throws {

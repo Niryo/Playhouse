@@ -50,10 +50,10 @@ extension PlayhouseBridgeRuntime {
             let reviewThreads = request.arguments["reviewThreads"]?.bool ?? false
             // `shared`: a probe that may reuse another caller's recent answer.
             guard request.arguments["shared"]?.bool == true else {
-                return try Self.value(await taskManager.reviewPullRequests(taskID, includeReviewThreads: reviewThreads))
+                return try Self.value(await taskManager.pullRequestStatus(taskID, includeReviewThreads: reviewThreads))
             }
             return try Self.value(await PullRequestStatusCache.states(request, taskID: taskID, reviewThreads: reviewThreads) {
-                try await taskManager.reviewPullRequests(taskID, includeReviewThreads: reviewThreads)
+                try await taskManager.pullRequestStatus(taskID, includeReviewThreads: reviewThreads)
             })
         case "task.pr.verify":
             return .object(["status": .string(try await taskManager.verifyPullRequestResolution(request.requiredUUID("taskID")).rawValue)])

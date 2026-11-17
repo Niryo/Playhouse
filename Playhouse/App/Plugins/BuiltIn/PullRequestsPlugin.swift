@@ -270,8 +270,9 @@ struct PullRequestsPlugin: View {
             if isInReview { syncIfNeeded(probed) }
             if probed.contains(where: { $0.health == .pending }) { schedulePoll() }
         } catch {
-            // A task that left Review while its probe ran (moved to Done) has
-            // no pull request state left to report.
+            // A card that already knows its task left Review stays quiet. One still holding
+            // Review when the task moved to Done is answered by the daemon, whose status read
+            // reports no state for a Done task whose worktrees are gone.
             guard taskID == self.taskID, isInReview else { return }
             await alert(error)
         }

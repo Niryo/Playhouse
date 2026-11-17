@@ -625,26 +625,30 @@ extension PlayhouseUITests {
         let error = response["error"] as? [String: Any]
         XCTAssertEqual(error?["code"] as? String, code, file: file, line: line)
     }
-    func chatPageSeparators(_ title: String) -> [XCUIElement] {
-        element("chat-sidebar")
+    /// The chat transcript read in one snapshot: its rows are replaced while a turn settles, and
+    /// an element bound by index that is gone by the time it is read fails the test outright.
+    private func chatTranscriptSnapshot(_ type: XCUIElement.ElementType) -> [XCUIElementSnapshot] {
+        let transcript = element("chat-sidebar")
             .descendants(matching: .scrollView)
             .matching(identifier: "conversation-scroll-view")
             .firstMatch
-            .staticTexts
-            .matching(identifier: "chat-page-separator")
-            .allElementsBoundByIndex
-            .filter { $0.label == title || $0.value as? String == title }
-            .sorted { $0.frame.minY < $1.frame.minY }
+        guard let snapshot = try? transcript.snapshot() else { return [] }
+        func descendants(of node: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+            node.children.flatMap { [$0] + descendants(of: $0) }
+        }
+        return descendants(of: snapshot).filter { $0.elementType == type }
+    }
+    /// The frames of the page separators titled `title`, top to bottom.
+    func chatPageSeparators(_ title: String) -> [CGRect] {
+        chatTranscriptSnapshot(.staticText)
+            .filter { $0.identifier == "chat-page-separator" && ($0.label == title || $0.value as? String == title) }
+            .map(\.frame)
+            .sorted { $0.minY < $1.minY }
     }
     func chatTranscriptShows(_ text: String, belowPage title: String) -> Bool {
         guard let separator = chatPageSeparators(title).last else { return false }
-        return element("chat-sidebar")
-            .descendants(matching: .scrollView)
-            .matching(identifier: "conversation-scroll-view")
-            .firstMatch
-            .groups.matching(NSPredicate(format: "label CONTAINS %@ OR identifier == %@", text, text))
-            .allElementsBoundByIndex
-            .contains { $0.frame.minY > separator.frame.minY }
+        return chatTranscriptSnapshot(.group)
+            .contains { ($0.label.contains(text) || $0.identifier == text) && $0.frame.minY > separator.minY }
     }
     func chatPageSeparatorIsVisible(_ title: String) -> Bool {
         element("chat-sidebar")
