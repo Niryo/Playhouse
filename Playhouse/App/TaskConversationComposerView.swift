@@ -40,6 +40,7 @@ extension TaskConversationView {
                 ? "Archived conversation, read-only."
                 : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
                     : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
+            skills: !hasTaskSidebar,
             modeMenu: .init(
                 text: isEnteringGoal ? "Goal" : (conversationMode == .plan ? "Plan" : nil),
                 badgeIcon: isEnteringGoal ? "scope" : nil,
@@ -391,7 +392,7 @@ extension TaskConversationView {
     }
 
     /// The Skills modal's width: a narrow column centered over the conversation.
-    static let skillsPageWidth: CGFloat = 480
+    static let skillsPageWidth: CGFloat = 336
     static let skillsPageMaxHeight: CGFloat = 760
 
     /// Summarizes how the selected provider's native configuration differs, so a

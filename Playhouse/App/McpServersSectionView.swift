@@ -335,7 +335,7 @@ struct McpServersSectionView: View {
                 signIn(name: server.name, provider: .claude)
             }
         } label: {
-            signInLabel("Sign in for Claude", waiting: signingIn.contains(key))
+            signInLabel(.claude, waiting: signingIn.contains(key))
         }
         .buttonStyle(.plain)
         .disabled(signingIn.contains(key))
@@ -344,16 +344,28 @@ struct McpServersSectionView: View {
         .accessibilityIdentifier("mcp-connector-signin-\(server.name)")
     }
 
-    private func signInLabel(_ text: String, waiting: Bool) -> some View {
+    /// The provider's logo and a short "Sign in" so the badge fits the narrow
+    /// modal's row; its accessibility label still names the provider. A row
+    /// with a badge for each agent shows only the logos, so its name keeps room.
+    private func signInLabel(_ provider: ConversationProvider, waiting: Bool, compact: Bool = false) -> some View {
         HStack(spacing: 4) {
-            if waiting { ProgressView().controlSize(.mini) } else { Image(systemName: "person.badge.key") }
-            Text(waiting ? "Waiting for sign-in…" : text).lineLimit(1)
+            if waiting {
+                ProgressView().controlSize(.mini)
+            } else {
+                AtomIcon(props: IconProps(asset: SkillsPageModel.logoAsset(provider), size: 10, color: "orange"), common: AtomCommon(width: 10, height: 10))
+            }
+            if !compact {
+                Text(waiting ? "Waiting…" : "Sign in").lineLimit(1)
+            }
         }
         .font(.caption2.weight(.medium))
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .foregroundStyle(.orange)
         .background(Color.orange.opacity(0.12), in: Capsule())
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(waiting ? "Waiting for sign-in…" : "Sign in for \(provider.displayName)")
     }
 
     private func emptyState(_ text: String, identifier: String) -> some View {
@@ -401,6 +413,10 @@ struct McpServersSectionView: View {
         return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "trailing", width: 340, inset: 12, hover: true), onDismiss: {}) {
             HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
+                    // Who starts the server leads its name, like a skill's row.
+                    if let mark = SkillsPageModel.providerMark(Set(server.providers), testID: "mcp-provider-\(key)") {
+                        ProviderMarkIcon(mark: mark)
+                    }
                     Text(server.name)
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
@@ -409,13 +425,6 @@ struct McpServersSectionView: View {
                         flag("Conflict", identifier: "mcp-conflict-\(key)")
                     } else if server.issue != nil {
                         flag("Problem", identifier: "mcp-problem-\(key)")
-                    }
-                    ForEach([ConversationProvider.claude, .codex]) { provider in
-                        if server.providers.contains(provider) {
-                            badge(provider.displayName, systemImage: "checkmark", color: .green)
-                                .fixedSize()
-                                .accessibilityIdentifier("mcp-provider-\(key)-\(provider.rawValue)")
-                        }
                     }
                     Spacer(minLength: 8)
                 }
@@ -527,7 +536,7 @@ struct McpServersSectionView: View {
                 ForEach(providers) { provider in
                     let waiting = signingIn.contains("\(server.name)|\(provider.rawValue)")
                     Button { signIn(name: server.name, provider: provider) } label: {
-                        signInLabel("Sign in for \(provider.displayName)", waiting: waiting)
+                        signInLabel(provider, waiting: waiting, compact: providers.count > 1)
                     }
                     .buttonStyle(.plain)
                     .disabled(waiting)

@@ -13,8 +13,8 @@ enum SkillsPageFocus: Equatable {
 /// skills, instruction files and servers, the user's global ones, and the ones
 /// that came with each provider. Every skill, rule or server a user adds works with both Claude and Codex,
 /// so the page shows where it lives and who can use it rather than which
-/// provider owns it. The header, the tabs and the skill gallery are composed of
-/// plugin atoms (`SkillsPageHeader`, `SkillsPageTabs` and `SkillGalleryView`); this view owns their
+/// provider owns it. The header (with the tabs) and the skill gallery are composed of
+/// plugin atoms (`SkillsPageHeader` and `SkillGalleryView`); this view owns their
 /// state, the confirmations and the editor panels, and the Rules and MCP lists.
 struct SkillsPageView: View {
     enum Kind: String, CaseIterable, Identifiable {
@@ -51,8 +51,10 @@ struct SkillsPageView: View {
     @State private var panel: Panel?
     @State private var pendingDelete: [SkillRecord] = []
     @State private var pendingLink: SkillRecord?
-    /// A toggle shows its new state at once; the daemon's answer settles it.
+    /// Enable or Disable shows its new state at once; the daemon's answer settles it.
     @State private var enabledOverrides: [String: Bool] = [:]
+    /// Groups showing only their header. Built-in starts so: users rarely need it.
+    @State private var collapsedGroups: Set<String> = ["builtin"]
     @State private var isSelecting = false
     @State private var selection = Set<String>()
     @State private var isFixing = false
@@ -91,7 +93,6 @@ struct SkillsPageView: View {
         VStack(alignment: .leading, spacing: 0) {
             SkillsPageHeader(model: model, actions: actions)
             Divider()
-            SkillsPageTabs(model: model, actions: actions)
             switch kind {
             case .skills: skillsBody
             case .rules: RulesSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingRulePanel, onFixTask: onFixTask)
@@ -110,7 +111,7 @@ struct SkillsPageView: View {
     private var model: SkillsPageModel {
         SkillsPageModel(
             catalog: catalog, kind: kind.rawValue, scrollTo: scrollTarget, scrollRequest: scrollRequest, search: search,
-            selection: isSelecting ? selection : nil, enabledOverrides: enabledOverrides,
+            selection: isSelecting ? selection : nil, enabledOverrides: enabledOverrides, collapsedGroups: collapsedGroups,
             isLoadingBuiltins: isLoading, isFixing: isFixing, error: errorMessage,
             panelOpen: isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel
         )
@@ -129,8 +130,11 @@ struct SkillsPageView: View {
             press: { withSkill($0, click) },
             longPress: { withSkill($0, beginSelection) },
             fix: { withSkill($0) { fix([$0]) } },
-            toggle: { withSkill($0) { setEnabled($0, !isEnabled($0)) } },
-            use: { withSkill($0, onUse) },
+            toggleGroup: { group in
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if collapsedGroups.remove(group) == nil { collapsedGroups.insert(group) }
+                }
+            },
             menu: { id, item in withSkill(id) { menu($0, item) } }
         )
     }
@@ -234,8 +238,9 @@ struct SkillsPageView: View {
         }
     }
 
-    /// Scrolls the list to a group: repo, global or builtin.
+    /// Scrolls the list to a group: repo, global or builtin, expanding it.
     private func jump(_ group: String) {
+        collapsedGroups.remove(group)
         scrollTarget = group
         scrollRequest += 1
     }
@@ -314,6 +319,9 @@ struct SkillsPageView: View {
     /// Runs the actions menu's item, by its id (see `SkillsPageModel.MenuItem`).
     private func menu(_ skill: SkillRecord, _ item: String) {
         switch item {
+        case "use":
+            if isEnabled(skill), !skill.providers.isEmpty { onUse(skill) }
+        case "toggle": setEnabled(skill, !isEnabled(skill))
         case "edit": openEditor(skill)
         case "reveal":
             if let folder = skill.folderPath { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)]) }
@@ -527,8 +535,8 @@ private struct NewSkillPanel: View {
         SkillPanel(identifier: "new-skill-panel") {
             VStack(alignment: .leading, spacing: 12) {
                 Text("New Skill").font(.headline)
-                // The controls get their own row so the panel fits the narrow modal.
-                HStack {
+                // Save to and the Private switch each get their own row so the panel fits the narrow modal.
+                VStack(alignment: .leading, spacing: 8) {
                     Picker("Save to", selection: $destination) {
                         Text("Global (~/.agents/skills)").tag("global")
                         ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }
@@ -547,6 +555,7 @@ private struct NewSkillPanel: View {
                      ? "Private: Playhouse stores the skill itself and writes nothing into the repository or its worktrees. Claude and Codex sessions on this repository use it like any other skill. The name uses lowercase letters, digits, and hyphens."
                      : "Saved in the open Agent Skills layout (.agents/skills). Playhouse shares it with both Claude and Codex. The name uses lowercase letters, digits, and hyphens.")
                     .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("new-skill-destination-note")
                 TextField("skill-name", text: $manifest.name)
                     .textFieldStyle(.roundedBorder)

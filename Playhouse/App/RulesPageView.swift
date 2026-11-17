@@ -269,6 +269,10 @@ struct RulesSectionView: View {
         return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "trailing", width: 320, inset: 12, hover: true), onDismiss: {}) {
             HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
+                    // Who follows the rule leads its name, like a skill's row.
+                    if let mark = SkillsPageModel.providerMark(Set(rule.providers), testID: "rule-provider-\(key)") {
+                        ProviderMarkIcon(mark: mark)
+                    }
                     Text(rule.name)
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
@@ -282,7 +286,6 @@ struct RulesSectionView: View {
                             .accessibilityLabel("Problem")
                             .accessibilityIdentifier("rule-problem-\(key)")
                     }
-                    providerBadges(rule.providers, key: key)
                     Spacer(minLength: 8)
                 }
                 .overlay {
@@ -316,17 +319,6 @@ struct RulesSectionView: View {
             .accessibilityIdentifier("rule-row-\(key)")
         } content: {
             hint(rule, key: key)
-        }
-    }
-
-    /// The agents that read a rule, beside its name on the row.
-    private func providerBadges(_ providers: [ConversationProvider], key: String) -> some View {
-        ForEach([ConversationProvider.claude, .codex]) { provider in
-            if providers.contains(provider) {
-                badge(provider.displayName, systemImage: "checkmark", color: .green)
-                    .fixedSize()
-                    .accessibilityIdentifier("rule-provider-\(key)-\(provider.rawValue)")
-            }
         }
     }
 

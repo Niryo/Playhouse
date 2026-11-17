@@ -110,7 +110,7 @@ function Primary(props) {
 function Toolbar(props) {
   var model = props.model, on = props.on;
   return h(Stack, { axis: "h", spacing: 12 },
-    h(SkillsButton, { testID: model.prefix + "open-skills-button", onPress: on.openSkills }),
+    model.skills ? h(SkillsButton, { testID: model.prefix + "open-skills-button", onPress: on.openSkills }) : null,
     h(ModeMenu, { model: model, on: on }),
     model.startImplementing != null ? h(StartImplementing, { model: model, on: on }) : null,
     h(Spacer, { minLength: 0 }),

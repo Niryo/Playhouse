@@ -669,26 +669,42 @@ extension PlayhouseUITests {
     }
     func openSkillsPage(file: StaticString = #filePath, line: UInt = #line) {
         let button = element("open-skills-button")
-        XCTAssertTrue(waitUntil({ button.exists && button.isHittable }, timeout: 15), "The composer should show the Skills button.", file: file, line: line)
+        XCTAssertTrue(waitUntil({ button.exists && button.isHittable }, timeout: 15), "The task sidebar (or a standalone chat's composer) should show the Skills button.", file: file, line: line)
         button.click()
         XCTAssertTrue(element("skills-page").waitToExist(timeout: 10), "The Skills button should open the Skills page.", file: file, line: line)
         XCTAssertFalse(element("skills-loading").waitToExist(timeout: 0.5) && !waitUntil({ !self.element("skills-loading").exists }, timeout: 10),
                        "The Skills page should finish loading.", file: file, line: line)
     }
-    /// Checks the Skills modal's layout around one list: the header holds only
-    /// the title and close button, the Skills | Rules | MCP tabs sit centered
-    /// under it, then the list's search fills a row beside its New button and
-    /// the anchors sit on their own row below.
+    /// Checks the Skills modal's layout around one list: the header holds the
+    /// page's icon, the Skills | Rules | MCP tabs and the close button, then the
+    /// list's search fills a row beside its New button and the anchors sit on
+    /// their own row below.
     func assertSkillsModalLayout(search: String, newButton: String, anchors: String, file: StaticString = #filePath, line: UInt = #line) {
-        let page = element("skills-page").frame, title = element("skills-title").frame, close = element("skills-back-button").frame
+        let title = element("skills-title").frame, close = element("skills-back-button").frame
         let tabs = element("skills-kind-picker").frame, field = element(search).frame, new = element(newButton).frame, jump = element(anchors).frame
-        XCTAssertEqual(close.midY, title.midY, accuracy: 4, "The close button sits level with the title in the header.", file: file, line: line)
-        XCTAssertGreaterThanOrEqual(tabs.minY, title.maxY, "The tabs sit in the body, below the header's title.", file: file, line: line)
-        XCTAssertEqual(tabs.midX, page.midX, accuracy: 2, "The tabs are centered in the modal.", file: file, line: line)
-        XCTAssertGreaterThanOrEqual(field.minY, tabs.maxY, "The search row sits below the tabs.", file: file, line: line)
+        XCTAssertEqual(close.midY, title.midY, accuracy: 4, "The close button sits level with the icon in the header.", file: file, line: line)
+        XCTAssertEqual(tabs.midY, title.midY, accuracy: 4, "The tabs sit in the header, beside its icon.", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(tabs.minX, title.maxX, "The tabs follow the header's icon.", file: file, line: line)
+        XCTAssertLessThanOrEqual(tabs.maxX, close.minX, "The close button stays at the header's end.", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(field.minY, tabs.maxY, "The search row sits below the header.", file: file, line: line)
         XCTAssertEqual(field.midY, new.midY, accuracy: 8, "The search and its New button share one row.", file: file, line: line)
-        XCTAssertGreaterThan(field.width, 250, "The search fills its row.", file: file, line: line)
+        // The card is a narrow column, so the search fills what its New button leaves of the row.
+        let page = element("skills-page").frame
+        XCTAssertGreaterThanOrEqual(title.minX, page.minX, "The header's icon stays inside the card.", file: file, line: line)
+        XCTAssertLessThanOrEqual(close.maxX, page.maxX + 1, "The close button stays inside the card.", file: file, line: line)
+        XCTAssertLessThan(field.minX - page.minX, 60, "The search starts at its row's start.", file: file, line: line)
+        XCTAssertLessThan(new.minX - field.maxX, 24, "The search reaches its New button.", file: file, line: line)
+        XCTAssertGreaterThan(field.width, page.width * 0.4, "The search fills its row.", file: file, line: line)
+        XCTAssertLessThanOrEqual(new.maxX, page.maxX, "The New button fits inside the card.", file: file, line: line)
         XCTAssertGreaterThanOrEqual(jump.minY, field.maxY, "The anchors sit on their own row below the search.", file: file, line: line)
+    }
+    /// A row's controls fit the narrow card: the row stays inside it and its name keeps room to show.
+    func assertRowFitsSkillsModal(_ row: String, name: String, file: StaticString = #filePath, line: UInt = #line) {
+        let page = element("skills-page").frame, rowFrame = element(row).frame, nameFrame = element(name).frame
+        XCTAssertGreaterThanOrEqual(rowFrame.minX, page.minX - 1, "\(row) starts inside the card.", file: file, line: line)
+        XCTAssertLessThanOrEqual(rowFrame.maxX, page.maxX + 1, "\(row) ends inside the card.", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(nameFrame.minX, rowFrame.minX - 1, "\(name) shows inside its row.", file: file, line: line)
+        XCTAssertGreaterThan(nameFrame.width, 40, "\(name) keeps room to show in the narrow card.", file: file, line: line)
     }
     func selectSkillsTab(_ label: String, picker identifier: String = "skills-tab-picker", file: StaticString = #filePath, line: UInt = #line) {
         let picker = element(identifier)
@@ -750,6 +766,22 @@ extension PlayhouseUITests {
         let hints = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix))
         XCTAssertTrue(waitUntil({ hints.count == 0 }, timeout: 5), "Leaving the list closes its hints.", file: file, line: line)
     }
+    /// A skill that is on labels its text with just its name; one that is off adds ", off" (and is grayed out).
+    func isSkillOn(_ name: String) -> Bool {
+        element("skill-text-\(name)").label == name
+    }
+    /// A skill that is off labels its text "<name>, off"; a missing row is neither on nor off.
+    func isSkillOff(_ name: String) -> Bool {
+        element("skill-text-\(name)").label == "\(name), off"
+    }
+    /// Chooses Disable, or Enable for a skill that is off, from the skill's actions menu.
+    func toggleSkill(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
+        clickSkillMenuItem(skill: name, item: "skill-toggle-\(name)", title: isSkillOn(name) ? "Disable" : "Enable", file: file, line: line)
+    }
+    /// Chooses Use from the skill's actions menu.
+    func useSkill(_ name: String, file: StaticString = #filePath, line: UInt = #line) {
+        clickSkillMenuItem(skill: name, item: "skill-use-\(name)", title: "Use", file: file, line: line)
+    }
     @discardableResult
     func revealSkillHint(_ name: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         revealHint("skill-hint-\(name)", row: "skill-row-\(name)", file: file, line: line)
@@ -794,6 +826,14 @@ extension PlayhouseUITests {
         }
         XCTFail("\(identifier) is not a provider badge.", file: file, line: line)
         return element(identifier)
+    }
+    /// The agents a rule's or MCP server's single provider icon names (`<base>-both`,
+    /// `-claude` or `-codex` on its row): both, one, or none when the row shows no icon.
+    func rowProviders(_ base: String, file: StaticString = #filePath, line: UInt = #line) -> Set<String> {
+        if rowBadge("\(base)-both", file: file, line: line).exists { return ["claude", "codex"] }
+        if rowBadge("\(base)-claude", file: file, line: line).exists { return ["claude"] }
+        if rowBadge("\(base)-codex", file: file, line: line).exists { return ["codex"] }
+        return []
     }
     /// Whether a section shows in a list: its heading at the list's top, or the
     /// whole section in view when the list ends before it can reach the top.
@@ -918,6 +958,9 @@ extension PlayhouseUITests {
     }
     func clickMcpMenuItem(server key: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         let actions = element("mcp-actions-\(key)")
+        // Another row's hint, opened where the pointer last rested, can cover this row's
+        // menu in the narrow card; leaving the list closes it.
+        if actions.exists, !actions.isHittable { element("skills-title").hover() }
         XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("mcp-editor-panel").exists }, timeout: 10),
                       "\(key) should have an actions menu.", file: file, line: line)
         actions.click()

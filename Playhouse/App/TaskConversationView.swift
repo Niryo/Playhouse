@@ -253,6 +253,9 @@ struct TaskConversationView: View {
     @State var openConversationPlugin: PluginRecord?
     @State var isStartingPluginTask = false
     var isTaskSidebarShownCollapsed: Bool { isTaskSidebarCollapsed && !isPluginAddModeOn }
+    /// A real task shows its sidebar (Changes, terminal and Skills buttons); a standalone
+    /// chat or a plugin's authoring chat shows only the conversation.
+    var hasTaskSidebar: Bool { !task.isStandaloneChat && task.authoringPluginID == nil }
     /// The open diff is rechecked one refresh at a time; a refresh asked for meanwhile runs once after.
     @State var isRefreshingOpenDiff = false
     @State var openDiffNeedsRefresh = false
@@ -608,7 +611,7 @@ struct TaskConversationView: View {
 
     var body: some View {
         Group {
-            if task.isStandaloneChat || task.authoringPluginID != nil {
+            if !hasTaskSidebar {
                 // The standalone chat sidebar reuses only the conversation transcript/composer,
                 // not the repo-specific "Changes" sidebar a real task's worktree needs.
                 conversationPanel

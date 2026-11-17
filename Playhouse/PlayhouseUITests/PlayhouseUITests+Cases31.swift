@@ -271,7 +271,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: section overhead", "The native modal keeps its own state.")
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
     }
-    // case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks and each task card's bottom row shows an Add here icon, which Close removes; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
+    // case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks and each task card's bottom row shows an Add here icon, which Close removes; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon before the sidebar's Skills and Terminal buttons and an Add here icon at the start of the composer's toolbar, which has no Skills button in a task; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
     func test_plugin_add_mode_toggles_and_shows_placeholders() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Plugin mode task", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
@@ -327,10 +327,12 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("plugin-mode-banner").exists)
         let terminal = element("toggle-terminal-button")
         XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, terminal.frame.minX + 1, "The toolbar placeholder sits beside the Terminal button.")
+        XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, element("open-skills-button").frame.minX + 1, "It sits before the Skills button too.")
         XCTAssertLessThan(abs(toolbarPlaceholder.frame.midY - terminal.frame.midY), 4, "It shares the Terminal button's row.")
-        let skills = element("open-skills-button")
-        XCTAssertGreaterThanOrEqual(composerPlaceholder.frame.minX, skills.frame.maxX - 1, "The composer placeholder sits beside the Skills button.")
-        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - skills.frame.midY), 4, "It shares the Skills button's row.")
+        // A task keeps its Skills button in the sidebar, so the composer's toolbar starts with the placeholder.
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertLessThanOrEqual(composerPlaceholder.frame.maxX, modeMenu.frame.minX + 1, "The composer placeholder leads the composer's toolbar, before the mode menu.")
+        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - modeMenu.frame.midY), 4, "It shares the mode menu's row.")
         XCTAssertGreaterThan(sidebarPlaceholder.frame.minY, element("hide-task-sidebar-button").frame.maxY, "The sidebar placeholder is a section below the header.")
         XCTAssertLessThan(sidebarPlaceholder.frame.maxY, terminal.frame.minY, "It sits above the command row.")
         let changesTitle = element("workspace-changes-title")
@@ -1273,13 +1275,14 @@ extension PlayhouseUITests {
         openTask(named: "Plugin context task")
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10), "The task's composer is back.")
 
-        // A popover plugin beside the composer's Skills button sees the draft and the selection.
+        // A popover plugin at the start of the composer's toolbar sees the draft and the selection.
         composer.click()
         composer.typeText("make this loud")
         for _ in 0..<4 { composer.typeKey(.leftArrow, modifierFlags: [.shift]) }
         let composerEntry = element("plugin-entry-context-composer")
         XCTAssertTrue(composerEntry.waitToExist(timeout: 5))
-        XCTAssertGreaterThanOrEqual(composerEntry.frame.minX, element("open-skills-button").frame.maxX - 1, "Its button sits beside the Skills button.")
+        XCTAssertLessThanOrEqual(composerEntry.frame.maxX, element("conversation-mode-menu").frame.minX + 1, "Its button leads the composer's toolbar.")
+        XCTAssertEqual(abs(element("open-skills-button").frame.midY - element("toggle-terminal-button").frame.midY), 0, accuracy: 2, "A task's only Skills button is the sidebar's, beside the terminal button.")
         composerEntry.click()
         let popover = app.popovers.descendants(matching: .any)["plugin-surface-context-composer"]
         XCTAssertTrue(popover.waitToExist(timeout: 10), "The plugin opens in a popover.")

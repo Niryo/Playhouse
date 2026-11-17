@@ -69,6 +69,7 @@ extension TaskConversationView {
         HStack(spacing: 4) {
             Spacer(minLength: 0)
             PluginSlot(placement: .conversationToolbar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
+            sidebarSkillsButton
             Button {
                 setTerminalPresented(!isTerminalPresented)
             } label: {
@@ -96,6 +97,26 @@ extension TaskConversationView {
         .padding(.vertical, 6)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("sidebar-command-row")
+    }
+
+    /// Opens the Skills, Rules & MCP page; beside the terminal button, styled like it.
+    var sidebarSkillsButton: some View {
+        Button { openSkillsPage(focus: nil) } label: {
+            Image(systemName: "sparkles")
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 26, height: 24)
+                .foregroundStyle(isShowingSkills ? WorkspaceTheme.accent : Color.secondary)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isShowingSkills ? WorkspaceTheme.accent.opacity(0.14) : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .nativeHelp("Skills, Rules & MCP")
+        .accessibilityLabel("Skills")
+        .accessibilityIdentifier("open-skills-button")
     }
 
     @ViewBuilder

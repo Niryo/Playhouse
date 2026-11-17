@@ -516,7 +516,7 @@ private struct NativeTokenStatsDemo: View {
 }
 
 /// The JavaScript Skills page above the native one (each as wide as the
-/// modal, 480 points, and 520 tall), from the same
+/// modal, 336 points, and 520 tall), from the same
 /// sample model, each opened by the composer's Skills button. Each side keeps its own page state; the native page uses a
 /// "native-" prefix so the two never share accessibility identifiers.
 private struct SkillsPageComparison: View {
@@ -568,6 +568,7 @@ private struct NativeSkillsPageDemo: View {
     @State private var search: String?
     @State private var selection: [String]?
     @State private var switched: [String: Bool] = [:]
+    @State private var collapsed: [String: Bool] = [:]
     @State private var lastAction = "none"
 
     /// The demo's state applied to the sample, as SkillsPageView applies it to the catalog.
@@ -583,6 +584,7 @@ private struct NativeSkillsPageDemo: View {
         model.selectionCount = SkillsPageModel.selectionCount(chosen.count)
         model.canFixSelection = chosen.contains(where: \.fixable)
         for group in model.groups.indices {
+            if let isCollapsed = collapsed[model.groups[group].value] { model.groups[group].collapsed = isCollapsed }
             for section in model.groups[group].sections.indices {
                 for row in model.groups[group].sections[section].rows.indices {
                     let id = model.groups[group].sections[section].rows[row].id
@@ -601,7 +603,7 @@ private struct NativeSkillsPageDemo: View {
         SkillsPageActions(
             back: { open = false; lastAction = "back" },
             selectKind: { kind = $0; lastAction = "kind \($0)" },
-            jump: { scrollTo = $0; scrollRequest += 1; lastAction = "jump \($0)" },
+            jump: { collapsed[$0] = false; scrollTo = $0; scrollRequest += 1; lastAction = "jump \($0)" },
             search: { search = $0; lastAction = "search \($0)" },
             newSkill: { lastAction = "new skill" },
             fixSelected: { lastAction = "fix \(selection?.count ?? 0) selected" },
@@ -625,13 +627,20 @@ private struct NativeSkillsPageDemo: View {
                 lastAction = "select \(row.name)"
             },
             fix: { id in lastAction = "fix \(shownRow(id)?.name ?? id)" },
-            toggle: { id in
-                guard let row = shownRow(id) else { return }
-                switched[id] = !row.enabled
-                lastAction = "toggle \(row.name) \(row.enabled ? "off" : "on")"
+            toggleGroup: { value in
+                guard let group = model.groups.first(where: { $0.value == value }) else { return }
+                collapsed[value] = !group.collapsed
+                lastAction = "\(group.collapsed ? "expand" : "collapse") \(value)"
             },
-            use: { id in lastAction = "use \(shownRow(id)?.name ?? id)" },
-            menu: { id, item in lastAction = "menu \(shownRow(id)?.name ?? id) \(item)" }
+            menu: { id, item in
+                guard let row = shownRow(id) else { return }
+                if item == "toggle" {
+                    switched[id] = !row.enabled
+                    lastAction = "toggle \(row.name) \(row.enabled ? "off" : "on")"
+                } else {
+                    lastAction = item == "use" ? "use \(row.name)" : "menu \(row.name) \(item)"
+                }
+            }
         )
     }
 
@@ -639,7 +648,7 @@ private struct NativeSkillsPageDemo: View {
         let model = model
         AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
-                AtomText(props: TextProps(text: "Composer button", size: 11, color: "secondary"))
+                AtomText(props: TextProps(text: "Skills button", size: 11, color: "secondary"))
                 SkillsButton(testID: "native-open-skills-button") {
                     open = true
                     lastAction = "open"
@@ -647,10 +656,9 @@ private struct NativeSkillsPageDemo: View {
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
             if open {
-                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14), common: AtomCommon(testID: "native-skills-page", width: 480, height: 520, padding: 0)) {
+                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14), common: AtomCommon(testID: "native-skills-page", width: TaskConversationView.skillsPageWidth, height: 520, padding: 0)) {
                     SkillsPageHeader(model: model, actions: actions)
                     AtomDivider()
-                    SkillsPageTabs(model: model, actions: actions)
                     if model.kind == "skills" {
                         SkillGalleryView(model: model, actions: actions)
                     } else {

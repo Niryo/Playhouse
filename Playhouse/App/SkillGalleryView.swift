@@ -12,9 +12,9 @@ struct SkillsPageModel: Codable, Equatable {
         var label: String
     }
 
-    /// A capsule on a skill's row (a provider that can use it) or in its hint
-    /// (Private or Linked, a private skill's namespaced command, or the row's flag:
-    /// Conflict, Shadowed or Invalid, which shows as its icon beside the name). `testID` is unprefixed.
+    /// A capsule in a skill's hint (Private or Linked, a private skill's
+    /// namespaced command, or the row's flag: Conflict, Shadowed or Invalid,
+    /// which shows as its icon beside the name). `testID` is unprefixed.
     struct Badge: Codable, Equatable {
         var text: String
         var icon: String
@@ -22,13 +22,26 @@ struct SkillsPageModel: Codable, Equatable {
         var testID: String
     }
 
+    /// The small icon beside a skill's name that says who can use it: Claude's
+    /// or Codex's logo (`asset`) for a skill only one of them can use, or a
+    /// green check (`icon`) for one both can. `testID` is unprefixed and ends
+    /// in claude, codex or both.
+    struct ProviderMark: Codable, Equatable {
+        var label: String
+        var icon: String?
+        var asset: String?
+        var color: String
+        var testID: String
+    }
+
     /// One action in a skill's menu; `testID` is unprefixed.
     struct MenuItem: Codable, Equatable {
-        /// edit, reveal, move-global, move-repo:<root path>, move-private:<root path>, unlink, link or delete.
+        /// use, toggle, edit, reveal, move-global, move-repo:<root path>, move-private:<root path>, unlink, link or delete.
         var id: String
         var title: String
         var help: String
         var destructive: Bool?
+        var disabled: Bool?
         var testID: String
     }
 
@@ -36,8 +49,8 @@ struct SkillsPageModel: Codable, Equatable {
         /// The skill's id, which every row action names.
         var id: String
         var name: String
-        /// The providers that can use it, beside the name on the row.
-        var providers: [Badge]
+        /// Who can use it, beside the name on the row; nil when no provider can.
+        var provider: ProviderMark?
         /// What the hint lists under the description.
         var badges: [Badge]
         /// Conflict, Shadowed or Invalid, marked beside the name.
@@ -53,10 +66,12 @@ struct SkillsPageModel: Codable, Equatable {
         var opensOnClick: Bool
         /// A conflict or an invalid SKILL.md that an agent can repair.
         var fixable: Bool
+        /// Off, it shows dimmed; its controls still respond.
         var enabled: Bool
         /// Some provider can use it, so Use can insert it.
         var usable: Bool
-        /// The menu's groups, a separator between each.
+        /// The menu's groups after its Use and Enable/Disable group
+        /// (`SkillsPageModel.leadingMenu`), a separator between each.
         var menu: [[MenuItem]]
     }
 
@@ -83,11 +98,14 @@ struct SkillsPageModel: Codable, Equatable {
         var intro: String
         /// Claude Code's built-ins are still being read.
         var loading: Bool
+        /// Only its header shows (Built-in starts so); a search shows every group's matches.
+        var collapsed: Bool
         var empty: Empty?
         var sections: [Section]
     }
 
     var prefix: String
+    /// The page's name, the header icon's label; the tabs take the title's place.
     var title: String
     var kinds: [Option]
     /// skills, rules or mcp.
@@ -122,10 +140,10 @@ extension SkillsPageModel {
     ]
 
     /// The page's model for a catalog (nil while its first read runs), with
-    /// the search filter and switch overrides already applied.
+    /// the search filter, enable overrides and collapsed groups already applied.
     init(
         catalog: SkillCatalog?, kind: String, scrollTo: String?, scrollRequest: Int, search: String, selection: Set<String>?,
-        enabledOverrides: [String: Bool], isLoadingBuiltins: Bool, isFixing: Bool, error: String?, panelOpen: Bool
+        enabledOverrides: [String: Bool], collapsedGroups: Set<String>, isLoadingBuiltins: Bool, isFixing: Bool, error: String?, panelOpen: Bool
     ) {
         prefix = ""
         title = "Skills, Rules & MCP"
@@ -140,12 +158,13 @@ extension SkillsPageModel {
         canFixSelection = selected.contains(where: Self.isFixable)
         self.isFixing = isFixing
         self.error = error
-        hint = "Hover a skill for its details, click it to open it, or press and hold one to select several. Turning a skill on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts."
+        hint = "Hover a skill for its details, click it to open it, or press and hold one to select several. Use a skill or turn it on or off from its menu; the change reaches Claude on its next turn, and a Codex conversation the next time its thread starts."
         selectingHint = "Click skills to select them. Built-in skills can't be selected."
         loaded = catalog != nil
         self.panelOpen = panelOpen
         let repositories = catalog?.repositories ?? []
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        func isCollapsed(_ group: String) -> Bool { query.isEmpty && collapsedGroups.contains(group) }
         func rows(_ skills: [SkillRecord]) -> [Row] {
             skills
                 .filter { query.isEmpty || $0.name.lowercased().contains(query) || $0.description.lowercased().contains(query) }
@@ -165,21 +184,21 @@ extension SkillsPageModel {
             Group(
                 value: "repo", label: "Repo", count: sections.reduce(0) { $0 + $1.rows.count },
                 intro: "Skills in the task's repositories. They live in .agents/skills or .claude/skills, and Playhouse shares each one with both Claude and Codex. A Private skill belongs to its repository but is stored by Playhouse, never in the repository, and reaches only this repository's Claude and Codex sessions.",
-                loading: false,
+                loading: false, collapsed: isCollapsed("repo"),
                 empty: repositories.isEmpty ? Empty(key: "repo", text: "This task has no repositories.") : nil,
                 sections: sections
             ),
             Group(
                 value: "global", label: "Global", count: global.count,
                 intro: "Your skills for every repository, from ~/.agents/skills and Claude's and Codex's own skill folders.",
-                loading: false,
+                loading: false, collapsed: isCollapsed("global"),
                 empty: global.isEmpty ? Empty(key: "global", text: "No global skills.") : nil,
                 sections: [Section(rows: global)]
             ),
             Group(
                 value: "builtin", label: "Built-in", count: builtin.count,
                 intro: "Skills and commands that come with each provider. Each one works only with the provider it ships with.",
-                loading: isLoadingBuiltins,
+                loading: isLoadingBuiltins, collapsed: isCollapsed("builtin"),
                 empty: builtin.isEmpty && !isLoadingBuiltins ? Empty(key: "builtin", text: "No built-in skills found.") : nil,
                 sections: [Section(rows: builtin)]
             ),
@@ -194,11 +213,47 @@ extension SkillsPageModel {
         skill.editable && (skill.conflict || skill.issue != nil)
     }
 
+    /// The asset of a provider's logo, shared by the row marks and the MCP sign-in badge.
+    static func logoAsset(_ provider: ConversationProvider) -> String {
+        switch provider {
+        case .claude: "ClaudeLogo"
+        case .codex: "CodexLogo"
+        }
+    }
+
+    /// Who can use a skill, rule or MCP server: one provider's logo, or a green
+    /// check for both. `testID` is `<base>-claude`, `<base>-codex` or `<base>-both`.
+    static func providerMark(_ providers: Set<ConversationProvider>, testID base: String) -> ProviderMark? {
+        switch (providers.contains(.claude), providers.contains(.codex)) {
+        case (true, true):
+            ProviderMark(label: "Claude and Codex", icon: "checkmark.circle.fill", color: "green", testID: "\(base)-both")
+        case (true, false):
+            ProviderMark(label: "Claude only", asset: logoAsset(.claude), color: "#D97757", testID: "\(base)-claude")
+        case (false, true):
+            ProviderMark(label: "Codex only", asset: logoAsset(.codex), color: "primary", testID: "\(base)-codex")
+        case (false, false):
+            nil
+        }
+    }
+
+    /// The menu's first group, composed from the row's current state so a
+    /// changed `enabled` updates it: Use, then Enable or Disable.
+    static func leadingMenu(_ row: Row) -> [MenuItem] {
+        [
+            MenuItem(
+                id: "use", title: "Use", help: "Insert /\(row.name) into the message",
+                disabled: !row.enabled || !row.usable, testID: "skill-use-\(row.name)"
+            ),
+            MenuItem(
+                id: "toggle", title: row.enabled ? "Disable" : "Enable",
+                help: row.enabled ? "Turn the skill off in Playhouse sessions" : "Turn the skill on in Playhouse sessions",
+                testID: "skill-toggle-\(row.name)"
+            ),
+        ]
+    }
+
     private static func row(_ skill: SkillRecord, repositories: [SkillRepositorySection], enabled: Bool) -> Row {
         let name = skill.name
-        let providers = ConversationProvider.allCases.filter(skill.providers.contains).map { provider in
-            Badge(text: provider.displayName, icon: "checkmark", color: "green", testID: "skill-provider-\(name)-\(provider.rawValue)")
-        }
         var badges: [Badge] = []
         let isPrivate = skill.scope == .privateRepo
         var command: Badge?
@@ -219,7 +274,7 @@ extension SkillsPageModel {
             nil
         }
         return Row(
-            id: skill.id, name: name, providers: providers, badges: badges, flag: flag, command: command,
+            id: skill.id, name: name, provider: providerMark(Set(skill.providers), testID: "skill-provider-\(name)"), badges: badges, flag: flag, command: command,
             description: skill.description.isEmpty ? nil : skill.description,
             issue: skill.issue,
             location: isPrivate
@@ -290,6 +345,19 @@ extension SkillsPageModel {
     }
 }
 
+/// A provider mark as the small icon that leads a Skills, Rules or MCP row's name.
+struct ProviderMarkIcon: View {
+    let mark: SkillsPageModel.ProviderMark
+    var prefix = ""
+
+    var body: some View {
+        AtomIcon(
+            props: IconProps(name: mark.icon, asset: mark.asset, size: 11, color: mark.color),
+            common: AtomCommon(testID: "\(prefix)\(mark.testID)", label: mark.label, help: mark.label, width: 12, height: 12)
+        )
+    }
+}
+
 /// What the page's controls do. Row actions name the skill by its id; `menu`
 /// also names the chosen item's id.
 struct SkillsPageActions {
@@ -305,12 +373,14 @@ struct SkillsPageActions {
     var press: (String) -> Void = { _ in }
     var longPress: (String) -> Void = { _ in }
     var fix: (String) -> Void = { _ in }
-    var toggle: (String) -> Void = { _ in }
-    var use: (String) -> Void = { _ in }
+    /// Collapses or expands a group (repo, global or builtin).
+    var toggleGroup: (String) -> Void = { _ in }
+    /// Includes the menu's Use and Enable/Disable (`use`, `toggle`).
     var menu: (String, String) -> Void = { _, _ in }
 }
 
-/// The composer's Skills button, which opens the Skills page.
+/// The Skills button, which opens the Skills page: in a standalone chat's
+/// composer, and in the catalog's demo. A task opens it from its sidebar.
 struct SkillsButton: View {
     let testID: String
     let action: () -> Void
@@ -322,10 +392,10 @@ struct SkillsButton: View {
     }
 }
 
-/// The Skills page's header, composed only of plugin atoms: a standard modal
-/// header with the page's icon and title and the close button. The Skills |
-/// Rules | MCP tabs sit under it (`SkillsPageTabs`), and each list's search,
-/// New button and anchors on their own rows under those.
+/// The Skills page's header, composed only of plugin atoms: the page's icon
+/// (named by its title), the Skills | Rules | MCP tabs in the title's place,
+/// and the close button. Each list's search, New button and anchors sit on
+/// their own rows under it.
 struct SkillsPageHeader: View {
     let model: SkillsPageModel
     var actions = SkillsPageActions()
@@ -333,11 +403,18 @@ struct SkillsPageHeader: View {
     private var prefix: String { model.prefix }
 
     var body: some View {
-        AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(paddingX: 20, paddingY: 14)) {
-            AtomStack(props: StackProps(fill: "accent", fillOpacity: 0.14, cornerRadius: 7), common: AtomCommon(width: 26, height: 26)) {
+        AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(paddingX: 20, paddingY: 12)) {
+            AtomStack(
+                props: StackProps(fill: "accent", fillOpacity: 0.14, cornerRadius: 7, summary: true),
+                common: AtomCommon(testID: "\(prefix)skills-title", label: model.title, help: model.title, width: 26, height: 26)
+            ) {
                 AtomIcon(props: IconProps(name: "sparkles", size: 13, weight: "semibold", color: "accent"))
             }
-            AtomText(props: TextProps(text: model.title, size: 15, weight: "semibold"), common: AtomCommon(testID: "\(prefix)skills-title"))
+            AtomSegmented(
+                props: SegmentedProps(options: model.kinds.map { .init(value: $0.value, label: $0.label) }, selected: model.kind, disabled: model.selection != nil || model.panelOpen),
+                common: AtomCommon(testID: "\(prefix)skills-kind-picker", label: "Show", help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools"),
+                onChange: actions.selectKind
+            )
             AtomSpacer()
             AtomButton(
                 props: ButtonProps(shortcut: model.panelOpen || model.selection != nil ? nil : "cancel"),
@@ -348,25 +425,6 @@ struct SkillsPageHeader: View {
                     AtomIcon(props: IconProps(name: "xmark", size: 9, weight: "bold", color: "secondary"))
                 }
             }
-        }
-    }
-}
-
-/// The Skills page's Skills | Rules | MCP tabs, composed only of plugin atoms:
-/// a segmented control centered at the top of the modal's body.
-struct SkillsPageTabs: View {
-    let model: SkillsPageModel
-    var actions = SkillsPageActions()
-
-    var body: some View {
-        AtomStack(props: StackProps(axis: "h"), common: AtomCommon(paddingX: 20, paddingY: 14)) {
-            AtomSpacer()
-            AtomSegmented(
-                props: SegmentedProps(options: model.kinds.map { .init(value: $0.value, label: $0.label) }, selected: model.kind, disabled: model.selection != nil || model.panelOpen),
-                common: AtomCommon(testID: "\(model.prefix)skills-kind-picker", label: "Show", help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools"),
-                onChange: actions.selectKind
-            )
-            AtomSpacer()
         }
     }
 }
@@ -421,8 +479,9 @@ struct SkillsPageSearchField: View {
 }
 
 /// A section's heading in a list, composed only of plugin atoms: its name in
-/// small capitals, its count, a spinner while it loads, and an info icon whose
-/// help explains the section.
+/// small capitals and its count (with `onToggle`, one button with a chevron
+/// that collapses and expands the section), a spinner while it loads, and an
+/// info icon whose help explains the section.
 struct SkillsPageGroupHeader: View {
     let label: String
     let count: Int
@@ -430,16 +489,40 @@ struct SkillsPageGroupHeader: View {
     var loading = false
     var loadingTestID: String?
     let introTestID: String
+    var collapsed = false
+    var toggleTestID: String?
+    var onToggle: (() -> Void)?
 
     var body: some View {
         AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(paddingX: 4)) {
-            AtomText(props: TextProps(text: label.uppercased(), size: 11, weight: "semibold", color: "secondary", tracking: 0.6))
-            AtomText(props: TextProps(text: String(count), size: 11, color: "tertiary", monospacedDigits: true))
+            if let onToggle {
+                AtomButton(
+                    common: AtomCommon(
+                        testID: toggleTestID, label: label, value: collapsed ? "Collapsed" : "Expanded",
+                        help: collapsed ? "Show \(label)" : "Hide \(label)"
+                    ),
+                    action: onToggle
+                ) {
+                    AtomStack(props: StackProps(axis: "h", spacing: 6)) {
+                        AtomIcon(props: IconProps(name: collapsed ? "chevron.right" : "chevron.down", size: 9, weight: "bold", color: "tertiary"), common: AtomCommon(width: 10))
+                        title
+                    }
+                }
+            } else {
+                title
+            }
             if loading {
                 AtomSpinner(props: SpinnerProps(size: "mini"), common: AtomCommon(testID: loadingTestID))
             }
             AtomSpacer()
             AtomIcon(props: IconProps(name: "info.circle", size: 11, color: "tertiary"), common: AtomCommon(testID: introTestID, label: "About \(label)", help: intro))
+        }
+    }
+
+    private var title: some View {
+        AtomStack(props: StackProps(axis: "h", spacing: 6)) {
+            AtomText(props: TextProps(text: label.uppercased(), size: 11, weight: "semibold", color: "secondary", tracking: 0.6))
+            AtomText(props: TextProps(text: String(count), size: 11, color: "tertiary", monospacedDigits: true))
         }
     }
 }
@@ -457,9 +540,11 @@ struct SkillsPageCard<Content: View>: View {
 
 /// The Skills list under the tabs, composed only of plugin atoms: a row with
 /// the search and New Skill (or the selection's actions), a row with the
-/// sections' anchors, then every section in one scroll view, each skill a
-/// single line with its name, switch, Use button and actions menu whose
-/// details show in a hint while the pointer rests on it.
+/// sections' anchors, then every section in one scroll view (a collapsed one
+/// only its header), each skill a single line with its name, the mark of who
+/// can use it and its actions menu (Use and Enable/Disable among them), dimmed
+/// while it is off, whose details show in a hint left of it while the pointer
+/// rests on it.
 struct SkillGalleryView: View {
     let model: SkillsPageModel
     var actions = SkillsPageActions()
@@ -516,7 +601,7 @@ struct SkillGalleryView: View {
                 common: AtomCommon(testID: "\(prefix)skills-fix-selected", help: "Open a task whose agent fixes the selected conflicting or invalid skills"),
                 action: actions.fixSelected
             ) {
-                AtomLabel(props: LabelProps(text: "Fix with Agent", icon: "wand.and.stars"))
+                AtomLabel(props: LabelProps(text: "Fix", icon: "wand.and.stars"))
             }
             AtomButton(
                 props: ButtonProps(style: "bordered", disabled: model.selection?.isEmpty != false, controlSize: "small", destructive: true),
@@ -559,20 +644,27 @@ struct SkillGalleryView: View {
         ) {
             SkillsPageGroupHeader(
                 label: group.label, count: group.count, intro: group.intro, loading: group.loading,
-                loadingTestID: "\(prefix)skills-\(group.value)-loading", introTestID: "\(prefix)skills-intro-\(group.value)"
+                loadingTestID: "\(prefix)skills-\(group.value)-loading", introTestID: "\(prefix)skills-intro-\(group.value)",
+                collapsed: group.collapsed, toggleTestID: "\(prefix)skills-collapse-\(group.value)",
+                onToggle: { actions.toggleGroup(group.value) }
             )
-            if let empty = group.empty { emptyState(empty) }
-            ForEach(Array(group.sections.enumerated()), id: \.offset) { _, section in
-                if let title = section.title {
-                    AtomText(props: TextProps(text: title, size: 12, weight: "semibold"), common: AtomCommon(testID: "\(prefix)skills-repo-section-\(title)", paddingX: 4))
-                }
-                if let empty = section.empty { emptyState(empty) }
-                if !section.rows.isEmpty {
-                    SkillsPageCard {
-                        ForEach(Array(section.rows.enumerated()), id: \.element.id) { index, item in
-                            if index > 0 { AtomDivider() }
-                            row(item)
-                        }
+            if !group.collapsed { groupContent(group) }
+        }
+    }
+
+    @ViewBuilder
+    private func groupContent(_ group: SkillsPageModel.Group) -> some View {
+        if let empty = group.empty { emptyState(empty) }
+        ForEach(Array(group.sections.enumerated()), id: \.offset) { _, section in
+            if let title = section.title {
+                AtomText(props: TextProps(text: title, size: 12, weight: "semibold"), common: AtomCommon(testID: "\(prefix)skills-repo-section-\(title)", paddingX: 4))
+            }
+            if let empty = section.empty { emptyState(empty) }
+            if !section.rows.isEmpty {
+                SkillsPageCard {
+                    ForEach(Array(section.rows.enumerated()), id: \.element.id) { index, item in
+                        if index > 0 { AtomDivider() }
+                        row(item)
                     }
                 }
             }
@@ -587,19 +679,20 @@ struct SkillGalleryView: View {
         let name = row.name
         let isSelected = model.selection?.contains(row.id) == true
         return AtomPopover(
-            props: PopoverProps(isPresented: false, arrowEdge: "trailing", width: 300, inset: 12, hover: true),
+            props: PopoverProps(isPresented: false, arrowEdge: "leading", width: 200, inset: 12, hover: true),
             onDismiss: {}
         ) {
             AtomStack(
                 props: StackProps(axis: "h", spacing: 8, group: true, fill: isSelected ? "accent" : nil, fillOpacity: isSelected ? 0.12 : nil),
-                common: AtomCommon(testID: "\(prefix)skill-row-\(name)", fillWidth: true, paddingX: 12, paddingY: 6)
+                // Off, the row dims but every control in it still responds.
+                common: AtomCommon(testID: "\(prefix)skill-row-\(name)", fillWidth: true, paddingX: 12, paddingY: 6, opacity: row.enabled ? nil : 0.45)
             ) {
                 // A press and hold starts selecting; a click opens the skill, or selects while
                 // selecting. Only the skill's own text takes them: a held click on a control, such
                 // as the actions menu while it tracks, must not start selecting.
                 AtomPressArea(
                     props: PressAreaProps(pointer: isSelecting ? row.editable : row.opensOnClick),
-                    common: AtomCommon(testID: "\(prefix)skill-text-\(name)", hint: row.description),
+                    common: AtomCommon(testID: "\(prefix)skill-text-\(name)", label: row.enabled ? name : "\(name), off", hint: row.description),
                     onPress: { actions.press(row.id) },
                     onLongPress: { actions.longPress(row.id) }
                 ) {
@@ -610,11 +703,14 @@ struct SkillGalleryView: View {
                                 common: AtomCommon(testID: "\(prefix)skill-select-\(name)", label: isSelected ? "Selected" : "Not selected")
                             )
                         }
+                        // Who can use the skill leads its name; its warning follows it.
+                        if let mark = row.provider {
+                            ProviderMarkIcon(mark: mark, prefix: prefix)
+                        }
                         AtomText(props: TextProps(text: name, size: 13, weight: "medium", lineLimit: 1), common: AtomCommon(testID: "\(prefix)skill-name-\(name)"))
                         if let flag = row.flag {
                             AtomIcon(props: IconProps(name: flag.icon, size: 11, color: flag.color), common: AtomCommon(testID: "\(prefix)\(flag.testID)", label: flag.text, help: flag.text))
                         }
-                        ForEach(row.providers, id: \.testID) { badge($0, testID: "\(prefix)\($0.testID)") }
                         AtomSpacer(props: SpacerProps(minLength: 8))
                     }
                 }
@@ -627,7 +723,7 @@ struct SkillGalleryView: View {
         }
     }
 
-    /// A skill's details, shown beside its row while the pointer rests on it.
+    /// A skill's details, shown left of its row while the pointer rests on it.
     private func hint(_ row: SkillsPageModel.Row) -> some View {
         let name = row.name
         return AtomStack(props: StackProps(axis: "v", spacing: 6, align: "leading", group: true), common: AtomCommon(testID: "\(prefix)skill-hint-\(name)")) {
@@ -662,24 +758,9 @@ struct SkillGalleryView: View {
                 AtomLabel(props: LabelProps(text: "Fix", icon: "wand.and.stars"))
             }
         }
-        AtomToggle(
-            props: ToggleProps(isOn: row.enabled, size: "mini"),
-            common: AtomCommon(
-                testID: "\(prefix)skill-toggle-\(name)", label: "\(name) enabled",
-                help: row.enabled ? "Turn the skill off in Playhouse sessions" : "Turn the skill on in Playhouse sessions"
-            ),
-            onToggle: { actions.toggle(row.id) }
-        )
-        AtomButton(
-            props: ButtonProps(style: "bordered", disabled: !row.enabled || !row.usable, controlSize: "small"),
-            common: AtomCommon(testID: "\(prefix)skill-use-\(name)", help: "Insert /\(name) into the message"),
-            action: { actions.use(row.id) }
-        ) {
-            AtomText(props: TextProps(text: "Use"))
-        }
         AtomMenu(
-            props: MenuProps(icon: "ellipsis", size: 12, weight: "semibold", items: row.menu.map { group in
-                group.map { .init(id: $0.id, title: $0.title, destructive: $0.destructive, help: $0.help, testID: "\(prefix)\($0.testID)") }
+            props: MenuProps(icon: "ellipsis", size: 12, weight: "semibold", items: ([SkillsPageModel.leadingMenu(row)] + row.menu).map { group in
+                group.map { .init(id: $0.id, title: $0.title, destructive: $0.destructive, help: $0.help, testID: "\(prefix)\($0.testID)", disabled: $0.disabled) }
             }),
             common: AtomCommon(testID: "\(prefix)skill-actions-\(name)", label: "Actions for \(name)", help: "More actions for \(name)", width: 22, height: 22),
             onMenu: { actions.menu(row.id, $0) }

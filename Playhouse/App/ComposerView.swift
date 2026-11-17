@@ -89,6 +89,9 @@ struct ComposerModel: Codable, Equatable {
     var focused: Bool
     var focusRequest: Int
     var editorHelp: String
+    /// The Skills button leads the toolbar only where the conversation has no
+    /// task sidebar (a standalone chat); a task's sidebar holds it instead.
+    var skills: Bool
     var modeMenu: ModeMenu
     var startImplementing: StartImplementing?
     var provider: ProviderMenu
@@ -163,7 +166,9 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
 
     private var toolbar: some View {
         AtomStack(props: StackProps(axis: "h", spacing: 12)) {
-            SkillsButton(testID: prefix + "open-skills-button", action: actions.openSkills)
+            if model.skills {
+                SkillsButton(testID: prefix + "open-skills-button", action: actions.openSkills)
+            }
             if let pluginActions {
                 pluginActions
             }
