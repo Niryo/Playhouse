@@ -5,8 +5,6 @@ import SwiftUI
 extension TaskConversationView {
     // MARK: @ mentions
 
-    var mentionHandles: Set<String> { Set(mentionCatalog?.items.map(\.handle) ?? []) }
-
     /// The mention being typed before the caret, whether or not its menu was dismissed.
     var typedMention: (location: Int, query: String)? {
         guard !isReadOnly, isComposerEditing, composerDraft.selection.length == 0 else { return nil }
@@ -19,9 +17,13 @@ extension TaskConversationView {
         return typed
     }
 
-    var mentionSuggestions: [MentionItem] {
-        guard let active = activeMention, let mentionCatalog else { return [] }
-        return Array(mentionCatalog.suggestions(query: active.query).prefix(80))
+    /// Recomputes what the open menu lists, at most 80 rows.
+    func refreshMentionSuggestions() {
+        guard let active = activeMention, let mentionCatalog else {
+            if !mentionSuggestions.isEmpty { mentionSuggestions = [] }
+            return
+        }
+        mentionSuggestions = Array(mentionCatalog.suggestions(query: active.query).prefix(80))
     }
 
     @ViewBuilder
@@ -54,8 +56,10 @@ extension TaskConversationView {
         guard !isLoadingMentions else { return }
         isLoadingMentions = true
         defer { isLoadingMentions = false }
-        if let catalog = try? await conversationManager.mentions(taskID: task.id) {
+        if let catalog = try? await conversationManager.mentions(taskID: task.id), catalog != mentionCatalog {
             mentionCatalog = catalog
+            mentionHandles = Set(catalog.items.map(\.handle))
+            refreshMentionSuggestions()
         }
     }
 

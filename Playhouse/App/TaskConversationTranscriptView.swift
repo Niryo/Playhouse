@@ -622,10 +622,14 @@ extension TaskConversationView {
                 }
                 .onChange(of: activeMention?.location) { _, location in
                     mentionSelection = 0
+                    refreshMentionSuggestions()
                     // Each new mention reads the catalog again, so it shows the latest recent mentions.
                     if location != nil { Task { await loadMentions() } }
                 }
-                .onChange(of: activeMention?.query) { _, _ in mentionSelection = 0 }
+                .onChange(of: activeMention?.query) { _, _ in
+                    mentionSelection = 0
+                    refreshMentionSuggestions()
+                }
                 .task(id: task.id) { await loadMentions() }
                 .onChange(of: draft) { _, newValue in
                     if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {

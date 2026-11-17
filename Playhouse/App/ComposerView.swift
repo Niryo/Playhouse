@@ -380,8 +380,10 @@ extension ComposerView where Header == EmptyView, ScheduleContent == EmptyView {
 }
 
 /// The `@` mention menu above the composer: the suggestions for what follows the `@`, the
-/// highlighted one first in keyboard order. Rows are plugin atoms; the list is a native scroll
-/// view so the highlighted row stays in view as the arrow keys move it.
+/// highlighted one first in keyboard order. Browsing everything groups the rows under a header
+/// per kind; recent mentions and a query's matches are one list under one header. Rows and
+/// headers are plugin atoms; the list is a native scroll view so the highlighted row stays in
+/// view as the arrow keys move it. It holds at most 80 rows, so it builds them all.
 struct ComposerMentionMenu: View {
     let query: String
     let items: [MentionItem]
@@ -391,67 +393,118 @@ struct ComposerMentionMenu: View {
     let selectedIndex: Int
     let select: (MentionItem) -> Void
 
+    private static let width: CGFloat = 460
+    private static let inset: CGFloat = 8
+    private static let rowHeight: CGFloat = 32
+    private static let headerHeight: CGFloat = 30
+    private static let maxListHeight: CGFloat = 360
+
+    private struct Section: Identifiable {
+        let id: String
+        let title: String
+        /// The header's identifier: the menu's title for a single list, the kind's section otherwise.
+        let testID: String
+        /// Each row with its index in `items`, which is the keyboard order.
+        let rows: [(index: Int, item: MentionItem)]
+    }
+
     var body: some View {
         AtomPanel(
-            props: PanelProps(spacing: 4, fill: "panel", fillOpacity: 1, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.14),
-            common: AtomCommon(testID: "mention-menu", label: "Mentions", value: title, width: 420, padding: 6)
+            props: PanelProps(spacing: 0, fill: "panel", fillOpacity: 1, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.1),
+            common: AtomCommon(testID: "mention-menu", label: "Mentions", value: title, width: Double(Self.width), padding: Double(Self.inset))
         ) {
-            AtomText(
-                props: TextProps(text: title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1, truncation: "tail"),
-                common: AtomCommon(testID: "mention-menu-title", paddingX: 8, paddingY: 3)
-            )
             if items.isEmpty {
+                header(title, testID: "mention-menu-title")
                 AtomText(
-                    props: TextProps(text: isLoading ? "Loading…" : "Nothing to mention matches “\(query)”", size: 12, color: "tertiary"),
-                    common: AtomCommon(testID: "mention-menu-empty", paddingX: 8, paddingY: 6)
+                    props: TextProps(text: isLoading ? "Loading…" : "Nothing to mention matches “\(query)”", size: 13, color: "tertiary"),
+                    common: AtomCommon(testID: "mention-menu-empty", fillWidth: true, paddingX: 12, paddingY: 8)
                 )
             } else {
+                let sections = sections
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 1) {
-                            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                                row(item, selected: index == selectedIndex).id(item.id)
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(sections) { section in
+                                header(section.title, testID: section.testID)
+                                ForEach(section.rows, id: \.item.id) { row in
+                                    self.row(row.item, selected: row.index == selectedIndex).id(row.item.id)
+                                }
                             }
                         }
                         .hoverRevealScrollers()
                     }
-                    // Rows are 30 points with a 1-point gap; ten show before the list scrolls.
-                    .frame(height: min(CGFloat(items.count) * 31, 310))
+                    .frame(height: min(Self.listHeight(sections), Self.maxListHeight))
                     .onChange(of: selectedIndex) { _, index in
                         if items.indices.contains(index) { proxy.scrollTo(items[index].id) }
                     }
                 }
             }
         }
+        .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
     }
 
     private var title: String {
         if !query.isEmpty { return "Mention matching “\(query)”" }
-        return showsRecent ? "Recent mentions" : "Mention a rule, skill, MCP server, agent, repository or task"
+        return showsRecent ? "Recent mentions" : "Mention a skill, MCP server, agent, repository or task"
+    }
+
+    /// One section per run of a kind while browsing everything; otherwise one under the menu's title.
+    private var sections: [Section] {
+        let indexed = items.enumerated().map { (index: $0.offset, item: $0.element) }
+        guard query.isEmpty, !showsRecent else {
+            return [Section(id: "all", title: title, testID: "mention-menu-title", rows: indexed)]
+        }
+        var sections: [Section] = []
+        var start = 0
+        while start < indexed.count {
+            let kind = indexed[start].item.kind
+            var end = start
+            while end < indexed.count, indexed[end].item.kind == kind { end += 1 }
+            sections.append(Section(id: "\(kind.rawValue)-\(start)", title: kind.sectionTitle, testID: "mention-section-\(kind.rawValue)", rows: Array(indexed[start..<end])))
+            start = end
+        }
+        return sections
+    }
+
+    private static func listHeight(_ sections: [Section]) -> CGFloat {
+        sections.reduce(0) { $0 + headerHeight + CGFloat($1.rows.count) * rowHeight }
+    }
+
+    private func header(_ text: String, testID: String) -> some View {
+        AtomText(
+            props: TextProps(text: text, size: 12, weight: "medium", color: "secondary", lineLimit: 1, truncation: "tail"),
+            common: AtomCommon(testID: testID, height: Double(Self.headerHeight), fillWidth: true, paddingX: 12)
+        )
     }
 
     private func row(_ item: MentionItem, selected: Bool) -> some View {
         AtomButton(
             props: ButtonProps(selected: selected),
-            common: AtomCommon(testID: "mention-item-\(item.handle)", label: "@" + item.handle, value: item.kind.title, help: item.detail.isEmpty ? item.title : item.detail),
+            common: AtomCommon(
+                testID: "mention-item-\(item.handle)", label: "@" + item.handle,
+                value: "\(item.kind.title): \(item.title)" + (item.detail.isEmpty ? "" : " — \(item.detail)"),
+                help: item.detail.isEmpty ? "@" + item.handle : "@\(item.handle) · \(item.detail)"
+            ),
             action: { select(item) }
         ) {
+            // Only the highlighted row draws a surface; a fill on every row read as a stack of cards.
             AtomStack(
-                props: StackProps(axis: "h", spacing: 8, fill: selected ? "accent" : nil, fillOpacity: 0.16, cornerRadius: 7),
-                common: AtomCommon(minHeight: 30, fillWidth: true, paddingX: 8)
+                props: StackProps(axis: "h", spacing: 10, fill: selected ? "primary" : nil, fillOpacity: selected ? 0.09 : nil, cornerRadius: 9),
+                common: AtomCommon(height: Double(Self.rowHeight), fillWidth: true, paddingX: 12)
             ) {
-                AtomIcon(props: IconProps(name: Self.icon(item.kind), size: 12, weight: "medium", color: "secondary"), common: AtomCommon(width: 16))
-                AtomText(props: TextProps(text: "@" + item.handle, size: 13, weight: "semibold", color: "accent", lineLimit: 1, truncation: "middle"))
-                AtomText(props: TextProps(text: item.kind.title, size: 11, weight: "medium", color: "tertiary", lineLimit: 1))
-                AtomSpacer(props: SpacerProps(minLength: 6))
-                AtomText(props: TextProps(text: item.detail, size: 11, color: "secondary", lineLimit: 1, truncation: "tail"))
+                AtomIcon(props: IconProps(name: Self.icon(item.kind), size: 13, weight: "regular", color: "secondary"), common: AtomCommon(width: 18))
+                AtomText(props: TextProps(text: item.title, size: 13, color: "primary", lineLimit: 1, truncation: "tail"))
+                    .layoutPriority(1)
+                if !item.detail.isEmpty {
+                    AtomText(props: TextProps(text: item.detail, size: 13, color: "secondary", lineLimit: 1, truncation: "tail"))
+                }
+                AtomSpacer(props: SpacerProps(minLength: 0))
             }
         }
     }
 
     static func icon(_ kind: MentionKind) -> String {
         switch kind {
-        case .rule: "list.bullet.rectangle"
         case .skill: "sparkles"
         case .mcp: "server.rack"
         case .agent: "person.crop.circle"
