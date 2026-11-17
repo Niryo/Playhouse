@@ -420,7 +420,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("message-composer").waitToExist(timeout: 10))
         XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
     }
-    // case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, and sends the due message to that same task and conversation, preserving its Claude session or Codex thread identifier. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+    // case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, keeps the scheduled message in the composer as its unsent draft while Send returns to sending, and sends the due message, including edits made to that draft since it was scheduled, to that same task and conversation, preserving its Claude session or Codex thread identifier; once it is sent, the draft is cleared from storage and from the open composer. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     func test_schedule_one_time_task_fires_when_due() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-once")
         launchApp(defaultParent: fixture.parent.path)
@@ -537,19 +537,32 @@ extension PlayhouseUITests {
         XCTAssertEqual(followUpSchedule["prompt"] as? String, "Send a scheduled follow-up.")
         let followedUpTask = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(followedUpTask["status"] as? String, "Review", "Scheduling keeps the existing task state.")
+        let followUpComposer = element("message-composer")
+        XCTAssertTrue(waitUntil({ followUpSend.label == "Send message" }, timeout: 5), "After scheduling a message, Send sends again.")
+        XCTAssertEqual(followUpComposer.value as? String, "Send a scheduled follow-up.", "The scheduled message stays in the composer.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == "Send a scheduled follow-up." }, timeout: 10), "The scheduled message is saved as the draft.")
+        XCTAssertEqual(element("schedule-task-button").value as? String, "On")
         attachScreenshot(named: "Existing conversation with a scheduled follow-up")
+        attachElementScreenshot(followUpComposer, named: "Scheduled follow-up waits in the composer")
+        // The message waits in the composer, so an edit made there is what gets sent.
+        replaceComposerText(with: "Send an edited scheduled follow-up.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == "Send an edited scheduled follow-up." }, timeout: 10), "The edit is saved as the draft.")
         let followUpAt = try XCTUnwrap(scheduleDate(followUpSchedule["scheduledAt"] as? String))
         let followUpRun = try XCTUnwrap(try runCLI(["schedule", "tick", "--now", scheduleISO(followUpAt.addingTimeInterval(600))], extraEnvironment: environment)["result"] as? [String: Any])
         XCTAssertEqual((followUpRun["fired"] as? [[String: Any]])?.compactMap { $0["taskID"] as? String }, [taskID], "The message runs in the original conversation.")
-        XCTAssertTrue(waitUntil({ self.claudeFixturePrompts().contains("Send a scheduled follow-up.") }, timeout: 30))
+        XCTAssertTrue(waitUntil({ self.claudeFixturePrompts().contains("Send an edited scheduled follow-up.") }, timeout: 30), "The edited message is sent.")
+        XCTAssertFalse(claudeFixturePrompts().contains("Send a scheduled follow-up."), "The text from before the edit isn't sent.")
         let deliveredTask = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(deliveredTask["claudeSessionID"] as? String, originalSessionID, "The follow-up stays in the original Claude session.")
         let deliveredFollowUp = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", "Send a scheduled follow-up.")
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", "Send an edited scheduled follow-up.")
         ).firstMatch
         XCTAssertTrue(deliveredFollowUp.waitToExist(timeout: 10), "The scheduled follow-up appears in the existing conversation transcript.")
         XCTAssertNil(deliveredTask["schedule"] as? [String: Any], "The one-time schedule clears after it fires.")
+        XCTAssertTrue(waitUntil({ (followUpComposer.value as? String ?? "") == "" }, timeout: 10), "Sending the scheduled message clears it from the composer.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool) == false }, timeout: 10), "The sent message is no longer a draft.")
         attachScreenshot(named: "Scheduled follow-up delivered in the existing conversation")
+        attachElementScreenshot(followUpComposer, named: "Composer empty after the scheduled message was sent")
 
         let bundleIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
         let agentURL = appBundle.appendingPathComponent("Contents/Library/LaunchAgents/\(bundleIdentifier).scheduler.plist")
@@ -754,7 +767,7 @@ extension PlayhouseUITests {
         _ = try runCLI(["schedule", "clear", templateID])
         XCTAssertTrue(element("task-card-\(templateID)").waitToExist(timeout: 10), "Clearing the schedule puts the task on the board.")
     }
-    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, Send still sends ordinary messages while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove returns it to an empty composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, the message stays in the composer as its draft and Send sends again while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove leaves the message in the composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     func test_scheduled_task_edit_and_page_management() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-edit")
         launchApp(defaultParent: fixture.parent.path)
@@ -899,8 +912,8 @@ extension PlayhouseUITests {
         XCTAssertEqual((later["fired"] as? [Any])?.count, 0, "A removed schedule sends nothing on a later tick.")
         XCTAssertEqual(claudeFixturePrompts().count, sent)
 
-        // An existing conversation's scheduled message is moved from the hint without restating it,
-        // and the composer keeps sending ordinary messages.
+        // An existing conversation's scheduled message waits in the composer as its draft, is
+        // moved from the hint without restating it, and Send sends again.
         replaceComposerText(with: "Send a scheduled follow-up.")
         _ = openScheduleHint()
         element("schedule-done-button").click()
@@ -908,6 +921,7 @@ extension PlayhouseUITests {
         send.click()
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: onceID)?["schedule"] as? [String: Any])?["prompt"] as? String) == "Send a scheduled follow-up." }, timeout: 10))
         XCTAssertTrue(waitUntil({ send.label == "Send message" }, timeout: 5), "After scheduling a message, Send sends again.")
+        XCTAssertEqual(composer.value as? String, "Send a scheduled follow-up.", "The scheduled message stays in the composer.")
         // A mid-month time again, then reopen so the conversation loads the saved schedule.
         _ = try runCLI(["schedule", "set", onceID, "--prompt", "Send a scheduled follow-up.", "--once", scheduleISO(stepSafeScheduleDate())])
         let followUpAt = try XCTUnwrap(scheduledAt(taskID: onceID))
@@ -917,10 +931,11 @@ extension PlayhouseUITests {
         openTask(named: "Sent by hand")
         XCTAssertTrue(waitUntil({ send.exists && send.label == "Send message" }, timeout: 10), "A reopened conversation with a scheduled message still sends.")
         XCTAssertEqual(element("schedule-task-button").value as? String, "On", "The clock shows the conversation has a scheduled message.")
-        XCTAssertEqual(composer.value as? String ?? "", "", "The scheduled message stays out of the composer.")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Send a scheduled follow-up." }, timeout: 10), "The reopened composer shows the scheduled message as its draft.")
         attachScreenshot(named: "Reopened conversation with a scheduled message still sends")
         attachElementScreenshot(element("schedule-task-button"), named: "Clock on for the scheduled message")
-        attachElementScreenshot(send, named: "Send still sends ordinary messages")
+        attachElementScreenshot(composer, named: "Scheduled message waits in the reopened composer")
+        attachElementScreenshot(send, named: "Send still sends")
         let movedFollowUp = moveScheduledTimeInHint()
         element("schedule-done-button").click()
         XCTAssertTrue(waitForDisappearance(element("schedule-hint")))
@@ -928,8 +943,8 @@ extension PlayhouseUITests {
         let movedTask = try XCTUnwrap(taskRecord(id: onceID))
         XCTAssertEqual((movedTask["schedule"] as? [String: Any])?["prompt"] as? String, "Send a scheduled follow-up.", "Moving a scheduled message keeps its prompt.")
         XCTAssertEqual(movedTask["status"] as? String, "Review")
-        XCTAssertNil(movedTask["savedPrompt"] as? String, "Moving a scheduled message leaves the composer draft alone.")
-        XCTAssertEqual(composer.value as? String ?? "", "")
+        XCTAssertEqual(movedTask["savedPrompt"] as? String, "Send a scheduled follow-up.", "Moving a scheduled message keeps it as the draft.")
+        XCTAssertEqual(composer.value as? String, "Send a scheduled follow-up.")
         XCTAssertEqual(send.label, "Send message", "Moving a scheduled message leaves Send sending.")
         XCTAssertEqual(element("schedule-task-button").value as? String, "On")
         XCTAssertEqual(claudeFixturePrompts().count, sent, "Moving a scheduled message sends nothing.")
@@ -937,10 +952,10 @@ extension PlayhouseUITests {
         XCTAssertEqual(accessibleLabelOrValue(of: element("schedule-summary")), movedFollowUp, "The hint shows the scheduled message's saved time.")
         attachScreenshot(named: "Existing conversation hint shows the moved scheduled message")
         attachElementScreenshot(element("schedule-hint"), named: "Moved scheduled message hint detail")
-        // Remove cancels the scheduled message and returns it to the empty composer.
+        // Remove cancels the scheduled message and leaves it in the composer.
         element("schedule-remove-button").click()
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: onceID)).map { $0["schedule"] == nil } == true }, timeout: 10), "Remove cancels the scheduled message.")
-        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Send a scheduled follow-up." }, timeout: 5), "The cancelled message returns to the composer.")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Send a scheduled follow-up." }, timeout: 5), "The cancelled message stays in the composer.")
         XCTAssertEqual(element("schedule-task-button").value as? String, "Off")
         XCTAssertEqual(claudeFixturePrompts().count, sent, "Cancelling a scheduled message sends nothing.")
         // With a draft typed in the composer, Remove keeps that draft rather than restoring the

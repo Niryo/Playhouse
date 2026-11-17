@@ -590,7 +590,7 @@ struct TaskConversationView: View {
                 conversationMode = mode
             }
             // A task that hasn't started reopens with Send in schedule mode. An existing
-            // conversation's scheduled message stays apart from the composer, so Send still sends.
+            // conversation's scheduled message waits in the composer, and Send sends it now.
             if let schedule = savedSchedule, !isExistingConversation {
                 composerSchedule = schedule
                 scheduleDraft = schedule
@@ -743,6 +743,19 @@ struct TaskConversationView: View {
                !conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "") {
                 isResponding = false
             }
+        }
+        .onChange(of: task.hasUnsentDraft) { wasUnsent, isUnsent in
+            // A scheduled message waits in the composer as its draft. When the scheduler sends
+            // it, the saved draft becomes the sent prompt, and the composer still showing that
+            // message clears; a draft the user changed meanwhile stays.
+            guard wasUnsent, !isUnsent, !isReadOnly else { return }
+            let shown = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !shown.isEmpty || !pendingImages.isEmpty,
+                  shown == (task.savedPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            draftAutosaveTask?.cancel()
+            draft = ""
+            composerDraft.settledText = ""
+            pendingImages = []
         }
         .onChange(of: conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "")) { _, interrupted in
             // The daemon can report the stop after this window loaded the settled turn.
