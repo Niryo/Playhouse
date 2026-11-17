@@ -80,6 +80,8 @@ enum ChatPageAnchorsLayout {
     static let labelHeight: CGFloat = 14
     static let labelSpacing: CGFloat = 12
     static let labelsVerticalPadding: CGFloat = 6
+    /// The gap between the last label and the jump-to-bottom button below it.
+    static let jumpToBottomSpacing: CGFloat = 4
 
     /// The height that shows `count` labels, at most `visibleLabelCount` of them.
     static func labelsHeight(count: Int) -> CGFloat {
@@ -96,11 +98,13 @@ enum ChatPageAnchorsLayout {
 /// The standalone chat's page labels: a narrow column of page titles beside the transcript,
 /// well apart from each other and a few at a time; scrolling it, with no scroll bar, reaches
 /// older ones. Clicking one jumps to its page; the page the transcript shows is marked, and
-/// the column scrolls to keep it in view.
+/// the column scrolls to keep it in view. Below the labels, a button jumps straight to the
+/// bottom of the chat.
 struct ChatPageAnchorsView: View {
     let model: ChatPageAnchorsModel
     let width: CGFloat
     let jump: (StandaloneChatPage) -> Void
+    let jumpToBottom: () -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -140,6 +144,11 @@ struct ChatPageAnchorsView: View {
         }
         .frame(width: width, alignment: .leading)
         .frame(maxHeight: ChatPageAnchorsLayout.labelsHeight(count: model.pages.count))
+        // Hangs below the labels, so the labels themselves stay centered on the transcript.
+        .overlay(alignment: .bottomLeading) {
+            ChatJumpToBottomButton(action: jumpToBottom)
+                .alignmentGuide(.bottom) { $0[.top] - ChatPageAnchorsLayout.jumpToBottomSpacing }
+        }
     }
 
     private func loadOlder(_ proxy: ScrollViewProxy) {
@@ -182,6 +191,34 @@ private struct ChatPageAnchorLabel: View {
         .accessibilityLabel(page.title)
         .accessibilityValue(isLoading ? "loading" : isCurrent ? "current" : "")
         .accessibilityIdentifier("chat-page-anchor-\(page.id)")
+    }
+}
+
+/// Below the page labels: jumps to the bottom of the chat at once, from an earlier page or
+/// from anywhere the reader scrolled up to.
+private struct ChatJumpToBottomButton: View {
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.down.to.line")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("Jump to bottom")
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(isHovering ? Color.primary : Color.secondary)
+            .frame(height: ChatPageAnchorsLayout.labelHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .onHover { isHovering = $0 }
+        .nativeHelp("Jump to the bottom of the chat")
+        .accessibilityLabel("Jump to bottom of chat")
+        .accessibilityIdentifier("chat-page-anchors-jump-to-bottom")
     }
 }
 
