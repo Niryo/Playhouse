@@ -356,9 +356,10 @@ def list_items(runtime, _session_state, message):
                     _session_state.item["createdAt"] = "2026-10-26T12:34:00Z"
         if _session_state.item_id == "item_assistant_fixture_1" and runtime.Path(str(runtime.sys.argv[0]) + ".provider-timestamp").exists():
             _session_state.item["createdAt"] = "2026-10-26T12:34:00Z"
-        if "-long-history-lazy-" in _session_state.mode and _session_state.item_id.startswith("item_long_history_"):
+        if "-long-history-" in _session_state.mode and _session_state.item_id.startswith("item_long_history_"):
             # Each history turn is its own turn, as in a real multi-turn thread, so the app
-            # treats every turn but the last as settled and shows its calls inline.
+            # treats every turn but the last as settled and shows its calls inline, and reads
+            # no later question as a steer of an earlier one.
             _session_state.turn_id = f"turn_long_history_{_session_state.item_id.rsplit('_', 1)[1]}"
         if _session_state.unassociated_restart_question and _session_state.item.get("type") == "userMessage":
             _session_state.entries.append({"item": _session_state.item})

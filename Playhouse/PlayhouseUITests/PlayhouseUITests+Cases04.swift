@@ -260,6 +260,14 @@ extension PlayhouseUITests {
         func health(_ arguments: [String]) throws -> String? {
             (try runCLI(["task", "pr", "status", taskID] + arguments, extraEnvironment: cacheEnvironment)["result"] as? [[String: Any]])?.first?["health"] as? String
         }
+        // The card probed the task (it had no pull request yet, so it looked one up) just
+        // before the window closed, and seeding #801 went around the commands that forget
+        // that shared answer. A sync is one of them.
+        XCTAssertEqual(
+            (try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["result"] as? [String: Any])["records"] as? [[String: Any]])?
+                .compactMap { $0["action"] as? String },
+            ["no-remote"]
+        )
         try Data().write(to: callLogURL, options: .atomic)
         try setPullRequest("failure")
         let together = DispatchGroup()

@@ -243,7 +243,18 @@ extension PlayhouseUITests {
         XCTAssertTrue(userText.exists, "The user message should expose its selectable text.")
         selectAllText(userView)
         XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
-        let initialBubble = try waitForSideChatBubble(at: userText, centered: true)
+        // This message is the transcript's first, at its top edge, where a hint above it would be
+        // clipped; the helper checks that it is pinned inside the transcript's top edge instead.
+        XCTAssertLessThan(userText.frame.minY, transcriptScrollView.frame.minY + 45,
+                          "The transcript's first message should start at its top edge (text \(userText.frame), transcript \(transcriptScrollView.frame)).")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == %@", "Side chat")).firstMatch.waitToExist(timeout: 8),
+                      "Selecting the user message should show the Side chat hint.")
+        let pinnedHintAttachment = XCTAttachment(screenshot: transcriptScrollView.screenshot())
+        pinnedHintAttachment.name = "Side chat hint pinned above the transcript's first message (transcript)"
+        pinnedHintAttachment.lifetime = .keepAlways
+        add(pinnedHintAttachment)
+        let initialBubble = try waitForSideChatBubble(at: userText, centered: true,
+                                                      hintScreenshot: "Side chat hint pinned above the transcript's first message")
         XCTAssertFalse(app.buttons["add-comment-to-selection-button"].exists, "The side chat bubble replaces the Add comment hint.")
         let initialCommentField = element("side-chat-input")
         XCTAssertTrue(initialCommentField.waitToExist(timeout: 5))

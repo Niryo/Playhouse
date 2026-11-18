@@ -316,7 +316,8 @@ extension PlayhouseUITests {
         launchAppWithOpen()
         waitForBoardOrAbortSuite()
         XCTAssertTrue(element("agents-info-login-codex").waitToExist(timeout: 40), "A signed-out Codex should offer Log in.")
-        XCTAssertTrue(element("agents-info-login-claude").exists, "A signed-out Claude should offer Log in.")
+        // The daemon reads each agent's account separately and shows the persisted state until its read lands.
+        XCTAssertTrue(element("agents-info-login-claude").waitToExist(timeout: 40), "A signed-out Claude should offer Log in.")
         XCTAssertFalse(element("agents-info-codex-window-primary").exists, "A signed-out agent shows no usage.")
         attachScreenshot(named: "Agents info with both agents signed out")
         element("agents-info-login-claude").click()

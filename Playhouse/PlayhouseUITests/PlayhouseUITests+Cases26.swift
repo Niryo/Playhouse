@@ -415,6 +415,17 @@ extension PlayhouseUITests {
         XCTAssertTrue(transcriptMessage("After restart.").waitToExist(timeout: 20), "The window streams the end of the reattached turn.")
         // The turn end reloads the transcript, and the row is absent from the accessibility tree
         // for an instant while the stored row replaces the live one; count once it is back.
+        // "After restart." streams, and the turn ends in the window, before that reload; the reload
+        // is the one that gives the answer its history id, so wait for that id first.
+        var answerID: String?
+        XCTAssertTrue(waitUntil({
+            let history = (try? self.runCLI(["conversation", "history", taskID], extraEnvironment: environment))?["result"] as? [String: Any]
+            answerID = (history?["messages"] as? [[String: Any]] ?? []).last { ($0["text"] as? String ?? "").contains("After restart.") }?["id"] as? String
+            return answerID != nil
+        }, timeout: 20), "The reattached turn's answer should be stored.")
+        let storedAnswerID = try XCTUnwrap(answerID)
+        let storedAnswer = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-message-\(storedAnswerID)")).firstMatch
+        XCTAssertTrue(storedAnswer.waitToExist(timeout: 20), "The window should reload the finished turn from history.")
         XCTAssertTrue(waitUntil({ visibleRows.count >= 1 }, timeout: 10), "The finished turn keeps its compaction row.")
         XCTAssertEqual(visibleRows.count, 1, "The finished turn still shows the compaction once.")
         XCTAssertEqual(spinningRows.count, 0)

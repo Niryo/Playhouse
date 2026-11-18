@@ -102,6 +102,28 @@ extension PlayhouseUITests {
             "PLAYHOUSE_E2E_GH_EXPECTED_IDS": expectedIDs,
         ]
     }
+    /// Every task with a started worktree and no pull request has the board probe look one
+    /// up on GitHub, and `gh` resolves to /opt/homebrew/bin/gh when PATH has none. A case
+    /// that set up no gh fixture of its own gets one that knows no pull requests, in a
+    /// directory of its own so it never resets a case's `gh-fixture` state on relaunch.
+    func addDefaultGitHubFixture(to environment: inout [String: String]) {
+        let ghDirectory = WorkspaceFixture.root.appendingPathComponent("gh-fixture", isDirectory: true).path
+        let path = environment["PATH"] ?? "/usr/bin:/bin"
+        if !path.split(separator: ":").contains(Substring(ghDirectory)) {
+            environment["PATH"] = "\(ghDirectory):\(path)"
+        }
+        guard environment["PLAYHOUSE_E2E_GH_STATE_PATH"] == nil else { return }
+        let directory = dataDirectory.appendingPathComponent("gh-default", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stateURL = directory.appendingPathComponent("state")
+        if !FileManager.default.fileExists(atPath: stateURL.path) {
+            FileManager.default.createFile(atPath: stateURL.path, contents: Data())
+        }
+        environment["PLAYHOUSE_E2E_GH_STATE_PATH"] = stateURL.path
+        environment["PLAYHOUSE_E2E_GH_CALL_LOG"] = directory.appendingPathComponent("calls").path
+        environment["PLAYHOUSE_E2E_GH_CREATE_LOG"] = directory.appendingPathComponent("create-calls").path
+        environment["PLAYHOUSE_E2E_GH_DETECT_LOG"] = directory.appendingPathComponent("detect-calls").path
+    }
     func activateOtherAppThenReturn() {
         XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
         app.activate()

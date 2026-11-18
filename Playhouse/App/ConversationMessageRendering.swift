@@ -385,8 +385,7 @@ extension TaskConversationView {
                         // Anchored on the text like assistant blocks; as a ZStack sibling of the
                         // bubble the hint's popover ignored clicks on its controls.
                         .overlay(alignment: .topLeading) {
-                            selectionHint(messageID: message.id, anchorID: 0)
-                                .offset(y: -16)
+                            selectionHint(messageID: message.id, anchorID: 0, raisedBy: 16)
                         }
                         .padding(.horizontal, 16).padding(.vertical, 11)
                         // The border is part of the background so the selection hint above stays clickable.
@@ -532,7 +531,8 @@ extension TaskConversationView {
         }
     }
 
-    func selectionHint(messageID: String, anchorID: Int) -> some View {
+    /// `raise` lifts the bubble's anchor and the hint above the selection into a message's top padding.
+    func selectionHint(messageID: String, anchorID: Int, raisedBy raise: CGFloat = 0) -> some View {
         Group {
             if let selection = currentTextSelection,
                selection.messageID == messageID, selection.anchorID == anchorID {
@@ -587,9 +587,13 @@ extension TaskConversationView {
                         }
                         .position(
                             x: min(max(selection.bounds.midX, 1), max(1, geometry.size.width - 1)),
-                            y: selection.bounds.midY
+                            y: selection.bounds.midY - raise
                         )
                     // The hint that opens the bubble, centered above the selection, gone while it is open.
+                    // The scroll view clips what is above its top, so there the hint is pinned just inside
+                    // it, over the selection's visible lines, and never further down than the selection's end.
+                    let visibleTop = -geometry.frame(in: .scrollView).minY
+                    let hintY = min(max(selection.bounds.minY - raise - 22, visibleTop + 4 + 15), selection.bounds.maxY + 22)
                     if !isBubbleOpen {
                         Button {
                             // Text already commented or side-chatted reopens with them.
@@ -612,7 +616,7 @@ extension TaskConversationView {
                         .frame(width: 120, height: 30)
                         .position(
                             x: min(max(selection.bounds.midX, 60), max(60, geometry.size.width - 60)),
-                            y: selection.bounds.minY - 22
+                            y: hintY
                         )
                         .zIndex(20)
                     }
