@@ -111,7 +111,7 @@ if (( slim == 1 )); then
 
 	if ! vm_is_running; then
 		printf 'Starting Tart VM %s to slim it...\n' "$vm_name"
-		tart run --no-graphics "$vm_name" </dev/null >/dev/null 2>&1 &
+		tart run --no-graphics --no-audio "$vm_name" </dev/null >/dev/null 2>&1 &
 		vm_pid=$!
 		started_vm=1
 	fi

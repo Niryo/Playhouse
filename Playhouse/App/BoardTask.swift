@@ -18,6 +18,11 @@ enum TaskStatus: String, CaseIterable, Identifiable {
         rawValue.lowercased().replacingOccurrences(of: " ", with: "-")
     }
 
+    /// The statuses a user may move to Review by hand.
+    static let manualReviewSources: Set<TaskStatus> = [.waitingResponse, .blocked]
+    /// The statuses a user may move to Done by hand.
+    static let manualDoneSources: Set<TaskStatus> = [.review, .waitingResponse, .blocked]
+
     var accent: Color {
         switch self {
         case .backlog: Color(red: 0.52, green: 0.57, blue: 0.66)
@@ -193,6 +198,11 @@ final class BoardTask {
     var pastRepositoryWorktreesData: Data?
     var contextFolderPathsData: Data?
     var draftImageDataURLsData: Data?
+    /// Review comments the user has written but not sent, encoded as JSON. Optional so tasks
+    /// stored before this field existed load unchanged.
+    var pendingAnnotationsData: Data?
+    /// Side chats on selected conversation text, encoded as JSON (`SavedSideChats`).
+    var sideChatsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
     var viewedWorkspaceChangesData: Data?
@@ -201,16 +211,16 @@ final class BoardTask {
     var totalCacheReadTokens: Int = 0
     var totalCacheCreationTokens: Int = 0
     var callUsageSnapshotsData: Data?
-    /// When true, moving this task to Review automatically creates its pull request(s)
-    /// instead of waiting for the user to click the manual "PR" control.
+    /// Legacy pull request mode columns, from before the `pull-request-mode`
+    /// plugin kept each task's mode in its own state. Only the one-time import
+    /// (`legacyPullRequestMode`) reads them; a new task gets PR's value, which
+    /// the import skips.
     var autoCreatePullRequestOnReview: Bool = false
-    /// When true (with `autoCreatePullRequestOnReview`), Playhouse keeps following the
-    /// task's pull requests in Review and sends fix turns until checks pass and every
-    /// review thread is resolved.
     var pullRequestAutopilot: Bool = false
-    /// When true (with `pullRequestAutopilot`), autopilot also merges the pull
-    /// requests once they're green.
     var pullRequestAutoMerge: Bool = false
+    /// The column the task was in when it last saved, while a move is unsaved;
+    /// saving publishes the move to plugins as `task.statusChanged`.
+    @Transient var statusBeforeSave: String? = nil
     /// Autopilot fix turns sent since the pull requests were last green; bounds the loop.
     var pullRequestAutopilotFixAttempts: Int = 0
     /// The PR state the last autopilot fix turn was sent for, so an unchanged red state
@@ -239,6 +249,11 @@ final class BoardTask {
     var lastScheduledRunTaskID: UUID?
     /// The recurring schedule that started this task, if any.
     var scheduleSourceTaskID: UUID?
+    /// Set on a task started from an Add Plugin mode placeholder: the `PluginPlacement`
+    /// the new plugin's entry goes in. Its conversation gets plugin authoring instructions.
+    var pluginPlacement: String?
+    /// Identifies the plugin being authored so its preview survives reopening.
+    var authoredPluginID: String?
 
     var workspaceRootPaths: [String] {
         get {
@@ -284,39 +299,17 @@ final class BoardTask {
         savedPrompt = nil
         pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
+        // Reads as PR, which the legacy import skips, so it never gives a task
+        // created since the plugin owned the mode one it didn't choose.
+        autoCreatePullRequestOnReview = true
         repositoryWorktreesData = nil
         contextFolderPathsData = nil
         draftImageDataURLsData = nil
+        pendingAnnotationsData = nil
+        sideChatsData = nil
         conversationActivityDurationsData = nil
         answeredAsyncQuestionIDsData = nil
         viewedWorkspaceChangesData = nil
-    }
-}
-
-/// What reaching Review does with a task's pull requests: nothing (the user creates
-/// them), create them, or create them and keep fixing them until they're green.
-enum PullRequestMode: String, CaseIterable, Codable, Sendable {
-    case manual
-    case pullRequest = "pr"
-    case autopilot
-    case merge
-
-    var label: String {
-        switch self {
-        case .manual: "Manual"
-        case .pullRequest: "PR"
-        case .autopilot: "Green"
-        case .merge: "Merge"
-        }
-    }
-
-    var helpText: String {
-        switch self {
-        case .manual: "Manual: you open the pull request yourself"
-        case .pullRequest: "PR: open the pull request when the task reaches Review"
-        case .autopilot: "Green: open the PR, then fix failing checks and review comments until it's green"
-        case .merge: "Merge: like Green, then merge the PR once it's green"
-        }
     }
 }
 
@@ -427,18 +420,26 @@ extension BoardTask {
     }
 }
 
-extension BoardTask {
-    var pullRequestMode: PullRequestMode {
-        if pullRequestAutopilot { return pullRequestAutoMerge ? .merge : .autopilot }
-        return autoCreatePullRequestOnReview ? .pullRequest : .manual
-    }
-}
-
 struct RepositoryWorktreeSpec: Codable, Equatable, Sendable {
     var repositoryPath: String
     var branch: String?
     var branchFrom: String?
     var mergeTarget: String? = nil
+}
+
+/// Which of a task's worktrees a command targets: the worktree path names one
+/// exactly; a repository path is enough while the task has one worktree of it.
+/// A branch tells apart pending worktrees of one repository, which share its path.
+struct RepositoryWorktreeSelector: Equatable, Sendable {
+    var repositoryPath: String?
+    var worktreePath: String?
+    var branch: String?
+
+    static func repository(_ path: String) -> Self { Self(repositoryPath: path) }
+
+    static func record(_ record: RepositoryWorktreeRecord) -> Self {
+        Self(repositoryPath: record.repositoryPath, worktreePath: record.worktreePath, branch: record.isPending ? record.branch : nil)
+    }
 }
 
 struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
@@ -453,19 +454,58 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
     var pullRequestURL: String? = nil
     /// Set once Playhouse confirms the linked pull request merged.
     var isPullRequestMerged: Bool = false
+    /// Set when GitHub reports the linked pull request closed without merging.
+    /// Such a worktree waits for a new pull request again.
+    var isPullRequestClosed: Bool = false
     /// The branch head when pull request creation last found nothing here to
     /// propose. The review gate clears it once the task changes the repository.
     var pullRequestSkippedHead: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case repositoryPath, branch, worktreePath, branchFrom, createdByPlayhouse
-        case mergeTarget, isPending, pullRequestNumber, pullRequestURL, isPullRequestMerged, pullRequestSkippedHead
+        case mergeTarget, isPending, pullRequestNumber, pullRequestURL, isPullRequestMerged, isPullRequestClosed, pullRequestSkippedHead
     }
 
-    /// A started repository with no linked pull request that is not known to
-    /// be unchanged, so its PR controls still offer to open one.
+    /// Whether a pull request is linked to this worktree.
+    var hasPullRequest: Bool { pullRequestNumber != nil && pullRequestURL != nil }
+
+    /// The linked pull request's state as the card shows it: open, merged or closed.
+    var pullRequestState: String? {
+        guard hasPullRequest else { return nil }
+        return isPullRequestMerged ? "merged" : (isPullRequestClosed ? "closed" : "open")
+    }
+
+    /// A started repository with no open or merged pull request that is not known
+    /// to be unchanged, so its PR controls still offer to open one.
     var awaitsPullRequest: Bool {
-        !isPending && (pullRequestNumber == nil || pullRequestURL == nil) && pullRequestSkippedHead == nil
+        !isPending && (!hasPullRequest || (isPullRequestClosed && !isPullRequestMerged)) && pullRequestSkippedHead == nil
+    }
+
+    /// Whether `branch` stands for a branch named when the task starts: "auto", or the
+    /// "auto 2", "auto 3"… a repository's further automatic worktrees wait under. The
+    /// space keeps those from ever being a real Git branch name.
+    static func isAutomaticBranch(_ branch: String) -> Bool {
+        branch == "auto" || (branch.hasPrefix("auto ") && Int(branch.dropFirst(5)).map { $0 > 1 } == true)
+    }
+
+    /// The automatic branch a new pending worktree of `repositoryPath` waits under: "auto",
+    /// or the first free "auto N" when another of the repository's records already waits,
+    /// so each pending worktree keeps a branch of its own to be told apart by.
+    static func automaticBranch(for repositoryPath: String, among records: [RepositoryWorktreeRecord]) -> String {
+        let taken = Set(records.filter { $0.isPending && $0.repositoryPath == repositoryPath }.map(\.branch))
+        guard taken.contains("auto") else { return "auto" }
+        return (2...).lazy.map { "auto \($0)" }.first { !taken.contains($0) }!
+    }
+
+    /// Whether `other` is this same worktree, possibly with other PR fields. A started
+    /// worktree is its path; pending records share the repository path until the task
+    /// starts, so a pending record is also told apart by its branch.
+    func isSameWorktree(as other: RepositoryWorktreeRecord) -> Bool {
+        let standard = { (path: String) in URL(fileURLWithPath: path).standardizedFileURL.path }
+        guard standard(repositoryPath) == standard(other.repositoryPath),
+              standard(worktreePath) == standard(other.worktreePath),
+              isPending == other.isPending else { return false }
+        return !isPending || branch == other.branch
     }
 
     init(
@@ -479,6 +519,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         pullRequestNumber: Int? = nil,
         pullRequestURL: String? = nil,
         isPullRequestMerged: Bool = false,
+        isPullRequestClosed: Bool = false,
         pullRequestSkippedHead: String? = nil
     ) {
         self.repositoryPath = repositoryPath
@@ -491,6 +532,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         self.pullRequestNumber = pullRequestNumber
         self.pullRequestURL = pullRequestURL
         self.isPullRequestMerged = isPullRequestMerged
+        self.isPullRequestClosed = isPullRequestClosed
         self.pullRequestSkippedHead = pullRequestSkippedHead
     }
 
@@ -506,6 +548,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         pullRequestNumber = try values.decodeIfPresent(Int.self, forKey: .pullRequestNumber)
         pullRequestURL = try values.decodeIfPresent(String.self, forKey: .pullRequestURL)
         isPullRequestMerged = try values.decodeIfPresent(Bool.self, forKey: .isPullRequestMerged) ?? false
+        isPullRequestClosed = try values.decodeIfPresent(Bool.self, forKey: .isPullRequestClosed) ?? false
         pullRequestSkippedHead = try values.decodeIfPresent(String.self, forKey: .pullRequestSkippedHead)
     }
 }

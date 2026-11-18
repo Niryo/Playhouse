@@ -76,7 +76,13 @@ function Totals(props) {
         return h(Stack, { key: bucket.label, axis: "v", spacing: 2, align: "leading" },
           h(Text, { size: 10, color: "tertiary" }, bucket.label),
           h(Text, { size: 13, weight: "medium" }, bucket.value));
-      })));
+      })),
+    overview.contextCompactions.map(function (detail, index) {
+      return h(Text, { key: "compaction-" + index, size: 10, color: "secondary", wrap: true, testID: id + "-compaction-" + index }, detail);
+    }),
+    overview.resumeCacheMisses.map(function (detail, index) {
+      return h(Text, { key: "resume-cache-miss-" + index, size: 10, color: "secondary", wrap: true, testID: id + "-resume-cache-miss-" + index }, "Resume cache miss · " + detail);
+    }));
 }
 
 function overviewSection(model) {
@@ -275,7 +281,7 @@ function Example() {
         onPress: function () { open[1](true); lastAction[1]("open"); }
       }),
       h(Text, { size: 11, color: "secondary", testID: "js-last-action" }, "Last: ", lastAction[0])),
-    open[0] ? h(Panel, { fillOpacity: 0.03, cornerRadius: 10, testID: "token-stats-modal" },
+    open[0] ? h(Panel, { fillOpacity: 0.03, cornerRadius: 10, padding: 0, testID: "token-stats-modal" },
       h(TokenStats, { model: Playhouse.props.tokenStats, section: section[0], on: on })) : null);
 }
 

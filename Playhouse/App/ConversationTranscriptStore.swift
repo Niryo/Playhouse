@@ -1,21 +1,20 @@
 import Foundation
 import GRDB
 
-/// Playhouse's own record of a task's provider timeline.
+/// Playhouse's own record of a task's conversation: the transcript it shows.
 ///
-/// Codex keeps its full thread history in its app-server, so Playhouse stores
-/// only which Codex turns belong to each Codex segment. Claude Code turns are
-/// stored here in full (visible messages and activities), so a mixed-provider
-/// transcript can be reopened in order without depending on another runtime's
-/// private session files. Tasks that never left Codex have no transcript file.
+/// Every turn of every provider is stored here in full, as it streamed (messages,
+/// activities, usage and the latest diff), so a conversation and any page of it
+/// reopen from this store alone. Neither Codex's app-server thread nor Claude
+/// Code's session files are read back to show a conversation; the provider's
+/// thread or session ID only resumes the agent's own context.
 struct ConversationTranscript: Codable, Equatable {
     struct Segment: Codable, Equatable, Identifiable {
         let id: String
         let provider: ConversationProvider
         let startedAt: Date
-        /// Codex turns that ran while this segment was active, captured when
-        /// the task switched away from Codex. Later Codex turns belong to the
-        /// last Codex segment.
+        /// Codex's own IDs for the turns that ran in this segment: resume metadata
+        /// for the app-server thread, never a source of the transcript.
         var codexTurnIDs: [String] = []
         /// Selected models keyed by the Codex turn IDs above. Older transcripts
         /// omit this map and render provider-only labels for those turns.
@@ -65,9 +64,9 @@ struct ConversationTranscript: Codable, Equatable {
 
     /// What one turn cost, and what ran in it.
     ///
-    /// Kept at transcript level rather than inside `Turn` because only Claude
-    /// turns have a `Turn` row — Codex keeps its own thread history — and both
-    /// providers must appear in the same breakdown.
+    /// Kept at transcript level rather than inside `Turn` so usage reported for
+    /// a turn with no recorded messages, such as a compaction, still appears in
+    /// the breakdown.
     struct TurnTokenUsage: Codable, Equatable, Identifiable {
         let id: String
         let provider: ConversationProvider
@@ -98,20 +97,13 @@ struct ConversationTranscript: Codable, Equatable {
     /// Retained after answering, so retrying an interrupted two-file repair
     /// cannot resurrect the source's old question.
     var userInputRepairs: [UserInputRepair]?
-    /// Private recovery turns. The submitted answers and prompt are never stored
-    /// raw; provider activity and diffs for these turns stay hidden.
-    var sensitiveTurnIDs: [String]?
-    /// Codex turn IDs containing private recovery prompts. Codex-only tasks may
-    /// not have a transcript segment to associate these IDs with.
-    var sensitiveCodexTurnIDs: [String]?
-    /// Codex recovery turns whose assistant responses must stay hidden because
-    /// their recovered user input included a secret answer.
-    var sensitiveCodexSecretTurnIDs: [String]?
-    /// Locally sanitized message copies for private Codex recovery turns. Raw
-    /// provider messages can be replaced after restart without losing safe text.
-    var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?
-    /// Fail-closed marker written before a private recovery prompt is sent.
-    var pendingSensitiveUserInputRedaction: Bool?
+    /// The latest turn's working-tree diff, as its provider last reported it.
+    var latestDiff: ConversationTurnDiff?
+    /// Every compaction of the Claude session's context, oldest first: what
+    /// fired it and how far it shrank the context.
+    var contextCompactions: [ContextCompactionEvent]?
+    /// Resumed Claude turns whose first call missed the prompt cache, oldest first.
+    var promptCacheMisses: [PromptCacheMissEvent]?
 
     var isEmpty: Bool { segments.isEmpty && turns.isEmpty }
 
@@ -282,6 +274,28 @@ final class ConversationTranscriptStore {
         }
     }
 
+    /// Which of the given messages have stored images, as the turns holding each,
+    /// read without touching the image data itself.
+    func turnsWithImages(_ taskID: UUID, messageIDs: Set<String>) throws -> [String: Set<String>] {
+        guard !messageIDs.isEmpty else { return [:] }
+        let ids = Array(messageIDs)
+        return try pool.read { db in
+            var result: [String: Set<String>] = [:]
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                let chunk = Array(ids[start..<min(start + 500, ids.count)])
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT turn_id, id FROM conversation_messages WHERE task_id = ? AND image_data_urls IS NOT NULL AND id IN (\(Self.placeholders(chunk.count)))",
+                    arguments: StatementArguments([taskID.uuidString] + chunk)
+                )
+                for row in rows {
+                    result[row["id"], default: []].insert(row["turn_id"])
+                }
+            }
+            return result
+        }
+    }
+
     /// The task's turns in order with their message IDs, without message bodies.
     struct Outline {
         struct Turn {
@@ -328,6 +342,31 @@ final class ConversationTranscriptStore {
                 arguments: [key, key]
             ) ?? true
             return Outline(turns: turns, hasPositionedElements: positioned)
+        }
+    }
+
+    /// The model of the newest assistant message that names one, among the turns of the given
+    /// segments. Turns are searched newest first, a query each, so a long conversation is not
+    /// decoded to find it.
+    func latestAssistantModelID(_ taskID: UUID, segmentIDs: Set<String>) throws -> String? {
+        guard !segmentIDs.isEmpty else { return nil }
+        return try pool.read { db in
+            let key = taskID.uuidString
+            let turns = try Row.fetchAll(db, sql: "SELECT id, segment_id FROM conversation_turns WHERE task_id = ? ORDER BY seq DESC", arguments: [key])
+            for turn in turns where segmentIDs.contains(turn["segment_id"]) {
+                let modelID = try String.fetchOne(
+                    db,
+                    sql: """
+                    SELECT json_extract(payload, '$.modelID') FROM conversation_messages
+                    WHERE task_id = ? AND turn_id = ? AND json_extract(payload, '$.role') = 'assistant'
+                        AND json_extract(payload, '$.modelID') IS NOT NULL
+                    ORDER BY position DESC LIMIT 1
+                    """,
+                    arguments: [key, turn["id"] as String]
+                )
+                if let modelID { return modelID }
+            }
+            return nil
         }
     }
 
@@ -575,6 +614,7 @@ final class ConversationTranscriptStore {
             if let (oldPosition, old) = previous[message.id], oldPosition == position, old == message { continue }
             var payload = message
             payload.imageDataURLs = []
+            payload.imagesDeferred = nil
             try db.execute(
                 sql: """
                 INSERT INTO conversation_messages (task_id, turn_id, id, position, payload, image_data_urls) VALUES (?, ?, ?, ?, ?, ?)
@@ -627,6 +667,88 @@ enum ConversationHandoff {
     static let chatPagePreamble = "Earlier turns of this standalone chat, provided as context. This chat is split into pages and each page is its own conversation: only the pages below are in scope for this turn."
 
     static func context(for provider: ConversationProvider, messages: [ConversationMessage], preamble: String? = nil) -> String? {
+        guard let transcript = transcript(messages: messages) else { return nil }
+        return """
+        \(openTag)
+        \(preamble ?? defaultPreamble)
+
+        \(transcript)
+        \(closeTag)
+        """
+    }
+
+    /// One standalone chat page and its archived turns, as a chat page context block shows it.
+    struct ChatPage {
+        let page: StandaloneChatPage
+        let messages: [ConversationMessage]
+    }
+
+    /// How many earlier pages a fresh page session is told about, newest first.
+    static let recentChatPageLimit = 8
+    /// Each side of the current page's latest exchange is cut to this many characters. A
+    /// follow-up usually only needs the last answer's gist, and anything more is one
+    /// `chat page read` away, so the excerpt stays small however long the page grows.
+    static let chatPageExcerptCharacterLimit = 1_200
+
+    /// The context a standalone chat page session receives. A fresh page session gets only
+    /// metadata: the current page's ID and title with a short excerpt of its latest exchange,
+    /// and the IDs and titles of recent pages, so the agent loads a page with `chat page read`
+    /// only when the user's message actually continues it. Pages the user explicitly attached
+    /// to this turn (`fullPages`) still travel whole, under a Playhouse page marker rather
+    /// than a line that reads as something the user typed.
+    static func chatPageContext(current: ChatPage?, recentPages: [StandaloneChatPage], fullPages: [ChatPage]) -> String? {
+        var sections: [String] = []
+        if let current {
+            var header = ["Playhouse chat page metadata, not part of the user's message. This standalone chat is split into titled pages, and each page is its own conversation. This session has not loaded any page's turns."]
+            header.append("Current page: \(chatPageLabel(current.page))")
+            if let excerpt = latestExchange(of: current) {
+                header.append("Its latest exchange, shortened:\n\(excerpt)")
+            }
+            if !recentPages.isEmpty {
+                header.append("Recent pages, newest first:\n" + recentPages.map { "- \(chatPageLabel($0))" }.joined(separator: "\n"))
+            }
+            header.append("If the user's message continues the current page or a recent page and this excerpt is not enough, run chat page read <page-id> to load that page before answering. Otherwise do not load any page.")
+            sections.append(header.joined(separator: "\n\n"))
+        }
+        // Attached pages share one transcript budget, so several never outgrow a single page.
+        let pageLimit = characterLimit / max(fullPages.count, 1)
+        let full = fullPages.compactMap { page -> String? in
+            transcript(messages: page.messages, limit: pageLimit).map { "Playhouse page \(chatPageLabel(page.page)):\n\n\($0)" }
+        }
+        if !full.isEmpty {
+            let preamble = current == nil ? chatPagePreamble : "Pages the user attached to this turn, in full:"
+            sections.append(([preamble] + full).joined(separator: "\n\n"))
+        }
+        guard !sections.isEmpty else { return nil }
+        return """
+        \(openTag)
+        \(sections.joined(separator: "\n\n"))
+        \(closeTag)
+        """
+    }
+
+    private static func chatPageLabel(_ page: StandaloneChatPage) -> String {
+        let count = page.messageCount == 1 ? "1 message" : "\(page.messageCount) messages"
+        return "\"\(page.title)\" (id: \(page.id), \(count))"
+    }
+
+    /// The page's last user message and the last reply after it, each cut to the excerpt limit.
+    private static func latestExchange(of page: ChatPage) -> String? {
+        let visible = page.messages.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard let questionIndex = visible.lastIndex(where: { $0.role == .user }) else { return nil }
+        let exchange = [visible[questionIndex]] + (visible[(questionIndex + 1)...].last(where: { $0.role == .assistant }).map { [$0] } ?? [])
+        return exchange.map { message in
+            let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortened = text.count > chatPageExcerptCharacterLimit
+                ? String(text.prefix(chatPageExcerptCharacterLimit)) + " […]"
+                : text
+            let speaker = message.role == .user ? "User" : (message.provider ?? .codex).displayName
+            return "\(speaker): \(shortened)"
+        }.joined(separator: "\n\n")
+    }
+
+    /// The visible turns as `Speaker: text` lines, newest kept when they exceed the limit.
+    static func transcript(messages: [ConversationMessage], limit: Int = characterLimit) -> String? {
         // A turn whose answer was only recorded as commentary still hands off its
         // last commentary, so a misclassified answer is never silently dropped.
         let answeredTurns = Set(messages.compactMap { $0.role == .assistant && $0.phase != "commentary" ? $0.turnID : nil })
@@ -644,16 +766,10 @@ enum ConversationHandoff {
         }
         guard !lines.isEmpty else { return nil }
         var transcript = lines.joined(separator: "\n\n")
-        if transcript.count > characterLimit {
-            transcript = "[Earlier turns omitted]\n\n" + String(transcript.suffix(characterLimit))
+        if transcript.count > limit {
+            transcript = "[Earlier turns omitted]\n\n" + String(transcript.suffix(limit))
         }
-        return """
-        \(openTag)
-        \(preamble ?? defaultPreamble)
-
-        \(transcript)
-        \(closeTag)
-        """
+        return transcript
     }
 
     static func prompt(_ text: String, context: String?) -> String {

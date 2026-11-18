@@ -393,6 +393,7 @@ private struct ReleaseNotesView: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("update-notes-body")
+                    .hoverRevealScrollers()
             }
             .frame(maxHeight: 240)
         }

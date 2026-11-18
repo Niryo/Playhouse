@@ -4,6 +4,7 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- The plugin fetch and update cases' local fixture servers listen on 127.0.0.1. -->
 	<key>com.apple.security.network.server</key>
 	<true/>
 	<key>com.apple.security.temporary-exception.sbpl</key>

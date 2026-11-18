@@ -1,0 +1,50 @@
+{
+  "doneArchive": {
+    "prefix": "",
+    "search": "",
+    "emptyMessage": null,
+    "loading": false,
+    "loadedValue": "5 tasks loaded",
+    "accent": "#339E73",
+    "rows": [
+      {
+        "id": "4F3A2C10-0000-4000-8000-000000000001",
+        "title": "Fix Skills page tab row layout",
+        "date": "10 November 2026",
+        "pullRequests": { "links": [{ "number": 227, "url": "https://github.com/example/playhouse/pull/227", "repository": "playhouse", "state": "merged" }] }
+      },
+      {
+        "id": "4F3A2C10-0000-4000-8000-000000000002",
+        "title": "Purple tint for the Waiting Response column",
+        "date": "10 November 2026",
+        "pullRequests": {
+          "create": { "title": "PR", "busy": false, "label": "PR. Create a pull request for the repository without a linked pull request", "help": "Create pull requests for repositories without a linked pull request" },
+          "links": [{ "number": 228, "url": "https://github.com/example/playhouse/pull/228", "repository": "playhouse", "state": "merged" }]
+        }
+      },
+      {
+        "id": "4F3A2C10-0000-4000-8000-000000000003",
+        "title": "Update the clean-mac AMI and monitoring",
+        "date": "9 November 2026",
+        "pullRequests": {
+          "create": { "title": "PRs", "busy": false, "label": "PRs. Create pull requests for each repository linked to this completed task", "help": "Create a pull request for each repository linked to this completed task" },
+          "links": []
+        }
+      },
+      {
+        "id": "4F3A2C10-0000-4000-8000-000000000004",
+        "title": "Investigate and fix a task error",
+        "date": "9 November 2026",
+        "pullRequests": {
+          "create": { "title": "PR", "busy": true, "label": "PR. Create a pull request for each repository linked to this completed task", "help": "Create a pull request for each repository linked to this completed task" },
+          "links": []
+        }
+      },
+      {
+        "id": "4F3A2C10-0000-4000-8000-000000000005",
+        "title": "Plan the next release notes",
+        "date": "8 November 2026"
+      }
+    ]
+  }
+}

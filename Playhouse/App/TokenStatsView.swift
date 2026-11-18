@@ -56,6 +56,8 @@ struct TokenStatsModel: Codable, Equatable {
         var buckets: [Bucket]
         var tools: [Tool]
         var turns: [Turn]
+        var contextCompactions: [String]
+        var resumeCacheMisses: [String]
     }
 
     /// A row's share bar: its length and heat against the largest row in its list.
@@ -230,6 +232,10 @@ extension TokenStatsModel {
                     total: format(turn.totalTokens),
                     tools: turn.tools.isEmpty ? nil : turn.tools.joined(separator: " · ")
                 )
+            },
+            contextCompactions: summary.contextCompactions.map(\.summary),
+            resumeCacheMisses: summary.promptCacheMisses.map { miss in
+                "Cache read \(format(miss.cacheReadTokens)) tokens · cache rewritten with \(format(miss.cacheWriteTokens)) tokens"
             }
         )
     }
@@ -591,6 +597,12 @@ struct TokenStatsView: View {
                         AtomText(props: TextProps(text: bucket.value, size: 13, weight: "medium"))
                     }
                 }
+            }
+            ForEach(Array(overview.contextCompactions.enumerated()), id: \.offset) { index, detail in
+                AtomText(props: TextProps(text: detail, size: 10, color: "secondary", wrap: true), common: AtomCommon(testID: "\(id)-compaction-\(index)"))
+            }
+            ForEach(Array(overview.resumeCacheMisses.enumerated()), id: \.offset) { index, detail in
+                AtomText(props: TextProps(text: "Resume cache miss · \(detail)", size: 10, color: "secondary", wrap: true), common: AtomCommon(testID: "\(id)-resume-cache-miss-\(index)"))
             }
         }
     }

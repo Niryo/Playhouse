@@ -49,6 +49,22 @@ struct StandaloneChatPendingFallback: Equatable {
     var turnID: String
 }
 
+/// One `chat page close-turn`, kept with the page it resolved to. The command runs inside the
+/// turn it settles, so the turn whose time span holds the signal is the turn that owns it: a
+/// daemon that never saw the turn start (it took over after a restart) can still file the turn
+/// on the page its agent chose.
+struct StandaloneChatTurnSignal: Equatable {
+    var pageID: String
+    var recordedAt: Date
+}
+
+/// A message of a turn being filed onto a page.
+struct StandaloneChatTurnMessage: Equatable {
+    var role: String
+    var text: String
+    var createdAt: Date?
+}
+
 private struct StandaloneChatPageArchive: Codable {
     let formatVersion: Int
     let page: StandaloneChatPage
@@ -140,6 +156,8 @@ final class StandaloneChatManager {
         );
         """)
         try exec("CREATE INDEX IF NOT EXISTS chat_messages_page_idx ON chat_messages(page_id, timeline_order);")
+        // The page labels read the newest pages, a few at a time, without sorting every page.
+        try exec("CREATE INDEX IF NOT EXISTS chat_pages_chat_created_idx ON chat_pages(chat_id, created_at);")
         try exec("""
         CREATE TABLE IF NOT EXISTS chat_meta (
             chat_id TEXT PRIMARY KEY,
@@ -152,6 +170,22 @@ final class StandaloneChatManager {
             chat_id TEXT PRIMARY KEY,
             page_id TEXT NOT NULL,
             turn_id TEXT NOT NULL
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS chat_turn_signals (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL,
+            page_id TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS chat_turn_signals_time_idx ON chat_turn_signals(chat_id, recorded_at);")
+        try exec("CREATE INDEX IF NOT EXISTS chat_messages_turn_idx ON chat_messages(turn_id);")
+        try exec("""
+        CREATE TABLE IF NOT EXISTS chat_inflight_turn (
+            chat_id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL
         );
         """)
         try exec("CREATE TABLE IF NOT EXISTS chat_archive_migrations (version INTEGER PRIMARY KEY);")
@@ -260,7 +294,9 @@ final class StandaloneChatManager {
     private func reindexMessages(pageID: String) throws {
         var ids: [String] = []
         try withStatement(
-            "SELECT id FROM chat_messages WHERE page_id = ? ORDER BY rowid ASC;",
+            // A recovered turn can be filed between turns already on the page, so its
+            // timeline position, not its insertion order, is the page's order.
+            "SELECT id FROM chat_messages WHERE page_id = ? ORDER BY timeline_order ASC, rowid ASC;",
             bindings: [.text(pageID)]
         ) { statement in
             while sqlite3_step(statement) == SQLITE_ROW { ids.append(columnText(statement, 0)) }
@@ -293,10 +329,24 @@ final class StandaloneChatManager {
         if isOutsideTransaction { try syncPageFile(pageID: pageID) }
     }
 
-    func listPages(chatID: String = defaultChatID, limit: Int = 50) throws -> [StandaloneChatPage] {
-        try queryPages(
-            "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?;",
-            bindings: [.text(chatID), .integer(Int64(limit))]
+    /// The newest pages, or with `titleContaining` only those whose title contains that text,
+    /// ignoring case, as the search above the chat's page labels finds them.
+    func listPages(chatID: String = defaultChatID, limit: Int = 50, titleContaining: String? = nil) throws -> [StandaloneChatPage] {
+        let titleText = titleContaining?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !titleText.isEmpty else {
+            return try queryPages(
+                "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?;",
+                bindings: [.text(chatID), .integer(Int64(limit))]
+            )
+        }
+        // The title's own % and _ match only themselves.
+        let pattern = "%" + titleText
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_") + "%"
+        return try queryPages(
+            "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? AND title LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?;",
+            bindings: [.text(chatID), .text(pattern), .integer(Int64(limit))]
         )
     }
 
@@ -329,6 +379,70 @@ final class StandaloneChatManager {
             ON CONFLICT(chat_id) DO UPDATE SET signal_sequence = signal_sequence + 1;
             """,
             bindings: [.text(chatID)]
+        )
+    }
+
+    // MARK: - In-flight turn
+
+    /// Records that Playhouse started sending a chat turn. It stays until the turn is filed (or
+    /// its send fails while its daemon is alive), so a daemon that took the turn over after a
+    /// restart knows when it began even when its provider's messages carry no time (Codex), and
+    /// recovery knows the newest turn really ran.
+    func beginTurn(chatID: String = defaultChatID) throws {
+        try exec(
+            "INSERT INTO chat_inflight_turn (chat_id, started_at) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET started_at = excluded.started_at;",
+            bindings: [.text(chatID), .text(iso(Date()))]
+        )
+    }
+
+    func inflightTurnStartedAt(chatID: String = defaultChatID) throws -> Date? {
+        var startedAt: Date?
+        try withStatement("SELECT started_at FROM chat_inflight_turn WHERE chat_id = ?;", bindings: [.text(chatID)]) { statement in
+            if sqlite3_step(statement) == SQLITE_ROW { startedAt = date(columnText(statement, 0)) }
+        }
+        return startedAt
+    }
+
+    func endTurn(chatID: String = defaultChatID) throws {
+        try exec("DELETE FROM chat_inflight_turn WHERE chat_id = ?;", bindings: [.text(chatID)])
+    }
+
+    /// Records a `chat page close-turn` signal: it counts toward the turn's compliance check
+    /// and keeps the page it resolved to with its time, in one transaction.
+    func recordTurnSignal(pageID: String, chatID: String = defaultChatID) throws {
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            try recordSignal(chatID: chatID)
+            try exec(
+                "INSERT INTO chat_turn_signals (chat_id, page_id, recorded_at) VALUES (?, ?, ?);",
+                bindings: [.text(chatID), .text(pageID), .text(iso(Date()))]
+            )
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// The close-turn signals recorded from `start` up to (not including) `end`, oldest first.
+    func turnSignals(chatID: String = defaultChatID, from start: Date, to end: Date? = nil) throws -> [StandaloneChatTurnSignal] {
+        var signals: [StandaloneChatTurnSignal] = []
+        try withStatement(
+            "SELECT page_id, recorded_at FROM chat_turn_signals WHERE chat_id = ? AND recorded_at >= ? AND recorded_at < ? ORDER BY seq ASC;",
+            bindings: [.text(chatID), .text(iso(start)), .text(end.map(iso) ?? "9999")]
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                signals.append(StandaloneChatTurnSignal(pageID: columnText(statement, 0), recordedAt: date(columnText(statement, 1))))
+            }
+        }
+        return signals
+    }
+
+    /// Pages created from `start` up to (not including) `end`, oldest first.
+    func pagesCreated(chatID: String = defaultChatID, from start: Date, to end: Date) throws -> [StandaloneChatPage] {
+        try queryPages(
+            "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at ASC;",
+            bindings: [.text(chatID), .text(iso(start)), .text(iso(end))]
         )
     }
 
@@ -527,6 +641,81 @@ final class StandaloneChatManager {
         }
         try syncPageFile(pageID: pageID)
         return message
+    }
+
+    /// Files one turn's messages onto a page, unless any page of this chat already holds that
+    /// turn: the check and the writes share one transaction, so the daemon that sent a turn, a
+    /// daemon that took it over after a restart, and startup recovery can never file it twice.
+    /// The turn goes ahead of the first message of any of `laterTurnIDs` already on the page,
+    /// otherwise at its end. Returns false when the turn was already filed.
+    @discardableResult
+    func fileTurn(
+        pageID: String,
+        turnID: String,
+        messages turnMessages: [StandaloneChatTurnMessage],
+        laterTurnIDs: Set<String> = [],
+        chatID: String = defaultChatID
+    ) throws -> Bool {
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            var alreadyFiled = false
+            try withStatement(
+                "SELECT 1 FROM chat_messages m JOIN chat_pages p ON p.id = m.page_id WHERE p.chat_id = ? AND m.turn_id = ? LIMIT 1;",
+                bindings: [.text(chatID), .text(turnID)]
+            ) { statement in
+                alreadyFiled = sqlite3_step(statement) == SQLITE_ROW
+            }
+            guard !alreadyFiled else {
+                try exec("ROLLBACK;")
+                return false
+            }
+            guard !turnMessages.isEmpty else {
+                try exec("ROLLBACK;")
+                return true
+            }
+            _ = try page(id: pageID)
+            let existing = try messages(pageID: pageID)
+            let end = (existing.map(\.timelineOrder).max() ?? -1) + 1
+            let insertAt = existing.first(where: { laterTurnIDs.contains($0.turnID) })?.timelineOrder ?? end
+            if insertAt < end {
+                try exec(
+                    "UPDATE chat_messages SET timeline_order = timeline_order + ? WHERE page_id = ? AND timeline_order >= ?;",
+                    bindings: [.integer(Int64(turnMessages.count)), .text(pageID), .integer(Int64(insertAt))]
+                )
+            }
+            let now = Date()
+            for (offset, message) in turnMessages.enumerated() {
+                try exec(
+                    "INSERT INTO chat_messages (id, page_id, turn_id, role, text, created_at, timeline_order) VALUES (?, ?, ?, ?, ?, ?, ?);",
+                    bindings: [
+                        .text(UUID().uuidString), .text(pageID), .text(turnID), .text(message.role), .text(message.text),
+                        .text(iso(message.createdAt ?? now)), .integer(Int64(insertAt + offset)),
+                    ]
+                )
+            }
+            try exec(
+                "UPDATE chat_pages SET message_count = (SELECT count(*) FROM chat_messages WHERE page_id = ?) WHERE id = ?;",
+                bindings: [.text(pageID), .text(pageID)]
+            )
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+        try syncPageFile(pageID: pageID)
+        return true
+    }
+
+    /// Every turn filed on any page of this chat.
+    func filedTurnIDs(chatID: String = defaultChatID) throws -> Set<String> {
+        var turnIDs = Set<String>()
+        try withStatement(
+            "SELECT DISTINCT m.turn_id FROM chat_messages m JOIN chat_pages p ON p.id = m.page_id WHERE p.chat_id = ?;",
+            bindings: [.text(chatID)]
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW { turnIDs.insert(columnText(statement, 0)) }
+        }
+        return turnIDs
     }
 
     func pageFileURL(pageID: String) -> URL {

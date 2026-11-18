@@ -10,6 +10,7 @@ enum AtomType: String, CaseIterable, Sendable {
     case stack = "Stack"
     case text = "Text"
     case icon = "Icon"
+    case image = "Image"
     case label = "Label"
     case button = "Button"
     case link = "Link"
@@ -32,6 +33,9 @@ enum AtomType: String, CaseIterable, Sendable {
     case editor = "Editor"
     case popover = "Popover"
     case stepSlider = "StepSlider"
+    case modal = "Modal"
+    case page = "Page"
+    case sidePanel = "SidePanel"
 
     /// The events each atom raises; a plugin's handler for any other name is never called.
     var events: Set<String> {
@@ -46,17 +50,18 @@ enum AtomType: String, CaseIterable, Sendable {
         case .menu: ["onMenu"]
         case .pressArea: ["onPress", "onLongPress"]
         case .editor: ["onChange", "onSubmit", "onSteerSubmit", "onFocusChange"]
-        case .popover: ["onDismiss"]
+        case .popover, .modal: ["onDismiss"]
         case .stepSlider: ["onChange"]
-        case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter, .scroll, .divider, .overlay: []
+        case .scroll: ["onEndReached"]
+        case .stack, .text, .icon, .image, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
         }
     }
 
     /// Whether the atom shows atom children. A Text holds only raw strings.
     var takesAtomChildren: Bool {
         switch self {
-        case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .overlay, .popover: true
-        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
+        case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .overlay, .popover, .modal, .page, .sidePanel: true
+        case .text, .icon, .image, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
         }
     }
 
@@ -65,8 +70,8 @@ enum AtomType: String, CaseIterable, Sendable {
     /// children but is a leaf. The debug atom highlight colors the two apart.
     var isContainer: Bool {
         switch self {
-        case .stack, .panel, .card, .scroll, .disclosure, .overlay, .popover: true
-        case .text, .icon, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
+        case .stack, .panel, .card, .scroll, .disclosure, .overlay, .popover, .modal, .page, .sidePanel: true
+        case .text, .icon, .image, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
              .toggle, .textField, .segmented, .menu, .pressArea, .editor, .stepSlider: false
         }
     }
@@ -88,6 +93,7 @@ enum AtomType: String, CaseIterable, Sendable {
         case .stack: Self.keys(StackProps.CodingKeys.self)
         case .text: Self.keys(TextProps.CodingKeys.self)
         case .icon: Self.keys(IconProps.CodingKeys.self)
+        case .image: Self.keys(ImageProps.CodingKeys.self)
         case .label: Self.keys(LabelProps.CodingKeys.self)
         case .button: Self.keys(ButtonProps.CodingKeys.self)
         case .link: Self.keys(LinkProps.CodingKeys.self)
@@ -110,6 +116,9 @@ enum AtomType: String, CaseIterable, Sendable {
         case .editor: Self.keys(EditorProps.CodingKeys.self)
         case .popover: Self.keys(PopoverProps.CodingKeys.self)
         case .stepSlider: Self.keys(StepSliderProps.CodingKeys.self)
+        case .modal: Self.keys(ModalProps.CodingKeys.self)
+        case .page: Self.keys(PageProps.CodingKeys.self)
+        case .sidePanel: Self.keys(SidePanelProps.CodingKeys.self)
         }
     }
 
@@ -136,6 +145,7 @@ enum AtomType: String, CaseIterable, Sendable {
             case .stack: _ = try StackProps.decode(props)
             case .text: _ = try TextProps.decode(props)
             case .icon: _ = try IconProps.decode(props)
+            case .image: _ = try ImageProps.decode(props).validateURL()
             case .label: _ = try LabelProps.decode(props)
             case .button: _ = try ButtonProps.decode(props)
             case .link: _ = try LinkProps.decode(props)
@@ -158,6 +168,9 @@ enum AtomType: String, CaseIterable, Sendable {
             case .editor: _ = try EditorProps.decode(props)
             case .popover: _ = try PopoverProps.decode(props)
             case .stepSlider: _ = try StepSliderProps.decode(props)
+            case .modal: _ = try ModalProps.decode(props)
+            case .page: _ = try PageProps.decode(props)
+            case .sidePanel: _ = try SidePanelProps.decode(props)
             }
         } catch let error as DecodingError {
             throw PluginTreeError(message: "<\(type)> has an invalid prop: \(Self.describe(error))")
@@ -201,6 +214,9 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
     var minHeight: Double?
     /// Stretch to the available width, content leading.
     var fillWidth: Bool?
+    /// Keep its natural size: a tight row neither wraps nor truncates it, and
+    /// squeezes its other children instead (a badge beside a name).
+    var fixedSize: Bool?
     var padding: Double?
     /// Extra horizontal padding, inside `padding`.
     var paddingX: Double?
@@ -212,7 +228,7 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
     var passThrough: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case testID, label, value, hint, help, width, height, minWidth, minHeight, fillWidth, padding, paddingX, paddingY, opacity, passThrough
+        case testID, label, value, hint, help, width, height, minWidth, minHeight, fillWidth, fixedSize, padding, paddingX, paddingY, opacity, passThrough
     }
 
     static let keys = Set(CodingKeys.allCases.map(\.stringValue))
@@ -221,16 +237,53 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
 /// A row or column. `axis` is "h" or "v" (default); `align` is leading,
 /// center or trailing for a column and top, center, bottom or baseline (the
 /// first line of text) for a row.
+/// `scrollID` names it as a place a Scroll around it can scroll to (`scrollTo`).
 /// `group` makes it one accessibility container for its children; `combine`
-/// makes it one accessibility element whose label joins theirs.
+/// makes it one accessibility element whose label joins theirs; `summary`
+/// makes it one element that reads only as its `label`, hiding its children
+/// (on macOS a combined element of Texts can report them as a value that
+/// hides an explicit label).
+///
+/// It draws nothing unless it has a surface prop. `fill` (a color name,
+/// primary by default) at `fillOpacity` (1 by default) fills it when either is
+/// set; a border inside its edge is drawn when any of `stroke` (a color name,
+/// primary by default), `strokeOpacity` (1), `strokeWidth` (1) or `dash` (on,
+/// off lengths; solid by default) is set. The shape is a rectangle rounded by
+/// `cornerRadius` (0 by default), or with `capsule` fully rounded ends (a
+/// circle when it is square). A Stack with a surface sizes the surface with
+/// the frame and padding props, and lays its children out inside it: at the
+/// start of its axis and at `align` across it (a `minHeight` column with
+/// `align` leading keeps its children at the top leading corner), or, with
+/// `align` center or unset (a Stack's default), centered both ways, also when
+/// `fillWidth` stretches it. A fixed `width` or `height` centers them, as it
+/// centers any atom's content. A color name it doesn't know draws primary.
 struct StackProps: AtomPropsDecodable, Equatable {
     var axis: String?
     var spacing: Double?
     var align: String?
     var group: Bool?
     var combine: Bool?
+    var fill: String?
+    var fillOpacity: Double?
+    var cornerRadius: Double?
+    var capsule: Bool?
+    var stroke: String?
+    var strokeOpacity: Double?
+    var strokeWidth: Double?
+    var dash: [Double]?
+    var summary: Bool?
+    var scrollID: String?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case axis, spacing, align, group, combine }
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case axis, spacing, align, group, combine, summary, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash, scrollID
+    }
+
+    /// Whether it fills its shape.
+    var hasFill: Bool { fill != nil || fillOpacity != nil }
+    /// Whether it draws a border.
+    var hasStroke: Bool { stroke != nil || strokeOpacity != nil || strokeWidth != nil || dash != nil }
+    /// Whether it draws a surface, and so lays its children out inside it.
+    var hasSurface: Bool { hasFill || hasStroke || cornerRadius != nil || capsule != nil }
 }
 
 /// A string, from `text` or the atom's raw string children. Weights: regular,
@@ -252,21 +305,69 @@ struct TextProps: AtomPropsDecodable, Equatable {
     var truncation: String?
     /// Give every digit the same width, so changing numbers don't shift.
     var monospacedDigits: Bool?
+    /// How wrapped lines line up: leading (default), center or trailing.
+    var align: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits
+        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits, align
     }
 }
 
-/// An SF Symbol (`name`) or a template image from the app's assets (`asset`).
+/// An SF Symbol (`name`) or a template image from the app's assets (`asset`);
+/// `original` draws the asset in its own colors (the app logo) instead.
 struct IconProps: AtomPropsDecodable, Equatable {
     var name: String?
     var asset: String?
     var size: Double?
     var weight: String?
     var color: String?
+    var original: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case name, asset, size, weight, color }
+    enum CodingKeys: String, CodingKey, CaseIterable { case name, asset, size, weight, color, original }
+}
+
+/// A picture loaded from `url`: `https`, `http` (which App Transport Security
+/// lets reach only IP addresses and local hosts, as for `fetch`), a `file://`
+/// path or a `data:image/…` URL. `size` makes it a square of that many points
+/// (otherwise the common `width` and `height` frame it, or it takes the width
+/// it is offered at the picture's aspect ratio). `contentMode` `fill` (the
+/// default) covers the frame and crops, `fit` shows all of it. `cornerRadius`
+/// rounds its corners and `circle` clips it to a circle (a profile picture).
+/// While it loads, and when it fails, it shows `placeholder` (an SF Symbol) on
+/// a faint fill, never an error. The window loads and caches it natively, so a
+/// re-render or another copy of the same URL doesn't load it again. It is
+/// decorative unless it has an accessibility `label`.
+struct ImageProps: AtomPropsDecodable, Equatable {
+    var url: String
+    var size: Double?
+    var contentMode: String?
+    var cornerRadius: Double?
+    var circle: Bool?
+    var placeholder: String?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case url, size, contentMode, cornerRadius, circle, placeholder }
+
+    /// The URL it loads, or nil when `url` isn't one it may load.
+    var source: URL? { try? validateURL() }
+
+    /// Checks `url` the way `fetch` checks its URL, also allowing local files and image data.
+    @discardableResult
+    func validateURL() throws -> URL {
+        let invalid = PluginTreeError(message:
+            "<Image> has an invalid prop: url: expected an absolute https, http, file or data:image URL, found \"\(url)\"")
+        guard let parsed = URL(string: url), let scheme = parsed.scheme?.lowercased() else { throw invalid }
+        switch scheme {
+        case "http", "https":
+            guard let host = parsed.host, !host.isEmpty else { throw invalid }
+        case "file":
+            guard parsed.path.hasPrefix("/"), parsed.path.count > 1 else { throw invalid }
+        case "data":
+            guard url.dropFirst("data:".count).lowercased().hasPrefix("image/") else { throw invalid }
+        default:
+            throw invalid
+        }
+        return parsed
+    }
 }
 
 /// An SF Symbol beside a string.
@@ -282,13 +383,14 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 
 /// A button whose label is its children. `style` is plain (default),
 /// borderless, bordered (a push button), prominent (the accent-filled
-/// push button) or automatic (the platform's default for where it sits); `emphasis` is the padding of the hover capsule, if any, and
+/// push button), link (accent text like a hyperlink) or automatic (the platform's default for where it sits); `emphasis` is the padding of the hover capsule, if any, and
 /// `overhang` lets that capsule spill past the button's layout size.
-/// `controlSize` "small" makes it a small control (it inherits the size
+/// `controlSize` "small" or "large" makes it a small or large control (it inherits the size
 /// otherwise); `shortcut` "default" makes Return press it and "cancel"
 /// makes Escape press it, window-wide, so only a window's primary or
 /// dismissing action should set one. `destructive` gives it the destructive
-/// role (a push button draws its title red).
+/// role (a push button draws its title red). `selected` marks it selected to
+/// accessibility, the current choice of a row of buttons (a ChoiceBar's).
 struct ButtonProps: AtomPropsDecodable, Equatable {
     var style: String?
     var emphasis: Double?
@@ -297,8 +399,9 @@ struct ButtonProps: AtomPropsDecodable, Equatable {
     var controlSize: String?
     var shortcut: String?
     var destructive: Bool?
+    var selected: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive }
+    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive, selected }
 }
 
 /// Opens `url` in the browser; its label is its children.
@@ -343,6 +446,9 @@ struct PillPickerProps: AtomPropsDecodable, Equatable {
 /// (`onPress`), with a right-click menu (`onMenu` receives the item's id) and
 /// an optional usage meter along its leading edge (`meter`, 0...1).
 struct CardProps: AtomPropsDecodable, Equatable {
+    /// The common `padding` of a Card that sets none.
+    static let defaultPadding: Double = 14
+
     struct MenuItem: Codable, Equatable {
         var id: String
         var title: String
@@ -374,19 +480,21 @@ struct DisclosureProps: AtomPropsDecodable, Equatable {
     enum CodingKeys: String, CodingKey, CaseIterable { case title, collapsed, spacing, toggleTestID }
 }
 
-/// A rounded, filled background behind its children, which it lays out as a
-/// leading column (an agent's block in Agents info). `fill` is a color name
-/// (primary by default) drawn at `fillOpacity` (0.05 by default); `stroke`
-/// is a color name for a border inside its edge, drawn at `strokeOpacity`
-/// (1 by default), `strokeWidth` points wide (1 by default) and dashed by
-/// `dash` (on, off lengths; solid by default). `capsule` rounds its ends fully
-/// instead of using `cornerRadius` (a circle when it is square). `align` is
-/// `leading` (the default: children at the leading edge, and a `minHeight` keeps
-/// them at the top, as a board column does) or `center` (children centered both
-/// ways, as an empty state's are, with `fillWidth` stretching it without moving
-/// them). It is one accessibility container, or with `combine` one element whose
-/// label joins its children's.
+/// A composite atom: shorthand for a column `Stack` with a surface and
+/// `group` (an agent's block in Agents info), so everything it does a Stack
+/// can do. It differs from a Stack only in its defaults: `fill` primary at
+/// `fillOpacity` 0.05, `cornerRadius` 8, `align` `leading` (children at the
+/// leading edge, and a `minHeight` keeps them at the top, as a board column
+/// does) or `center` (centered both ways, as an empty state's are), and one
+/// accessibility container (or with `combine` one element whose label joins
+/// its children's). Its border is drawn only when it has a `stroke`, at
+/// `strokeOpacity` (1), `strokeWidth` (1) and `dash` (solid). Unlike a Stack
+/// it is padded by default: the common `padding` is `defaultPadding` unless
+/// set (a native Panel sized by its own frame passes 0).
 struct PanelProps: AtomPropsDecodable, Equatable {
+    /// The common `padding` of a Panel that sets none.
+    static let defaultPadding: Double = 12
+
     var spacing: Double?
     var fill: String?
     var fillOpacity: Double?
@@ -400,6 +508,18 @@ struct PanelProps: AtomPropsDecodable, Equatable {
     var combine: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable { case spacing, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash, align, combine }
+
+    /// The Stack this Panel stands for.
+    var stack: StackProps {
+        StackProps(
+            axis: "v", spacing: spacing, align: align == "center" ? "center" : "leading", group: true, combine: combine,
+            fill: fill ?? "primary", fillOpacity: fillOpacity ?? 0.05, cornerRadius: cornerRadius ?? 8, capsule: capsule,
+            stroke: stroke,
+            strokeOpacity: stroke == nil ? nil : strokeOpacity,
+            strokeWidth: stroke == nil ? nil : strokeWidth,
+            dash: stroke == nil ? nil : dash
+        )
+    }
 }
 
 /// A horizontal usage bar: a capsule track filled to `fraction` (0...1) in
@@ -421,14 +541,22 @@ struct MeterProps: AtomPropsDecodable, Equatable {
 /// Token Stats sections), stretched to the available width. `height` (a
 /// common prop) fixes its height; `maxHeight` lets it shrink to its content.
 /// `inset` pads the column inside the scroll view, and `lazy` builds only
-/// the children in view (the Skills page's gallery).
+/// the children in view (the Done archive's rows). It raises `onEndReached`
+/// each time the end of its content comes into view (and once when the
+/// content fits), so its owner can append the next page (the Done archive's
+/// 40 at a time). Each new `scrollRequest` scrolls, animated, until the
+/// descendant Stack whose `scrollID` is `scrollTo` sits at the top (the
+/// Skills page's section anchors); a lazy column can reach only a Stack it
+/// has built.
 struct ScrollProps: AtomPropsDecodable, Equatable {
     var spacing: Double?
     var maxHeight: Double?
     var inset: Double?
     var lazy: Bool?
+    var scrollTo: String?
+    var scrollRequest: Int?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight, inset, lazy }
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight, inset, lazy, scrollTo, scrollRequest }
 }
 
 /// A thin separator line across the stack it sits in.
@@ -468,13 +596,16 @@ struct ToggleProps: AtomPropsDecodable, Equatable {
 /// edit calls `onChange` with the new text. `placeholder` shows while it is
 /// empty, and `autoFocus` gives it the keyboard focus when it appears. With
 /// a handler, Return calls `onSubmit` and the Up and Down arrows call
-/// `onArrow` with "up" or "down" instead of moving the caret.
+/// `onArrow` with "up" or "down" instead of moving the caret. `style`
+/// `plain` drops the rounded border, for a field inside a decorated `Stack`
+/// (the Done archive's search); `rounded` is the default.
 struct TextFieldProps: AtomPropsDecodable, Equatable {
     var text: String
     var placeholder: String?
     var autoFocus: Bool?
+    var style: String?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder, autoFocus }
+    enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder, autoFocus, style }
 }
 
 /// A segmented control (the Skills page's Skills | Rules | MCP and source
@@ -510,6 +641,8 @@ struct MenuProps: AtomPropsDecodable, Equatable {
         var checked: Bool?
         /// An SF Symbol shown before the title.
         var icon: String?
+        /// Shown dimmed and can't be chosen.
+        var disabled: Bool?
     }
 
     var icon: String?
@@ -549,12 +682,15 @@ struct PressAreaProps: AtomPropsDecodable, Equatable {
 /// topTrailing, bottomLeading or bottomTrailing), moved by `offsetX` and
 /// `offsetY` points without changing its size: a repository chip's remove
 /// badge on its top trailing corner. It is one accessibility container.
+/// `revealOnHover` draws the overlay only while the pointer is over the
+/// atom: a repository row's Replace and Add buttons.
 struct OverlayProps: AtomPropsDecodable, Equatable {
     var align: String?
     var offsetX: Double?
     var offsetY: Double?
+    var revealOnHover: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case align, offsetX, offsetY }
+    enum CodingKeys: String, CodingKey, CaseIterable { case align, offsetX, offsetY, revealOnHover }
 }
 
 /// A multiline message editor that grows with its text (the composer's).
@@ -589,15 +725,32 @@ struct EditorProps: AtomPropsDecodable, Equatable {
 /// controlled: it is open while `isPresented` is true, and a click outside or
 /// Escape calls `onDismiss`, after which the owner sets `isPresented` false.
 /// `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`) is the
-/// anchor's edge it points at; `width` fixes the popover's. The anchor and
-/// the content keep their own accessibility, so a `testID` here only names
-/// the popover to a plugin's events.
+/// anchor's edge it points at; `width` fixes the popover's. The content is
+/// padded by `inset` (`defaultInset` unless set) and a plugin's children are
+/// `spacing` apart (`defaultSpacing` unless set), so content looks right with
+/// no padding of its own; a native owner that pads its content passes 0. The
+/// anchor and the content keep their own accessibility, so a `testID` here
+/// only names the popover to a plugin's events.
+///
+/// With `hover` it is a hint instead: it also opens while the pointer rests
+/// on the anchor for `delay` seconds (`defaultHoverDelay` unless set) and
+/// closes when the pointer leaves it. A hint takes no keyboard focus and no
+/// clicks away from the window, so it never raises `onDismiss` (the Skills
+/// page's rows show their details this way).
 struct PopoverProps: AtomPropsDecodable, Equatable {
+    static let defaultInset: Double = 14
+    static let defaultSpacing: Double = 10
+    static let defaultHoverDelay: Double = 0.4
+
     var isPresented: Bool
     var arrowEdge: String?
     var width: Double?
+    var inset: Double?
+    var spacing: Double?
+    var hover: Bool?
+    var delay: Double?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, arrowEdge, width }
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, arrowEdge, width, inset, spacing, hover, delay }
 }
 
 /// A discrete slider over `options`, as wide as its container. It is
@@ -614,4 +767,63 @@ struct StepSliderProps: AtomPropsDecodable, Equatable {
     var selected: String
 
     enum CodingKeys: String, CodingKey, CaseIterable { case options, selected }
+}
+
+/// A modal sheet over the window, presented from its first child, which stays
+/// laid out as usual, and showing the rest in a leading column (the Token
+/// Stats modal; a native owner gives any content). It is controlled: it is
+/// open while `isPresented` is true, and Escape (or a native owner's content
+/// dismissing itself) calls `onDismiss`, after which the owner sets
+/// `isPresented` false. `width` and `height` fix the sheet's
+/// size, its content at the top leading corner; without them it fits its
+/// content. With a `title` the sheet starts with the app's standard modal
+/// header: an optional `icon` (SF Symbol), the title, an optional `subtitle`
+/// and a close button (`<testID>-close`, `modal-close` without one) that
+/// calls `onDismiss`. The header and content are padded by `inset`
+/// (`defaultInset` unless set, as the app's own sheets are) and `spacing`
+/// apart, as are a plugin's children (`defaultSpacing` unless set); a native
+/// owner whose content pads itself passes an `inset` of 0. Its `testID` names
+/// the sheet's content column.
+struct ModalProps: AtomPropsDecodable, Equatable {
+    static let defaultInset: Double = 24
+    static let defaultSpacing: Double = 16
+
+    var isPresented: Bool
+    var width: Double?
+    var height: Double?
+    var title: String?
+    var subtitle: String?
+    var icon: String?
+    var inset: Double?
+    var spacing: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, width, height, title, subtitle, icon, inset, spacing }
+}
+
+/// A page that slides in from the trailing edge over its first child and
+/// covers all of it (a main sidebar page plugin over the board), showing the
+/// rest in a leading column on the window background. The first child stays
+/// laid out as usual and sizes the atom. It is controlled: the page shows
+/// while `isPresented` is true, and the owner closes it with its own control
+/// (the page's Back button). Its `testID` names the page.
+struct PageProps: AtomPropsDecodable, Equatable {
+    var isPresented: Bool
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented }
+}
+
+/// A full-height panel that slides in over one edge of its first child (the
+/// Done archive over the board), showing the rest in a column with no
+/// spacing on the window background, a hairline along its inner edge and a
+/// shadow over what it covers. `edge` is `trailing` (the default) or
+/// `leading`; `width` is the panel's (340 by default). The first child stays
+/// laid out as usual and sizes the atom. It is controlled: the panel shows
+/// while `isPresented` is true, and the owner closes it with its own control
+/// (the archive's close button). Its `testID` names the panel.
+struct SidePanelProps: AtomPropsDecodable, Equatable {
+    var isPresented: Bool
+    var edge: String?
+    var width: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, edge, width }
 }

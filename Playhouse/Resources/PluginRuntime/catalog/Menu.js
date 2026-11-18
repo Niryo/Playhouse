@@ -1,9 +1,10 @@
 // Menu: a borderless pull-down menu labelled by an SF Symbol. Its items come
 // in groups with a separator between them; choosing one calls onMenu with its id.
+// A disabled item is dimmed and can't be chosen.
 function Demo() {
   var chosen = React.useState("none");
   var items = [
-    [{ id: "edit", title: "Edit…", help: "Edit the item", testID: "menu-edit" }, { id: "reveal", title: "Reveal in Finder", testID: "menu-reveal" }],
+    [{ id: "edit", title: "Edit…", help: "Edit the item", testID: "menu-edit" }, { id: "reveal", title: "Reveal in Finder", testID: "menu-reveal" }, { id: "busy", title: "Run Now", disabled: true, help: "Already running", testID: "menu-disabled" }],
     [],
     [{ id: "delete", title: "Delete…", destructive: true, help: "Delete the item", testID: "menu-delete" }]
   ];

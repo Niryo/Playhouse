@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SwiftData
 
 @main
@@ -30,7 +31,20 @@ struct SeedTaskPullRequestLink {
             task.codexThreadID = nil
             task.claudeSessionID = nil
             try context.save()
+            // Playhouse keeps the transcript itself, so a task without a provider
+            // session also starts without a conversation.
+            try clearTranscript(dataDirectory.appendingPathComponent("Conversations-v1.sqlite"), taskID: taskID.uuidString)
             print("Cleared provider sessions for task \(taskID).")
+            return
+        }
+
+        if arguments.count == 5, arguments[2] == "--legacy-plugin" {
+            task.authoredPluginID = arguments[3]
+            task.pluginPlacement = "mainSidebar"
+            task.contextFolderPaths = [arguments[4]]
+            task.workspaceRootPaths = [arguments[4]]
+            try context.save()
+            print("Seeded legacy plugin task \(taskID).")
             return
         }
 
@@ -51,9 +65,27 @@ struct SeedTaskPullRequestLink {
     }
 }
 
+private func clearTranscript(_ databaseURL: URL, taskID: String) throws {
+    guard FileManager.default.fileExists(atPath: databaseURL.path) else { return }
+    var database: OpaquePointer?
+    guard sqlite3_open(databaseURL.path, &database) == SQLITE_OK else { throw SeedError.transcriptUnavailable }
+    defer { sqlite3_close(database) }
+    sqlite3_busy_timeout(database, 30_000)
+    for table in ["conversation_state", "conversation_token_usage", "conversation_turns", "conversation_messages", "conversation_activities"] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "DELETE FROM \(table) WHERE task_id = ?", -1, &statement, nil) == SQLITE_OK else {
+            throw SeedError.transcriptUnavailable
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, taskID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw SeedError.transcriptUnavailable }
+    }
+}
+
 private enum SeedError: LocalizedError {
     case usage
     case taskUnavailable
+    case transcriptUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -61,6 +93,8 @@ private enum SeedError: LocalizedError {
             "Usage: seed-task-pr-link <data-directory> <task-id> <pr-number> <https-url> [repository-index] | <data-directory> <task-id> --clear-provider-session"
         case .taskUnavailable:
             "The task must exist and have at least one repository."
+        case .transcriptUnavailable:
+            "The task's conversation transcript couldn't be cleared."
         }
     }
 }

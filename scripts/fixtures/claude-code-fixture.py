@@ -22,6 +22,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import functools
+
+import claude_fixture_handlers as _fixture_handlers
+
+
+def _bind_fixture_handler(handler):
+    return functools.partial(handler, sys.modules[__name__])
+
+
+respond = _bind_fixture_handler(_fixture_handlers.respond)
+run_reattach_turn = _bind_fixture_handler(_fixture_handlers.run_reattach_turn)
 
 class AgentInput:
     """Reads stdin the way Claude Code's runtime (Bun) does: it waits for kqueue to report the
@@ -71,6 +82,9 @@ class AgentInput:
 STDIN = AgentInput()
 
 
+# Where the fixture's simulated model auto-compacts on its own, as Claude Code does
+# for a 200k-token window when nothing at launch overrides it.
+FIXTURE_NATIVE_AUTO_COMPACT_TOKENS = 200000
 STORY = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
 STORY_CLOSING = "The story is above."
 INSPECTION_INTENT = "I'll inspect the workspace first."
@@ -88,6 +102,27 @@ CHAT_NOTICE_PROMPT = "Name the largest moon of Saturn."
 CHAT_NOTICE_ANSWER = "Titan is the largest moon of Saturn."
 CHAT_NOTICE_REPLY = "I already answered above."
 NO_VISIBLE_OUTPUT_NOTICE = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+# A task turn after which Claude Code adds its own notice: a long handoff, or the short one above.
+LONG_NOTICE_PROMPT = "Hand off with a long Claude Code notice."
+SHORT_NOTICE_PROMPT = "Hand off with a short Claude Code notice."
+NOTICE_HANDOFF_ANSWER = "The handoff is ready."
+NOTICE_HANDOFF_REPLY = "Continuing after the handoff notice."
+LONG_HANDOFF_NOTICE = "\n".join(
+    [f"Handoff context line {index:02d}: the previous session summarized this part of the task in detail." for index in range(1, 25)]
+    + ["Handoff context ends here."]
+)
+# A turn that writes a file with one long heredoc command, then runs one long single-line command
+# and one short command, as an agent's real heredocs put tens of thousands of characters in a
+# command's title.
+LONG_COMMAND_PROMPT = "Write the release notes with one long heredoc."
+LONG_COMMAND_ANSWER = "The release notes are written."
+SHORT_COMMAND = "echo release notes checked"
+# One line far past the row's 160-character preview, as a long `python3 -c` or a Codex argument list joined by spaces.
+LONG_SINGLE_LINE_COMMAND = "echo " + " ".join(f"release-note-{index:03d}" for index in range(1, 41))
+LONG_HEREDOC_COMMAND = "cat > /tmp/playhouse-fixture-release-notes.md <<'NOTES'\n" + "\n".join(
+    [f"Release note line {index:03d}: this change keeps a long command readable without laying all of it out." for index in range(1, 121)]
+    + ["NOTES"]
+)
 # A chat turn that forgets close-turn; Playhouse's one visible nudge then gets it run.
 CHAT_SKIPPED_CLOSE_TURN_PROMPT = "Plan a weekend hiking trip."
 CHAT_SKIPPED_CLOSE_TURN_ANSWER = "Pick a loop trail under 15 km and start early."
@@ -96,7 +131,12 @@ CHAT_NUDGE_REPLY = "Filed."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 # Claude writes questions in Markdown, as it does replies.
-MARKDOWN_QUESTION = "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`."
+MARKDOWN_QUESTION = (
+    "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.\n\n"
+    "When the user clicks an \"Add here\" placeholder, which conversation should open: the task's active "
+    "conversation, a new conversation started just for that placeholder, or the conversation the placeholder "
+    "was originally added from?"
+)
 # Playhouse keys each answer by the question it answers.
 QUESTION_TEXTS = ("Which color should I use?", MARKDOWN_QUESTION)
 NUDGE_RACE_STALE_ANSWER = "The task review is approved. Only the UI review is still pending."
@@ -109,7 +149,7 @@ NUDGED_FINAL_ANSWER = "All checks passed and the screenshot is attached. The wor
 TINY_PNG_HEX = "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"
 # Lines each held stage of the streamed follow turn adds; the first stage alone
 # outgrows the transcript viewport.
-STREAM_FOLLOW_STAGES = (20, 8, 8, 8)
+STREAM_FOLLOW_STAGES = (20, 8, 8, 8, 8)
 STREAM_FOLLOW_FINAL = "Streamed follow reply finished."
 
 
@@ -150,6 +190,11 @@ def maybe_burn_cpu():
 def write(value):
     if isinstance(value, dict) and value.get("type") == "result" and "usage" not in value:
         value = {**value, "usage": dict(TURN_USAGE)}
+    if isinstance(value, dict) and value.get("type") == "result" and os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_CACHE_MISS") == "1":
+        value = {**value, "usage": {
+            "input_tokens": 250000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 250000, "output_tokens": 5,
+        }}
     sys.stdout.write(json.dumps(value) + "\n")
     sys.stdout.flush()
 
@@ -165,11 +210,107 @@ def report_command(instructions, marker, replacement=None):
         command = line.strip()
         # Command lines start with the quoted CLI path; prose may mention the same words.
         if command.startswith("'") and marker in command:
-            return command.replace("<completed|in-progress|waiting-response>", replacement) if replacement else command
+            return command.replace("<completed|waiting-response|blocked>", replacement) if replacement else command
     return None
 
 
+SIDE_CHAT_MARKER = "You are now in a Playhouse side chat"
+
+
+def side_chat_respond(user_text, instructions, turn, prior_turns):
+    """Answers a Playhouse side chat turn. The first turn of a fork quotes the selection and the
+    source session's latest prompt. Asking it to create a task tries four tool calls: a Write, an
+    ordinary shell command, the Playhouse CLI chained with `&` to another command, and the CLI's
+    `task create` whose quoted description contains shell punctuation. As Claude Code does, each
+    call first goes through the `PreToolUse` hooks the launch's --settings carry (recorded in
+    `hookDecisions`), and the fixture then asks Playhouse's permission handler about each one
+    (`permissionDecisions`). The CLI command really runs when both allow it. A question naming
+    `hold-side-chat` holds its answer, before any output, until the test releases it: the fixture
+    writes `<fixture>.side-chat-hold-ready` and waits for `<fixture>.side-chat-hold-release`, which
+    it consumes so the next held question waits again."""
+    selection = re.search(r"<selected-text>\n(.*?)\n</selected-text>", user_text, re.S)
+    question = user_text.split("</selected-text>", 1)[-1].strip()
+    session = turn["sessionID"]
+    if "hold-side-chat" in question.lower():
+        ready = Path(str(sys.argv[0]) + ".side-chat-hold-ready")
+        release = Path(str(sys.argv[0]) + ".side-chat-hold-release")
+        ready.write_text(f"Side chat answer held on {session}.\n", encoding="utf-8")
+        deadline = time.monotonic() + 120
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not release.exists():
+            raise TimeoutError("The test did not release the held side chat answer.")
+        release.unlink(missing_ok=True)
+    if "create a task" in question.lower():
+        line = next((line.strip() for line in instructions.splitlines()
+                     if line.strip().startswith("'") and "task create" in line), "")
+        executable = shlex.split(line)[0] if line else "playhouse-cli"
+        cli_command = shlex.join([executable, "task", "create", "--title", "Side chat follow-up",
+                                  "--prompt", f"Follow up on the side chat about: {question} -> keep a; b <path>"])
+        requests = {
+            "side-chat-write": {"tool_name": "Write", "input": {"file_path": os.path.join(os.getcwd(), "side-chat-forbidden.txt"), "content": "no"}},
+            "side-chat-shell": {"tool_name": "Bash", "input": {"command": "touch side-chat-forbidden.txt"}},
+            "side-chat-chained": {"tool_name": "Bash", "input": {"command": shlex.join([executable, "task", "list"]) + " & touch side-chat-forbidden.txt"}},
+            "side-chat-cli": {"tool_name": "Bash", "input": {"command": cli_command}},
+        }
+        settings = json.loads(argument("--settings") or "{}")
+        hook_commands = [hook["command"] for entry in settings.get("hooks", {}).get("PreToolUse", [])
+                         for hook in entry.get("hooks", []) if hook.get("type") == "command"]
+        hook_decisions = {}
+        for request_id, request in requests.items():
+            decision = "pass"
+            for hook_command in hook_commands:
+                completed = subprocess.run(hook_command, shell=True, capture_output=True, text=True, timeout=30,
+                                           input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": request["tool_name"],
+                                                             "tool_input": request["input"]}))
+                output = json.loads(completed.stdout) if completed.stdout.strip() else {}
+                if (output.get("hookSpecificOutput") or {}).get("permissionDecision") == "deny":
+                    decision = "deny"
+            hook_decisions[request_id] = decision
+        turn["hookDecisions"] = hook_decisions
+        for request_id, request in requests.items():
+            write({"type": "control_request", "request_id": request_id, "request": {"subtype": "can_use_tool", **request}})
+        decisions = {}
+        while len(decisions) < len(requests):
+            line = STDIN.readline()
+            if not line:
+                break
+            if not line.strip():
+                continue
+            message = json.loads(line)
+            response = (message.get("response") or {}) if message.get("type") == "control_response" else {}
+            if response.get("request_id") in requests:
+                decisions[response["request_id"]] = (response.get("response") or {}).get("behavior")
+        turn["permissionDecisions"] = decisions
+        created = None
+        if decisions.get("side-chat-cli") == "allow" and hook_decisions.get("side-chat-cli") == "pass":
+            completed = subprocess.run(shlex.split(cli_command), capture_output=True, text=True, timeout=60)
+            try:
+                created = (json.loads(completed.stdout).get("result") or {}).get("id")
+            except json.JSONDecodeError:
+                created = None
+        reply = f"Created task {created}." if created else "Could not create the task."
+    elif selection:
+        source = turn.get("forkedFrom")
+        source_prompt = next((prior.get("userText", "") for prior in reversed(prior_turns)
+                              if prior.get("sessionID") == source and prior.get("userText")
+                              and "playhouse internal outcome nudge:" not in prior["userText"].lower()), "")
+        first_line = source_prompt.strip().splitlines()[0] if source_prompt.strip() else ""
+        reply = f"Side chat about \"{selection.group(1)}\", forked from {source} (which asked: {first_line[:80]}): {question}"
+    else:
+        earlier = sum(1 for prior in prior_turns if prior.get("sessionID") == session)
+        reply = f"Side chat follow-up {earlier + 1} on {session}: {question}"
+    turn["sideChatReply"] = reply
+    text("msg_side_chat", reply)
+    return []
+
+
 def assistant(message_id, blocks, usage=None, parent=None):
+    if usage is None and os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_CACHE_MISS") == "1":
+        usage = {
+            "input_tokens": 250000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 250000, "output_tokens": 5,
+        }
     message = {"id": message_id, "role": "assistant", "content": blocks}
     if usage:
         message["usage"] = dict(usage)
@@ -221,6 +362,42 @@ def write_session_calls(session_id, turn_number, main_calls):
     with open(project / session_id / "subagents" / f"agent-fx{turn_number}.jsonl", "a", encoding="utf-8") as handle:
         for index, usage in enumerate(STORY_SUBAGENT_CALLS):
             handle.write(line(f"msg_fx_sub{turn_number}_{index}", usage, sidechain=True))
+
+
+def write_session_context(session_id, tokens, minutes_ago=0):
+    """Write a real-looking main-agent usage line to position the cache clock."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config or not session_id:
+        return
+    project = Path(config) / "projects" / "-fixture-project"
+    project.mkdir(parents=True, exist_ok=True)
+    model = argument("--model") or "claude-opus-5-5"
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - minutes_ago * 60))
+    entry = {"type": "assistant", "timestamp": timestamp,
+             "message": {"id": f"fixture-context-{time.time_ns()}", "model": model,
+                         "usage": {"input_tokens": tokens, "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 1}}}
+    with open(project / f"{session_id}.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def write_compaction_boundary(session_id, trigger, pre_tokens, post_tokens=6000):
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    if config and session_id:
+        project = Path(config) / "projects" / "-fixture-project"
+        project.mkdir(parents=True, exist_ok=True)
+        entry = {"type": "system", "subtype": "compact_boundary", "timestamp": timestamp,
+                 "compactMetadata": {"trigger": trigger, "preTokens": pre_tokens, "postTokens": post_tokens}}
+        with open(project / f"{session_id}.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    # Claude Code can report one compaction's start more than once, each under its own uuid.
+    write({"type": "system", "subtype": "status", "status": "compacting", "uuid": f"fixture-compacting-{time.time_ns()}"})
+    write({"type": "system", "subtype": "status", "status": "compacting", "uuid": f"fixture-compacting-{time.time_ns()}"})
+    write({"type": "system", "subtype": "status", "status": None, "compact_result": "success"})
+    write({"type": "system", "subtype": "compact_boundary", "uuid": f"fixture-boundary-{time.time_ns()}", "compact_metadata": {
+        "trigger": trigger, "pre_tokens": pre_tokens, "post_tokens": post_tokens
+    }})
 
 
 # The token-waste session: a Claude Code request log (`api-request-shape`,
@@ -482,777 +659,6 @@ def read_steered_input(description):
     raise TimeoutError(f"Playhouse did not steer {description}.")
 
 
-def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=""):
-    global background_result_sent
-    commands = []
-    if user_text.startswith("Classify the latest user message for Playhouse's continuous chat page index."):
-        hold = Path(str(sys.argv[0]) + ".hold-classifier")
-        if hold.exists():
-            hold.unlink(missing_ok=True)
-            active = Path(str(sys.argv[0]) + ".classifier-active")
-            release = Path(str(sys.argv[0]) + ".classifier-release")
-            active.write_text("The fallback classifier is held in the background.\n", encoding="utf-8")
-            deadline = time.monotonic() + 30
-            while not release.exists() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            released = release.exists()
-            active.unlink(missing_ok=True)
-            release.unlink(missing_ok=True)
-            if not released:
-                return commands
-        if Path(str(sys.argv[0]) + ".fail-classifier").exists():
-            text("msg_page_classification", '{"continues":"sometimes","title":null}')
-            return commands
-        history_path = Path(str(sys.argv[0]) + ".history")
-        history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {"turns": []}
-        classifier_attempts = sum(
-            1 for turn in history.get("turns", [])
-            if (turn.get("userText") or "").startswith("Classify the latest user message for Playhouse's continuous chat page index.")
-        )
-        if classifier_attempts == 0:
-            text("msg_page_classification", '{"continues":false,"title":"Ignored extra field","unexpected":true}')
-            return commands
-        if "One more thought about Saturn" in user_text:
-            text("msg_page_classification", '{"continues":true,"title":null}')
-        elif "Neptune" in user_text:
-            text("msg_page_classification", '{"continues":false,"title":"Neptune"}')
-        elif "Another thought about Mars" in user_text:
-            text("msg_page_classification", '{"continues":true,"title":null}')
-        elif "Mars" in user_text:
-            text("msg_page_classification", '{"continues":false,"title":"Mars"}')
-        elif "Saturn's rings" in user_text:
-            text("msg_page_classification", '{"continues":false,"title":"Saturn Rings"}')
-        else:
-            text("msg_page_classification", '{"continues":false,"title":"Volcanoes"}')
-    elif "playhouse internal outcome nudge:" in user_text.lower() and previous_prompt.rstrip().endswith(CHAT_SKIPPED_CLOSE_TURN_PROMPT.lower()):
-        # Answers Playhouse's chat nudge the way it asks: close-turn for the previous reply,
-        # then one short line, without repeating that reply.
-        close_turn = report_command(instructions, " chat page close-turn ")
-        if close_turn:
-            command = close_turn.replace("--continues true", f"--continues false --new-title {shlex.quote(CHAT_NUDGE_PAGE_TITLE)}")
-            commands.append({"command": command, "output": run_tool("toolu_nudged_close_turn", "Bash", {"command": command}, command)})
-        text("msg_chat_nudge_reply", CHAT_NUDGE_REPLY)
-    elif user_text.rstrip().endswith(CHAT_SKIPPED_CLOSE_TURN_PROMPT):
-        text("msg_chat_skipped_close_turn", CHAT_SKIPPED_CLOSE_TURN_ANSWER)
-    elif user_text.rstrip().endswith(CHAT_CLOSE_FIRST_PROMPT):
-        close_turn = report_command(instructions, " chat page close-turn ")
-        if close_turn:
-            commands.append({"command": close_turn,
-                             "output": run_tool("toolu_close_first", "Bash", {"command": close_turn}, close_turn)})
-        text("msg_chat_close_first_answer", CHAT_CLOSE_FIRST_ANSWER)
-    elif user_text.rstrip().endswith(CHAT_NOTICE_PROMPT):
-        # Mirrors the observed incident: the turn ends on close-turn, so Claude Code adds its
-        # synthetic "no visible output" message to the same turn and Claude answers again.
-        text("msg_chat_notice_answer", CHAT_NOTICE_ANSWER)
-        close_turn = report_command(instructions, " chat page close-turn ")
-        if close_turn:
-            commands.append({"command": close_turn,
-                             "output": run_tool("toolu_close_last", "Bash", {"command": close_turn}, close_turn)})
-        write({"type": "user", "parent_tool_use_id": None, "isSynthetic": True, "uuid": "fixture-no-visible-output-notice",
-               "message": {"role": "user", "content": [{"type": "text", "text": NO_VISIBLE_OUTPUT_NOTICE}]}})
-        text("msg_chat_notice_reply", CHAT_NOTICE_REPLY)
-    elif PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
-        question_input = {
-            "questions": [{
-                "header": "Color",
-                "question": "Which color should I use?",
-                "options": [{"label": "Blue"}, {"label": "Green"}],
-                "multiSelect": False,
-            }]
-        }
-        assistant("msg_pending_question_success", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
-        write({"type": "control_request", "request_id": "question-request-1", "request": {
-            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
-        }})
-    elif "pending ui review" in user_text.lower():
-        # Mirrors the observed incident: Claude answers while a background
-        # review still runs, the review's notification lands right after that
-        # answer, and the woken turn says nothing new (Claude Code's synthetic
-        # "No response requested." never reaches stdout). No outcome is reported.
-        tool_id = "toolu_pending_ui_review"
-        task_id = "bgtask-pending-ui-review"
-        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
-            "subagent_type": "ui-verifier", "description": "UI review", "prompt": "review the UI",
-            "run_in_background": True,
-        }}])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False},
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
-             "subagent_type": "ui-verifier", "description": "UI review"},
-        ]})
-        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "description": "UI review", "subagent_type": "ui-verifier",
-               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
-        text("msg_pending_ui_review", NUDGE_RACE_STALE_ANSWER)
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        background_result_sent = True
-        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "status": "completed", "output_file": "", "summary": NUDGE_RACE_UI_REPORT})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        parent_request_started("msg_pending_ui_review_woken", woken=True)
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-    elif "playhouse internal outcome nudge:" in user_text.lower() and "pending ui review" in previous_prompt:
-        # The nudge says to keep working when work remains, and this turn does:
-        # it runs a check, starts a background suite, and Claude Code wakes it
-        # for the suite's notification, where it presents a screenshot, answers,
-        # and only then reports completed.
-        assistant("msg_nudged_intro", [{"type": "text", "text": NUDGED_COMMENTARY}])
-        run_tool("toolu_nudged_check", "Bash", {"command": "echo NUDGED CHECK PASSED", "description": "Final check"},
-                 "echo NUDGED CHECK PASSED")
-        steered_uuid = None
-        if Path(str(sys.argv[0]) + ".nudged-steer-pause").exists():
-            # The test steers this running nudge turn, as a user can.
-            Path(str(sys.argv[0]) + ".nudged-steer-ready").write_text("The nudged turn is waiting for a steer.\n", encoding="utf-8")
-            steered, steered_uuid = read_steered_input("the nudged turn")
-            text("msg_nudged_steer_answer", f"STEERED NUDGE: {steered}")
-        assistant("msg_nudged_suite_intro", [{"type": "text", "text": NUDGED_SUITE_COMMENTARY}])
-        suite_tool, suite_task = "toolu_nudged_suite", "bgtask-nudged-suite"
-        assistant(f"msg_{suite_tool}", [{"type": "tool_use", "id": suite_tool, "name": "Agent", "input": {
-            "subagent_type": "general-purpose", "description": "Final suite", "prompt": "run the suite",
-            "run_in_background": True,
-        }}])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": suite_tool, "content": "Async agent launched successfully.", "is_error": False},
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": suite_task, "run_id": "fixture-run-1", "task_type": "local_agent",
-             "subagent_type": "general-purpose", "description": "Final suite"},
-        ]})
-        write({"type": "system", "subtype": "task_started", "task_id": suite_task, "run_id": "fixture-run-1",
-               "tool_use_id": suite_tool, "description": "Final suite", "subagent_type": "general-purpose",
-               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        background_result_sent = True
-        write({"type": "system", "subtype": "task_notification", "task_id": suite_task, "run_id": "fixture-run-1",
-               "tool_use_id": suite_tool, "status": "completed", "output_file": "", "summary": NUDGED_SUITE_REPORT})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        parent_request_started("msg_nudged_woken", woken=True)
-        present = report_command(instructions, " conversation present-image ")
-        if present:
-            image = Path(str(sys.argv[0]) + ".nudged-screenshot.png")
-            image.write_bytes(bytes.fromhex(TINY_PNG_HEX))
-            present = present.replace("<path>", shlex.quote(str(image))).replace(
-                '[--caption "short caption"]', f"--caption {shlex.quote(NUDGED_IMAGE_CAPTION)}")
-            commands.append({"command": present, "output": run_tool("toolu_nudged_image", "Bash", {"command": present}, present)})
-        text("msg_nudged_final", NUDGED_FINAL_ANSWER)
-        outcome = report_command(instructions, " task outcome ", "completed")
-        if outcome:
-            commands.append({"command": outcome, "output": run_tool("toolu_nudged_outcome", "Bash", {"command": outcome}, outcome)})
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        if steered_uuid:
-            complete_command(steered_uuid)
-            complete_command(current_command_uuid)
-    elif "playhouse internal outcome nudge:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
-        question_input = {
-            "questions": [{
-                "header": "Color",
-                "question": "Which color should I use?",
-                "options": [{"label": "Blue"}, {"label": "Green"}],
-                "multiSelect": False,
-            }]
-        }
-        assistant("msg_private_reminder_question", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
-        write({"type": "control_request", "request_id": "question-request-1", "request": {
-            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
-        }})
-    elif "playhouse internal outcome nudge:" in user_text.lower() and not preserve_no_outcome:
-        command = report_command(instructions, " task outcome ", "waiting-response")
-        if command:
-            commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
-    elif "answer to the pending question from the prior playhouse session" in user_text.lower():
-        answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
-        recovery_pause = Path(str(sys.argv[0]) + ".recovery-pause")
-        if recovery_pause.exists():
-            # Hold the recovery turn open so tests can inspect it mid-turn.
-            recovery_release = Path(str(sys.argv[0]) + ".recovery-release")
-            Path(str(sys.argv[0]) + ".recovery-ready").write_text("The recovery turn is running.\n", encoding="utf-8")
-            recovery_deadline = time.monotonic() + 30
-            while not recovery_release.exists() and time.monotonic() < recovery_deadline:
-                time.sleep(0.02)
-            if not recovery_release.exists():
-                raise TimeoutError("The test did not release the recovery turn.")
-        text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
-    elif "ask a restart-safe structured question" in user_text.lower():
-        question_input = {
-            "questions": [{
-                "header": "Color",
-                "question": "Which color should I use?",
-                "options": [{"label": "Blue"}, {"label": "Green"}],
-                "multiSelect": False,
-            }]
-        }
-        assistant("msg_ask_restart_safe", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
-        write({"type": "control_request", "request_id": "question-request-1", "request": {
-            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
-        }})
-        time.sleep(0.1)
-        write({"type": "result", "subtype": "error", "is_error": True, "result": "Fixture process ended with a pending question."})
-    elif "ask an empty structured question" in user_text.lower():
-        question_input = {"questions": []}
-        assistant("msg_ask_user", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
-        write({"type": "control_request", "request_id": "question-request-1", "request": {
-            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
-        }})
-    elif "ask a structured question" in user_text.lower():
-        question_input = {
-            "questions": [{
-                "header": "Color",
-                "question": MARKDOWN_QUESTION,
-                "options": [
-                    {"label": "Blue", "description": "Use blue."},
-                    {"label": "Green", "description": "Use green."},
-                ],
-                "multiSelect": False,
-            }]
-        }
-        assistant("msg_ask_user", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
-        write({"type": "control_request", "request_id": "question-request-1", "request": {
-            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
-        }})
-    elif "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
-        # Report one in-progress tool use before holding, so a user-initiated Stop
-        # with no final answer still keeps the window's activity section mounted,
-        # and the fold it performs on settle is distinguishable from the section
-        # simply never having rendered.
-        assistant("msg_stop_command", [{"type": "tool_use", "id": "toolu_stop_command", "name": "Bash", "input": {"command": "git status --short"}}])
-        ready = Path(str(sys.argv[0]) + ".interrupt-ready")
-        ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
-        deadline = time.monotonic() + 30
-        received_interrupt = False
-        while time.monotonic() < deadline:
-            line = STDIN.readline(0.02)
-            if line is None:
-                continue
-            control = json.loads(line)
-            if control.get("type") != "control_request" or control.get("request", {}).get("subtype") != "interrupt":
-                continue
-            received_interrupt = True
-            Path(str(sys.argv[0]) + ".interrupt-received").write_text("control interrupt\n", encoding="utf-8")
-            interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
-            if Path(sys.argv[0]).name.endswith("-hold-reject-interrupt"):
-                reject = Path(str(sys.argv[0]) + ".interrupt-reject")
-                reject_deadline = time.monotonic() + 15
-                while not reject.exists() and time.monotonic() < reject_deadline:
-                    time.sleep(0.02)
-                reject.unlink(missing_ok=True)
-                write({"type": "control_response", "response": {
-                    "subtype": "error", "request_id": control.get("request_id"),
-                    "error": "Fixture rejected the interrupt while the turn remains active.",
-                }})
-                ack_deadline = time.monotonic() + 15
-                while not interrupt_release.exists() and time.monotonic() < ack_deadline:
-                    time.sleep(0.02)
-                interrupt_release.unlink(missing_ok=True)
-                text("msg_after_rejected_interrupt", "The turn completed after Stop was rejected.")
-                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-                break
-            ack_deadline = time.monotonic() + 15
-            while not interrupt_release.exists() and time.monotonic() < ack_deadline:
-                time.sleep(0.02)
-            interrupt_release.unlink(missing_ok=True)
-            write({"type": "control_response", "response": {
-                "subtype": "success", "request_id": control.get("request_id"), "response": {},
-            }})
-            write({"type": "result", "subtype": "error_during_execution", "is_error": True,
-                   "result": "Claude interrupted this turn."})
-            break
-        ready.unlink(missing_ok=True)
-        if not received_interrupt:
-            raise TimeoutError("Timed out waiting for Claude interrupt.")
-        commands.append({"interruptReceived": True})
-    elif user_text.strip().lower() == "please fail-this-claude-turn.":
-        # Match only the live message, not a historical mention: once this turn
-        # fails and its text is part of the transcript, a later turn's handoff
-        # context quotes it back verbatim, and a substring check would misfire.
-        # The session already exists by now: Playhouse answered initialize and
-        # sent this turn. Failing here leaves the session behind, so the next
-        # turn must resume it instead of claiming its ID again.
-        raise RuntimeError("Claude fixture failed this turn after creating its session.")
-    elif "hold-claude-turn-for-concurrency" in user_text.lower():
-        ready = Path(str(sys.argv[0]) + ".concurrent-turn-ready")
-        release = Path(str(sys.argv[0]) + ".concurrent-turn-release")
-        ready.write_text("Claude turn is active.\n", encoding="utf-8")
-        deadline = time.monotonic() + 60
-        while not release.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not release.exists():
-            raise TimeoutError("Timed out waiting for the concurrent Claude turn test.")
-        if "fail-after-hold" in user_text.lower():
-            raise RuntimeError("Claude fixture failed after releasing the held turn.")
-        text("msg_concurrent", SIMPLE_ANSWER)
-    elif "publish-image-during-active-turn" in user_text.lower():
-        ready = Path(str(sys.argv[0]) + ".image-turn-ready")
-        release = Path(str(sys.argv[0]) + ".image-turn-release")
-        ready.write_text("Claude turn is active.\n", encoding="utf-8")
-        deadline = time.monotonic() + 60
-        while not release.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not release.exists():
-            raise TimeoutError("Timed out waiting for the agent image publication test.")
-        text("msg_image_order", "Claude answer after the image.")
-    elif "show-tool-calls-inline" in user_text.lower():
-        # Commentary, then shell calls with their stated purpose and output, a
-        # failing call, and an MCP call whose arguments and result stay private,
-        # so the timeline can place each call after the text written before it.
-        def tool_call(tool_id, name, tool_input, output, is_error=False):
-            assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}])
-            write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": tool_id, "content": output, "is_error": is_error},
-            ]}})
-        text("msg_timeline_intro", "I'll check the repository status first.")
-        tool_call("toolu_timeline_status", "Bash", {
-            "command": "git status --short && echo fixture-status-done", "description": "Check repository status",
-        }, "fixture-status-done")
-        text("msg_timeline_middle", "The status is clean. Next I'll list the files and run the check.")
-        tool_call("toolu_timeline_list", "Bash", {"command": "ls -1", "description": "List fixture files"},
-                  "README.md\nfixture-one.txt\nfixture-two.txt\nfixture-three.txt\nfixture-four.txt")
-        tool_call("toolu_timeline_fail", "Bash", {"command": "exit 3", "description": "Run the failing check"},
-                  "Exit code 3", is_error=True)
-        tool_call("toolu_timeline_mcp", "mcp__fixture__lookup", {"query": "timeline-private-argument"},
-                  "timeline-private-result")
-        text("msg_timeline_final", "Here is what ran:\n1. `git status --short` was clean.\n2. The check exited with code `3`.\n\n- Bullets read at text size\n- Inline `code` is tinted")
-    elif "follow-active-turn" in user_text.lower():
-        # Holds before any output, so a test can reopen the conversation first,
-        # then again while commentary and a running tool are visible.
-        for stage, description in [("started", "Claude turn started without output."),
-                                   ("ready", "Claude turn shows progress and a running tool.")]:
-            if stage == "ready":
-                text("msg_follow_progress", "Claude is partway through the followed turn.")
-                assistant("msg_toolu_follow_active_step", [{"type": "tool_use", "id": "toolu_follow_active_step", "name": "Bash", "input": {
-                    "command": "fixture-follow-step", "description": "Fixture follow step",
-                }}])
-            marker = Path(str(sys.argv[0]) + f".follow-turn-{stage}")
-            release = Path(str(sys.argv[0]) + (".follow-turn-continue" if stage == "started" else ".follow-turn-release"))
-            marker.write_text(f"{description}\n", encoding="utf-8")
-            deadline = time.monotonic() + 60
-            while not release.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            marker.unlink(missing_ok=True)
-            if not release.exists():
-                raise TimeoutError(f"The test did not release the fixture after: {description}")
-            release.unlink(missing_ok=True)
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "toolu_follow_active_step", "content": "", "is_error": False},
-        ]}})
-        text("msg_follow_final", "Claude finished the followed turn.")
-    elif "stream-follow-latest" in user_text.lower():
-        # Streams a long reply in held stages, so a test can check the transcript
-        # between them: following the bottom, then left alone once scrolled up.
-        for stage, count in enumerate(STREAM_FOLLOW_STAGES, start=1):
-            first = sum(STREAM_FOLLOW_STAGES[:stage - 1]) + 1
-            for line in range(first, first + count):
-                text(f"msg_stream_follow_{line}", stream_follow_line(line))
-            ready = Path(str(sys.argv[0]) + f".stream-follow-ready-{stage}")
-            release = Path(str(sys.argv[0]) + f".stream-follow-release-{stage}")
-            ready.write_text(f"Streamed follow stage {stage} is visible.\n", encoding="utf-8")
-            deadline = time.monotonic() + 60
-            while not release.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            ready.unlink(missing_ok=True)
-            if not release.exists():
-                raise TimeoutError(f"The test did not release streamed follow stage {stage}.")
-            release.unlink(missing_ok=True)
-        text("msg_stream_follow_final", STREAM_FOLLOW_FINAL)
-    elif user_text.startswith("Write a concise task title"):
-        if "title-failure" not in sys.argv[0]:
-            text("msg_title", "Generated Claude title")
-    elif "<response-comments>" in user_text:
-        payload = user_text.split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
-        comments = json.loads(payload)
-        answer = "\n".join(
-            f':playhouse-annotation{{index="{index}"}} For ‘{item["text"]}’: {item["comment"]}'
-            for index, item in enumerate(comments)
-        )
-        text("msg_comments", answer)
-    elif user_text.rstrip().endswith("What happened earlier?"):
-        text("msg_recovered", SIMPLE_ANSWER)
-    elif "recall-earlier-pages" in user_text.lower():
-        # A standalone chat looking back: it reads each earlier page named in the
-        # message ("page-id:<id>") with the real `chat page read` command, then answers.
-        close_turn = report_command(instructions, " chat page close-turn ")
-        cli = close_turn.split(" chat page close-turn ")[0] if close_turn else None
-        turn_key = hashlib.md5(user_text.encode()).hexdigest()[:8]
-        text(f"msg_recall_intro_{turn_key}", "Let me look back at those pages.")
-        for index, page_id in enumerate(re.findall(r"page-id:([A-Za-z0-9-]+)", user_text)):
-            command = f"{cli} chat page read {page_id}"
-            commands.append({"command": command,
-                             "output": run_tool(f"toolu_recall_{index}", "Bash", {"command": command}, command)})
-        hold = Path(str(sys.argv[0]) + ".recall-hold")
-        if hold.exists():
-            # Holds the turn open after the reads so a test can look at the live turn.
-            ready = Path(str(sys.argv[0]) + ".recall-ready")
-            release = Path(str(sys.argv[0]) + ".recall-release")
-            ready.write_text("The recalling turn is active.\n", encoding="utf-8")
-            deadline = time.monotonic() + 60
-            while not release.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            ready.unlink(missing_ok=True)
-            if not release.exists():
-                raise TimeoutError("Timed out waiting for the recall hold release.")
-            hold.unlink(missing_ok=True)
-            release.unlink(missing_ok=True)
-        text(f"msg_recall_answer_{turn_key}", "I recalled both pages.")
-        if close_turn:
-            commands.append({"command": close_turn,
-                             "output": run_tool("toolu_close_turn", "Bash", {"command": close_turn}, close_turn)})
-    elif "release notes" in user_text.lower():
-        # A standalone chat has no outcome to report, so it ends every turn with
-        # its page signal instead. That signal runs in the same place a task
-        # outcome does: after the answer, before Claude's closing line.
-        text("msg_chat_intent", CHAT_INTENT)
-        run_tool("toolu_chat_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
-        text("msg_chat_answer", CHAT_ANSWER)
-        close_turn = report_command(instructions, " chat page close-turn ")
-        if close_turn:
-            commands.append({"command": close_turn,
-                             "output": run_tool("toolu_close_turn", "Bash", {"command": close_turn}, close_turn)})
-        text("msg_chat_closing", CHAT_CLOSING)
-    elif match := re.search(r"long history turn (\d+)", user_text.lower()):
-        # Thirty visible assistant messages in one turn, so a few turns build a
-        # transcript long enough to page through.
-        number = match.group(1)
-        for index in range(1, 31):
-            text(f"msg_long_{number}_{index}", f"Long history turn {number}, message {index}.")
-    elif "token waste" in user_text.lower() or "instruction resume" in user_text.lower():
-        if "instruction resume" in user_text.lower():
-            write_resume_session(argument("--session-id") or argument("--resume"))
-        else:
-            write_waste_session(argument("--session-id") or argument("--resume"))
-        text("msg_waste_answer", "Token waste shown.")
-        progress_clear = report_command(instructions, " task progress clear ")
-        outcome = report_command(instructions, " task outcome ", "completed")
-        for tool_id, command in [("toolu_progress_clear", progress_clear), ("toolu_outcome", outcome)]:
-            if command:
-                commands.append({"command": command, "output": run_tool(tool_id, "Bash", {"command": command}, command)})
-        text("msg_waste_closing", "The token waste is above.")
-    elif "story" in user_text.lower():
-        # Kept on disk because each send may start a fresh fixture process, and
-        # a repeated message ID would make the second turn's calls look like the first's.
-        counter = Path(str(sys.argv[0]) + ".story-turns")
-        story_turns = (int(counter.read_text()) if counter.is_file() else 0) + 1
-        counter.write_text(str(story_turns))
-        main_ids = [f"msg_story_{story_turns}", f"msg_story_closing_{story_turns}"]
-        for index, usage in enumerate(STORY_SUBAGENT_CALLS):
-            assistant(f"msg_fx_sub{story_turns}_{index}", [{"type": "text", "text": "subagent step"}], usage,
-                      parent=f"toolu_fx_agent_{story_turns}")
-        write_session_calls(argument("--session-id") or argument("--resume"), story_turns,
-                            list(zip(main_ids, STORY_MAIN_CALLS)))
-        text(main_ids[0], STORY, STORY_MAIN_CALLS[0])
-        # Claude Code writes one line per content block of a call; the repeat shares the call's ID.
-        assistant(main_ids[0], [{"type": "thinking", "thinking": ""}], STORY_MAIN_CALLS[0])
-        progress_clear = report_command(instructions, " task progress clear ")
-        outcome = report_command(instructions, " task outcome ", "completed")
-        for tool_id, command in [("toolu_progress_clear", progress_clear), ("toolu_outcome", outcome)]:
-            if command:
-                commands.append({"command": command, "output": run_tool(tool_id, "Bash", {"command": command}, command)})
-        text(main_ids[1], STORY_CLOSING, STORY_MAIN_CALLS[1])
-    elif "inspect" in user_text.lower():
-        text("msg_inspect_intent", INSPECTION_INTENT)
-        run_tool("toolu_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
-        text("msg_inspect_answer", INSPECTION_ANSWER)
-    elif "checks" in user_text.lower():
-        # Every text precedes an ordinary tool, so the turn records only commentary.
-        text("msg_checks_first", UNANSWERED_FIRST)
-        run_tool("toolu_checks_first", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
-        text("msg_checks_last", UNANSWERED_LAST)
-        run_tool("toolu_checks_last", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
-    elif "background agents wake" in user_text.lower():
-        # Mirrors the real CLI waking the parent for a background agent's
-        # notification after the parent already sent its result. The last
-        # agent finishes while the woken parent is still streaming, and only
-        # the parent's next result ends the turn.
-        agents = [("toolu_wake_agent_a", "bgtask-wake-a", "Wake reviewer A"),
-                  ("toolu_wake_agent_b", "bgtask-wake-b", "Wake reviewer B")]
-        assistant("msg_wake_agents", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
-            "subagent_type": "Explore", "description": description, "prompt": "review something",
-            "run_in_background": True,
-        }} for tool_id, _, description in agents])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False}
-            for tool_id, _, _ in agents
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
-             "subagent_type": "Explore", "description": description}
-            for _, task_id, description in agents
-        ]})
-        for tool_id, task_id, description in agents:
-            write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
-                   "tool_use_id": tool_id, "description": description, "subagent_type": "Explore",
-                   "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
-        text("msg_wake_started", "WAKE STARTED")
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        background_result_sent = True
-        (first_tool, first_task, _), (second_tool, second_task, second_description) = agents
-        write({"type": "system", "subtype": "task_notification", "task_id": first_task, "run_id": "fixture-run-1",
-               "tool_use_id": first_tool, "status": "completed", "output_file": "", "summary": "Reviewer A finished."})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": second_task, "run_id": "fixture-run-1", "task_type": "local_agent",
-             "subagent_type": "Explore", "description": second_description},
-        ]})
-        # The woken parent has only begun streaming when the last agent
-        # finishes; no complete assistant message has arrived yet.
-        parent_request_started("msg_wake_resumed", woken=True)
-        write({"type": "system", "subtype": "task_notification", "task_id": second_task, "run_id": "fixture-run-1",
-               "tool_use_id": second_tool, "status": "completed", "output_file": "", "summary": "Reviewer B finished."})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        wake_pause = Path(str(sys.argv[0]) + ".background-wake-pause")
-        if wake_pause.exists():
-            wake_ready = Path(str(sys.argv[0]) + ".background-wake-ready")
-            wake_release = Path(str(sys.argv[0]) + ".background-wake-release")
-            wake_ready.write_text("Last notification sent mid-work.\n", encoding="utf-8")
-            wake_deadline = time.monotonic() + 30
-            while not wake_release.exists() and time.monotonic() < wake_deadline:
-                time.sleep(0.02)
-            if not wake_release.exists():
-                raise TimeoutError("The test did not release the woken parent's final answer.")
-        text("msg_wake_resumed", "WAKE RESUMED")
-        run_tool("toolu_wake_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
-        # The woken turn's next request carries Reviewer B's queued notification.
-        parent_request_started("msg_wake_final")
-        text("msg_wake_final", "WAKE FINAL")
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-    elif "background agent" in user_text.lower():
-        # Mirrors the real `claude` CLI's --forward-subagent-text protocol for a
-        # backgrounded Agent/Task call: the launch confirmation tool_result is not
-        # completion, and the real outcome arrives later as system task events.
-        tool_id = "toolu_background_agent"
-        task_id = "bgtask-fixture-1"
-        did_fail = "background agent failure" in user_text.lower()
-        terminal_status = "failed" if did_fail else "completed"
-        result_summary = "Background check failed." if did_fail else "Background check finished."
-        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
-            "subagent_type": "Explore", "description": "Background check", "prompt": "check something",
-            "run_in_background": True,
-        }}])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False},
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
-             "subagent_type": "Explore", "description": "Background check"},
-        ]})
-        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "description": "Background check", "subagent_type": "Explore",
-               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
-        write({"type": "system", "subtype": "task_progress", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "description": "Running Bash", "subagent_type": "Explore",
-               "last_tool_name": "Bash"})
-        text("msg_background_started", "STARTED")
-        if not did_fail:
-            # Model the provider finishing its parent response before it sends
-            # the background agent's terminal notification. The bridge must
-            # keep the send open while that result is still outstanding.
-            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-            background_result_sent = True
-        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
-               "patch": {"status": terminal_status, "end_time": 0}})
-        if not did_fail:
-            # This empty snapshot can clear the client's outstanding task set
-            # before task_notification carries the actual result.
-            write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        summary_pause = Path(str(sys.argv[0]) + ".background-summary-pause")
-        if summary_pause.exists() and not did_fail:
-            summary_ready = Path(str(sys.argv[0]) + ".background-summary-ready")
-            summary_release = Path(str(sys.argv[0]) + ".background-summary-release")
-            summary_ready.write_text("Status-only completion sent.\n", encoding="utf-8")
-            summary_deadline = time.monotonic() + 30
-            while not summary_release.exists() and time.monotonic() < summary_deadline:
-                time.sleep(0.02)
-            if not summary_release.exists():
-                raise TimeoutError("The test did not release the background-agent summary event.")
-        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "status": terminal_status, "output_file": "", "summary": result_summary})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        if did_fail:
-            # The running turn's next request carries the notification; no wake follows.
-            parent_request_started("msg_background_failure_seen")
-            text("msg_background_failure_seen", "The background check failed.")
-        else:
-            parent_request_started("msg_background_woken", woken=True)
-            text("msg_background_woken", "BACKGROUND HANDLED")
-            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-    elif "consumed wake notification" in user_text.lower():
-        # Mirrors the observed stranding sequence: a background shell parks the
-        # answered turn, the shell's notification arrives, and Claude Code
-        # starts the provider turn that would deliver it — `system init` — but
-        # then says nothing at all, because it consumed the notification
-        # without a new parent request. No answer and no result of that turn
-        # ever arrive, so Playhouse alone has to settle this turn instead of
-        # leaving the task In Progress forever.
-        tool_id = "toolu_consumed_wake"
-        task_id = "bgshell-consumed-wake-1"
-        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
-            "command": "sleep 1; echo WAKE", "description": "Consumed wake shell", "run_in_background": True,
-        }}])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
-             "content": f"Command running in background with ID: {task_id}."},
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Consumed wake shell"},
-        ]})
-        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "description": "Consumed wake shell", "task_type": "local_bash"})
-        text("msg_consumed_wake_started", "WAKE SHELL STARTED")
-        outcome = report_command(instructions, " task outcome ", "completed")
-        if outcome:
-            commands.append({"command": outcome,
-                             "output": run_tool("toolu_consumed_wake_outcome", "Bash", {"command": outcome}, outcome)})
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        background_result_sent = True
-        complete_command(current_command_uuid)
-        wait_for_release("consumed-wake", "The parent result is out while the background shell runs.")
-        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
-               "patch": {"status": "completed", "end_time": 0}})
-        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "status": "completed", "output_file": "",
-               "summary": 'Background command "Consumed wake shell" completed (exit code 0)'})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        # The woken provider turn starts and then goes quiet: no parent request,
-        # no answer, no result of its own, ever.
-        write({"type": "system", "subtype": "init"})
-        Path(str(sys.argv[0]) + ".consumed-wake-woken").write_text(
-            "The woken turn started and consumed the notification silently.\n", encoding="utf-8"
-        )
-    elif "slow woken turn" in user_text.lower():
-        # The same announcement, but from a woken turn that is alive and merely
-        # slow to speak: it stays silent well past the grace Playhouse gives a
-        # consumed notification, then answers. Cutting it off there would lose
-        # the background task's report, so this turn must end on Claude's own
-        # answer rather than on Playhouse's backstop.
-        tool_id = "toolu_slow_woken"
-        task_id = "bgshell-slow-woken-1"
-        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
-            "command": "sleep 1; echo SLOW", "description": "Slow woken shell", "run_in_background": True,
-        }}])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
-             "content": f"Command running in background with ID: {task_id}."},
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Slow woken shell"},
-        ]})
-        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "description": "Slow woken shell", "task_type": "local_bash"})
-        text("msg_slow_woken_started", "SLOW SHELL STARTED")
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        background_result_sent = True
-        complete_command(current_command_uuid)
-        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
-               "patch": {"status": "completed", "end_time": 0}})
-        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "status": "completed", "output_file": "",
-               "summary": 'Background command "Slow woken shell" completed (exit code 0)'})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        write({"type": "system", "subtype": "init"})
-        Path(str(sys.argv[0]) + ".slow-woken-announced").write_text(
-            "The woken turn started and is about to go quiet for a while.\n", encoding="utf-8"
-        )
-        time.sleep(float(os.environ.get("PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS", "6")))
-        # Only `parent_request_started` without a second `init`: this turn was
-        # already announced above, it is just finally speaking.
-        parent_request_started("msg_slow_woken_answer")
-        text("msg_slow_woken_answer", "SLOW WOKEN HANDLED")
-        outcome = report_command(instructions, " task outcome ", "completed")
-        if outcome:
-            commands.append({"command": outcome,
-                             "output": run_tool("toolu_slow_woken_outcome", "Bash", {"command": outcome}, outcome)})
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-    elif "parked background shell" in user_text.lower():
-        # Mirrors a turn Claude Code has already answered while a background
-        # shell keeps running: the parent result is out, no notification has
-        # arrived yet, and the turn is still the active one. Input steered into
-        # that window must reach the process and be answered inside the same
-        # turn, before the shell's notification and the woken parent turn.
-        tool_id = "toolu_parked_shell"
-        task_id = "bgshell-parked-1"
-        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
-            "command": "sleep 1; echo PARKED", "description": "Parked shell", "run_in_background": True,
-        }}])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
-             "content": f"Command running in background with ID: {task_id}."},
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Parked shell"},
-        ]})
-        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "description": "Parked shell", "task_type": "local_bash"})
-        text("msg_parked_started", "PARKED STARTED")
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        background_result_sent = True
-        # The submitted command is finished too, so only the running shell holds
-        # the turn open: exactly the window the real CLI parks a turn in.
-        complete_command(current_command_uuid)
-        Path(str(sys.argv[0]) + ".parked-shell-ready").write_text(
-            "The parent result is out while the shell runs.\n", encoding="utf-8"
-        )
-        steered, steered_uuid = read_steered_input("the parked background shell turn")
-        parent_request_started("msg_parked_steered_answer")
-        text("msg_parked_steered", f"STEERED: {steered}")
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
-               "patch": {"status": "completed", "end_time": 0}})
-        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "status": "completed", "output_file": "",
-               "summary": 'Background command "Parked shell" completed (exit code 0)'})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        parent_request_started("msg_parked_final", woken=True)
-        text("msg_parked_final", "PARKED HANDLED")
-        wait_for_release("steered-answer", "The steered answer is visible while the woken parent result is pending.")
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        complete_command(steered_uuid)
-    elif "background shell" in user_text.lower():
-        # Mirrors the real `claude` CLI for a Bash call with run_in_background:
-        # the tool_result only confirms the launch, the shell reports through
-        # the same system task events as an agent, and Claude Code then starts
-        # a woken parent turn to deliver its notification. When the shell
-        # finishes early, that woken turn starts before the first result.
-        tool_id = "toolu_background_shell"
-        task_id = "bgshell-fixture-1"
-        finishes_early = "finishes early" in user_text.lower()
-        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
-            "command": "sleep 1; echo SHELL DONE", "description": "Fixture shell", "run_in_background": True,
-        }}])
-        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
-             "content": f"Command running in background with ID: {task_id}."},
-        ]}})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
-            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Fixture shell"},
-        ]})
-        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "description": "Fixture shell", "task_type": "local_bash"})
-        text("msg_shell_started", "SHELL STARTED")
-        if not finishes_early:
-            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-            wait_for_release("background-shell-running", "Parent result sent while the shell runs.")
-        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
-               "patch": {"status": "completed", "end_time": 0}})
-        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "status": "completed", "output_file": "",
-               "summary": 'Background command "Fixture shell" completed (exit code 0)'})
-        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
-        wait_for_release("background-shell-wake", "The shell finished before the parent woke.")
-        parent_request_started("msg_shell_woken", woken=True)
-        text("msg_shell_woken", "SHELL HANDLED")
-        outcome = report_command(instructions, " task outcome ", "completed")
-        if outcome:
-            commands.append({"command": outcome, "output": run_tool("toolu_shell_outcome", "Bash", {"command": outcome}, outcome)})
-        if finishes_early:
-            # The first turn's result arrives only after the woken turn began.
-            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-            wait_for_release("background-shell-second-result", "The first result arrived; the woken turn's is pending.")
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        background_result_sent = True
-    else:
-        text("msg_simple", SIMPLE_ANSWER)
-    return commands
-
-
 def auth_command(arguments):
     """`claude auth status|login|logout`, as the Agents info block uses them.
     The account lives in `<executable>.auth-state` so a test can sign it out or in."""
@@ -1260,6 +666,8 @@ def auth_command(arguments):
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {
         "loggedIn": True, "authMethod": "claude.ai", "email": "claude-fixture@example.com", "subscriptionType": "max"}
     if arguments[:1] == ["status"]:
+        if Path(str(sys.argv[0]) + ".auth-status-error").exists():
+            return 1
         print(json.dumps(state))
     elif arguments[:1] == ["logout"]:
         state_path.write_text(json.dumps({"loggedIn": False}), encoding="utf-8")
@@ -1293,124 +701,6 @@ def fixture_commands():
     return commands
 
 
-def run_reattach_turn():
-    """A turn for the daemon-restart cases (`-reattach` in the executable name).
-
-    Playhouse runs this process with file-backed stdio, so it keeps running when the daemon that
-    started it dies. The turn writes "Before restart." and holds; marker files beside the
-    executable drive it from there: `.reattach-ask` raises a tool approval and a question,
-    `.reattach-late-reply` writes a reply to Playhouse's first control request again,
-    `.reattach-release` finishes with "After restart." and the turn's outcome,
-    `.reattach-release-quiet` finishes with no outcome report, and `.reattach-exit` exits
-    without a result. Every input line is logged to `.reattach-stdin`."""
-    base = str(sys.argv[0])
-    instructions = argument("--append-system-prompt") or ""
-    turn_uuid = None
-    reporting = None
-    pending = {}
-
-    def log(name, value):
-        with open(f"{base}.{name}", "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(value) + "\n")
-
-    def finish():
-        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
-        complete_command(turn_uuid)
-
-    def handle(line):
-        nonlocal turn_uuid, reporting
-        log("reattach-stdin", line)
-        if not line.strip():
-            return
-        message = json.loads(line)
-        kind = message.get("type")
-        if kind == "control_request":
-            subtype = (message.get("request") or {}).get("subtype")
-            response = {"claude_code_version": "2.1.308 (Claude Code fixture)", "models": [], "commands": [], "agents": []} \
-                if subtype == "initialize" else {}
-            if subtype == "interrupt":
-                Path(f"{base}.reattach-interrupted").write_text(message.get("request_id", ""), encoding="utf-8")
-            write({"type": "control_response", "response": {
-                "subtype": "success", "request_id": message.get("request_id"), "response": response}})
-            if subtype == "interrupt":
-                write({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "Interrupted."})
-                complete_command(turn_uuid)
-        elif kind == "control_response":
-            response = message.get("response") or {}
-            request_id = response.get("request_id")
-            log("reattach-replies", {"id": request_id, "response": response.get("response")})
-            if pending.pop(request_id, None) == "question":
-                answers = ((response.get("response") or {}).get("updatedInput") or {}).get("answers") or {}
-                write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_reattach_question", "content": json.dumps(answers), "is_error": False}]}})
-                text("msg_reattach_answer", f"Answer received: {answers.get('Which color?', '')}.")
-        elif kind == "user":
-            content = message.get("message", {}).get("content", [])
-            user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
-            if turn_uuid is None and "playhouse internal outcome nudge" in user_text.lower():
-                # A status nudge is answered at once with the outcome.
-                turn_uuid = message.get("uuid")
-                text("msg_reattach_nudge", "Waiting for your review.")
-                command = report_command(instructions, "task outcome", "waiting-response")
-                reporting = subprocess.Popen(shlex.split(command), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) \
-                    if command else None
-                if reporting is None:
-                    finish()
-            elif turn_uuid is None:
-                turn_uuid = message.get("uuid")
-                write({"type": "system", "subtype": "init", "session_id": argument("--session-id") or argument("--resume")})
-                text("msg_reattach_before", "Before restart.")
-                Path(f"{base}.reattach-ready").write_text(user_text, encoding="utf-8")
-            else:
-                # A steered follow-up reaches the running turn and is answered in it.
-                log("reattach-steers", user_text)
-                text(f"msg_reattach_steer_{len(user_text)}", f"Steer received: {user_text}")
-                complete_command(message.get("uuid"))
-
-    while True:
-        line = STDIN.readline(0.05)
-        while line:
-            handle(line[:-1] if line.endswith("\n") else line)
-            line = STDIN.readline(0)
-        if line == "":
-            # A piped helper run ends with its input; a file-backed run never sees this.
-            return 0
-        if turn_uuid is None:
-            continue
-        if Path(f"{base}.reattach-ask").exists():
-            Path(f"{base}.reattach-ask").unlink()
-            pending["reattach-approval-1"] = "approval"
-            write({"type": "control_request", "request_id": "reattach-approval-1", "request": {
-                "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "touch reattach.txt"}}})
-            pending["reattach-question-1"] = "question"
-            write({"type": "control_request", "request_id": "reattach-question-1", "request": {
-                "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [{
-                    "question": "Which color?", "header": "Color",
-                    "options": [{"label": "red"}, {"label": "blue"}], "multiSelect": False}]}}})
-            Path(f"{base}.reattach-asked").write_text("asked\n", encoding="utf-8")
-        if Path(f"{base}.reattach-late-reply").exists():
-            Path(f"{base}.reattach-late-reply").unlink()
-            write({"type": "control_response", "response": {"subtype": "success", "request_id": "playhouse-1", "response": {}}})
-        if Path(f"{base}.reattach-exit").exists():
-            os._exit(3)
-        if reporting is None and Path(f"{base}.reattach-release-quiet").exists():
-            Path(f"{base}.reattach-release-quiet").unlink()
-            text("msg_reattach_after", "After restart.")
-            finish()
-        if reporting is None and Path(f"{base}.reattach-release").exists():
-            Path(f"{base}.reattach-release").unlink()
-            text("msg_reattach_after", "After restart.")
-            command = report_command(instructions, "task outcome", "waiting-response")
-            # Like a tool call, the report runs while the turn keeps reading its input.
-            reporting = subprocess.Popen(shlex.split(command), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) \
-                if command else None
-            if reporting is None:
-                finish()
-        if reporting is not None and reporting.poll() is not None:
-            reporting = None
-            finish()
-
-
 def main():
     global background_result_sent, current_command_uuid
     if sys.argv[1:2] == ["auth"]:
@@ -1423,9 +713,16 @@ def main():
         "arguments": sys.argv[1:],
         "sessionID": argument("--session-id") or argument("--resume"),
         "resumed": "--resume" in sys.argv,
+        "forkedFrom": argument("--resume") if "--fork-session" in sys.argv else None,
         "cwd": os.getcwd(),
         "bridgeServiceName": os.environ.get("PLAYHOUSE_BRIDGE_SERVICE_NAME"),
         "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
+        "autoCompactWindow": os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+        # Any launch value that would turn off or shrink Claude Code's native auto-compaction.
+        "autoCompactOverrides": {
+            name: os.environ[name] for name in ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "DISABLE_AUTO_COMPACT", "DISABLE_COMPACT")
+            if name in os.environ
+        },
         # The non-built-in skills this launch would load, after bridging and overrides.
         "skills": [command["name"] for command in fixture_commands() if not command.get("builtin")],
     }
@@ -1439,12 +736,26 @@ def main():
                 # One line per Claude Code session started, including metadata-only ones.
                 with open(str(sys.argv[0]) + ".sessions", "a", encoding="utf-8") as sessions:
                     sessions.write("initialize\n")
+                # A slow session start: the turn is still launching. Metadata-only sessions
+                # carry no session ID and are never held.
+                if "--session-id" in sys.argv or "--resume" in sys.argv:
+                    wait_for_release("launch", "Claude Code is starting the session.")
                 missing_resume = Path(str(sys.argv[0]) + ".missing-resume")
                 if "--resume" in sys.argv and missing_resume.exists():
                     missing_resume.unlink()
                     write({"type": "result", "subtype": "error", "is_error": True,
                            "result": "No conversation found with session ID"})
                     return 1
+                # Like Claude Code, a session-cwd fixture's session file records the folder
+                # the session started in (a fork's too); Playhouse resumes a rootless task from it.
+                config = os.environ.get("CLAUDE_CONFIG_DIR")
+                starts_session = "--resume" not in sys.argv or "--fork-session" in sys.argv
+                if "-session-cwd" in Path(sys.argv[0]).name and config and "--session-id" in sys.argv and starts_session:
+                    project = Path(config) / "projects" / "-fixture-project"
+                    project.mkdir(parents=True, exist_ok=True)
+                    with open(project / f"{argument('--session-id')}.jsonl", "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({"type": "system", "subtype": "fixture-session-start",
+                                                 "sessionId": argument("--session-id"), "cwd": os.getcwd()}) + "\n")
                 # Claude Code announces the newest release of a family only through the
                 # bare alias, which names the concrete model in `resolvedModel`; no entry
                 # has that concrete name as its own value.
@@ -1558,6 +869,68 @@ def main():
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text
+            session_id = argument("--session-id") or argument("--resume")
+            if user_text.strip() == "/compact":
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
+                turn["compaction"] = {"trigger": "manual"}
+                history.setdefault("turns", []).append(turn)
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+                write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "started"})
+                if Path(str(sys.argv[0]) + ".compact-hold").exists():
+                    write({"type": "system", "subtype": "status", "status": "compacting"})
+                    Path(str(sys.argv[0]) + ".compact-ready").touch()
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        line = STDIN.readline(0.02)
+                        if line is None:
+                            continue
+                        control = json.loads(line)
+                        if control.get("type") == "control_request" and control.get("request", {}).get("subtype") == "interrupt":
+                            write({"type": "control_response", "response": {
+                                "subtype": "success", "request_id": control.get("request_id"), "response": {},
+                            }})
+                            write({"type": "system", "subtype": "status", "status": None, "compact_result": "failed"})
+                            write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "completed"})
+                            write({"type": "result", "subtype": "error", "is_error": True, "result": "Interrupted"})
+                            return 0
+                    raise TimeoutError("Compaction was not interrupted.")
+                if Path(str(sys.argv[0]) + ".compact-fail").exists():
+                    write({"type": "system", "subtype": "status", "status": "compacting"})
+                    write({"type": "system", "subtype": "status", "status": None, "compact_result": "failed"})
+                else:
+                    write_compaction_boundary(session_id, "manual", 180000)
+                write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "completed"})
+                write({"type": "result", "subtype": "success", "is_error": False, "result": "", "usage": {
+                    "input_tokens": 20, "output_tokens": 40, "cache_read_input_tokens": 180000,
+                    "cache_creation_input_tokens": 0
+                }})
+                continue
+            if match := re.search(r"fill context to (\d+) tokens(?: (\d+) minutes ago)?", user_text.lower()):
+                filled = int(match.group(1))
+                minutes_ago = int(match.group(2) or 0)
+                write_session_context(session_id, filled, minutes_ago)
+                turn["filledContextTokens"] = filled
+                # Claude Code's native auto-compaction, at the fixture model's own window unless
+                # the launch shrinks it or turns it off.
+                configured_window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "0") or 0) or FIXTURE_NATIVE_AUTO_COMPACT_TOKENS
+                native_disabled = any(os.environ.get(name) for name in ("DISABLE_AUTO_COMPACT", "DISABLE_COMPACT"))
+                if not native_disabled and filled >= configured_window:
+                    write_compaction_boundary(session_id, "auto", filled)
+                    turn["autoCompacted"] = True
+            if "compact twice mid turn" in user_text.lower():
+                # A long turn compacts before each call that would cross the window, after the
+                # text and tool call written before it, then continues from its own summary message,
+                # as the real CLI does.
+                text("msg_fixture_before_compactions", "Reading the build log before the first compaction.")
+                run_tool("toolu_fixture_first_compaction", "Bash", {"command": "true"})
+                write_compaction_boundary(session_id, "auto", 170000, 14000)
+                write({"type": "user", "isSynthetic": True, "parent_tool_use_id": None, "uuid": f"fixture-summary-{time.time_ns()}",
+                       "message": {"role": "user", "content": [{"type": "text", "text": "Continued after the first compaction."}]}})
+                text("msg_fixture_between_compactions", "Checking the log again between compactions.")
+                run_tool("toolu_fixture_second_compaction", "Bash", {"command": "true"})
+                write_compaction_boundary(session_id, "auto", 168000, 15000)
+                write({"type": "user", "isSynthetic": True, "parent_tool_use_id": None, "uuid": f"fixture-summary-{time.time_ns()}",
+                       "message": {"role": "user", "content": [{"type": "text", "text": "Continued after the second compaction."}]}})
             # What arrived of each image, without keeping its payload in the history.
             turn["images"] = [
                 {"mediaType": block.get("source", {}).get("media_type"),
@@ -1582,8 +955,20 @@ def main():
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
             maybe_burn_cpu()
-            turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome,
-                                            previous_prompt=previous_prompt)
+            if SIDE_CHAT_MARKER in instructions:
+                turn["reportCommands"] = side_chat_respond(user_text, instructions, turn, prior_turns)
+            else:
+                turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome,
+                                                previous_prompt=previous_prompt)
+            if (os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME") == "1"
+                    and "playhouse internal outcome nudge:" not in user_text.lower()
+                    and "hold" not in user_text.lower()):
+                outcome = report_command(instructions, " task outcome ", "waiting-response")
+                if outcome:
+                    turn["reportCommands"].append({
+                        "command": outcome,
+                        "output": run_tool("toolu_fixture_compaction_outcome", "Bash", {"command": outcome}, outcome),
+                    })
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)
             history_path.write_text(json.dumps(history), encoding="utf-8")

@@ -1,0 +1,244 @@
+import CryptoKit
+import Foundation
+
+/// otherwise see it.
+enum SkillLayout: String, Codable, Sendable {
+    /// `<repo>/.agents/skills` or `~/.agents/skills`, read natively by Codex.
+    case agents
+    /// `<repo>/.claude/skills` or `<claude config>/skills`, read natively by Claude Code.
+    case claude
+    /// `$CODEX_HOME/skills`, Codex's legacy user folder.
+    case codexLegacy
+    /// `$CODEX_HOME/skills/.system`, skills bundled with Codex.
+    case codexSystem
+    /// `<claude config>/skills/synced/*`, skills claude.ai syncs into Claude Code.
+    case claudeSynced
+    /// Built into the Claude Code binary, with no folder on disk.
+    case claudeBundled
+    /// `<Playhouse data>/private-skills/<repository key>/.claude/skills`: a
+    /// repository's private skills, which Playhouse keeps out of the repository
+    /// and bridges into both providers' sessions for that repository only.
+    case playhousePrivate
+
+    var displayPath: String {
+        switch self {
+        case .agents: ".agents/skills"
+        case .claude: ".claude/skills"
+        case .codexLegacy: "Codex skills"
+        case .codexSystem: "Codex built-in"
+        case .claudeSynced: "claude.ai synced"
+        case .claudeBundled: "Claude Code built-in"
+        case .playhousePrivate: "Private, stored by Playhouse"
+        }
+    }
+}
+
+enum SkillScope: String, Codable, Sendable, CaseIterable {
+    case repo
+    case global
+    case builtin
+    /// Belongs to one repository but is never written into it or its worktrees.
+    case privateRepo = "private"
+}
+
+struct SkillLocation: Codable, Equatable, Sendable {
+    /// The skill folder as found, which can be a symlink.
+    let path: String
+    let layout: SkillLayout
+    let isSymlink: Bool
+}
+
+struct SkillRecord: Codable, Equatable, Identifiable, Sendable {
+    /// Stable across tasks: a repo skill is keyed by its source repository, not
+    /// the task worktree, so its enabled state follows the repository.
+    let id: String
+    let name: String
+    let description: String
+    let scope: SkillScope
+    let repositoryPath: String?
+    /// The task root the repo skill was read from.
+    let rootPath: String?
+    /// The resolved skill folder that edits, moves, and deletes act on.
+    let folderPath: String?
+    let locations: [SkillLocation]
+    /// Providers that can use the skill in sessions Playhouse launches.
+    let providers: [ConversationProvider]
+    let enabled: Bool
+    let editable: Bool
+    /// Both providers read the skill natively, so it also works outside Playhouse.
+    let availableOutsidePlayhouse: Bool
+    let conflict: Bool
+    let issue: String?
+    /// What to type after `/` when it differs from `name`: a private skill whose
+    /// name an earlier repository's private skill of the task already uses is
+    /// namespaced as `<repository>:<name>`, the way Claude Code names it.
+    var invocationName: String? = nil
+    /// For a private skill no provider uses: where the skill with the same
+    /// name that takes precedence lives.
+    var shadowedBy: String? = nil
+
+    /// `/name`, or `/<repository>:<name>` for a namespaced private skill.
+    var invocationToken: String { "/" + (invocationName ?? name) }
+
+    func adjusted(providers: [ConversationProvider]? = nil, issue: String?? = nil, invocationName: String?? = nil, shadowedBy: String?? = nil) -> SkillRecord {
+        var copy = SkillRecord(
+            id: id, name: name, description: description, scope: scope, repositoryPath: repositoryPath, rootPath: rootPath,
+            folderPath: folderPath, locations: locations, providers: providers ?? self.providers, enabled: enabled, editable: editable,
+            availableOutsidePlayhouse: availableOutsidePlayhouse, conflict: conflict, issue: issue ?? self.issue
+        )
+        copy.invocationName = invocationName ?? self.invocationName
+        copy.shadowedBy = shadowedBy ?? self.shadowedBy
+        return copy
+    }
+}
+
+struct SkillRepositorySection: Codable, Equatable, Sendable {
+    let repositoryPath: String
+    let rootPath: String
+    let name: String
+    let skills: [SkillRecord]
+}
+
+struct SkillCatalog: Codable, Equatable, Sendable {
+    let repositories: [SkillRepositorySection]
+    let global: [SkillRecord]
+    let builtin: [SkillRecord]
+
+    var allSkills: [SkillRecord] { repositories.flatMap(\.skills) + global + builtin }
+    func skill(id: String) -> SkillRecord? { allSkills.first { $0.id == id } }
+
+    /// The same catalog with one skill's record swapped for a newer one.
+    func replacing(_ record: SkillRecord) -> SkillCatalog {
+        func swap(_ skills: [SkillRecord]) -> [SkillRecord] { skills.map { $0.id == record.id ? record : $0 } }
+        return SkillCatalog(
+            repositories: repositories.map {
+                SkillRepositorySection(repositoryPath: $0.repositoryPath, rootPath: $0.rootPath, name: $0.name, skills: swap($0.skills))
+            },
+            global: swap(global),
+            builtin: swap(builtin)
+        )
+    }
+}
+
+/// The task Playhouse opens so an agent can repair broken skills.
+struct SkillFixPlan: Equatable, Sendable {
+    let title: String
+    let prompt: String
+    /// Source repositories whose skills the task fixes in its own worktrees.
+    let repositoryPaths: [String]
+    /// Global skill folders the agent edits in place.
+    let contextFolders: [String]
+}
+
+/// A skill a message invokes, so a provider without slash commands can be
+/// handed the skill directly.
+struct SkillInvocation: Codable, Equatable, Sendable {
+    let name: String
+    let path: String
+}
+
+/// What a provider launch needs so it sees every skill in the gallery. Claude
+/// Code runs one process per turn, so its part is exact per launch. Codex shares
+/// one app-server across tasks, so its extra roots are the union of every
+/// task's bridge folder and each thread hides the folders that are not its own.
+struct SkillBridgeLaunch: Codable, Equatable, Sendable {
+    struct BridgedSkill: Codable, Equatable, Sendable {
+        let name: String
+        let source: String
+        let link: String
+    }
+
+    var claudeAddDirectories: [String] = []
+    var claudeDisabledSkillNames: [String] = []
+    var claudeLinks: [BridgedSkill] = []
+    var codexExtraRoots: [String] = []
+    var codexDisabledSkillPaths: [String] = []
+    var codexLinks: [BridgedSkill] = []
+    var invocations: [SkillInvocation] = []
+
+    /// `--settings` entries that hide disabled skills from Claude Code for this run only.
+    var claudeSettings: [String: Any] {
+        guard !claudeDisabledSkillNames.isEmpty else { return [:] }
+        return ["skillOverrides": Dictionary(uniqueKeysWithValues: claudeDisabledSkillNames.map { ($0, "off") })]
+    }
+
+    /// Per-thread Codex config that hides disabled and other tasks' bridged skills
+    /// without writing to the user's `config.toml`.
+    var codexThreadConfig: [String: Any]? {
+        guard !codexDisabledSkillPaths.isEmpty else { return nil }
+        return ["skills": ["config": codexDisabledSkillPaths.map { ["path": $0, "enabled": false] }]]
+    }
+}
+
+/// The folders the skill gallery and the rule set read. Production uses the
+/// user's own homes; debug bridge tests point every one at isolated fixtures.
+struct SkillEnvironment: Equatable, Sendable {
+    /// The folder whose `.agents/skills` holds global skills.
+    var homeDirectory: String
+    var claudeConfigDirectory: String
+    /// Claude Code's state file, which holds its user MCP servers: `~/.claude.json`,
+    /// or `.claude.json` inside a configured `CLAUDE_CONFIG_DIR`.
+    var claudeStateFile: String
+    var codexHome: String
+    /// Where an organization deploys Claude Code's managed CLAUDE.md and managed-mcp.json.
+    var managedClaudeDirectory: String
+    /// Playhouse-owned folder for bridge wrappers.
+    var bridgeDirectory: String
+    /// Playhouse-owned store of private repository skills, one folder per repository.
+    var privateSkillsDirectory: String
+
+    static func resolve(
+        homeOverride: String? = nil,
+        claudeConfigOverride: String? = nil,
+        codexHomeOverride: String? = nil,
+        storeDirectory: String?
+    ) -> SkillEnvironment {
+        let environment = PlayhouseProcessEnvironment.current
+        let home = homeOverride ?? environment["HOME"] ?? NSHomeDirectory()
+        let configuredClaude = claudeConfigOverride
+            ?? (homeOverride == nil ? environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 } : nil)
+        let claude = configuredClaude ?? home + "/.claude"
+        let codex = codexHomeOverride
+            ?? (homeOverride.map { $0 + "/.codex" })
+            ?? environment["CODEX_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? home + "/.codex"
+        // Beside the store, where task worktrees and other Playhouse data live.
+        let data = storeDirectory
+            ?? PlayhouseProcessEnvironment.current["PLAYHOUSE_DATA_DIRECTORY"]
+            ?? (try? PlayhouseAppIdentity.defaultDataDirectory().path)
+            ?? home + "/.playhouse"
+        return SkillEnvironment(
+            homeDirectory: home,
+            claudeConfigDirectory: claude,
+            claudeStateFile: configuredClaude.map { $0 + "/.claude.json" } ?? home + "/.claude.json",
+            codexHome: codex,
+            managedClaudeDirectory: homeOverride.map { $0 + "/managed/ClaudeCode" } ?? "/Library/Application Support/ClaudeCode",
+            bridgeDirectory: URL(fileURLWithPath: data).appendingPathComponent("skill-bridge").path,
+            privateSkillsDirectory: URL(fileURLWithPath: data).appendingPathComponent("private-skills").path
+        )
+    }
+}
+
+/// One task root, with the source repository that identifies its skills.
+struct SkillRoot: Equatable, Sendable {
+    let path: String
+    let repositoryPath: String
+
+    var name: String { URL(fileURLWithPath: repositoryPath).lastPathComponent }
+
+    static func roots(for task: any ConversationSubject) -> [SkillRoot] {
+        let worktrees = task.repositoryWorktrees
+        let paths = task.workspaceRootPaths.isEmpty && task.status == .done
+            ? worktrees.map(\.repositoryPath)
+            : task.workspaceRootPaths
+        return paths.map { path in
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+            let repository = worktrees.first {
+                URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == standardized
+                    || URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == standardized
+            }?.repositoryPath ?? standardized
+            return SkillRoot(path: standardized, repositoryPath: URL(fileURLWithPath: repository).standardizedFileURL.path)
+        }
+    }
+}
+

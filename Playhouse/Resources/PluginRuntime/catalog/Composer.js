@@ -15,15 +15,32 @@ function menuItem(prefix, item) {
   return { id: item.id, title: item.title, help: item.help, testID: prefix + item.testID, checked: item.checked, icon: item.checked ? undefined : item.icon };
 }
 
-function ModeMenu(props) {
-  var model = props.model, mode = model.modeMenu, prefix = model.prefix;
-  return h(Menu, {
-    icon: "plus", size: 14, weight: "semibold", color: mode.active ? "accent" : "secondary",
-    text: mode.text, textSize: 11, textWeight: "semibold", badgeIcon: mode.badgeIcon,
-    items: [mode.items.map(function (item) { return menuItem(prefix, item); })],
-    testID: prefix + "conversation-mode-menu", label: mode.label,
-    help: "Change conversation mode or add context", minWidth: 30, minHeight: 31, onMenu: props.on.modeMenu
-  });
+function AttachButton(props) {
+  var model = props.model, attach = model.attach;
+  return h(Button, { disabled: attach.disabled, testID: model.prefix + "composer-attach-button", label: "Attach files", help: attach.help, onPress: props.on.attach },
+    h(Panel, { fillOpacity: 0, cornerRadius: 13, width: 26, height: 26, padding: 0 },
+      h(Icon, { name: "paperclip", size: 13, weight: "medium", color: "secondary" })));
+}
+
+// The Plan or Goal button: its icon, on an orange highlight while the mode is on.
+function ModeToggle(props) {
+  var toggle = props.toggle;
+  return h(Button, { testID: props.testID, label: props.label, value: toggle.on ? "On" : "Off", help: toggle.help, onPress: props.onPress },
+    h(Panel, { fill: "orange", fillOpacity: toggle.on ? 0.18 : 0, cornerRadius: 13, width: 26, height: 26, padding: 0 }, props.icon(toggle.on ? "orange" : "secondary")));
+}
+
+function ModeToggles(props) {
+  var model = props.model, on = props.on, prefix = model.prefix;
+  return [
+    h(ModeToggle, {
+      key: "plan", toggle: model.plan, testID: prefix + "conversation-plan-button", label: "Plan mode", onPress: on.togglePlan,
+      icon: function (color) { return h(Icon, { name: "lightbulb.max", size: 13, weight: "medium", color: color }); }
+    }),
+    model.goal != null ? h(ModeToggle, {
+      key: "goal", toggle: model.goal, testID: prefix + "conversation-goal-button", label: "Goal", onPress: on.toggleGoal,
+      icon: function (color) { return h(Icon, { asset: "GoalIcon", color: color, width: 15, height: 15 }); }
+    }) : null
+  ];
 }
 
 function StartImplementing(props) {
@@ -32,7 +49,7 @@ function StartImplementing(props) {
     h(Button, {
       key: "start", disabled: start.disabled, testID: prefix + "start-implementing-button", value: start.value,
       hint: "Switches to Code mode and starts implementing this plan", help: start.help, onPress: props.on.startImplementing
-    }, h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, paddingX: 11 },
+    }, h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, padding: 0, paddingX: 11 },
       h(Text, { size: 12, weight: "semibold", color: "white" }, "Start Implementing"))),
     start.unavailableReason != null ? h(Button, {
       key: "reason", disabled: start.reasonDisabled, testID: prefix + "start-implementing-unavailable-reason", label: "No repository",
@@ -54,7 +71,7 @@ function ProviderMenu(props) {
 function ModelPicker(props) {
   var model = props.model, picker = model.model, prefix = model.prefix, on = props.on;
   var effortTitle = picker.effortChoices.filter(function (choice) { return choice.value === picker.selectedEffort; })[0];
-  return h(Popover, { isPresented: picker.open, arrowEdge: "top", width: 320, testID: prefix + "model-picker-popover", onDismiss: on.dismissModelPicker },
+  return h(Popover, { isPresented: picker.open, arrowEdge: "top", width: 320, inset: 0, spacing: 0, testID: prefix + "model-picker-popover", onDismiss: on.dismissModelPicker },
     h(Button, {
       testID: prefix + "model-picker-menu", label: picker.label, value: picker.name,
       help: "Choose a model and reasoning effort", opacity: 0.82, onPress: on.toggleModelPicker
@@ -79,16 +96,16 @@ function ModelPicker(props) {
 
 function ScheduleButton(props) {
   var model = props.model, schedule = model.schedule, prefix = model.prefix, on = props.on;
-  return h(Popover, { isPresented: schedule.open, arrowEdge: "top", testID: prefix + "schedule-popover", onDismiss: on.dismissSchedule },
+  return h(Popover, { isPresented: schedule.open, arrowEdge: "top", inset: 0, spacing: 0, testID: prefix + "schedule-popover", onDismiss: on.dismissSchedule },
     h(Button, {
       testID: prefix + "schedule-task-button", label: "Schedule", value: schedule.on ? "On" : "Off", help: schedule.help, onPress: on.toggleSchedule
-    }, h(Panel, { fill: "accent", fillOpacity: schedule.on ? 0.14 : 0, cornerRadius: 13, width: 26, height: 26 },
+    }, h(Panel, { fill: "accent", fillOpacity: schedule.on ? 0.14 : 0, cornerRadius: 13, width: 26, height: 26, padding: 0 },
       h(Icon, { name: schedule.on ? "clock.fill" : "clock", size: 12, weight: "medium", color: schedule.on ? "accent" : "secondary" }))),
     h(Text, { size: 12, padding: 12, testID: prefix + "schedule-hint" }, "The schedule hint stays native."));
 }
 
 function primaryIcon(name, fill, opacity, size, radius, dimmed) {
-  return h(Panel, { fill: fill, fillOpacity: opacity, cornerRadius: radius, width: 31, height: 31, opacity: dimmed ? 0.45 : 1 },
+  return h(Panel, { fill: fill, fillOpacity: opacity, cornerRadius: radius, width: 31, height: 31, padding: 0, opacity: dimmed ? 0.45 : 1 },
     h(Icon, { name: name, size: size, weight: "bold", color: "white" }));
 }
 
@@ -98,7 +115,7 @@ function Primary(props) {
   if (primary.kind === "stop") label = primaryIcon("stop.fill", "primary", 0.72, 11, 9, false);
   else if (primary.kind === "continue") label = primaryIcon("play.fill", "accent", 1, 11, 9, false);
   else if (primary.kind === "schedule") {
-    label = h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, paddingX: 12, opacity: primary.disabled ? 0.45 : 1 },
+    label = h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, padding: 0, paddingX: 12, opacity: primary.disabled ? 0.45 : 1 },
       h(Label, { text: "Schedule", icon: "clock", size: 12, weight: "semibold", color: "white" }));
   } else label = primaryIcon("arrow.up", "accent", 1, 13, 15.5, primary.disabled);
   return h(Button, {
@@ -110,8 +127,9 @@ function Primary(props) {
 function Toolbar(props) {
   var model = props.model, on = props.on;
   return h(Stack, { axis: "h", spacing: 12 },
-    h(SkillsButton, { testID: model.prefix + "open-skills-button", onPress: on.openSkills }),
-    h(ModeMenu, { model: model, on: on }),
+    h(AttachButton, { model: model, on: on }),
+    model.skills ? h(SkillsButton, { testID: model.prefix + "open-skills-button", onPress: on.openSkills }) : null,
+    h(ModeToggles, { model: model, on: on }),
     model.startImplementing != null ? h(StartImplementing, { model: model, on: on }) : null,
     h(Spacer, { minLength: 0 }),
     h(ProviderMenu, { model: model, on: on }),
@@ -154,15 +172,8 @@ function Demo() {
   var model = Object.assign({}, sample, {
     draft: draft[0],
     placeholder: goal ? "Set a goal to keep pursuing" : sample.placeholder,
-    modeMenu: Object.assign({}, sample.modeMenu, {
-      text: goal ? "Goal" : plan ? "Plan" : undefined,
-      badgeIcon: goal ? "scope" : undefined,
-      active: goal || plan,
-      label: goal ? "Goal" : "Conversation mode: " + (plan ? "Plan mode" : "Code mode"),
-      items: sample.modeMenu.items.map(function (item) {
-        return Object.assign({}, item, { checked: item.id === "mode:" + mode[0] });
-      })
-    }),
+    plan: Object.assign({}, sample.plan, { on: plan }),
+    goal: Object.assign({}, sample.goal, { on: goal }),
     startImplementing: plan ? sample.startImplementing : undefined,
     provider: Object.assign({}, sample.provider, {
       title: title, value: provider[0], label: "Provider: " + title,
@@ -182,10 +193,12 @@ function Demo() {
     steer: function () { last[1]("steer"); },
     focusChange: function () {},
     openSkills: function () { last[1]("skills"); },
-    modeMenu: function (id) {
-      mode[1](id === "goal" ? "goal" : id.slice("mode:".length));
-      if (id === "goal") draft[1]("");
-      last[1]("mode " + id);
+    attach: function () { last[1]("attach"); },
+    togglePlan: function () { mode[1](plan ? "default" : "plan"); last[1](plan ? "plan off" : "plan on"); },
+    toggleGoal: function () {
+      mode[1](goal ? "default" : "goal");
+      if (!goal) draft[1]("");
+      last[1](goal ? "goal off" : "goal on");
     },
     startImplementing: function () { mode[1]("default"); last[1]("start implementing"); },
     showRepositoryPicker: function () { last[1]("repository picker"); },

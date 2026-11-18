@@ -137,6 +137,56 @@ struct WorkspaceChangeInventory: Codable, Equatable {
     var count: Int { unviewed.count + viewed.count }
 }
 
+/// How a changed file and its repository are shown, shared by the Changes
+/// sidebar and the window's diff.
+enum WorkspaceChangeStyle {
+    struct RepositoryGroup {
+        let repository: String
+        let entries: [WorkspaceChangeEntry]
+    }
+
+    static func repositoryGroups(_ entries: [WorkspaceChangeEntry]) -> [RepositoryGroup] {
+        Dictionary(grouping: entries, by: \.repository)
+            .keys
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { repository in RepositoryGroup(repository: repository, entries: entries.filter { $0.repository == repository }) }
+    }
+
+    static func repositoryLabel(_ path: String) -> String {
+        URL(fileURLWithPath: path).pathComponents.suffix(2).joined(separator: "/")
+    }
+
+    static func badge(for entry: WorkspaceChangeEntry) -> String {
+        if entry.statusCode == "??" { return "U" }
+        if entry.statusCode.contains("R") { return "R" }
+        if entry.statusCode.contains("A") { return "A" }
+        if entry.statusCode.contains("D") { return "D" }
+        if entry.status == "conflict" { return "!" }
+        return "M"
+    }
+
+    /// An SF Symbol name.
+    static func symbol(for status: String) -> String {
+        switch status {
+        case "added", "untracked": "plus.square.fill"
+        case "deleted": "minus.square.fill"
+        case "renamed", "copied": "arrow.turn.up.right"
+        case "conflict": "exclamationmark.triangle.fill"
+        default: "doc.text"
+        }
+    }
+
+    /// An atom color name.
+    static func colorName(for status: String) -> String {
+        switch status {
+        case "added", "untracked": "green"
+        case "deleted", "conflict": "red"
+        case "renamed", "copied": "orange"
+        default: "secondary"
+        }
+    }
+}
+
 /// Whether a planned conversation can hand off to a Code-mode implementation turn.
 enum PlanImplementationHandoff {
     /// Why a task's Start Implementing is unavailable, or nil when the task has somewhere to
@@ -147,15 +197,26 @@ enum PlanImplementationHandoff {
     }
 }
 
-/// How a task's terminal panel starts its shell. `environment` holds only the variables
+/// How a task's terminal panel starts its shells. `environment` holds only the variables
 /// Playhouse sets on top of the app's own environment.
 struct TaskTerminalLaunch: Codable, Equatable {
     let taskID: UUID
+    /// The first pane's folder, where a single-repository task's one shell runs.
     let directory: String
     let shell: String
     /// The shell runs as a login shell, as Terminal.app starts it, so the user's profile applies.
     let arguments: [String]
     let environment: [String: String]
+    /// One shell per created worktree, in the task's repository order; a task with several
+    /// repositories opens them as a split view, each shell in its own worktree.
+    let panes: [Pane]
+
+    struct Pane: Codable, Equatable {
+        let repositoryPath: String
+        /// The source repository's folder name, which labels the pane.
+        let name: String
+        let directory: String
+    }
 
     /// Why a task can't open a terminal yet, or nil when it has a created worktree. The terminal
     /// only runs in a worktree, and opening it never creates one: a pending worktree is named

@@ -65,7 +65,7 @@ private struct PluginCommitReadout: View {
 /// The Plugins menu's catalog: every atom rendered by its JavaScript page, and
 /// the native composites (the task item, the Agents info section, the Token
 /// Stats modal, the Skills page, the repository chips and picker, the
-/// composer) composed in JavaScript beside the native ones.
+/// composer, the Done archive) composed in JavaScript beside the native ones.
 struct PluginCatalogView: View {
     private enum Page: Hashable {
         case atom(AtomType)
@@ -76,6 +76,7 @@ struct PluginCatalogView: View {
         case skillsPage
         case repositoryChips
         case composer
+        case doneArchive
     }
 
     @State private var selection: Page? = .atom(.stack)
@@ -88,6 +89,8 @@ struct PluginCatalogView: View {
                         Text(atom.rawValue)
                             .tag(Page.atom(atom))
                             .accessibilityIdentifier("plugin-catalog-atom-\(atom.rawValue)")
+                            // The always-populated first section carries the List's scroller reveal.
+                            .hoverRevealScrollers()
                     }
                 }
                 Section("Examples") {
@@ -112,38 +115,62 @@ struct PluginCatalogView: View {
                     Text("Composer")
                         .tag(Page.composer)
                         .accessibilityIdentifier("plugin-catalog-composer")
+                    Text("Done Archive")
+                        .tag(Page.doneArchive)
+                        .accessibilityIdentifier("plugin-catalog-done-archive")
                 }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
         } detail: {
             ScrollView {
-                switch selection {
-                case .atom(let atom)?:
-                    AtomPage(atom: atom).id(atom)
-                case .taskItem?:
-                    TaskItemComparison()
-                case .agentsInfo?:
-                    AgentsInfoComparison()
-                case .kanbanColumn?:
-                    KanbanColumnComparison()
-                case .tokenStats?:
-                    TokenStatsComparison()
-                case .skillsPage?:
-                    SkillsPageComparison()
-                case .repositoryChips?:
-                    RepositoryChipsComparison()
-                case .composer?:
-                    ComposerComparison()
-                case nil:
-                    EmptyView()
+                Group {
+                    switch selection {
+                    case .atom(let atom)?:
+                        AtomCatalogPage(atom: atom).id(atom)
+                    case .taskItem?:
+                        TaskItemComparison()
+                    case .agentsInfo?:
+                        AgentsInfoComparison()
+                    case .kanbanColumn?:
+                        KanbanColumnComparison()
+                    case .tokenStats?:
+                        TokenStatsComparison()
+                    case .skillsPage?:
+                        SkillsPageComparison()
+                    case .repositoryChips?:
+                        RepositoryChipsComparison()
+                    case .composer?:
+                        ComposerComparison()
+                    case .doneArchive?:
+                        DoneArchiveComparison()
+                    case nil:
+                        EmptyView()
+                    }
                 }
+                .hoverRevealScrollers()
             }
         }
     }
 }
 
+@MainActor
 private func catalogPage(_ page: String) -> (source: String, props: [String: PluginValue])? {
-    try? PluginRenderCommand.catalogPage(page, resources: PluginRuntime.bundledResources)
+    catalogValue(page) { try PluginRenderCommand.catalogPage(page, resources: PluginRuntime.bundledResources) }
+}
+
+/// A page's bundled script or decoded sample. A page that cannot load renders
+/// only its title, so the reason goes to diagnostics.
+@MainActor
+private func catalogValue<Value>(_ page: String, _ load: () throws -> Value) -> Value? {
+    do {
+        return try load()
+    } catch {
+        var fields = PlayhouseDiagnostics.errorFields(error)
+        fields["page"] = page
+        fields["error"] = String(describing: error)
+        PlayhouseDiagnostics.record("plugin.catalog.page_failed", fields: fields)
+        return nil
+    }
 }
 
 /// One side of a composite's comparison page.
@@ -155,7 +182,7 @@ private func comparisonColumn(_ title: String, width: CGFloat, @ViewBuilder cont
     .frame(width: width, alignment: .leading)
 }
 
-private struct AtomPage: View {
+private struct AtomCatalogPage: View {
     let atom: AtomType
 
     var body: some View {
@@ -200,7 +227,7 @@ private struct TaskItemComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("TaskItem"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("TaskItem", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 300) {
                         PluginSurface(source: page.source, name: "TaskItem.js", props: page.props)
@@ -233,7 +260,6 @@ private struct TaskItemComparison: View {
 private struct NativeTaskItemDemo: View {
     let sample: TaskItemComparison.Sample
     @State private var blocked = false
-    @State private var mode: String?
     @State private var opened = 0
     @State private var lastAction = "none"
 
@@ -244,11 +270,6 @@ private struct NativeTaskItemDemo: View {
             task.statusMessage = sample.blockedStatusMessage
             task.statusIsBlocked = true
         }
-        if var pullRequests = task.pullRequests {
-            pullRequests.modes = TaskItemModel.modeOptions(taskID: task.id).filter { option in pullRequests.modes.contains { $0.value == option.value } }
-            pullRequests.mode = mode ?? pullRequests.mode
-            task.pullRequests = pullRequests
-        }
         return task
     }
 
@@ -257,11 +278,7 @@ private struct NativeTaskItemDemo: View {
             TaskItemView(model: model, actions: TaskItemActions(
                 open: { opened += 1 },
                 menu: { lastAction = "menu \($0)" },
-                showTokenStats: { lastAction = "token stats" },
-                createPullRequests: { lastAction = "create pull requests" },
-                setPullRequestMode: { mode = $0; lastAction = "mode \($0)" },
-                moveToDone: { lastAction = "move to done" },
-                resolveConflicts: { lastAction = "resolve conflicts" }
+                showTokenStats: { lastAction = "token stats" }
             ))
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
                 AtomButton(props: ButtonProps(style: "borderless"), common: AtomCommon(testID: "native-toggle-blocked"), action: { blocked.toggle() }) {
@@ -285,7 +302,7 @@ private struct AgentsInfoComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("AgentsInfo"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("AgentsInfo", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 240) {
                         PluginSurface(source: page.source, name: "AgentsInfo.js", props: page.props)
@@ -335,11 +352,17 @@ private struct NativeAgentsInfoDemo: View {
         // As wide as the board sidebar's content.
         AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
             AtomStack(props: StackProps(axis: "v"), common: AtomCommon(width: 160)) {
-                AgentsInfoSection(model: model, collapsed: collapsed, actions: AgentsInfoActions(
-                    toggle: { lastAction = collapsed ? "expand" : "collapse"; collapsed.toggle() },
-                    login: { signedOut = false; lastAction = "login \($0)" },
-                    switchAccount: { lastAction = "switch \($0)" }
-                ))
+                // Like a Main sidebar bottom section: its host's header, the content 6 points below.
+                AtomDisclosure(
+                    props: DisclosureProps(title: model.title, collapsed: collapsed, spacing: 6, toggleTestID: "\(model.id)-toggle"),
+                    common: AtomCommon(testID: model.id),
+                    onToggle: { lastAction = collapsed ? "expand" : "collapse"; collapsed.toggle() }
+                ) {
+                    AgentsInfoSection(model: model, actions: AgentsInfoActions(
+                        login: { signedOut = false; lastAction = "login \($0)" },
+                        switchAccount: { lastAction = "switch \($0)" }
+                    ))
+                }
             }
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
                 AtomButton(props: ButtonProps(style: "borderless"), common: AtomCommon(testID: "native-toggle-signed-out"), action: { signedOut.toggle() }) {
@@ -362,7 +385,7 @@ private struct KanbanColumnComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("KanbanColumn"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("KanbanColumn", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 264) {
                         PluginSurface(source: page.source, name: "KanbanColumn.js", props: page.props)
@@ -427,7 +450,7 @@ private struct TokenStatsComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("TokenStats"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("TokenStats", { try Self.sample(page.props) }) {
                 comparisonColumn("JavaScript (React → atoms)", width: 740) {
                     PluginSurface(source: page.source, name: "TokenStats.js", props: page.props)
                 }
@@ -478,7 +501,7 @@ private struct NativeTokenStatsDemo: View {
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
             if open {
-                AtomPanel(props: PanelProps(fillOpacity: 0.03, cornerRadius: 10), common: AtomCommon(testID: "native-token-stats-modal")) {
+                AtomPanel(props: PanelProps(fillOpacity: 0.03, cornerRadius: 10), common: AtomCommon(testID: "native-token-stats-modal", padding: 0)) {
                     TokenStatsView(model: model, section: section, actions: TokenStatsActions(
                         selectSection: { section = $0; lastAction = "section \($0)" },
                         showRawInput: { target in
@@ -492,8 +515,8 @@ private struct NativeTokenStatsDemo: View {
     }
 }
 
-/// The JavaScript Skills page above the native one (each as wide as a window,
-/// 1040 points, and 520 tall, so the page scrolls across), from the same
+/// The JavaScript Skills page above the native one (each as wide as the
+/// modal, 336 points, and 520 tall), from the same
 /// sample model, each opened by the composer's Skills button. Each side keeps its own page state; the native page uses a
 /// "native-" prefix so the two never share accessibility identifiers.
 private struct SkillsPageComparison: View {
@@ -503,20 +526,21 @@ private struct SkillsPageComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("SkillsPage"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("SkillsPage", { try Self.sample(page.props) }) {
                 ScrollView(.horizontal) {
                     VStack(alignment: .leading, spacing: 18) {
-                        comparisonColumn("JavaScript (React → atoms)", width: 1060) {
+                        comparisonColumn("JavaScript (React → atoms)", width: 740) {
                             PluginSurface(source: page.source, name: "SkillsPage.js", props: page.props)
                         }
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("plugin-catalog-js-skills-page")
-                        comparisonColumn("Native SwiftUI (atoms)", width: 1060) {
+                        comparisonColumn("Native SwiftUI (atoms)", width: 740) {
                             NativeSkillsPageDemo(sample: sample)
                         }
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("plugin-catalog-native-skills-page")
                     }
+                    .hoverRevealScrollers()
                 }
                 .accessibilityIdentifier("plugin-catalog-skills-page-scroll")
             }
@@ -539,10 +563,12 @@ private struct NativeSkillsPageDemo: View {
     let sample: SkillsPageComparison.Sample
     @State private var open = true
     @State private var kind: String?
-    @State private var tab: String?
+    @State private var scrollTo: String?
+    @State private var scrollRequest = 0
     @State private var search: String?
     @State private var selection: [String]?
     @State private var switched: [String: Bool] = [:]
+    @State private var collapsed: [String: Bool] = [:]
     @State private var lastAction = "none"
 
     /// The demo's state applied to the sample, as SkillsPageView applies it to the catalog.
@@ -550,17 +576,19 @@ private struct NativeSkillsPageDemo: View {
         var model = sample.skillsPage
         model.prefix = "native-"
         model.kind = kind ?? model.kind
-        model.tab = tab ?? model.tab
+        model.scrollTo = scrollTo ?? model.scrollTo
+        model.scrollRequest = scrollRequest
         model.search = search ?? model.search
         model.selection = selection
-        let chosen = model.tabs.flatMap(\.sections).flatMap(\.rows).filter { selection?.contains($0.id) == true }
+        let chosen = model.groups.flatMap(\.sections).flatMap(\.rows).filter { selection?.contains($0.id) == true }
         model.selectionCount = SkillsPageModel.selectionCount(chosen.count)
         model.canFixSelection = chosen.contains(where: \.fixable)
-        for tab in model.tabs.indices {
-            for section in model.tabs[tab].sections.indices {
-                for row in model.tabs[tab].sections[section].rows.indices {
-                    let id = model.tabs[tab].sections[section].rows[row].id
-                    if let enabled = switched[id] { model.tabs[tab].sections[section].rows[row].enabled = enabled }
+        for group in model.groups.indices {
+            if let isCollapsed = collapsed[model.groups[group].value] { model.groups[group].collapsed = isCollapsed }
+            for section in model.groups[group].sections.indices {
+                for row in model.groups[group].sections[section].rows.indices {
+                    let id = model.groups[group].sections[section].rows[row].id
+                    if let enabled = switched[id] { model.groups[group].sections[section].rows[row].enabled = enabled }
                 }
             }
         }
@@ -568,14 +596,14 @@ private struct NativeSkillsPageDemo: View {
     }
 
     private func shownRow(_ id: String) -> SkillsPageModel.Row? {
-        model.tabs.flatMap(\.sections).flatMap(\.rows).first { $0.id == id }
+        model.groups.flatMap(\.sections).flatMap(\.rows).first { $0.id == id }
     }
 
     private var actions: SkillsPageActions {
         SkillsPageActions(
             back: { open = false; lastAction = "back" },
             selectKind: { kind = $0; lastAction = "kind \($0)" },
-            selectTab: { tab = $0; lastAction = "tab \($0)" },
+            jump: { collapsed[$0] = false; scrollTo = $0; scrollRequest += 1; lastAction = "jump \($0)" },
             search: { search = $0; lastAction = "search \($0)" },
             newSkill: { lastAction = "new skill" },
             fixSelected: { lastAction = "fix \(selection?.count ?? 0) selected" },
@@ -599,13 +627,20 @@ private struct NativeSkillsPageDemo: View {
                 lastAction = "select \(row.name)"
             },
             fix: { id in lastAction = "fix \(shownRow(id)?.name ?? id)" },
-            toggle: { id in
-                guard let row = shownRow(id) else { return }
-                switched[id] = !row.enabled
-                lastAction = "toggle \(row.name) \(row.enabled ? "off" : "on")"
+            toggleGroup: { value in
+                guard let group = model.groups.first(where: { $0.value == value }) else { return }
+                collapsed[value] = !group.collapsed
+                lastAction = "\(group.collapsed ? "expand" : "collapse") \(value)"
             },
-            use: { id in lastAction = "use \(shownRow(id)?.name ?? id)" },
-            menu: { id, item in lastAction = "menu \(shownRow(id)?.name ?? id) \(item)" }
+            menu: { id, item in
+                guard let row = shownRow(id) else { return }
+                if item == "toggle" {
+                    switched[id] = !row.enabled
+                    lastAction = "toggle \(row.name) \(row.enabled ? "off" : "on")"
+                } else {
+                    lastAction = item == "use" ? "use \(row.name)" : "menu \(row.name) \(item)"
+                }
+            }
         )
     }
 
@@ -613,7 +648,7 @@ private struct NativeSkillsPageDemo: View {
         let model = model
         AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
-                AtomText(props: TextProps(text: "Composer button", size: 11, color: "secondary"))
+                AtomText(props: TextProps(text: "Skills button", size: 11, color: "secondary"))
                 SkillsButton(testID: "native-open-skills-button") {
                     open = true
                     lastAction = "open"
@@ -621,7 +656,7 @@ private struct NativeSkillsPageDemo: View {
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
             if open {
-                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 10), common: AtomCommon(testID: "native-skills-page", width: 1040, height: 520)) {
+                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14), common: AtomCommon(testID: "native-skills-page", width: TaskConversationView.skillsPageWidth, height: 520, padding: 0)) {
                     SkillsPageHeader(model: model, actions: actions)
                     AtomDivider()
                     if model.kind == "skills" {
@@ -647,7 +682,7 @@ private struct RepositoryChipsComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("RepositoryChips"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("RepositoryChips", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 360) {
                         PluginSurface(source: page.source, name: "RepositoryChips.js", props: page.props)
@@ -707,14 +742,14 @@ private struct NativeRepositoryChipsDemo: View {
     var body: some View {
         let chipsModel = chipsModel
         let pickerModel = pickerModel
-        let chipNames = chipsModel.chips.map { (path: $0.path, name: $0.name) }
+        let chipNames = chipsModel.chips.map { (path: $0.id, name: $0.name) }
         let repositoryNames = pickerModel.repositories.map { (path: $0.path, name: $0.name) }
         AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
             AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             RepositoryChipsView(model: chipsModel, actions: RepositoryChipsActions(
                 edit: { lastAction = "edit \(name($0, in: chipNames))" },
                 remove: { path in
-                    chips = chipsModel.chips.filter { $0.path != path }
+                    chips = chipsModel.chips.filter { $0.id != path }
                     lastAction = "remove \(name(path, in: chipNames))"
                 },
                 add: {
@@ -725,7 +760,7 @@ private struct NativeRepositoryChipsDemo: View {
             if open {
                 AtomPanel(
                     props: PanelProps(fill: "window", fillOpacity: 1, cornerRadius: 10, stroke: "primary", strokeOpacity: 0.12),
-                    common: AtomCommon(testID: "native-repository-picker-panel")
+                    common: AtomCommon(testID: "native-repository-picker-panel", padding: 0)
                 ) {
                     RepositoryPickerView(model: pickerModel, actions: RepositoryPickerActions(
                         chooseParent: { lastAction = "choose folder" },
@@ -747,6 +782,10 @@ private struct NativeRepositoryChipsDemo: View {
                         select: { path in
                             open = false
                             lastAction = "select \(name(path, in: repositoryNames))"
+                        },
+                        replace: { path in
+                            open = false
+                            lastAction = "replace \(name(path, in: repositoryNames))"
                         }
                     ))
                 }
@@ -765,7 +804,7 @@ private struct ComposerComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("Composer"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("Composer", { try Self.sample(page.props) }) {
                 comparisonColumn("JavaScript (React → atoms)", width: 784) {
                     PluginSurface(source: page.source, name: "Composer.js", props: page.props)
                 }
@@ -814,11 +853,8 @@ private struct NativeComposerDemo: View {
         model.prefix = "native-"
         model.draft = draft
         if goal { model.placeholder = "Set a goal to keep pursuing" }
-        model.modeMenu.text = goal ? "Goal" : plan ? "Plan" : nil
-        model.modeMenu.badgeIcon = goal ? "scope" : nil
-        model.modeMenu.active = goal || plan
-        model.modeMenu.label = goal ? "Goal" : "Conversation mode: \(plan ? "Plan mode" : "Code mode")"
-        model.modeMenu.items = model.modeMenu.items.map { var item = $0; item.checked = item.id == "mode:\(mode)"; return item }
+        model.plan.on = plan
+        model.goal?.on = goal
         if !plan { model.startImplementing = nil }
         model.provider.title = title
         model.provider.value = provider
@@ -842,10 +878,15 @@ private struct NativeComposerDemo: View {
             steer: { lastAction = "steer" },
             focusChange: { _ in },
             openSkills: { lastAction = "skills" },
-            modeMenu: { id in
-                mode = id == "goal" ? "goal" : String(id.dropFirst("mode:".count))
-                if id == "goal" { draft = "" }
-                lastAction = "mode \(id)"
+            attach: { lastAction = "attach" },
+            togglePlan: {
+                mode = mode == "plan" ? "default" : "plan"
+                lastAction = mode == "plan" ? "plan on" : "plan off"
+            },
+            toggleGoal: {
+                mode = mode == "goal" ? "default" : "goal"
+                if mode == "goal" { draft = "" }
+                lastAction = mode == "goal" ? "goal on" : "goal off"
             },
             startImplementing: { mode = "default"; lastAction = "start implementing" },
             showRepositoryPicker: { lastAction = "repository picker" },
@@ -868,6 +909,100 @@ private struct NativeComposerDemo: View {
                 ComposerView(model: model, actions: actions, header: { EmptyView() }, scheduleContent: {
                     AtomText(props: TextProps(text: "The schedule hint stays native.", size: 12), common: AtomCommon(testID: "native-schedule-hint", padding: 12))
                 })
+            }
+        }
+    }
+}
+
+/// The JavaScript Done archive above the native one, from the same sample
+/// model, each opened by the board header's archive button into a SidePanel
+/// atom over a 560 by 460 point stand-in for the board. Each side keeps its own
+/// open state and search; the native side uses a "native-" prefix so the two
+/// never share accessibility identifiers.
+private struct DoneArchiveComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Done Archive")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("DoneArchive"),
+               let sample = catalogValue("DoneArchive", { try Self.sample(page.props) }) {
+                comparisonColumn("JavaScript (React → atoms)", width: 580) {
+                    PluginSurface(source: page.source, name: "DoneArchive.js", props: page.props)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-js-done-archive")
+                comparisonColumn("Native SwiftUI (atoms)", width: 580) {
+                    NativeDoneArchiveDemo(sample: sample)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-native-done-archive")
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var doneArchive: DoneArchiveModel
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native Done archive with the same demo state as DoneArchive.js, built from the same atoms.
+private struct NativeDoneArchiveDemo: View {
+    let sample: DoneArchiveComparison.Sample
+    @State private var open = true
+    @State private var search = ""
+    @State private var reachedEnd = false
+    @State private var lastAction = "none"
+
+    /// The demo's search applied to the sample, as the board narrows its own.
+    private var model: DoneArchiveModel {
+        var model = sample.doneArchive
+        let query = search.trimmingCharacters(in: .whitespaces).lowercased()
+        model.prefix = "native-"
+        model.search = search
+        model.rows = query.isEmpty ? model.rows : model.rows.filter { $0.title.lowercased().contains(query) }
+        model.emptyMessage = model.rows.isEmpty ? "No matching tasks" : nil
+        return model
+    }
+
+    private func title(_ id: String) -> String {
+        sample.doneArchive.rows.first { $0.id == id }?.title ?? id
+    }
+
+    var body: some View {
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomText(props: TextProps(text: "Board header button", size: 11, color: "secondary"))
+                DoneArchiveButton(testID: "native-done-archive-button") {
+                    lastAction = open ? "toggle closed" : "toggle open"
+                    open.toggle()
+                }
+                AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+                AtomText(props: TextProps(text: reachedEnd ? "End reached" : "End not reached", size: 11, color: "secondary"), common: AtomCommon(testID: "native-end-reached"))
+            }
+            AtomStack(
+                props: StackProps(axis: "v", spacing: 0, group: true, fill: "window", cornerRadius: 10),
+                common: AtomCommon(testID: "native-done-archive-board", width: 560, height: 460)
+            ) {
+                AtomText(props: TextProps(text: "The board", size: 12, color: "tertiary"))
+            }
+            .atomSidePanel(
+                SidePanelProps(isPresented: open, width: 340),
+                common: AtomCommon(testID: "native-done-archive-panel")
+            ) {
+                DoneArchivePanel(model: model, actions: DoneArchiveActions(
+                    close: { open = false; lastAction = "close" },
+                    search: { search = $0; lastAction = "search \($0)" },
+                    open: { open = false; lastAction = "open \(title($0))" },
+                    createPullRequests: { lastAction = "create pr \(title($0))" },
+                    loadMore: { reachedEnd = true }
+                ))
             }
         }
     }

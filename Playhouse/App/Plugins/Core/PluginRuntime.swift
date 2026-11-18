@@ -23,6 +23,16 @@ final class PluginRuntime {
         var message: String
     }
 
+    /// A call the plugin made to its host: `Playhouse.bridge(command, arguments)`
+    /// (`kind` "bridge") or `Playhouse.ui.<name>(…)` (`kind` "ui"). The plugin
+    /// waits on a promise until the host answers it with `answerHostCall`.
+    struct HostCall: Equatable {
+        var id: Int
+        var kind: String
+        var name: String
+        var arguments: PluginValue
+    }
+
     /// The vendored modules, in the order they are defined.
     static let vendorModules = ["react", "scheduler", "react-reconciler"]
 
@@ -36,12 +46,18 @@ final class PluginRuntime {
     /// Script errors, uncaught exceptions and invalid commits, oldest first.
     private(set) var errors: [String] = []
     @ObservationIgnored private(set) var log: [LogEntry] = []
+    /// Host calls not answered yet, oldest first.
+    @ObservationIgnored private(set) var pendingHostCalls: [HostCall] = []
+    /// Called for each host call as the plugin makes it; it stays pending until answered.
+    @ObservationIgnored var onHostCall: ((HostCall) -> Void)?
 
     @ObservationIgnored private let context: JSContext
     @ObservationIgnored private let timerMode: Timers
     @ObservationIgnored private var pendingTimers: [Int: DispatchWorkItem] = [:]
     @ObservationIgnored private var manualTimers: [(id: Int, due: Double)] = []
     @ObservationIgnored private var manualClock: Double = 0
+    @ObservationIgnored private var commandResults: [Int: Result<PluginValue, PluginHostError>] = [:]
+    @ObservationIgnored private var nextCommandToken = 0
 
     /// Loads the runtime from `resources` and runs `source`. `props` is the
     /// plugin's input, readable as `Playhouse.props`. A script that throws
@@ -87,6 +103,34 @@ final class PluginRuntime {
         return dispatcher?.call(withArguments: arguments)?.toBool() ?? false
     }
 
+    /// Delivers an app event to the plugin's `Playhouse.on` listeners, whose
+    /// updates commit as one batch. Returns how many listeners heard it.
+    @discardableResult
+    func emit(_ event: PluginEvent) -> Int {
+        let emitter = context.objectForKeyedSubscript("__playhouseEmit")
+        return Int(emitter?.call(withArguments: [event.name, PluginValue.object(event.payload).javaScriptValue(in: context)])?.toInt32() ?? 0)
+    }
+
+    /// Replaces `Playhouse.props` and tells `Playhouse.useProps` subscribers,
+    /// whose updates commit as one batch.
+    func updateProps(_ props: [String: PluginValue]) {
+        context.objectForKeyedSubscript("__playhouseSetProps")?.call(withArguments: [PluginValue.object(props).javaScriptValue(in: context)])
+    }
+
+    /// Resolves (or rejects) the promise of host call `id`.
+    func answerHostCall(_ id: Int, result: Result<PluginValue, PluginHostError>) {
+        guard pendingHostCalls.contains(where: { $0.id == id }) else { return }
+        pendingHostCalls.removeAll { $0.id == id }
+        let answer = context.objectForKeyedSubscript("__playhouseAnswerHostCall")
+        switch result {
+        case .success(let value):
+            answer?.call(withArguments: [id, true, value.javaScriptValue(in: context)])
+        case .failure(let error):
+            let failure = PluginValue.object(["code": .string(error.code), "message": .string(error.message)])
+            answer?.call(withArguments: [id, false, failure.javaScriptValue(in: context)])
+        }
+    }
+
     /// With `.manual` timers: advances the clock by `seconds` and fires every
     /// timer that came due, including ones those timers schedule.
     func runDueTimers(advancing seconds: Double = 0) {
@@ -99,6 +143,34 @@ final class PluginRuntime {
             fireTimer(next.id)
         }
         manualClock = target
+    }
+
+    /// With `.manual` timers: fires the earliest pending timer, advancing the
+    /// clock to it. Returns false when no timer is pending.
+    @discardableResult
+    func runNextTimer() -> Bool {
+        guard let next = manualTimers.min(by: { $0.due < $1.due }) else { return false }
+        runDueTimers(advancing: max(0, next.due - manualClock))
+        return true
+    }
+
+    /// The command names the script registered with `Playhouse.commands.register`.
+    func registeredCommands() -> [String] {
+        context.objectForKeyedSubscript("__playhouseCommandNames")?.call(withArguments: [])?.toArray()?.compactMap { $0 as? String } ?? []
+    }
+
+    /// Starts the `phase` handler of command `name` with `request`; its result
+    /// arrives in `commandResult(_:)` once the handler's promise settles.
+    func runCommand(_ name: String, phase: String, request: PluginValue) -> Int {
+        nextCommandToken += 1
+        let token = nextCommandToken
+        context.objectForKeyedSubscript("__playhouseRunCommand")?.call(withArguments: [token, name, phase, request.javaScriptValue(in: context)])
+        return token
+    }
+
+    /// What command run `token` settled with, or nil while it runs.
+    func commandResult(_ token: Int) -> Result<PluginValue, PluginHostError>? {
+        commandResults[token]
     }
 
     private func installNative() {
@@ -123,6 +195,25 @@ final class PluginRuntime {
             self?.pendingTimers.removeValue(forKey: id)?.cancel()
             self?.manualTimers.removeAll { $0.id == id }
         }
+        let hostCall: @convention(block) (Int, String, String, JSValue) -> Void = { [weak self] id, kind, name, arguments in
+            guard let self else { return }
+            let call = HostCall(id: id, kind: kind, name: name, arguments: (try? PluginValue(javaScript: arguments)) ?? .null)
+            pendingHostCalls.append(call)
+            onHostCall?(call)
+        }
+        let commandResult: @convention(block) (Int, Bool, JSValue) -> Void = { [weak self] token, ok, value in
+            let result = (try? PluginValue(javaScript: value)) ?? .null
+            if ok {
+                self?.commandResults[token] = .success(result)
+            } else {
+                let object = result.object ?? [:]
+                self?.commandResults[token] = .failure(PluginHostError(
+                    code: object["code"]?.string ?? "script_error", message: object["message"]?.string ?? "The command failed."
+                ))
+            }
+        }
+        native.setObject(commandResult, forKeyedSubscript: "commandResult" as NSString)
+        native.setObject(hostCall, forKeyedSubscript: "hostCall" as NSString)
         native.setObject(commit, forKeyedSubscript: "commit" as NSString)
         native.setObject(log, forKeyedSubscript: "log" as NSString)
         native.setObject(setTimer, forKeyedSubscript: "setTimer" as NSString)
@@ -160,4 +251,11 @@ final class PluginRuntime {
         }
         return message
     }
+}
+
+/// Why the host turned down a plugin's call; the plugin's promise rejects
+/// with an Error carrying this `code` and `message`.
+struct PluginHostError: Error, Equatable, Sendable {
+    var code: String
+    var message: String
 }

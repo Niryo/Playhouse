@@ -1,8 +1,104 @@
-# Playhouse
+<p align="center">
+  <img src="docs/images/icon.png" width="128" alt="Playhouse app icon">
+</p>
 
-Playhouse is a native macOS task board for coordinating work across agents. The MVP provides a Kanban board, task creation, drag-and-drop status changes, and local persistence.
+<h1 align="center">Playhouse</h1>
 
-## Install a release
+<p align="center">
+  <b>A native macOS Kanban board for running coding agents.</b><br>
+  Hand tasks to Claude Code or Codex, let them work in parallel in isolated Git worktrees,<br>
+  and review the results like pull requests from a teammate.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-14%2B-black?logo=apple" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-SwiftUI-F05138?logo=swift&logoColor=white" alt="SwiftUI">
+  <img src="https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-8A63D2" alt="Claude Code and Codex">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue" alt="License: GPLv3"></a>
+</p>
+
+<p align="center">
+  <img src="docs/images/board.png" alt="The Playhouse board with tasks in Blocked, Waiting Response, In Progress and Review">
+</p>
+
+## Features
+
+### A board that tracks your agents
+
+Every task is a conversation with an agent, and its card moves across **Backlog → In Progress → Waiting Response → Blocked → Review → Done** on its own. Cards show what the agent is doing right now, why it's blocked, and the pull request it opened. Questions get answered, blockers get cleared, and finished work waits for you in Review.
+
+### Isolated worktrees and pull requests
+
+Each repository attached to a task gets its own managed Git worktree and branch, so many agents can work on the same codebase at once without stepping on each other. Before a task reaches Review, Playhouse commits, syncs and pushes its changes. A per-task mode decides what happens next:
+
+| Mode | What it does |
+| --- | --- |
+| **Manual** | You open the pull request yourself |
+| **PR** | Opens the pull request when the task reaches Review |
+| **Green** | Opens the PR, then fixes failing checks and review comments until it's green |
+| **Merge** | Like Green, then merges the PR once it's green |
+
+<p align="center">
+  <img src="docs/images/conversation.png" alt="A task conversation: the agent explains the root cause of a flaky Safari test and how it verified the fix">
+</p>
+
+### Review every change
+
+The Changes panel lists every file the agent touched. Click one to open a side-by-side diff powered by Monaco, with syntax highlighting. A built-in terminal opens right in the task's worktree.
+
+<p align="center">
+  <img src="docs/images/diff.png" alt="Side-by-side diff of the agent's fix to DatePicker.tsx">
+</p>
+
+### Side chats
+
+Select any part of a reply and ask a quick question about it in a side chat. The answer stays next to the selection and never derails the main conversation or the agent's context.
+
+<p align="center">
+  <img src="docs/images/side-chat.png" width="544" alt="A side chat asking why only Safari fires the change event early">
+</p>
+
+### Switch providers seamlessly
+
+Choose Claude Code or Codex per task, and switch in the middle of a conversation. The transcript carries over, so the other agent continues exactly where the first one stopped. Models, reasoning effort, plan mode, skills, rules and MCP servers work across both.
+
+<p align="center">
+  <img src="docs/images/providers.png" alt="The provider menu in the composer, switching between Claude and Codex">
+</p>
+
+### Agents that ask before they guess
+
+When an agent needs a decision, the task moves to **Waiting Response** and tells you exactly what it needs. Blocked tasks show the reason right on the card.
+
+<p align="center">
+  <img src="docs/images/waiting.png" alt="An agent asking whether to confirm Stripe payments on the client or the server">
+</p>
+
+### Plugins
+
+Extend Playhouse with JavaScript plugins built from the same native atoms as the app itself. Add a sidebar section, a composer action, a control on every task card, or a tool in the task sidebar. Plugins get live app state (running agents, tasks, usage) and render as real SwiftUI. Several built-in features, like the pull request modes, are plugins themselves. See the [plugin guide](Playhouse/App/Plugins/README.md).
+
+<p align="center">
+  <img src="docs/images/plugin.png" width="216" alt="A Release Train plugin in the sidebar showing release progress and running agents">
+</p>
+
+### And more
+
+- **Schedules**: run a task once at a set time, or hourly, daily, on weekdays or weekly.
+- **Standalone chat**: a board-level conversation for questions that aren't tasks yet.
+- **Skills, rules and MCP servers**: browse, edit and toggle them for both providers in one place.
+- **Usage at a glance**: per-account rate limits and token stats for Claude and Codex.
+- **Scriptable**: every action in the app is also available from the bundled `playhouse-cli`.
+
+## Getting started
+
+**Requirements**
+
+- macOS 14 or later, and Xcode 26.5 or later to build
+- The [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI and/or the [Codex](https://github.com/openai/codex) CLI, signed in
+- The [GitHub CLI](https://cli.github.com) (`gh`) for pull request features
+
+**Install a release**
 
 Releases are Apple Silicon builds published to GitHub. Install the latest into `/Applications` with:
 
@@ -12,81 +108,41 @@ curl -fsSL https://raw.githubusercontent.com/Niryo/Playhouse/master/scripts/inst
 
 Installed releases check for updates once a day and show an Update button in the window's title bar. Releases are signed with a self-signed certificate and are not notarized. If you download the zip in a browser instead, allow it once in System Settings → Privacy & Security → Open Anyway. Maintainers publish releases with `scripts/release.sh`; see [docs/release-system.md](docs/release-system.md).
 
-## Run the app
-
-Open `Playhouse.xcodeproj` in Xcode and run the `Playhouse` scheme. The app targets macOS 14 and later.
-
-To build and launch it from the terminal, run:
+**Build and run**
 
 ```sh
+git clone https://github.com/Niryo/Playhouse.git
+cd Playhouse
 ./scripts/run.sh
 ```
 
-The script resolves the repository location and stores its build products under the system temporary directory.
+Or open `Playhouse.xcodeproj` in Xcode and run the `Playhouse` scheme. Tasks are stored locally with SwiftData.
 
-Tasks are stored locally with SwiftData and remain available after the app closes.
+## Command line
 
-## CLI bridge
-
-Playhouse bundles a `playhouse-cli` command-line tool beside the GUI executable and an on-demand XPC service inside the app. The CLI uses the same task, workspace, settings, and conversation managers as the GUI and returns versioned JSON. Conversation sends print JSON event lines while Codex streams, followed by the final response.
-
-Run a command from the repository:
+Playhouse bundles `playhouse-cli`, which talks to a background daemon over a Unix socket and uses the same managers as the app. Everything you can do in the window, you can script:
 
 ```sh
-./scripts/playhouse.sh status
+./scripts/playhouse.sh task create --title "Add rate limiting to the public API" \
+  --prompt "600 requests a minute per API key, with RateLimit headers" --repo ~/Developer/storefront-api
+./scripts/playhouse.sh conversation send <task-id> --message "Use Redis for the counters"
 ./scripts/playhouse.sh board list
-./scripts/playhouse.sh task list
 ```
 
-The repository wrapper builds the app bundle if needed and routes each command through the bundled CLI. See [docs/bridge.md](docs/bridge.md) for the command list and JSON behavior.
+See [docs/bridge.md](docs/bridge.md) for every command and its JSON output.
 
-## End-to-end verification
+## Development
 
-The default CLI suite is headless. It builds the real app, creates committed Git fixtures under `/tmp`, and invokes the bundled CLI through fresh XPC connections against isolated on-disk SwiftData and preferences. It covers task CRUD, validation, status changes, multi-root persistence, settings, repository suggestions, and conversation history. The shared contract defines the exact required case set; there is no independent fixed test-count threshold.
-
-Run just the CLI/XPC suite with:
+Playhouse has two paired end-to-end suites that run against the real app, daemon and persistence, with scripted Claude and Codex fixtures, so no sign-in is needed:
 
 ```sh
-./scripts/test-e2e.sh
+./scripts/test-e2e.sh                     # headless CLI suite
+./scripts/setup-ui-tart-vm.sh             # one-time: create the Tart macOS VM for UI tests
+./scripts/test-ui-tart.sh --case <case>   # visible UI case, run in the VM
 ```
 
-The visible UI suite launches Playhouse and exercises the same named cases through the real interface. UI tests always run inside the Tart macOS VM; direct `test-ui.sh` invocations on the host hand off to the VM runner:
+Read [AGENTS.md](AGENTS.md) for the testing, verification and contribution rules. It applies to humans and agents alike.
 
-```sh
-./scripts/test-ui.sh
-```
+## License
 
-For a focused UI safety pass, select the paired case IDs:
-
-```bash
-./scripts/test-ui.sh --case test_task_creation_persists_ordered_roots_across_fresh_connections
-```
-
-To run a UI case in a Tart macOS VM while continuing to work in the host checkout, create a VM with Xcode 26.5 (matching the project's current Xcode), then run:
-
-```sh
-./scripts/setup-ui-tart-vm.sh
-./scripts/test-ui-tart.sh --case test_task_creation_persists_ordered_roots_across_fresh_connections
-```
-
-The setup script clones the Cirrus Labs Xcode 26.5 image, drops the pulled image from Tart's cache, slims the VM by removing guest components the macOS UI suite does not use (simulator runtimes, Flutter, the Android SDK, Kiro CLI, and caches; about 50 GB), and configures a 6 CPU, 12 GB VM. It requires at least 110 GiB free in Tart storage while cloning. Run `./scripts/setup-ui-tart-vm.sh --slim` to slim an existing VM; setup holds the same VM lock as the test runner, so it waits for any UI run using the VM. The runner starts the stopped VM with a shared artifact directory mounted, copies the source through it into a VM-local snapshot, and runs the existing UI suite there. Test data and build products stay in the guest during the run; logs and `.xcresult` bundles are copied to `/tmp/playhouse-ui-tart-artifacts/<run-id>/`, then the per-run guest snapshot is removed. The VM is kept running for the next run; pass `--stop-vm-after-run` to stop it when the run finishes. Use `--show-vm` to open the display and pause before testing so you can grant Xcode Helper Accessibility permission if needed; this option requires an interactive terminal. Set `PLAYHOUSE_UI_TART_VM` or pass `--vm` to select a different VM.
-
-For full end-to-end coverage, the combined script checks that the CLI and UI tests have exactly matching case names and shared expectation text, runs CLI/XPC first, then launches the UI suite:
-
-```sh
-./scripts/test-full-e2e.sh
-```
-
-The fast verifier runs all CLI/XPC cases and checks that the UI suite has the exact same case IDs and expectations. After the CLI gate passes, the UI coverage reviewer inspects only the paired cases affected by the change and does not execute tests. Any UI execution, including full E2E runs, happens in the Tart VM. Keep `./scripts/test-full-e2e.sh` for deliberate full E2E runs across every CLI and UI case. Add the same named case and shared expectation to both suites for each new behavior; `scripts/check-test-parity.py` rejects unmatched, duplicate, or mismatched cases. The VM needs XCTest UI automation available. It does not require Codex sign-in.
-
-Real provider turns use a separate opt-in suite. It runs against Claude Code by default; pass `--provider codex` for Codex or `--provider all` to also check a Claude → Codex → Claude handoff. Claude needs a working host `claude` login; Codex needs `codex login` and Luna access. Its live UI cases also run in Tart, where the VM needs the provider CLI installed and its own guest login. Use `--show-vm` on the direct Tart command when you need to sign in interactively:
-
-```sh
-PLAYHOUSE_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh                    # Claude
-PLAYHOUSE_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --provider codex
-PLAYHOUSE_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --skip-ui --provider all
-```
-
-`scripts/test-codex-integration.sh` remains as a wrapper for `--provider codex`. For a focused live UI case after guest sign-in, run `scripts/test-ui-tart.sh --live-provider claude --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls`.
-
-See `AGENTS.md` for the development testing, Git, and task-verification rules.
+Playhouse is free software, released under the [GNU General Public License v3.0](LICENSE).

@@ -5,26 +5,46 @@ import Foundation
 /// the atom that raises them, and reports every commit and the final tree.
 /// The app's catalog pages run the same way with `page`.
 struct PluginRenderCommand: Sendable {
-    struct Event: Sendable {
-        var testID: String
-        var name: String
-        var value: String?
+    /// One step after the first render, run in order.
+    enum Event: Sendable {
+        /// `<testID>:<event>[:<value>]`: an atom's handler, as a click or an edit raises it.
+        case atom(testID: String, name: String, value: String?)
+        /// `@<name>[:<json payload>]`: an app event to the plugin's `Playhouse.on` listeners.
+        case app(PluginEvent)
+        /// `+<seconds>`: advances the clock, firing the timers that come due.
+        case advance(Double)
 
-        /// `<testID>:<event>[:<value>]`.
         init(parsing text: String) throws {
+            if text.hasPrefix("@") {
+                self = .app(try PluginEvent(parsing: String(text.dropFirst())))
+                return
+            }
+            if text.hasPrefix("+") {
+                guard let seconds = Double(text.dropFirst()), seconds >= 0 else {
+                    throw PluginTreeError(message: "A clock step is +<seconds>, not \"\(text)\".")
+                }
+                self = .advance(seconds)
+                return
+            }
             let parts = text.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
             guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else {
-                throw PluginTreeError(message: "An event is <testID>:<event>[:<value>], not \"\(text)\".")
+                throw PluginTreeError(message: "An event is <testID>:<event>[:<value>], @<app event>[:<json>] or +<seconds>, not \"\(text)\".")
             }
-            testID = parts[0]
-            name = parts[1]
-            value = parts.count == 3 ? parts[2] : nil
+            self = .atom(testID: parts[0], name: parts[1], value: parts.count == 3 ? parts[2] : nil)
         }
     }
 
     var file: String?
     var page: String?
+    /// Props under `propsJSON`, such as an installed plugin's placement context.
+    var baseProps: [String: PluginValue] = [:]
     var propsJSON: String?
+    /// Answers the plugin's `Playhouse.bridge` calls; without one they are
+    /// rejected. `Playhouse.ui` calls are recorded and resolved with null;
+    /// `fetch` calls reach the network as they do in the window.
+    var bridge: (@Sendable (String, PluginValue) async throws -> PluginValue)?
+    /// An installed plugin's placement, which decides what its host refuses.
+    var placement: PluginPlacement?
     var events: [Event] = []
     var advance: Double = 0
     var resources = PluginRuntime.bundledResources
@@ -63,12 +83,14 @@ struct PluginRenderCommand: Sendable {
         return (source, props)
     }
 
-    func run() throws -> PluginValue {
+    func run() async throws -> PluginValue {
         let source: String
-        var props: [String: PluginValue] = [:]
+        var props = baseProps
         let name: String
         if let page {
-            (source, props) = try Self.catalogPage(page, resources: resources)
+            let catalog = try Self.catalogPage(page, resources: resources)
+            source = catalog.source
+            props.merge(catalog.props) { _, new in new }
             name = "\(page).js"
         } else if let file {
             source = try String(contentsOf: URL(fileURLWithPath: file), encoding: .utf8)
@@ -94,24 +116,73 @@ struct PluginRenderCommand: Sendable {
                 "touchedNodes": .array(commit.touchedNodes.map { .number(Double($0)) })
             ]))
         }
-        // Effects run from a zero-delay scheduler timer; flush them so the tree is settled.
-        runtime.runDueTimers()
-        noteCommit("render", since: nil)
-        for event in events where runtime.errors.isEmpty {
-            guard let node = Self.find(testID: event.testID, in: runtime.tree.root) else {
-                throw PluginTreeError(message: "No atom has testID \"\(event.testID)\".")
-            }
-            guard node.events.contains(event.name) else {
-                throw PluginTreeError(message: "<\(node.type)> \(event.testID) has no \(event.name) handler.")
-            }
-            let before = runtime.tree.lastCommit?.number
-            runtime.dispatch(nodeID: node.id, event: event.name, value: event.value.map(PluginValue.string))
+        var hostCalls: [PluginValue] = []
+        // Answers every pending host call, then runs the timers its answers
+        // scheduled, until the plugin stops calling (bounded, for a loop).
+        func settle() async {
             runtime.runDueTimers()
-            noteCommit("\(event.testID):\(event.name)", since: before)
+            for _ in 0..<50 {
+                guard let call = runtime.pendingHostCalls.first else { return }
+                var entry: [String: PluginValue] = ["kind": .string(call.kind), "name": .string(call.name), "arguments": call.arguments]
+                let result: Result<PluginValue, PluginHostError>
+                if let refusal = PluginHostRules.refusal(kind: call.kind, name: call.name, placement: placement, arguments: call.arguments) {
+                    result = .failure(refusal)
+                } else if call.kind == "bridge", let bridge {
+                    do {
+                        result = .success(try await bridge(call.name, call.arguments))
+                    } catch let error as PluginHostError {
+                        result = .failure(error)
+                    } catch {
+                        result = .failure(PluginHostError(code: "operation_failed", message: error.localizedDescription))
+                    }
+                } else if call.kind == "bridge" {
+                    result = .failure(PluginHostError(code: "unavailable", message: "Bridge calls are not available here."))
+                } else if call.kind == "net" {
+                    result = await PluginNetwork.fetch(call.arguments)
+                } else {
+                    result = .success(.null)
+                }
+                switch result {
+                case .success(let value): entry["ok"] = .bool(true); entry["result"] = value
+                case .failure(let error): entry["ok"] = .bool(false); entry["error"] = .object(["code": .string(error.code), "message": .string(error.message)])
+                }
+                hostCalls.append(.object(entry))
+                runtime.answerHostCall(call.id, result: result)
+                runtime.runDueTimers()
+            }
+        }
+        // Effects run from a zero-delay scheduler timer; flush them so the tree is settled.
+        await settle()
+        noteCommit("render", since: nil)
+        var emitted: [PluginValue] = []
+        for event in events where runtime.errors.isEmpty {
+            let before = runtime.tree.lastCommit?.number
+            switch event {
+            case .atom(let testID, let name, let value):
+                guard let node = Self.find(testID: testID, in: runtime.tree.root) else {
+                    throw PluginTreeError(message: "No atom has testID \"\(testID)\".")
+                }
+                guard node.events.contains(name) else {
+                    throw PluginTreeError(message: "<\(node.type)> \(testID) has no \(name) handler.")
+                }
+                runtime.dispatch(nodeID: node.id, event: name, value: value.map(PluginValue.string))
+                await settle()
+                noteCommit("\(testID):\(name)", since: before)
+            case .app(let appEvent):
+                let listeners = runtime.emit(appEvent)
+                emitted.append(.object(["name": .string(appEvent.name), "listeners": .number(Double(listeners))]))
+                await settle()
+                noteCommit("@\(appEvent.name)", since: before)
+            case .advance(let seconds):
+                runtime.runDueTimers(advancing: seconds)
+                await settle()
+                noteCommit("+\(seconds)", since: before)
+            }
         }
         if advance > 0, runtime.errors.isEmpty {
             let before = runtime.tree.lastCommit?.number
             runtime.runDueTimers(advancing: advance)
+            await settle()
             noteCommit("advance", since: before)
         }
         return .object([
@@ -120,6 +191,8 @@ struct PluginRenderCommand: Sendable {
             "commits": .array(commits),
             "tree": runtime.tree.snapshot(),
             "errors": .array(runtime.errors.map(PluginValue.string)),
+            "hostCalls": .array(hostCalls),
+            "emitted": .array(emitted),
             "log": .array(runtime.log.map { .string("\($0.level): \($0.message)") })
         ])
     }

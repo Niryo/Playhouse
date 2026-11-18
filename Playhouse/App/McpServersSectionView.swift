@@ -6,13 +6,6 @@ import SwiftUI
 /// configuration, and the organization's managed ones. Like skills and rules,
 /// each server is passed to the provider that would not start it on its own.
 struct McpServersSectionView: View {
-    enum Tab: String, CaseIterable, Identifiable {
-        case repo = "Repo"
-        case global = "Global"
-        case managed = "Managed"
-        var id: String { rawValue }
-    }
-
     enum Panel {
         case editing(McpServerRecord, McpServerConfig)
         case creating
@@ -22,9 +15,14 @@ struct McpServersSectionView: View {
     let manager: RemoteConversationManager
     @Binding var isPresentingPanel: Bool
     let onFixTask: (UUID, String) -> Void
+    /// A server's editor, or its sign-in with one agent, to open once the list loads.
+    var focus: SkillsPageFocus? = nil
 
-    @State private var tab: Tab = .repo
+    /// The section the list last scrolled to, and how many times it has.
+    @State private var scrollTarget: String?
+    @State private var scrollRequest = 0
     @State private var catalog: McpCatalog?
+    @State private var search = ""
     @State private var status: McpStatusReport?
     @State private var isCheckingStatus = false
     @State private var recheckRequested = false
@@ -37,6 +35,7 @@ struct McpServersSectionView: View {
     /// A toggle shows its new state at once; the daemon's answer settles it.
     @State private var enabledOverrides: [String: Bool] = [:]
     @State private var isFixing = false
+    @State private var didOpenFocus = false
 
     private static let panelAnimation = Animation.spring(response: 0.34, dampingFraction: 0.9)
 
@@ -52,48 +51,59 @@ struct McpServersSectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                Picker("Server source", selection: $tab) {
-                    ForEach(Tab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+            HStack(spacing: 8) {
+                SkillsPageSearchField(text: search, placeholder: "Search servers", testID: "mcp-search") { search = $0 }
+                AtomButton(
+                    props: ButtonProps(style: "bordered", controlSize: "small"),
+                    common: AtomCommon(testID: "new-mcp-server-button", help: "Add an MCP server that both Claude and Codex can use"),
+                    action: { setPanel(.creating) }
+                ) {
+                    AtomLabel(props: LabelProps(text: "New Server", icon: "plus"))
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 260)
-                .accessibilityIdentifier("mcp-tab-picker")
+            }
+            .padding(.horizontal, 20)
+            HStack(spacing: 8) {
+                SkillsPageAnchorBar(testID: "mcp-tab-picker", anchorPrefix: "mcp-anchor", anchors: anchors, onJump: jump)
                 Spacer()
                 if isCheckingStatus {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Checking sign-in…").font(.callout).foregroundStyle(.secondary)
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.mini)
+                        Text("Checking sign-in…").font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("mcp-checking-status")
                 }
-                Button { setPanel(.creating) } label: { Label("New Server", systemImage: "plus") }
-                    .buttonHoverPointer()
-                    .nativeHelp("Add an MCP server that both Claude and Codex can use")
-                    .accessibilityIdentifier("new-mcp-server-button")
             }
             .padding(.horizontal, 20)
-            .padding(.top, 10)
+            .padding(.vertical, 12)
             if let errorMessage {
                 Text(errorMessage)
                     .font(.callout)
                     .foregroundStyle(.red)
                     .padding(.horizontal, 20)
-                    .padding(.top, 8)
+                    .padding(.bottom, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("mcp-error")
             }
-            Text("MCP servers give agents tools. Click one to open it. Turning a server on or off reaches both agents on their next turn.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .accessibilityIdentifier("mcp-provider-timing")
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) { content }
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        content
+                        Text("MCP servers give agents tools. Hover one for its details, or click it to open it. Turning a server on or off reaches both agents on their next turn.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 4)
+                            .accessibilityIdentifier("mcp-provider-timing")
+                    }
                     .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .hoverRevealScrollers()
+                }
+                .onChange(of: scrollRequest) {
+                    guard let scrollTarget else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(scrollTarget, anchor: .top) }
+                }
             }
             .accessibilityIdentifier("mcp-list")
         }
@@ -106,6 +116,7 @@ struct McpServersSectionView: View {
             // Opening the page asks both agents which servers need a sign-in, while the list loads.
             async let statuses: Void = checkStatus()
             await reload()
+            openFocus()
             await statuses
         }
         .alert(
@@ -175,7 +186,8 @@ struct McpServersSectionView: View {
             case .creating:
                 McpServerEditorPanel(server: nil, config: McpServerConfig(transport: .stdio), roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, config, scope, root in
                     let record = try await manager.createMcpServer(taskID: task.id, name: name, config: config, scope: scope, root: root)
-                    tab = record.scope == .global ? .global : .repo
+                    jump(record.scope == .global ? "global" : "repo")
+                    search = ""
                     await reload()
                 }
                 .padding(.horizontal, 20)
@@ -188,48 +200,83 @@ struct McpServersSectionView: View {
         }
     }
 
+    private func jump(_ section: String) {
+        scrollTarget = section
+        scrollRequest += 1
+    }
+
+    private var anchors: [SkillsPageAnchor] {
+        [
+            SkillsPageAnchor(value: "repo", label: "Repo", count: (catalog?.repositories ?? []).reduce(0) { $0 + filtered($1.servers).count }),
+            SkillsPageAnchor(value: "global", label: "Global", count: filtered(catalog?.global ?? []).count),
+            SkillsPageAnchor(value: "managed", label: "Managed", count: filtered(catalog?.managed ?? []).count),
+        ]
+    }
+
     @ViewBuilder
     private var content: some View {
         if let catalog {
+            let counts = Dictionary(uniqueKeysWithValues: anchors.map { ($0.value, $0) })
             ForEach(catalog.problems, id: \.path) { problem in
                 Label("\(problem.path): \(problem.message)", systemImage: "exclamationmark.triangle")
-                    .font(.callout)
+                    .font(.system(size: 12))
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("mcp-file-problem")
             }
-            switch tab {
-            case .repo:
-                Text("Servers in the task's repositories: .mcp.json, which Claude reads, and .codex/config.toml, which Codex reads. Playhouse passes each one to the agent that would not start it on its own.")
-                    .font(.callout).foregroundStyle(.secondary)
+            group(counts["repo"]!, intro: "Servers in the task's repositories: .mcp.json, which Claude reads, and .codex/config.toml, which Codex reads. Playhouse passes each one to the agent that would not start it on its own.") {
                 if catalog.repositories.isEmpty {
                     emptyState("This task has no repositories.", identifier: "mcp-empty-repo")
                 }
                 ForEach(catalog.repositories, id: \.rootPath) { section in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(section.name)
-                            .font(.headline)
-                            .padding(.top, 6)
-                            .accessibilityIdentifier("mcp-repo-section-\(section.name)")
-                        if section.servers.isEmpty {
-                            emptyState("No MCP servers in \(section.name).", identifier: "mcp-empty-\(section.name)")
-                        }
-                        ForEach(section.servers) { row($0) }
+                    let shown = filtered(section.servers)
+                    Text(section.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 4)
+                        .accessibilityIdentifier("mcp-repo-section-\(section.name)")
+                    if shown.isEmpty {
+                        emptyState(section.servers.isEmpty ? "No MCP servers in \(section.name)." : "No matching servers.", identifier: "mcp-empty-\(section.name)")
                     }
+                    rows(shown)
                 }
-            case .global:
-                Text("Your servers for every repository, from Claude Code's ~/.claude.json and Codex's config.toml. New global servers are written into both, so both CLIs start them.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if catalog.global.isEmpty { emptyState("No global MCP servers.", identifier: "mcp-empty-global") }
-                ForEach(catalog.global) { row($0) }
-            case .managed:
-                Text("Your organization's managed servers. Claude Code always starts them, and they can't be edited or turned off here.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if catalog.managed.isEmpty { emptyState("No managed MCP servers on this Mac.", identifier: "mcp-empty-managed") }
-                ForEach(catalog.managed) { row($0) }
+            }
+            let global = filtered(catalog.global)
+            group(counts["global"]!, intro: "Your servers for every repository, from Claude Code's ~/.claude.json and Codex's config.toml. New global servers are written into both, so both CLIs start them.") {
+                if global.isEmpty { emptyState(catalog.global.isEmpty ? "No global MCP servers." : "No matching servers.", identifier: "mcp-empty-global") }
+                rows(global)
+            }
+            let managed = filtered(catalog.managed)
+            group(counts["managed"]!, intro: "Your organization's managed servers. Claude Code always starts them, and they can't be edited or turned off here.") {
+                if managed.isEmpty { emptyState(catalog.managed.isEmpty ? "No managed MCP servers on this Mac." : "No matching servers.", identifier: "mcp-empty-managed") }
+                rows(managed)
                 connectors(catalog)
             }
         } else {
             ProgressView().frame(maxWidth: .infinity).accessibilityIdentifier("mcp-loading")
+        }
+    }
+
+    /// One of the list's sections, which its anchor scrolls to.
+    private func group<Content: View>(_ anchor: SkillsPageAnchor, intro: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SkillsPageGroupHeader(label: anchor.label, count: anchor.count, intro: intro, introTestID: "mcp-intro-\(anchor.value)")
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .id(anchor.value)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(anchor.label)
+        .accessibilityIdentifier("mcp-group-\(anchor.value)")
+    }
+
+    @ViewBuilder
+    private func rows(_ servers: [McpServerRecord]) -> some View {
+        if !servers.isEmpty {
+            SkillsPageCard {
+                ForEach(Array(servers.enumerated()), id: \.element.id) { index, server in
+                    if index > 0 { AtomDivider() }
+                    row(server)
+                }
+            }
         }
     }
 
@@ -238,32 +285,39 @@ struct McpServersSectionView: View {
     @ViewBuilder
     private func connectors(_ catalog: McpCatalog) -> some View {
         let known = Set(catalog.allServers.map(\.name))
-        let others = (status?.claude ?? []).filter { !known.contains($0.name) }
+        let query = searchQuery
+        let others = (status?.claude ?? []).filter { !known.contains($0.name) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
         Text("Also started by Claude Code")
-            .font(.headline)
-            .padding(.top, 10)
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
         if status == nil {
             Text("Checking which claude.ai connectors and plugin servers Claude Code starts on its own…")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
                 .accessibilityIdentifier("mcp-connectors-hint")
         } else if others.isEmpty {
             emptyState("Claude Code starts no other servers.", identifier: "mcp-connectors-empty")
         }
-        ForEach(others, id: \.name) { server in
-            HStack(spacing: 8) {
-                Text(server.name).font(.body.weight(.semibold))
-                if server.needsSignIn {
-                    connectorSignInButton(server)
-                } else {
-                    badge(server.status, systemImage: "circle.fill", color: .secondary)
+        if !others.isEmpty {
+            SkillsPageCard {
+                ForEach(Array(others.enumerated()), id: \.element.name) { index, server in
+                    if index > 0 { AtomDivider() }
+                    HStack(spacing: 8) {
+                        Text(server.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                        Spacer()
+                        if server.needsSignIn {
+                            connectorSignInButton(server)
+                        } else {
+                            badge(server.status, systemImage: "circle.fill", color: .secondary)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("mcp-connector-\(server.name)")
                 }
-                Spacer()
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 10))
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("mcp-connector-\(server.name)")
         }
     }
 
@@ -281,7 +335,7 @@ struct McpServersSectionView: View {
                 signIn(name: server.name, provider: .claude)
             }
         } label: {
-            signInLabel("Sign in for Claude", waiting: signingIn.contains(key))
+            signInLabel(.claude, waiting: signingIn.contains(key))
         }
         .buttonStyle(.plain)
         .disabled(signingIn.contains(key))
@@ -290,20 +344,41 @@ struct McpServersSectionView: View {
         .accessibilityIdentifier("mcp-connector-signin-\(server.name)")
     }
 
-    private func signInLabel(_ text: String, waiting: Bool) -> some View {
+    /// The provider's logo and a short "Sign in" so the badge fits the narrow
+    /// modal's row; its accessibility label still names the provider. A row
+    /// with a badge for each agent shows only the logos, so its name keeps room.
+    private func signInLabel(_ provider: ConversationProvider, waiting: Bool, compact: Bool = false) -> some View {
         HStack(spacing: 4) {
-            if waiting { ProgressView().controlSize(.mini) } else { Image(systemName: "person.badge.key") }
-            Text(waiting ? "Waiting for sign-in…" : text).lineLimit(1)
+            if waiting {
+                ProgressView().controlSize(.mini)
+            } else {
+                AtomIcon(props: IconProps(asset: SkillsPageModel.logoAsset(provider), size: 10, color: "orange"), common: AtomCommon(width: 10, height: 10))
+            }
+            if !compact {
+                Text(waiting ? "Waiting…" : "Sign in").lineLimit(1)
+            }
         }
         .font(.caption2.weight(.medium))
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .foregroundStyle(.orange)
         .background(Color.orange.opacity(0.12), in: Capsule())
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(waiting ? "Waiting for sign-in…" : "Sign in for \(provider.displayName)")
     }
 
     private func emptyState(_ text: String, identifier: String) -> some View {
-        Text(text).foregroundStyle(.secondary).padding(.vertical, 6).accessibilityIdentifier(identifier)
+        Text(text).font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 4).accessibilityIdentifier(identifier)
+    }
+
+    private var searchQuery: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The servers whose name or command line contains the search, like the Skills search.
+    private func filtered(_ servers: [McpServerRecord]) -> [McpServerRecord] {
+        let query = searchQuery
+        guard !query.isEmpty else { return servers }
+        return servers.filter { $0.name.localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(query) }
     }
 
     private func isEnabled(_ server: McpServerRecord) -> Bool { enabledOverrides[server.id] ?? server.enabled }
@@ -330,101 +405,125 @@ struct McpServersSectionView: View {
         }
     }
 
+    /// A server on one line: its name, a mark when it conflicts or has a
+    /// problem, any sign-in it needs, its Fix, switch and actions. Its details
+    /// show in a hint while the pointer rests on it.
     private func row(_ server: McpServerRecord) -> some View {
         let key = Self.key(server)
-        return HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(server.name)
-                            .font(.body.weight(.semibold))
-                            .accessibilityIdentifier("mcp-name-\(key)")
-                        badge(server.transport == .stdio ? "Local" : server.transport.rawValue.uppercased(),
-                              systemImage: server.transport == .stdio ? "terminal" : "network", color: .purple)
-                            .accessibilityIdentifier("mcp-transport-\(key)")
-                        ForEach([ConversationProvider.claude, .codex]) { provider in
-                            if server.providers.contains(provider) {
-                                badge(provider.displayName, systemImage: "checkmark", color: .green)
-                                    .accessibilityIdentifier("mcp-provider-\(key)-\(provider.rawValue)")
-                            }
-                        }
-                        if server.availableOutsidePlayhouse {
-                            badge("Both CLIs", systemImage: "checkmark.seal", color: .blue)
-                                .accessibilityIdentifier("mcp-native-\(key)")
-                        }
-                        if server.conflict {
-                            badge("Conflict", systemImage: "exclamationmark.triangle", color: .orange)
-                                .accessibilityIdentifier("mcp-conflict-\(key)")
-                        } else if server.issue != nil {
-                            badge("Problem", systemImage: "exclamationmark.triangle", color: .orange)
-                                .accessibilityIdentifier("mcp-problem-\(key)")
-                        }
+        return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "trailing", width: 340, inset: 12, hover: true), onDismiss: {}) {
+            HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    // Who starts the server leads its name, like a skill's row.
+                    if let mark = SkillsPageModel.providerMark(Set(server.providers), testID: "mcp-provider-\(key)") {
+                        ProviderMarkIcon(mark: mark)
                     }
-                    Text(server.summary)
-                        .font(.callout.monospaced())
-                        .foregroundStyle(.secondary)
+                    Text(server.name)
+                        .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                        .accessibilityIdentifier("mcp-summary-\(key)")
-                    if !server.envNames.isEmpty || !server.headerNames.isEmpty {
-                        Text(Self.variableNames(server))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("mcp-env-\(key)")
+                        .accessibilityIdentifier("mcp-name-\(key)")
+                    if server.conflict {
+                        flag("Conflict", identifier: "mcp-conflict-\(key)")
+                    } else if server.issue != nil {
+                        flag("Problem", identifier: "mcp-problem-\(key)")
                     }
-                    if let issue = server.issue {
-                        Text(issue).font(.caption).foregroundStyle(.orange).accessibilityIdentifier("mcp-issue-\(key)")
-                    }
-                    if let limitation = server.limitation {
-                        Text(limitation).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("mcp-limitation-\(key)")
-                    }
-                    if !isEnabled(server), !server.alwaysOnFor.isEmpty {
-                        Text("\(server.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still starts it from its own configuration, so turning it off applies to the other agent only. Delete it to stop both.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .accessibilityIdentifier("mcp-always-on-\(key)")
-                    } else if let note = Self.sharedNote(server) {
-                        Text(note).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("mcp-shared-\(key)")
-                    }
-                    Text(server.locations.map(\.layout.displayName).joined(separator: " · "))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .accessibilityIdentifier("mcp-location-\(key)")
+                    Spacer(minLength: 8)
                 }
-                Spacer(minLength: 8)
+                .overlay {
+                    PressAreaView(showsPointingHand: true, onClick: { openEditor(server) }, onLongPress: {})
+                }
+                .accessibilityHint(server.summary)
+                // Outside the click-to-open area above, so the buttons get their own clicks.
+                signInButtons(server, key: key)
+                if server.issue != nil, server.scope != .managed {
+                    Button { fix(server) } label: { Label("Fix", systemImage: "wand.and.stars") }
+                        .controlSize(.small)
+                        .disabled(isFixing)
+                        .buttonHoverPointer()
+                        .nativeHelp("Open a task whose agent fixes \(server.name)")
+                        .accessibilityIdentifier("mcp-fix-\(key)")
+                }
+                if server.scope != .managed {
+                    Toggle("Enabled", isOn: Binding(get: { isEnabled(server) }, set: { setEnabled(server, $0) }))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                        .buttonHoverPointer()
+                        .nativeHelp(isEnabled(server) ? "Turn the server off in Playhouse sessions" : "Turn the server on in Playhouse sessions")
+                        .accessibilityLabel("\(server.name) enabled")
+                        .accessibilityIdentifier("mcp-toggle-\(key)")
+                }
+                actions(server, key: key)
             }
-            .overlay {
-                PressAreaView(showsPointingHand: true, onClick: { openEditor(server) }, onLongPress: {})
-            }
-            // Outside the click-to-open area above, so the buttons get their own clicks.
-            signInButtons(server, key: key)
-            }
-            if server.issue != nil, server.scope != .managed {
-                Button { fix(server) } label: { Label("Fix with Agent", systemImage: "wand.and.stars") }
-                    .controlSize(.small)
-                    .disabled(isFixing)
-                    .buttonHoverPointer()
-                    .nativeHelp("Open a task whose agent fixes \(server.name)")
-                    .accessibilityIdentifier("mcp-fix-\(key)")
-            }
-            if server.scope != .managed {
-                Toggle("Enabled", isOn: Binding(get: { isEnabled(server) }, set: { setEnabled(server, $0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .buttonHoverPointer()
-                    .nativeHelp(isEnabled(server) ? "Turn the server off in Playhouse sessions" : "Turn the server on in Playhouse sessions")
-                    .accessibilityLabel("\(server.name) enabled")
-                    .accessibilityIdentifier("mcp-toggle-\(key)")
-            }
-            actions(server, key: key)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("mcp-row-\(key)")
+        } content: {
+            hint(server, key: key)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func flag(_ text: String, identifier: String) -> some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(.orange)
+            .nativeHelp(text)
+            .accessibilityLabel(text)
+            .accessibilityIdentifier(identifier)
+    }
+
+    /// A server's details: its command line or URL, its transport, its
+    /// variables, any problem, and where it is defined. The agents that start
+    /// it show on the row.
+    private func hint(_ server: McpServerRecord, key: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(server.name).font(.system(size: 13, weight: .semibold))
+            Text(server.summary)
+                .font(.system(size: 11).monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .truncationMode(.middle)
+                .accessibilityIdentifier("mcp-summary-\(key)")
+            HStack(spacing: 4) {
+                badge(server.transport == .stdio ? "Local" : server.transport.rawValue.uppercased(),
+                      systemImage: server.transport == .stdio ? "terminal" : "network", color: .purple)
+                    .accessibilityIdentifier("mcp-transport-\(key)")
+                if server.availableOutsidePlayhouse {
+                    badge("Both CLIs", systemImage: "checkmark.seal", color: .blue)
+                        .accessibilityIdentifier("mcp-native-\(key)")
+                }
+            }
+            if !server.envNames.isEmpty || !server.headerNames.isEmpty {
+                Text(Self.variableNames(server))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("mcp-env-\(key)")
+            }
+            if let issue = server.issue {
+                Text(issue).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("mcp-issue-\(key)")
+            }
+            if let limitation = server.limitation {
+                Text(limitation).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("mcp-limitation-\(key)")
+            }
+            if !isEnabled(server), !server.alwaysOnFor.isEmpty {
+                Text("\(server.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still starts it from its own configuration, so turning it off applies to the other agent only. Delete it to stop both.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("mcp-always-on-\(key)")
+            } else if let note = Self.sharedNote(server) {
+                Text(note).font(.system(size: 11)).foregroundStyle(.secondary).accessibilityIdentifier("mcp-shared-\(key)")
+            }
+            Text(server.locations.map(\.layout.displayName).joined(separator: " · "))
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("mcp-location-\(key)")
+        }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("mcp-row-\(key)")
+        .accessibilityIdentifier("mcp-hint-\(key)")
     }
 
     /// One button per agent that needs the server's sign-in: the label that says
@@ -437,7 +536,7 @@ struct McpServersSectionView: View {
                 ForEach(providers) { provider in
                     let waiting = signingIn.contains("\(server.name)|\(provider.rawValue)")
                     Button { signIn(name: server.name, provider: provider) } label: {
-                        signInLabel("Sign in for \(provider.displayName)", waiting: waiting)
+                        signInLabel(provider, waiting: waiting, compact: providers.count > 1)
                     }
                     .buttonStyle(.plain)
                     .disabled(waiting)
@@ -505,6 +604,22 @@ struct McpServersSectionView: View {
         perform(reloading: false) {
             let config = try await manager.mcpServerConfig(taskID: task.id, serverID: server.id)
             setPanel(.editing(server, config))
+        }
+    }
+
+    /// The composer's `/mcp` gear opens the server's editor; its sign-in button narrows the
+    /// list to the server and starts that agent's sign-in, whose badge then shows the wait.
+    private func openFocus() {
+        guard !didOpenFocus else { return }
+        didOpenFocus = true
+        switch focus {
+        case .mcpServer(let id):
+            if let server = catalog?.server(id: id) { openEditor(server) }
+        case .mcpSignIn(let name, let provider):
+            search = name
+            signIn(name: name, provider: provider)
+        case .skill, nil:
+            break
         }
     }
 
@@ -673,6 +788,9 @@ private struct McpServerEditorPanel: View {
                         .font(.title2.weight(.semibold))
                         .accessibilityIdentifier("mcp-editor-title")
                     Spacer()
+                }
+                // The controls get their own rows so the panel fits the narrow modal.
+                VStack(alignment: .leading, spacing: 8) {
                     if server == nil {
                         Picker("Save to", selection: $destination) {
                             Text("Global").tag("global")

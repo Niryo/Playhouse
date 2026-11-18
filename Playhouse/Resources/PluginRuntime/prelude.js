@@ -8,6 +8,8 @@
 //   __native.log(level, message)
 //   __native.setTimer(id, ms)      Swift calls __playhouseFireTimer(id) when due
 //   __native.clearTimer(id)
+//   __native.hostCall(id, kind, name, arguments)
+//                                  Swift answers with __playhouseAnswerHostCall(id, ok, value)
 (function (global) {
   "use strict";
 
@@ -206,13 +208,288 @@
       return true;
     };
 
+    // Host calls: each returns a promise the host settles with __playhouseAnswerHostCall.
+    var hostCalls = {};
+    var nextHostCall = 1;
+    function hostCall(kind, name, args) {
+      return new Promise(function (resolve, reject) {
+        var id = nextHostCall++;
+        hostCalls[id] = { resolve: resolve, reject: reject };
+        __native.hostCall(id, kind, name, args === undefined ? null : args);
+      });
+    }
+    global.__playhouseAnswerHostCall = function (id, ok, value) {
+      var call = hostCalls[id];
+      if (!call) return;
+      delete hostCalls[id];
+      reconciler.batchedUpdates(function () {
+        run(function () {
+          if (ok) {
+            call.resolve(value);
+          } else {
+            var error = new Error((value && value.message) || "The host call failed.");
+            error.code = value && value.code;
+            call.reject(error);
+          }
+        });
+      });
+    };
+
+    // fetch(url, {method, headers, body, timeout}): one HTTP or HTTPS request,
+    // answered by the host (PluginNetwork). Bodies are text; an HTTP error
+    // status still resolves (ok is false), and a request that can't be made
+    // rejects with an Error carrying code and message.
+    function fetchHeaders(fields) {
+      var names = Object.keys(fields);
+      return {
+        get: function (name) {
+          var value = fields[String(name).toLowerCase()];
+          return value === undefined ? null : value;
+        },
+        has: function (name) { return Object.prototype.hasOwnProperty.call(fields, String(name).toLowerCase()); },
+        keys: function () { return names.slice(); },
+        forEach: function (callback) { names.forEach(function (name) { callback(fields[name], name); }); },
+        toJSON: function () { return fields; }
+      };
+    }
+    function fetch(input, init) {
+      init = init || {};
+      var headers = {};
+      var given = init.headers;
+      if (given && typeof given.forEach === "function" && !Array.isArray(given)) {
+        given.forEach(function (value, name) { headers[String(name)] = String(value); });
+      } else if (Array.isArray(given)) {
+        given.forEach(function (pair) { headers[String(pair[0])] = String(pair[1]); });
+      } else if (given) {
+        Object.keys(given).forEach(function (name) { headers[name] = String(given[name]); });
+      }
+      var request = {
+        url: String(input && input.url !== undefined ? input.url : input),
+        method: String(init.method || "GET"),
+        headers: headers
+      };
+      if (init.body !== undefined && init.body !== null) request.body = String(init.body);
+      if (init.timeout !== undefined) request.timeout = Number(init.timeout);
+      return hostCall("net", "fetch", request).then(function (answer) {
+        var body = answer.body;
+        return {
+          ok: answer.status >= 200 && answer.status < 300,
+          status: answer.status,
+          statusText: answer.statusText,
+          url: answer.url,
+          redirected: answer.redirected,
+          headers: fetchHeaders(answer.headers || {}),
+          text: function () { return Promise.resolve(body); },
+          json: function () { return new Promise(function (resolve) { resolve(JSON.parse(body)); }); }
+        };
+      });
+    }
+
+    // Swift replaces the props when the placement's context changes.
+    var propsListeners = [];
+    global.__playhouseSetProps = function (props) {
+      Playhouse.props = props || {};
+      reconciler.batchedUpdates(function () {
+        propsListeners.slice().forEach(function (listener) { run(function () { listener(Playhouse.props); }); });
+      });
+    };
+    function onPropsChange(listener) {
+      propsListeners.push(listener);
+      return function () {
+        var index = propsListeners.indexOf(listener);
+        if (index >= 0) propsListeners.splice(index, 1);
+      };
+    }
+
+    // App events (PluginEvent in Swift): Swift calls __playhouseEmit(name, payload)
+    // for "task.statusChanged", "app.focus", "plugin.stateChanged" and "app.launched".
+    var eventListeners = {};
+    // "app.launched" arrives as the plugin first mounts, often before the effect
+    // that listens for it has run: the first listener added later still hears it.
+    var unheardLaunch = null;
+    global.__playhouseEmit = function (name, payload) {
+      var listeners = (eventListeners[name] || []).slice();
+      if (name === "app.launched" && listeners.length === 0) unheardLaunch = payload || {};
+      reconciler.batchedUpdates(function () {
+        listeners.forEach(function (listener) { run(function () { listener(payload || {}); }); });
+      });
+      return listeners.length;
+    };
+    function on(name, listener) {
+      name = String(name);
+      (eventListeners[name] = eventListeners[name] || []).push(listener);
+      if (name === "app.launched" && unheardLaunch !== null) {
+        var launch = unheardLaunch;
+        unheardLaunch = null;
+        global.setTimeout(function () {
+          if ((eventListeners[name] || []).indexOf(listener) < 0) return;
+          reconciler.batchedUpdates(function () { run(function () { listener(launch); }); });
+        }, 0);
+      }
+      return function () {
+        var listeners = eventListeners[name] || [];
+        var index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      };
+    }
+
+    // throttle(fn, seconds): the first call runs at once; calls made while it
+    // runs (until a promise it returns settles) or within `seconds` after it
+    // started collapse into one trailing call with the latest arguments. Use it
+    // to keep frequent events from flooding a rate-limited service like GitHub.
+    function throttle(fn, seconds) {
+      var interval = Math.max(0, Number(seconds) || 0) * 1000;
+      // The cooldown is a timer, so it follows the host's clock (and
+      // `plugin render --advance`) the way every other timer does.
+      var cooling = false;
+      var running = false;
+      var pendingArgs = null;
+      function start(args) {
+        running = true;
+        cooling = true;
+        pendingArgs = null;
+        global.setTimeout(function () { cooling = false; schedule(); }, interval);
+        var finish = function () { running = false; schedule(); };
+        var result;
+        try { result = fn.apply(null, args); } catch (error) { reportError(error); }
+        if (result && typeof result.then === "function") {
+          result.then(finish, function (error) { reportError(error); finish(); });
+        } else {
+          finish();
+        }
+      }
+      function schedule() {
+        if (pendingArgs && !running && !cooling) start(pendingArgs);
+      }
+      return function () {
+        pendingArgs = Array.prototype.slice.call(arguments);
+        schedule();
+      };
+    }
+
+    // `/` commands (the manifest's "commands"): each name's handlers, which the
+    // host runs with __playhouseRunCommand(token, name, phase, request) in a
+    // fresh runtime, and whose result (or error) it hears through
+    // __native.commandResult. "available" with no name runs every command's.
+    var commands = {};
+    function registerCommand(name, handlers) {
+      commands[String(name)] = handlers || {};
+    }
+    global.__playhouseCommandNames = function () { return Object.keys(commands); };
+    global.__playhouseRunCommand = function (token, name, phase, request) {
+      function settle(ok, value) {
+        if (ok) {
+          __native.commandResult(token, true, value === undefined ? null : value);
+        } else {
+          __native.commandResult(token, false, {
+            code: (value && value.code) || "script_error",
+            message: (value && value.message) || String(value)
+          });
+        }
+      }
+      function call(handlers, phaseName) {
+        var handler = handlers[phaseName];
+        if (typeof handler !== "function") return Promise.resolve(null);
+        return new Promise(function (resolve) { resolve(handler(request || {})); });
+      }
+      var result;
+      if (phase === "available") {
+        var names = Object.keys(commands);
+        result = Promise.all(names.map(function (each) { return call(commands[each], "available"); })).then(function (values) {
+          var map = {};
+          names.forEach(function (each, index) { if (values[index] !== null && values[index] !== undefined) map[each] = values[index]; });
+          return map;
+        });
+      } else if (!commands[name]) {
+        result = Promise.reject({ code: "not_found", message: "The plugin never registered the command /" + name + "." });
+      } else if (typeof commands[name][phase] !== "function") {
+        result = phase === "list" || phase === "run"
+          ? Promise.reject({ code: "not_found", message: "/" + name + " has no " + phase + " handler." })
+          : Promise.resolve(null);
+      } else {
+        result = call(commands[name], phase);
+      }
+      result.then(function (value) { settle(true, value); }, function (error) { settle(false, error); });
+    };
+
     var Playhouse = {
       props: global.__playhouseProps || {},
-      render: function (element) { reconciler.updateContainer(element, root, null, null); }
+      // Registers the handlers of a `/` command the manifest declares:
+      // {available, list, run, choose, press}, each given one request object
+      // and returning a value or a promise of one.
+      commands: { register: registerCommand },
+      // Listens for an app event; returns a function that stops listening.
+      on: on,
+      throttle: throttle,
+      render: function (element) { reconciler.updateContainer(element, root, null, null); },
+      onPropsChange: onPropsChange,
+      // The current props, re-rendering the component whenever they change.
+      useProps: function () {
+        var state = React.useState(Playhouse.props);
+        React.useEffect(function () {
+          if (state[0] !== Playhouse.props) state[1](Playhouse.props);
+          return onPropsChange(function (props) { state[1](props); });
+        }, []);
+        return state[0];
+      },
+      // Any Playhouse bridge command, the same ones the CLI sends ("task.list", "task.create", …).
+      bridge: function (command, args) { return hostCall("bridge", String(command), args || {}); },
+      // Saves one of this plugin's values (null removes it); it comes back as props.state.
+      setState: function (key, value) {
+        var plugin = Playhouse.props.plugin || {};
+        return hostCall("bridge", "plugin.state.set", { pluginID: plugin.id, key: String(key), value: value === undefined ? null : value });
+      },
+      // What only the window can do.
+      ui: {
+        close: function () { return hostCall("ui", "close", {}); },
+        openTask: function (taskID) { return hostCall("ui", "openTask", { taskID: String(taskID) }); },
+        // Shows a task.changes.list entry's diff over the conversation.
+        openDiff: function (entry) { return hostCall("ui", "openDiff", entry || {}); },
+        // Tells the window the task's folders changed, so it rereads them and bumps props.workspace.revision.
+        refreshWorkspace: function () { return hostCall("ui", "refreshWorkspace", {}); },
+        // Moves the task to a board column ("Done", "Review", …), as dragging its card would.
+        moveTask: function (taskID, status) { return hostCall("ui", "moveTask", { taskID: String(taskID), status: String(status) }); },
+        // Opens the task with its pull request conflicts ready to resolve.
+        resolveConflicts: function (taskID) { return hostCall("ui", "resolveConflicts", { taskID: String(taskID) }); },
+        // Shows an alert over the window, for a failure the user should see.
+        alert: function (title, message) { return hostCall("ui", "alert", { title: String(title), message: message == null ? "" : String(message) }); },
+        // Opens an http(s) link in the default browser.
+        openURL: function (url) { return hostCall("ui", "openURL", { url: String(url) }); },
+        // Asks the user to confirm ({title, message, confirm, destructive}); resolves true when they do.
+        // On the board and in the composer's commands.
+        confirm: function (options) {
+          options = options || {};
+          return hostCall("ui", "confirm", {
+            title: String(options.title || ""), message: options.message == null ? "" : String(options.message),
+            confirm: options.confirm == null ? "OK" : String(options.confirm), destructive: options.destructive === true
+          });
+        },
+        // Opens a new task; with {schedule: "recurring" or "once"} its schedule picker is up. Only on the board.
+        newTask: function (options) {
+          options = options || {};
+          return hostCall("ui", "newTask", { schedule: options.schedule == null ? null : String(options.schedule) });
+        },
+        // Opens Login Items in System Settings, where the user allows scheduled runs. Only on the board.
+        openLoginItems: function () { return hostCall("ui", "openLoginItems", {}); },
+        composer: {
+          setDraft: function (text) { return hostCall("ui", "composer.setDraft", { text: String(text) }); },
+          insertText: function (text) { return hostCall("ui", "composer.insertText", { text: String(text) }); },
+          replaceSelection: function (text) { return hostCall("ui", "composer.replaceSelection", { text: String(text) }); },
+          focus: function () { return hostCall("ui", "composer.focus", {}); },
+          // Turns on the composer's "plan" or "goal" mode.
+          setMode: function (mode) { return hostCall("ui", "composer.setMode", { mode: String(mode) }); }
+        },
+        // Opens the Skills page: {skillID}, {mcpServerID}, or {signIn: {name, provider}} to
+        // sign a provider in to an MCP server. In the conversation.
+        openSkills: function (focus) { return hostCall("ui", "openSkills", focus || {}); },
+        // Opens a plugin's editor. In the conversation.
+        editPlugin: function (pluginID) { return hostCall("ui", "editPlugin", { pluginID: String(pluginID) }); }
+      }
     };
     global.React = React;
     global.h = React.createElement;
     global.Playhouse = Playhouse;
+    global.fetch = fetch;
     // Each atom is also a global string constant, so plugins write h(Text, …).
     atomNames.forEach(function (name) { global[name] = name; });
   };

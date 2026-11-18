@@ -43,6 +43,7 @@ trap cleanup EXIT
 architecture="$(uname -m)"
 python3 "${repository_root}/scripts/check-test-parity.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
+python3 "${repository_root}/scripts/check-hover-scrollers.py"
 python3 "${repository_root}/scripts/check-e2e-locking.py"
 python3 "${repository_root}/scripts/check-e2e-build-cache.py"
 report_phase build
@@ -87,6 +88,20 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/agent-run-host-tests.swift" \
   -o "${agent_run_host_tests}"
 "${agent_run_host_tests}"
+# Pure-logic unit checks of the context compaction decisions and session state reader.
+context_compaction_tests="${test_output_dir}/context-compaction-policy-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/ContextCompaction.swift" \
+  "${repository_root}/scripts/unit/context-compaction-policy-tests.swift" \
+  -o "${context_compaction_tests}"
+"${context_compaction_tests}"
+# Pure-logic unit checks of where provider dividers and goal achievements sit in the transcript.
+transcript_row_anchor_tests="${test_output_dir}/transcript-row-anchors-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/TranscriptRowAnchors.swift" \
+  "${repository_root}/scripts/unit/transcript-row-anchors-tests.swift" \
+  -o "${transcript_row_anchor_tests}"
+"${transcript_row_anchor_tests}"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1
@@ -113,6 +128,8 @@ if (( ${#selected_cases[@]} > 0 )); then
 fi
 
 report_phase cases
+# Task status sounds play at volume 0 in every CLI call and daemon the suite starts.
+export PLAYHOUSE_MUTE_SOUNDS=1
 set +e
 # Reused builds share an XPC identity and process-global diagnostics routing.
 # Serialize only callers of that exact cached build, never unrelated worktrees/UI.

@@ -24,6 +24,9 @@ enum AtomRegistry {
         register(.icon) { node, _ in
             AnyView(AtomIcon(props: try .decode(node.props), common: try .decode(node.props)))
         }
+        register(.image) { node, _ in
+            AnyView(AtomImage(props: try .decode(node.props), common: try .decode(node.props)))
+        }
         register(.label) { node, _ in
             AnyView(AtomLabel(props: try .decode(node.props), common: try .decode(node.props)))
         }
@@ -75,7 +78,9 @@ enum AtomRegistry {
             AnyView(AtomMeter(props: try .decode(node.props), common: try .decode(node.props)))
         }
         register(.scroll) { node, runtime in
-            AnyView(AtomScroll(props: try .decode(node.props), common: try .decode(node.props)) {
+            AnyView(AtomScroll(props: try .decode(node.props), common: try .decode(node.props), onEndReached: node.events.contains("onEndReached") ? {
+                runtime.dispatch(nodeID: node.id, event: "onEndReached")
+            } : nil) {
                 PluginChildren(node: node, runtime: runtime)
             })
         }
@@ -134,16 +139,40 @@ enum AtomRegistry {
         }
         register(.popover) { node, runtime in
             let children = node.children.filter { $0.type != PluginNode.textType }
-            return AnyView(AtomPopover(props: try .decode(node.props), common: try .decode(node.props), onDismiss: {
+            let props: PopoverProps = try .decode(node.props)
+            return AnyView(AtomPopover(props: props, common: try .decode(node.props), onDismiss: {
                 runtime.dispatch(nodeID: node.id, event: "onDismiss")
             }, anchor: {
                 if let anchor = children.first { PluginNodeView(node: anchor, runtime: runtime) }
             }, content: {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(children.dropFirst()) { child in
-                        PluginNodeView(node: child, runtime: runtime)
-                    }
-                }
+                PresentedChildren(children: Array(children.dropFirst()), spacing: CGFloat(props.spacing ?? PopoverProps.defaultSpacing), runtime: runtime)
+            }))
+        }
+        register(.modal) { node, runtime in
+            let children = node.children.filter { $0.type != PluginNode.textType }
+            let props: ModalProps = try .decode(node.props)
+            return AnyView(AtomModal(props: props, common: try .decode(node.props), onDismiss: {
+                runtime.dispatch(nodeID: node.id, event: "onDismiss")
+            }, base: {
+                if let base = children.first { PluginNodeView(node: base, runtime: runtime) }
+            }, content: {
+                PresentedChildren(children: Array(children.dropFirst()), spacing: CGFloat(props.spacing ?? ModalProps.defaultSpacing), runtime: runtime)
+            }))
+        }
+        register(.page) { node, runtime in
+            let children = node.children.filter { $0.type != PluginNode.textType }
+            return AnyView(AtomPage(props: try .decode(node.props), common: try .decode(node.props), base: {
+                if let base = children.first { PluginNodeView(node: base, runtime: runtime) }
+            }, content: {
+                PresentedChildren(children: Array(children.dropFirst()), spacing: 0, runtime: runtime)
+            }))
+        }
+        register(.sidePanel) { node, runtime in
+            let children = node.children.filter { $0.type != PluginNode.textType }
+            return AnyView(AtomSidePanel(props: try .decode(node.props), common: try .decode(node.props), base: {
+                if let base = children.first { PluginNodeView(node: base, runtime: runtime) }
+            }, content: {
+                PresentedChildren(children: Array(children.dropFirst()), spacing: 0, runtime: runtime)
             }))
         }
         register(.stepSlider) { node, runtime in
@@ -199,6 +228,22 @@ struct PluginChildren: View {
     var body: some View {
         ForEach(node.children.filter { $0.type != PluginNode.textType }) { child in
             PluginNodeView(node: child, runtime: runtime)
+        }
+    }
+}
+
+/// What a Popover, Modal, Page or SidePanel presents: every child after the
+/// first, in a leading column.
+struct PresentedChildren: View {
+    let children: [PluginNode]
+    let spacing: CGFloat
+    let runtime: PluginRuntime
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: spacing) {
+            ForEach(children) { child in
+                PluginNodeView(node: child, runtime: runtime)
+            }
         }
     }
 }

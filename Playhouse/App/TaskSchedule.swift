@@ -11,6 +11,9 @@ struct TaskScheduleRequest {
     var imageDataURLs: [String] = []
     var mode: ConversationMode = .code
     var modelID: String?
+    /// Only moves an already scheduled task, keeping the prompt, images, mode and model it was
+    /// scheduled with; the payload fields above are ignored.
+    var keepsPayload = false
 }
 
 /// One run taken from a schedule, with everything needed to start it after the schedule's
@@ -22,13 +25,12 @@ struct ScheduledRunClaim {
     /// More than the grace period late: the run is placed in Blocked instead of starting.
     var dropped: Bool
     let title: String
-    let prompt: String
-    let imageDataURLs: [String]
+    var prompt: String
+    var imageDataURLs: [String]
     let mode: ConversationMode
     let modelID: String?
     let provider: ConversationProvider
     let effort: String?
-    let pullRequestMode: PullRequestMode
     let repositories: [RepositoryWorktreeSpec]
     let contextFolders: [String]
 }

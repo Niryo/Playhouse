@@ -73,14 +73,18 @@ if [[ "$(cat "${fixture_root}/.playhouse-bridge-fixture" 2>/dev/null || true)" !
   printf 'Refusing to prepare UI Codex fixtures without the owned fixture root marker.\n' >&2
   exit 1
 fi
+for fixture_module in "${repository_root}"/scripts/fixtures/*_fixture_*.py; do
+  cp "${fixture_module}" "${fixture_root}/"
+done
 codex_fixtures=(
   ui empty nonblocking slow plan-slow question-isolation-plan-slow interrupted abort success unique-turns-success goal-success single-server-goal-success
   title-success title-failure title-success-wait title-archive-ui hold
   hold-interrupt hold-reject-interrupt reattach
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted unique-turns-progress-hold-release
-  in-progress-continuation-hold-release in-progress-cap-hold-release in-progress-stop-hold-release in-progress-queue-hold-release
+  outcome-recovery-hold-release outcome-blocked-hold-release outcome-unanswered-hold-release outcome-stop-hold-release outcome-queue-hold-release
+  unique-turns-background-pass unique-turns-background-retry unique-turns-background-fail unique-turns-background-vanish unique-turns-background-stop unique-turns-background-server unique-turns-background-timeout unique-turns-background-retry-daemon unique-turns-background-queue
   progress-question progress-user-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question restart-question-no-secret unassociated-restart-question
-  status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success long-history-with-prompt-success markdown steer-queue-serial-success-wait draft-serial-success-wait
+  status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success long-history-lazy-success long-history-with-prompt-success markdown steer-queue-serial-success-wait draft-serial-success-wait
 )
 for fixture in "${codex_fixtures[@]}"; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
@@ -102,7 +106,7 @@ cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}
 chmod 755 "${fixture_root}/claude-fixture-ui-aliases-only"
 cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-reattach"
 chmod 755 "${fixture_root}/claude-fixture-reattach"
-for fixture in subagent context-compaction tool-activity long-history-success long-history-with-prompt-success markdown async-question async-question-queued goal-success; do
+for fixture in subagent context-compaction tool-activity long-history-success long-history-lazy-success long-history-with-prompt-success markdown async-question async-question-queued goal-success; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
   xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true
@@ -420,6 +424,9 @@ overall_failed=0
 # from this unsandboxed script instead, and keep it alive for the whole run by
 # holding one watcher connection (the daemon exits when its last one closes).
 bridge_watcher_pid=""
+# The daemon keeps the PLAYHOUSE_MUTE_SOUNDS it starts with, so the watcher that
+# starts it must carry it for task status sounds to play at volume 0.
+export PLAYHOUSE_MUTE_SOUNDS=1
 # A daemon left from an earlier build would silently serve this run's requests.
 pkill -f "${compiled_app}/Contents/MacOS/playhouse-daemon" 2>/dev/null || true
 if [[ -x "${compiled_app}/Contents/MacOS/playhouse-cli" ]]; then
@@ -438,6 +445,8 @@ if [[ -x "${compiled_app}/Contents/MacOS/playhouse-cli" ]]; then
   bridge_watcher_pid=$!
   trap 'pkill -P "${bridge_watcher_pid}" 2>/dev/null || true; kill "${bridge_watcher_pid}" 2>/dev/null || true; cleanup' EXIT
 fi
+run_started_marker="${test_output_dir}/.run-started"
+touch "${run_started_marker}"
 for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   first_case=$(( batch_index * batch_size ))
   batch_cases=("${selected_cases[@]:first_case:batch_size}")
@@ -592,6 +601,20 @@ PY
     fi
   fi
 done
+
+# A failed case keeps its data directory, and the daemon logs its starts and exits, in the
+# guest's /tmp, which the next run's VM restart clears. Keep this run's copies (the top-level
+# files of each preserved `data/`, with Diagnostics.jsonl) with the run's artifacts.
+if [[ "${PLAYHOUSE_UI_TART_GUEST:-0}" == "1" ]]; then
+  while IFS= read -r -d '' preserved_case; do
+    [[ -d "${preserved_case}/data" ]] || continue
+    preserved_copy="${test_output_dir}/preserved-case-data/$(basename "${preserved_case}")"
+    mkdir -p "${preserved_copy}"
+    find "${preserved_case}/data" -mindepth 1 -maxdepth 1 -type f -exec cp -p {} "${preserved_copy}/" \; 2>/dev/null || true
+  done < <(find /tmp/playhouse-ui-test-data -mindepth 1 -maxdepth 1 -type d -name 'PlayhouseUITests-*' -newer "${run_started_marker}" -print0 2>/dev/null)
+  find "/private/tmp/playhouse-bridge/$(id -u)" -maxdepth 1 -type f -name '*.sock.log' -newer "${run_started_marker}" \
+    -exec cp -p {} "${test_output_dir}/" \; 2>/dev/null || true
+fi
 
 if ! python3 - "${test_output_dir}" "${batch_count}" "${expected_count}" <<'PY'
 import json

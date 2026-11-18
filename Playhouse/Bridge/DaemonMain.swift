@@ -137,7 +137,7 @@ enum PlayhouseBridgeDaemonMain {
     /// Playhouse settings travel as `BridgeRequest` fields.
     static func reduceToSessionEnvironment() {
         let kept = BridgeContract.sessionEnvironmentNames
-            .union(["PLAYHOUSE_BRIDGE_SERVICE_NAME", "PLAYHOUSE_BRIDGE_SOCKET_PATH", "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS"])
+            .union(["PLAYHOUSE_BRIDGE_SERVICE_NAME", "PLAYHOUSE_BRIDGE_SOCKET_PATH", "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS", "PLAYHOUSE_MUTE_SOUNDS"])
         for name in ProcessInfo.processInfo.environment.keys where !kept.contains(name) {
             unsetenv(name)
         }
@@ -222,6 +222,11 @@ enum PlayhouseBridgeDaemonMain {
             }
             _ = finished.wait(timeout: .now() + 15)
         }
+        // The built-in plugins' background halves hear app events here, whether
+        // or not a window is open.
+        MainActor.assumeIsolated {
+            PluginServiceHost.services = [PullRequestModeService()]
+        }
         startScheduleTicker(environment: environment)
         RunLoop.current.run()
     }
@@ -281,6 +286,15 @@ enum PlayhouseBridgeDaemonMain {
 
         lifecycle.requestStarted()
         defer { lifecycle.requestFinished() }
+
+        // A caller in a read-only sandbox, such as a Codex side chat's CLI call, gets only board
+        // requests: the daemon runs outside that sandbox and must not do what the sandbox forbids.
+        if !SideChatReadOnlyPolicy.allowsSandboxedRequest(request), let peer = connection.peerProcessID,
+           callerIsReadOnlySandboxed(peer) {
+            let denied = BridgeResponse.failure(request, code: "forbidden", message: SideChatReadOnlyPolicy.sandboxedCallerMessage)
+            if let framed = try? BridgeFraming.frame(BridgeWireMessage.response(denied)) { try? connection.write(framed) }
+            return
+        }
 
         let semaphore = DispatchSemaphore(value: 0)
         let responseBox = ResponseBox()
@@ -366,6 +380,18 @@ enum PlayhouseBridgeDaemonMain {
         // Agents with work outlive the daemon as on an idle exit; the next daemon
         // reattaches them. Exits from its own thread so this reply gets out first.
         Thread.detachNewThread { lifecycle.shutDown() }
+    }
+
+    /// Whether `pid` runs in a sandbox that forbids it to write even beside the bridge sockets, as
+    /// Codex's read-only sandbox does. A sandbox that lets its process write there, such as the
+    /// UI test runner's, and a process with no sandbox are not read-only. The sandbox carries
+    /// over to every child a process starts, so a sandboxed caller can't shed it.
+    private static func callerIsReadOnlySandboxed(_ pid: pid_t) -> Bool {
+        guard playhouse_is_sandboxed(pid) == 1 else { return false }
+        // The sockets' own directory, which exists while this daemon listens in it.
+        let directory = BridgeContract.socketURL(forServiceName: BridgeContract.serviceName)
+            .deletingLastPathComponent().resolvingSymlinksInPath()
+        return playhouse_sandbox_denies_file_create(pid, directory.path) == 1
     }
 
     /// A plain reference box to hand a value out of the `@MainActor` task above

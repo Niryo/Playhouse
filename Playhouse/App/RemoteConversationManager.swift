@@ -37,7 +37,7 @@ struct RemoteConversationManager {
 
     func modelID(taskID: UUID) throws -> String? { try store.modelID(taskID: taskID) }
     func effort(taskID: UUID) throws -> ConversationEffort { try store.effort(taskID: taskID) }
-    func setModelID(taskID: UUID, modelID: String) throws { try store.setModelID(taskID: taskID, modelID: modelID) }
+    func setModelID(taskID: UUID, modelID: String) async throws { try await store.setModelID(taskID: taskID, modelID: modelID) }
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] { try store.cachedModels(taskID: taskID) }
     func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
         try store.cachedModels(taskID: taskID, provider: provider)
@@ -56,20 +56,42 @@ struct RemoteConversationManager {
 
     /// With `messageLimit`, only the newest messages (before `beforeMessageID`,
     /// when given) cross the bridge, with a count of the earlier ones left.
+    /// `afterMessageID` and `chatPageID` instead read forward: the messages after
+    /// that message, or from the first message of that standalone chat page.
     func history(
         taskID: UUID,
         messageLimit: Int? = nil,
         beforeMessageID: String? = nil,
+        afterMessageID: String? = nil,
+        chatPageID: String? = nil,
         onActionRequest: @escaping () -> Void = {}
     ) async throws -> ConversationHistory {
-        var arguments: [String: BridgeValue] = ["taskID": id(taskID)]
+        // The window loads earlier messages' images as it shows them (`messageImages`).
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "deferImages": .boolean(true)]
         if let messageLimit { arguments["limit"] = .string(String(messageLimit)) }
         if let beforeMessageID { arguments["before"] = .string(beforeMessageID) }
+        if let afterMessageID { arguments["after"] = .string(afterMessageID) }
+        if let chatPageID { arguments["page"] = .string(chatPageID) }
         let result = try await daemon.call("conversation.history", arguments) { event in
             if event.type == "action_request" { onActionRequest() }
         }
         await runtime.refresh()
         return try result.decoded(ConversationHistory.self)
+    }
+
+    /// The images of messages a history read marked `imagesDeferred`.
+    func messageImages(taskID: UUID, messageIDs: [String]) async throws -> [ConversationMessageImages] {
+        let result = try await daemon.call("conversation.images", [
+            "taskID": id(taskID), "messages": .array(messageIDs.map(BridgeValue.string)),
+        ])
+        // Read in place: decoding through JSON would copy megabytes of image data on the main actor.
+        guard case .array(let entries) = result else { return [] }
+        return entries.compactMap { entry in
+            guard let id = entry.object?["id"]?.string else { return nil }
+            return ConversationMessageImages(
+                id: id, turnID: entry.object?["turnID"]?.string, imageDataURLs: entry.object?["imageDataURLs"]?.strings ?? []
+            )
+        }
     }
 
     func send(
@@ -93,6 +115,7 @@ struct RemoteConversationManager {
             // The window keeps its own paged transcript, so the finished turn
             // only needs to bring back the newest page rather than everything.
             "historyLimit": .string(String(TaskConversationView.historyPageSize)),
+            "deferImages": .boolean(true),
         ]
         if let modelID { arguments["model"] = .string(modelID) }
         if let statusBeforeSubmission { arguments["statusBeforeSubmission"] = .string(statusBeforeSubmission.rawValue) }
@@ -225,6 +248,7 @@ struct RemoteConversationManager {
             "itemID": .string(question.id),
             "answers": .array(answers.map(BridgeValue.string)),
             "historyLimit": .string(String(TaskConversationView.historyPageSize)),
+            "deferImages": .boolean(true),
         ])
         let history = try result.object?["history"].map { try $0.decoded(ConversationHistory.self) }
         return (result.object?["text"]?.string ?? "", result.object?["queued"]?.bool ?? false, history)
@@ -310,6 +334,11 @@ struct RemoteConversationManager {
     func linkSkill(taskID: UUID, skillID: String, linked: Bool) async throws -> SkillRecord {
         try await daemon.call(linked ? "skills.link" : "skills.unlink", ["taskID": id(taskID), "skillID": .string(skillID)])
             .decoded(SkillRecord.self)
+    }
+
+    /// What the composer's `@` menu can mention, read like the CLI's `mentions list`.
+    func mentions(taskID: UUID) async throws -> MentionCatalog {
+        try await daemon.call("mentions.list", ["taskID": id(taskID)]).decoded(MentionCatalog.self)
     }
 
     func rules(taskID: UUID) async throws -> RuleCatalog {
@@ -476,29 +505,50 @@ struct RemoteConversationManager {
         return (title, provider)
     }
 
+    /// Names a one-time scheduled task that is still untitled; the daemon reserves the title and
+    /// generates it in the background.
+    func nameScheduledTask(taskID: UUID) async throws {
+        _ = try await daemon.call("schedule.name", ["taskID": id(taskID)])
+    }
+
+    /// Sends a side chat message; without `sideChatID`, opens a side chat on `selection`.
+    func sideChat(
+        taskID: UUID,
+        sideChatID: String?,
+        selection: String?,
+        source: ConversationTextSource? = nil,
+        message: String,
+        modelID: String? = nil,
+        effort: ConversationEffort? = nil,
+        onDelta: @escaping (String) -> Void
+    ) async throws -> SideChatReply {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "message": .string(message)]
+        if let modelID, !modelID.isEmpty { arguments["model"] = .string(modelID) }
+        if let effort { arguments["effort"] = .string(effort.rawValue) }
+        if let sideChatID { arguments["sideChatID"] = .string(sideChatID) }
+        if let selection { arguments["selection"] = .string(selection) }
+        if let source, let json = try? JSONEncoder().encode(source), let text = String(data: json, encoding: .utf8) {
+            arguments["source"] = .string(text)
+        }
+        return try await daemon.call("conversation.side_chat", arguments) { event in
+            if event.type == "text_delta", let text = event.payload.object?["text"]?.string { onDelta(text) }
+        }.decoded(SideChatReply.self)
+    }
+
+    func savedSideChats(taskID: UUID) async throws -> [SavedSideChat] {
+        try await daemon.call("conversation.side_chats.list", ["taskID": id(taskID)]).decoded([SavedSideChat].self)
+    }
+
+    func closeSideChat(taskID: UUID, sideChatID: String) async {
+        _ = try? await daemon.call("conversation.side_chat.close", ["taskID": id(taskID), "sideChatID": .string(sideChatID)])
+    }
+
     func reconcileLifecycleStatusOnOpen(taskID: UUID) async throws -> BoardTaskRecord {
         try await daemon.call("task.reconcile", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
     }
 
     func createPullRequests(taskID: UUID) async throws -> BoardTaskRecord {
         try await daemon.call("task.pr.create", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
-    }
-
-    func setPullRequestMode(taskID: UUID, mode: PullRequestMode) async throws -> BoardTaskRecord {
-        try await daemon.call("task.pr.mode", ["taskID": id(taskID), "mode": .string(mode.rawValue)]).decoded(BoardTaskRecord.self)
-    }
-
-    /// Runs one autopilot pass in the daemon. `onStatus` gets the probed states
-    /// before any fix turn starts; the call itself returns after that turn ends.
-    func runPullRequestAutopilot(
-        taskID: UUID,
-        onStatus: @escaping ([PullRequestReviewState]) -> Void = { _ in }
-    ) async throws -> PullRequestAutopilotOutcome {
-        try await daemon.call("task.pr.autopilot", ["taskID": id(taskID)]) { event in
-            guard event.type == "autopilot_status",
-                  let states = try? event.payload.decoded([PullRequestReviewState].self) else { return }
-            onStatus(states)
-        }.decoded(PullRequestAutopilotOutcome.self)
     }
 
     /// Review syncs pull request changes and may open PRs, which needs the

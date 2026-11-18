@@ -17,25 +17,26 @@ function Chip(props) {
   return h(Overlay, { align: "topTrailing", offsetX: 6, offsetY: -6 },
     h(Button, {
       disabled: model.readOnly, testID: prefix + "conversation-repository-badge-" + name,
-      help: "Edit repository settings for " + name, onPress: function () { on.edit(chip.path); }
+      help: "Edit repository settings for " + name, onPress: function () { on.edit(chip.key || chip.path); }
     }, h(Panel, { fill: "primary", fillOpacity: 0.08, capsule: true, stroke: "primary", strokeOpacity: 0.14, padding: 7, paddingX: 5.5 },
       h(Stack, { axis: "h", spacing: 6 },
         h(Icon, { name: "arrow.triangle.branch", size: 11, weight: "semibold", color: model.accent }),
-        h(Text, { size: 13, weight: "semibold", color: "primary", lineLimit: 1 }, name)))),
+        h(Text, { size: 13, weight: "semibold", color: "primary", lineLimit: 1 }, chip.branch ? chip.path.split("/").pop() : name),
+        chip.branch ? h(Text, { size: 11, color: "secondary", lineLimit: 1, truncation: "middle" }, chip.branch) : null))),
     model.readOnly ? null : h(Button, {
       testID: prefix + "remove-conversation-repository-" + name, label: "Remove " + name,
-      help: "Remove " + name + " from this task", onPress: function () { on.remove(chip.path); }
-    }, h(Panel, { fill: "panel", fillOpacity: 1, capsule: true, stroke: "primary", strokeOpacity: 0.16, width: 20, height: 20 },
+      help: "Remove " + name + " from this task", onPress: function () { on.remove(chip.key || chip.path); }
+    }, h(Panel, { fill: "panel", fillOpacity: 1, capsule: true, stroke: "primary", strokeOpacity: 0.16, width: 20, height: 20, padding: 0 },
       h(Icon, { name: "xmark", size: 9, weight: "bold", color: "secondary" }))));
 }
 
 function Chips(props) {
   var model = props.model, on = props.on, prefix = model.prefix;
-  var children = model.chips.map(function (chip) { return h(Chip, { key: chip.path, model: model, chip: chip, on: on }); });
+  var children = model.chips.map(function (chip) { return h(Chip, { key: chip.key || chip.path, model: model, chip: chip, on: on }); });
   children.push(h(Button, {
     key: "add", disabled: model.readOnly, testID: prefix + "add-conversation-repository-button",
     label: "Add repository", help: "Add a repository", onPress: on.add
-  }, h(Panel, { fillOpacity: 0.07, capsule: true, width: 28, height: 28 },
+  }, h(Panel, { fillOpacity: 0.07, capsule: true, width: 28, height: 28, padding: 0 },
     h(Icon, { name: "plus", size: 12, weight: "semibold" }))));
   return h(Stack, { axis: "h", spacing: 10 }, children);
 }
@@ -80,12 +81,30 @@ function Picker(props) {
         spacing: 2, lazy: true, width: 280, height: model.listHeight,
         testID: prefix + "conversation-repository-list"
       }, model.repositories.map(function (repository, index) {
-        return h(Button, {
-          key: repository.path, testID: prefix + "conversation-repository-" + model.listing + "-" + repository.name,
-          help: "Select repository", onPress: function () { on.select(repository.path); }
-        }, h(Panel, { spacing: 2, fill: "accent", fillOpacity: index === model.highlighted ? 0.16 : 0, cornerRadius: 5, fillWidth: true, padding: 7 },
-          h(Text, { size: 11, weight: "medium" }, repository.name),
-          h(Text, { size: 9, color: "secondary", lineLimit: 1 }, repository.path)));
+        var id = prefix + "conversation-repository-" + model.listing + "-" + repository.name;
+        // The inset keeps the buttons clear of the list's overlay scroller.
+        return h(Overlay, { key: repository.path, align: "trailing", offsetX: -16, revealOnHover: true },
+          h(Button, { testID: id, help: "Add " + repository.name + " alongside the selected repositories", onPress: function () { on.select(repository.path); } },
+            h(Panel, { fill: "accent", fillOpacity: index === model.highlighted ? 0.16 : 0, cornerRadius: 5, fillWidth: true, padding: 7 },
+              // The spacer keeps the text clear of the buttons the hover reveals.
+              h(Stack, { axis: "h", spacing: 0 },
+                h(Stack, { axis: "v", spacing: 2, align: "leading" },
+                  h(Text, { size: 11, weight: "medium" }, repository.name),
+                  h(Text, { size: 9, color: "secondary", lineLimit: 1 }, repository.path)),
+                h(Spacer, { minLength: 64 })))),
+          h(Stack, { axis: "h", spacing: 2 },
+            model.canReplace ? h(Button, {
+              emphasis: 4,
+              testID: id + "-replace", label: "Replace with " + repository.name,
+              help: "Replace the selected repositories with " + repository.name,
+              onPress: function () { on.replace(repository.path); }
+            }, h(Icon, { name: "repeat", size: 11, weight: "semibold", color: "secondary" })) : null,
+            h(Button, {
+              emphasis: 4,
+              testID: id + "-add", label: "Add " + repository.name,
+              help: "Add " + repository.name + " alongside the selected repositories",
+              onPress: function () { on.select(repository.path); }
+            }, h(Icon, { name: "plus", size: 11, weight: "semibold", color: "secondary" }))));
       })));
     }
   }
@@ -102,14 +121,15 @@ function Demo() {
   var last = React.useState("none");
   var chipsModel = Object.assign({}, chipsSample, { chips: chips[0] });
   var pickerModel = Object.assign({}, pickerSample, { search: search[0], highlighted: highlighted[0] });
+  // A chip's actions name its worktree (key), or its repository's path.
   function named(path, list) {
-    var found = list.filter(function (each) { return each.path === path; })[0];
+    var found = list.filter(function (each) { return (each.key || each.path) === path; })[0];
     return found ? found.name : path;
   }
   var on = {
     edit: function (path) { last[1]("edit " + named(path, chips[0])); },
     remove: function (path) {
-      chips[1](chips[0].filter(function (chip) { return chip.path !== path; }));
+      chips[1](chips[0].filter(function (chip) { return (chip.key || chip.path) !== path; }));
       last[1]("remove " + named(path, chips[0]));
     },
     add: function () { open[1](!open[0]); last[1](open[0] ? "close picker" : "open picker"); },
@@ -125,12 +145,13 @@ function Demo() {
       open[1](false);
       last[1]("submit " + (repository ? repository.name : "saved"));
     },
-    select: function (path) { open[1](false); last[1]("select " + named(path, pickerModel.repositories)); }
+    select: function (path) { open[1](false); last[1]("select " + named(path, pickerModel.repositories)); },
+    replace: function (path) { open[1](false); last[1]("replace " + named(path, pickerModel.repositories)); }
   };
   return h(Stack, { axis: "v", spacing: 12, align: "leading" },
     h(Text, { size: 11, color: "secondary", testID: "js-last-action" }, "Last: ", last[0]),
     h(Chips, { model: chipsModel, on: on }),
-    open[0] ? h(Panel, { fill: "window", fillOpacity: 1, cornerRadius: 10, stroke: "primary", strokeOpacity: 0.12, testID: "js-repository-picker-panel" },
+    open[0] ? h(Panel, { fill: "window", fillOpacity: 1, cornerRadius: 10, stroke: "primary", strokeOpacity: 0.12, padding: 0, testID: "js-repository-picker-panel" },
       h(Picker, { model: pickerModel, on: on })) : null);
 }
 

@@ -22,6 +22,11 @@ import time
 import uuid
 from pathlib import Path
 
+# A run started inside a Playhouse conversation inherits the host app's bridge
+# socket; every subprocess must reach the daemon derived from this run's
+# service name instead.
+os.environ.pop("PLAYHOUSE_BRIDGE_SOCKET_PATH", None)
+
 
 MARKER_NAME = ".playhouse-live-integration-owner"
 MARKER_VALUE = "Playhouse live integration suite owns this disposable workspace (v1).\n"
@@ -126,6 +131,8 @@ class LiveWorkspace:
         self.environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
         self.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = str(self.data_directory / "preferences")
         self.environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = service_name
+        # Task status sounds play at volume 0, never through the host's speakers.
+        self.environment["PLAYHOUSE_MUTE_SOUNDS"] = "1"
 
     def run_cli(self, *command):
         result = subprocess.run(
@@ -362,6 +369,71 @@ def scenario_stop_active_turn(ws):
     record = ws.run_cli("task", "get", task_id)
     require(record["status"] in {"Blocked", "Waiting Response"}, f"A stopped turn should leave the task resumable: {record['status']}")
     return "stop an active turn from another process"
+
+
+def wait_for_in_progress(ws, task_id, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ws.run_cli("task", "get", task_id)["status"] == "In Progress":
+            return
+        time.sleep(0.05)
+    raise AssertionError("The sent message never moved the task to In Progress.")
+
+
+def scenario_stop_right_after_send(ws):
+    # Stop lands while the provider is still launching its turn, before anything is interruptible.
+    task_id = ws.create_task(f"{ws.provider} immediate stop integration")["id"]
+    turn = ws.start_turn(task_id, "Run exactly one shell command: `sleep 120 && printf 'EARLY_%s' NOT_EXPECTED`. Then reply with one short sentence.")
+    try:
+        wait_for_in_progress(ws, task_id)
+        stopped_at = time.monotonic()
+        stopped = ws.run_cli("conversation", "stop", task_id)
+        stop_seconds = time.monotonic() - stopped_at
+        require(stopped == {"interrupted": True}, f"Stop right after send should take effect: {stopped}")
+    except BaseException:
+        turn.process.terminate()
+        raise
+    status, final = turn.finish(timeout=90)
+    settle_seconds = time.monotonic() - stopped_at
+    require(not final.get("ok"), f"A stopped turn should not report success: {final}")
+    require(not any("EARLY_NOT_EXPECTED" in json.dumps(event) for event in turn.events), "The stopped turn still ran its command to completion.")
+    code = (final.get("error") or {}).get("code")
+    record = ws.run_cli("task", "get", task_id)
+    if code == "turn_stopped":
+        require(record["status"] != "In Progress", f"A message stopped before the agent started should not leave the task running: {record['status']}")
+    else:
+        require(record["status"] in {"Blocked", "Waiting Response"}, f"A stopped turn should leave the task resumable: {record['status']}")
+    print(f"  stop right after send: stop returned in {stop_seconds:.2f}s, send settled in {settle_seconds:.2f}s, error code {code}", flush=True)
+    token = f"AFTER_STOP_{uuid.uuid4().hex[:6].upper()}"
+    history, _ = ws.stream_turn(task_id, f"Do not run any command. Reply with exactly the token {token}.")
+    require(any(token in m["text"] for m in history["messages"] if m["role"] == "assistant"), "The conversation did not continue after an early Stop.")
+    return "stop right after send, then continue"
+
+
+def scenario_steer_right_after_send(ws):
+    # The steer is sent while the provider is still launching its turn and must still enter that turn.
+    task_id = ws.create_task(f"{ws.provider} immediate steer integration")["id"]
+    token = f"EARLY_STEER_{uuid.uuid4().hex[:6].upper()}"
+    prompt = "Run exactly one shell command: `sleep 8 && echo PLAYHOUSE_EARLY_STEER_DONE`. When it finishes, reply with one short sentence."
+    turn = ws.start_turn(task_id, prompt)
+    try:
+        wait_for_in_progress(ws, task_id)
+        steer_text = f"Also include the exact token {token} in your final reply."
+        steered_at = time.monotonic()
+        steered = ws.run_cli("conversation", "steer", task_id, "--message", steer_text)
+        steer_seconds = time.monotonic() - steered_at
+        require(steered == {"accepted": True, "queued": False}, f"Steer right after send should enter the launching turn: {steered}")
+    except BaseException:
+        turn.process.terminate()
+        raise
+    status, final = turn.finish()
+    require(status == 0 and final.get("ok"), f"The steered turn failed: {final}")
+    history = final["result"]
+    require(any(m["role"] == "user" and m["text"] == steer_text for m in history["messages"]), "The early steer is missing from history.")
+    require(any(token in m["text"] for m in history["messages"] if m["role"] == "assistant"), "The turn did not act on the early steer.")
+    require(ws.run_cli("conversation", "queue-list", task_id) == [], "A steer accepted by the launching turn must not be queued.")
+    print(f"  steer right after send: accepted in {steer_seconds:.2f}s", flush=True)
+    return "steer right after send"
 
 
 def scenario_concurrent_auto_branch(ws):
@@ -676,6 +748,8 @@ SHARED_SCENARIOS = [
     scenario_plan_edit_resume_and_reload,
     scenario_steer_active_turn,
     scenario_stop_active_turn,
+    scenario_stop_right_after_send,
+    scenario_steer_right_after_send,
     scenario_concurrent_auto_branch,
     scenario_bridged_skill_reaches_provider,
 ]

@@ -45,6 +45,9 @@ Pass --live-provider only when the guest has that provider's CLI and a login
 Environment:
   PLAYHOUSE_UI_TART_VM         VM name (default: playhouse-ui)
   PLAYHOUSE_UI_TART_ARTIFACTS  Host artifact root
+  PLAYHOUSE_UI_SCREEN_WIDTH    Guest screen width in points for the run (default: 1024)
+  PLAYHOUSE_UI_SCREEN_HEIGHT   Guest screen height in points for the run (default: 768)
+  PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS Per-case XCTest allowance (default: 180)
   --live-provider <provider>   Run live UI cases against claude or codex; guest access is required
   --stop-vm-after-run          Stop the persistent VM after this run
   --reset-vm-state             Reset guest app/test processes before this run
@@ -193,7 +196,7 @@ start_vm() {
 	if (( show_vm == 1 )); then
 		tart_display_args=(--vnc)
 	fi
-	python3 - "$launch_log" "${tart_display_args[@]}" \
+	python3 - "$launch_log" "${tart_display_args[@]}" --no-audio \
 		--dir="artifacts:${artifact_root}" \
 		"$vm_name" <<'PY' &
 import subprocess
@@ -250,6 +253,34 @@ guest_shares_artifact_root() {
 	tart exec "$vm_name" /bin/test -d "/Volumes/My Shared Files/artifacts/${run_id}" >/dev/null 2>&1
 }
 
+# Once the guest kernel has restarted its GPU (it writes a .gpuRestart report),
+# WebKit's GPU process keeps hanging until the VM reboots, and a web view's
+# content process can stall for good. A reused VM in that state is rebooted
+# before the run instead of failing WebKit cases partway through it.
+guest_gpu_restarted_since_boot() {
+	tart exec "$vm_name" /bin/bash -c '
+		boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed -E "s/^[{] sec = ([0-9]+),.*/\1/")
+		for report in /Library/Logs/DiagnosticReports/*.gpuRestart; do
+			[[ -e "$report" ]] || continue
+			(( $(/usr/bin/stat -f %m "$report") > boot )) && exit 0
+		done
+		exit 1
+	' >/dev/null 2>&1
+}
+
+# The VM lock is held, so no other run is using the VM being restarted.
+restart_vm() {
+	vm_attached=0
+	tart stop "$vm_name" >/dev/null 2>&1 || true
+	start_vm
+	wait_for_guest
+	# A failed stop leaves the old VM answering; never run against its share.
+	if ! guest_shares_artifact_root; then
+		printf 'Tart VM %s still does not share %s after a restart. Stop it with `tart stop %s` and rerun.\n' "$vm_name" "$artifact_root" "$vm_name" >&2
+		exit 74
+	fi
+}
+
 if tart list --format json | python3 -c '
 import json
 import sys
@@ -266,18 +297,13 @@ raise SystemExit(1)
 	# Directory shares are fixed at boot. This run's freshly created artifact
 	# directory is visible in the guest only if the VM shares this artifact root;
 	# otherwise it was booted by an older runner or with a different
-	# PLAYHOUSE_UI_TART_ARTIFACTS. The VM lock is held, so no run is using it.
+	# PLAYHOUSE_UI_TART_ARTIFACTS.
 	if ! guest_shares_artifact_root; then
 		printf 'Running Tart VM %s does not share %s (booted by another runner); restarting it with this artifact root.\n' "$vm_name" "$artifact_root"
-		vm_attached=0
-		tart stop "$vm_name" >/dev/null 2>&1 || true
-		start_vm
-		wait_for_guest
-		# A failed stop leaves the old VM answering; never run against its share.
-		if ! guest_shares_artifact_root; then
-			printf 'Tart VM %s still does not share %s after a restart. Stop it with `tart stop %s` and rerun.\n' "$vm_name" "$artifact_root" "$vm_name" >&2
-			exit 74
-		fi
+		restart_vm
+	elif guest_gpu_restarted_since_boot; then
+		printf 'Running Tart VM %s has restarted its GPU since boot (a .gpuRestart report in /Library/Logs/DiagnosticReports), which leaves WebKit hanging; restarting it.\n' "$vm_name"
+		restart_vm
 	fi
 else
 	start_vm
@@ -292,6 +318,66 @@ if (( show_vm == 1 )); then
 	fi
 	printf 'The VM display is open. Configure Accessibility permission in the guest if needed, then press Return to start the UI test (Ctrl-C to cancel).\n'
 	read -r
+fi
+
+# The guest picks its screen size at boot, and it has come up both 1024 and 2560 points wide.
+# Window sizes, layout limits and scroll extents in the UI cases follow from it, so every run
+# uses the same screen. The setter is compiled once into the guest and reused.
+ui_screen_width="${PLAYHOUSE_UI_SCREEN_WIDTH:-1024}"
+ui_screen_height="${PLAYHOUSE_UI_SCREEN_HEIGHT:-768}"
+if ! tart exec -i "$vm_name" /bin/bash -c '
+	set -e
+	tool_dir="$HOME/PlayhouseUITestRuns/bin"
+	mkdir -p "$tool_dir"
+	source="$tool_dir/set-display-mode.swift"
+	cat > "$source.new"
+	if ! cmp -s "$source.new" "$source" || [[ ! -x "$tool_dir/set-display-mode" ]]; then
+		mv "$source.new" "$source"
+		xcrun swiftc -O "$source" -o "$tool_dir/set-display-mode"
+	else
+		rm -f "$source.new"
+	fi
+	"$tool_dir/set-display-mode" "$1" "$2"
+' _ "$ui_screen_width" "$ui_screen_height" <<'SWIFT'
+import CoreGraphics
+import Foundation
+
+let arguments = CommandLine.arguments
+guard arguments.count == 3, let width = Int(arguments[1]), let height = Int(arguments[2]) else {
+	FileHandle.standardError.write(Data("usage: set-display-mode <width> <height>\n".utf8))
+	exit(2)
+}
+let display = CGMainDisplayID()
+if let current = CGDisplayCopyDisplayMode(display), current.width == width, current.height == height {
+	exit(0)
+}
+let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+let modes = (CGDisplayCopyAllDisplayModes(display, options) as? [CGDisplayMode]) ?? []
+guard let mode = modes.first(where: { $0.width == width && $0.height == height && $0.isUsableForDesktopGUI() }) else {
+	FileHandle.standardError.write(Data("No \(width)x\(height) display mode is available.\n".utf8))
+	exit(1)
+}
+var configuration: CGDisplayConfigRef?
+guard CGBeginDisplayConfiguration(&configuration) == .success,
+	  CGConfigureDisplayWithDisplayMode(configuration, display, mode, nil) == .success,
+	  CGCompleteDisplayConfiguration(configuration, .forSession) == .success else {
+	FileHandle.standardError.write(Data("Could not switch the display to \(width)x\(height).\n".utf8))
+	exit(1)
+}
+SWIFT
+then
+	printf 'Could not set the Tart guest screen to %sx%s points.\n' "$ui_screen_width" "$ui_screen_height" >&2
+	exit 1
+fi
+
+# The task status sounds the cases trigger would reach the host's speakers through Tart's
+# audio pass-through. The guest keeps its output device, so the app's sound playback (and
+# the cases asserting it) is unchanged, but its output is muted on every run, including a
+# reused VM.
+if ! guest_muted="$(tart exec "$vm_name" /usr/bin/osascript \
+	-e 'set volume output muted true' -e 'output muted of (get volume settings)' 2>/dev/null)" \
+	|| [[ "$guest_muted" != "true" ]]; then
+	printf 'Warning: could not mute the Tart guest audio output; task sounds may be audible on the host.\n' >&2
 fi
 
 printf 'Running UI tests in VM-local source snapshot...\n'
@@ -445,7 +531,7 @@ if (( reset_failed == 1 )); then
 	test_status=74
 else
 	set +e
-	PLAYHOUSE_UI_TART_GUEST=1 PLAYHOUSE_UI_TESTS_CONFIRMED=1 PLAYHOUSE_UI_DASHBOARD=0 TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
+	PLAYHOUSE_UI_TART_GUEST=1 PLAYHOUSE_UI_TESTS_CONFIRMED=1 PLAYHOUSE_UI_DASHBOARD=0 PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS="${PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS:-180}" TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
 	test_status=${PIPESTATUS[0]}
 	set -e
 fi

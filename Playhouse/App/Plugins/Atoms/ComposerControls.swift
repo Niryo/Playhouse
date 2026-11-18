@@ -1,6 +1,57 @@
 import AppKit
 import SwiftUI
 
+/// The composer's `@` mentions, for native owners only: the handles its editor colors,
+/// an edit that inserts a chosen mention, and the keys an open mention menu takes.
+struct ChatEditorMentions {
+    var handles: Set<String> = []
+    var edit: ChatEditorEdit? = nil
+    /// Returns whether the menu took the key; the editor handles it otherwise.
+    var onKey: ((ChatEditorKey) -> Bool)? = nil
+    /// Every time the editor starts or stops editing, unlike `isFocused`, which reports only
+    /// changes from the owner's value.
+    var onEditingChange: (Bool) -> Void = { _ in }
+}
+
+/// Replaces `range` (UTF-16) with `text` once per `id`, leaving the caret after it, as typing would.
+struct ChatEditorEdit: Equatable {
+    let id: Int
+    let range: NSRange
+    let text: String
+}
+
+enum ChatEditorKey {
+    case up, down, accept, dismiss
+}
+
+extension NSAttributedString.Key {
+    /// Marks the text of an `@` mention, which is drawn in the accent color.
+    static let playhouseMention = NSAttributedString.Key("PlayhouseMention")
+}
+
+extension NSAttributedString {
+    /// The texts drawn as mentions: each whole accent-colored run that holds a mention, so accent
+    /// color spilling onto the words around a mention shows in what is read back.
+    var drawnMentions: [String] {
+        var mentions: [String] = []
+        enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: length)) { value, range, _ in
+            guard (value as? NSColor) == NSColor.controlAccentColor else { return }
+            var marked = false
+            enumerateAttribute(.playhouseMention, in: range) { mention, _, stop in
+                if mention != nil { marked = true; stop.pointee = true }
+            }
+            if marked { mentions.append((string as NSString).substring(with: range)) }
+        }
+        return mentions
+    }
+
+    /// What a text view's accessibility title says about its drawn mentions, nil without any.
+    var drawnMentionsTitle: String? {
+        let mentions = drawnMentions
+        return mentions.isEmpty ? nil : "Mentions " + mentions.joined(separator: ", ")
+    }
+}
+
 // The native text view owns wrapping and document sizing. SwiftUI only receives
 // a bounded viewport height; it never asks a multiline TextField for its ideal size.
 struct NativeChatEditor: NSViewRepresentable {
@@ -18,6 +69,11 @@ struct NativeChatEditor: NSViewRepresentable {
     let onSubmit: () -> Void
     let onSteerSubmit: () -> Void
     let onPasteImage: (Data) -> Void
+    /// Escape, for a native owner that closes on it; without one the text view keeps its own.
+    var onCancel: (() -> Void)? = nil
+    /// The selected range, in UTF-16 offsets, whenever it changes.
+    var onSelectionChange: (NSRange) -> Void = { _ in }
+    var mentions = ChatEditorMentions()
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -26,7 +82,7 @@ struct NativeChatEditor: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
+        HoverRevealScrollers.install(on: scroll)
         let editor = ChatEditorTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
         editor.isRichText = false
         // Prompts carry code and commands; send exactly the quotes and dashes the user typed.
@@ -65,6 +121,8 @@ struct NativeChatEditor: NSViewRepresentable {
         editor.onSubmit = onSubmit
         editor.onSteerSubmit = onSteerSubmit
         editor.onPasteImage = onPasteImage
+        editor.onCancel = onCancel
+        editor.onMentionKey = mentions.onKey
         editor.isEditable = isEnabled
         editor.isSelectable = isEnabled
         editor.setAccessibilityHelp(accessibilityHelp)
@@ -75,6 +133,15 @@ struct NativeChatEditor: NSViewRepresentable {
             editor.string = text
             editor.undoManager?.removeAllActions()
             scroll.requestTextLayout()
+            editor.colorMentions(mentions.handles)
+        }
+        if context.coordinator.coloredHandles != mentions.handles {
+            context.coordinator.coloredHandles = mentions.handles
+            editor.colorMentions(mentions.handles)
+        }
+        if let edit = mentions.edit, edit.id != context.coordinator.handledEditID {
+            context.coordinator.handledEditID = edit.id
+            editor.apply(edit)
         }
         if isFocused, isEnabled, editor.window?.firstResponder !== editor {
             if let window = editor.window {
@@ -103,19 +170,36 @@ struct NativeChatEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeChatEditor
         var handledFocusRequest: Int
+        var handledEditID: Int?
+        var coloredHandles: Set<String> = []
         init(_ parent: NativeChatEditor) {
             self.parent = parent
             handledFocusRequest = parent.focusRequest
+            // An edit made before this editor existed is not replayed into it.
+            handledEditID = parent.mentions.edit?.id
         }
 
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? ChatEditorTextView else { return }
+            editor.colorMentions(parent.mentions.handles)
             parent.text = editor.string
             (editor.enclosingScrollView as? ChatEditorScrollView)?.requestTextLayout()
         }
 
-        func textDidBeginEditing(_ notification: Notification) { parent.isFocused = true }
-        func textDidEndEditing(_ notification: Notification) { parent.isFocused = false }
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let editor = notification.object as? NSTextView else { return }
+            parent.onSelectionChange(editor.selectedRange())
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.isFocused = true
+            parent.mentions.onEditingChange(true)
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.isFocused = false
+            parent.mentions.onEditingChange(false)
+        }
     }
 }
 
@@ -205,6 +289,13 @@ final class ChatEditorTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onSteerSubmit: (() -> Void)?
     var onPasteImage: ((Data) -> Void)?
+    var onCancel: (() -> Void)?
+    var onMentionKey: ((ChatEditorKey) -> Bool)?
+
+    override func cancelOperation(_ sender: Any?) {
+        guard let onCancel else { return super.cancelOperation(sender) }
+        onCancel()
+    }
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(paste(_:)),
@@ -215,6 +306,16 @@ final class ChatEditorTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if let onMentionKey, !hasMarkedText(), event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty {
+            let key: ChatEditorKey? = switch event.keyCode {
+            case 126: .up
+            case 125: .down
+            case 36, 76, 48: .accept
+            case 53: .dismiss
+            default: nil
+            }
+            if let key, onMentionKey(key) { return }
+        }
         if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText(), isEditable {
             if event.modifierFlags.contains(.shift) {
                 insertNewlineIgnoringFieldEditor(nil)
@@ -226,6 +327,35 @@ final class ChatEditorTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+
+    /// Colors each `@handle` of `handles` in the accent color and the rest as ordinary text.
+    func colorMentions(_ handles: Set<String>) {
+        guard let storage = textStorage, !hasMarkedText() else { return }
+        let matches = MentionText.handles(in: string, known: handles)
+        let whole = NSRange(location: 0, length: storage.length)
+        storage.beginEditing()
+        storage.removeAttribute(.playhouseMention, range: whole)
+        // Not `textColor`, which reads the first character's color: a draft opening with a mention
+        // would turn all of its text the accent color.
+        storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: whole)
+        for match in matches {
+            storage.addAttributes([.foregroundColor: NSColor.controlAccentColor, .playhouseMention: true], range: match.range)
+        }
+        storage.endEditing()
+        typingAttributes[.foregroundColor] = NSColor.textColor
+        typingAttributes[.playhouseMention] = nil
+        // Read back from what is drawn, so the title names exactly the mentions shown in color.
+        setAccessibilityTitle(storage.drawnMentionsTitle)
+    }
+
+    func apply(_ edit: ChatEditorEdit) {
+        guard edit.range.location >= 0, NSMaxRange(edit.range) <= (string as NSString).length else { return }
+        if window?.firstResponder !== self { window?.makeFirstResponder(self) }
+        guard shouldChangeText(in: edit.range, replacementString: edit.text) else { return }
+        textStorage?.replaceCharacters(in: edit.range, with: edit.text)
+        didChangeText()
+        setSelectedRange(NSRange(location: edit.range.location + (edit.text as NSString).length, length: 0))
     }
 
     override func paste(_ sender: Any?) {
