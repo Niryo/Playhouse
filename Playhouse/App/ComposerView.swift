@@ -21,14 +21,17 @@ struct ComposerModel: Codable, Equatable {
         var label: String
     }
 
-    /// The + menu: Goal (where the provider supports goals) and the modes. `text` is
-    /// "Goal" or "Plan" beside the symbol while either is on, which also tints it.
-    struct ModeMenu: Codable, Equatable {
-        var text: String?
-        var badgeIcon: String?
-        var active: Bool
-        var label: String
-        var items: [Item]
+    /// The Plan or Goal button. While `on` it shows an orange highlight; the two
+    /// are never on together.
+    struct ModeToggle: Codable, Equatable {
+        var on: Bool
+        var help: String
+    }
+
+    /// The attach button, which opens a file panel. It takes images for now.
+    struct Attach: Codable, Equatable {
+        var disabled: Bool
+        var help: String
     }
 
     /// The Start Implementing button of a finished plan; `unavailableReason` also
@@ -92,7 +95,10 @@ struct ComposerModel: Codable, Equatable {
     /// The Skills button leads the toolbar only where the conversation has no
     /// task sidebar (a standalone chat); a task's sidebar holds it instead.
     var skills: Bool
-    var modeMenu: ModeMenu
+    var attach: Attach
+    var plan: ModeToggle
+    /// Nil where the provider has no goals.
+    var goal: ModeToggle?
     var startImplementing: StartImplementing?
     var provider: ProviderMenu
     var model: ModelPicker
@@ -112,8 +118,11 @@ struct ComposerActions {
     /// The editor's selected range, in UTF-16 offsets.
     var selectionChange: (NSRange) -> Void = { _ in }
     var openSkills: () -> Void = {}
-    /// goal, mode:default or mode:plan.
-    var modeMenu: (String) -> Void = { _ in }
+    var attach: () -> Void = {}
+    /// Turns Plan mode on (and Goal off) or off.
+    var togglePlan: () -> Void = {}
+    /// Turns goal entry on (and Plan mode off) or off.
+    var toggleGoal: () -> Void = {}
     var startImplementing: () -> Void = {}
     var showRepositoryPicker: () -> Void = {}
     /// A provider's raw value.
@@ -128,7 +137,7 @@ struct ComposerActions {
 }
 
 /// The composer's box, composed only of plugin atoms: the editor, then the
-/// Skills button, the + menu, Start Implementing, the provider menu, the
+/// attach button, the Skills button, the Plan and Goal buttons, Start Implementing, the provider menu, the
 /// model button with its popover, the schedule button and the send, stop,
 /// continue or schedule control. What sits above the editor (`header`) and
 /// the schedule popover's content are native and handed in.
@@ -166,13 +175,21 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
 
     private var toolbar: some View {
         AtomStack(props: StackProps(axis: "h", spacing: 12)) {
+            attachButton
             if model.skills {
                 SkillsButton(testID: prefix + "open-skills-button", action: actions.openSkills)
             }
             if let pluginActions {
                 pluginActions
             }
-            modeMenu
+            modeToggle(model.plan, testID: "conversation-plan-button", label: "Plan mode", action: actions.togglePlan) { on in
+                AtomIcon(props: IconProps(name: "lightbulb.max", size: 13, weight: "medium", color: Self.modeColor(on)))
+            }
+            if let goal = model.goal {
+                modeToggle(goal, testID: "conversation-goal-button", label: "Goal", action: actions.toggleGoal) { on in
+                    AtomIcon(props: IconProps(asset: "GoalIcon", color: Self.modeColor(on)), common: AtomCommon(width: 15, height: 15))
+                }
+            }
             if let start = model.startImplementing {
                 startImplementing(start)
             }
@@ -186,21 +203,37 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
         }
     }
 
-    private var modeMenu: some View {
-        let mode = model.modeMenu
-        return AtomMenu(
-            props: MenuProps(
-                icon: "plus", size: 14, weight: "semibold", color: mode.active ? "accent" : "secondary",
-                text: mode.text, textSize: 11, textWeight: "semibold", badgeIcon: mode.badgeIcon,
-                items: [mode.items.map(menuItem)]
-            ),
-            common: AtomCommon(
-                testID: prefix + "conversation-mode-menu", label: mode.label,
-                help: "Change conversation mode or add context", minWidth: 30, minHeight: 31
-            ),
-            onMenu: actions.modeMenu
-        )
+    private var attachButton: some View {
+        AtomButton(
+            props: ButtonProps(disabled: model.attach.disabled),
+            common: AtomCommon(testID: prefix + "composer-attach-button", label: "Attach files", help: model.attach.help),
+            action: actions.attach
+        ) {
+            AtomPanel(props: PanelProps(fillOpacity: 0, cornerRadius: 13), common: AtomCommon(width: 26, height: 26, padding: 0)) {
+                AtomIcon(props: IconProps(name: "paperclip", size: 13, weight: "medium", color: "secondary"))
+            }
+        }
     }
+
+    /// A Plan or Goal button: its icon, on an orange highlight while the mode is on.
+    private func modeToggle<Icon: View>(
+        _ toggle: ComposerModel.ModeToggle, testID: String, label: String, action: @escaping () -> Void, @ViewBuilder icon: (Bool) -> Icon
+    ) -> some View {
+        let icon = icon(toggle.on)
+        return AtomButton(
+            common: AtomCommon(testID: prefix + testID, label: label, value: toggle.on ? "On" : "Off", help: toggle.help),
+            action: action
+        ) {
+            AtomPanel(
+                props: PanelProps(fill: "orange", fillOpacity: toggle.on ? 0.18 : 0, cornerRadius: 13),
+                common: AtomCommon(width: 26, height: 26, padding: 0)
+            ) {
+                icon
+            }
+        }
+    }
+
+    private static func modeColor(_ on: Bool) -> String { on ? "orange" : "secondary" }
 
     private var prefix: String { model.prefix }
 

@@ -31,13 +31,9 @@ extension PlayhouseUITests {
         try createTaskFixture(title: "Plan mode Markdown", roots: [fixture.primary.path])
         openTask(named: "Plan mode Markdown")
 
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
-        modeMenu.click()
-        let planMode = app.menuItems["Plan mode"]
-        XCTAssertTrue(planMode.waitToExist(timeout: 5))
-        planMode.click()
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        let planButton = element("conversation-plan-button")
+        let goalButton = element("conversation-goal-button")
+        setPlanMode(true)
 
         let taskID = try taskID(named: "Plan mode Markdown")
         let emptyConversation = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
@@ -46,17 +42,35 @@ extension PlayhouseUITests {
         let startImplementingInEmptyConversation = element("start-implementing-button")
         XCTAssertFalse(startImplementingInEmptyConversation.waitToExist(timeout: 2), "Plan mode should not offer Start Implementing before a first message exists.")
 
-        modeMenu.click()
-        let goalComposerMode = app.menuItems["conversation-mode-goal"]
-        XCTAssertTrue(goalComposerMode.waitToExist(timeout: 5))
-        goalComposerMode.click()
-        XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer should enter Goal mode.")
+        XCTAssertTrue(goalButton.waitToExist(timeout: 5), "A Codex task's composer should show the Goal button.")
+        XCTAssertLessThan(planButton.frame.maxX, goalButton.frame.minX + 1, "The Goal button sits right of the Plan button.")
+        XCTAssertGreaterThan(modeHighlightPixels("conversation-plan-button"), 20, "The Plan button is highlighted orange while plan mode is on.")
+        XCTAssertLessThan(modeHighlightPixels("conversation-goal-button"), 5, "The Goal button has no orange highlight while it is off.")
+        XCTAssertGreaterThan(modeBackgroundTintFraction(element("conversation-plan-button")), 0.25, "The Plan button's background is tinted orange while on.")
+        XCTAssertLessThan(modeBackgroundTintFraction(element("conversation-goal-button")), 0.05, "The Goal button's background has no orange tint while off.")
+        attachRegionScreenshot([element("composer-attach-button"), goalButton], named: "Composer close-up: Plan mode on")
+        goalButton.click()
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5), "The composer should enter Goal mode.")
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-plan-button") }, timeout: 5), "Entering Goal mode should turn plan mode off.")
         XCTAssertFalse(startImplementingInEmptyConversation.exists, "Entering Goal mode should not reveal Start Implementing in an empty conversation.")
-        modeMenu.click()
-        let planModeAfterGoal = app.menuItems["Plan mode"]
-        XCTAssertTrue(planModeAfterGoal.waitToExist(timeout: 5))
-        planModeAfterGoal.click()
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after Goal.")
+        XCTAssertTrue(waitUntil({ self.modeHighlightPixels("conversation-goal-button") > 20 }, timeout: 3), "The Goal button is highlighted orange while goal entry is on.")
+        XCTAssertLessThan(modeHighlightPixels("conversation-plan-button"), 5, "The Plan button loses its highlight when Goal turns on.")
+        XCTAssertGreaterThan(modeBackgroundTintFraction(element("conversation-goal-button")), 0.25, "The Goal button's background is tinted orange while on.")
+        XCTAssertLessThan(modeBackgroundTintFraction(element("conversation-plan-button")), 0.05, "The Plan button's background has no orange tint while off.")
+        attachRegionScreenshot([element("composer-attach-button"), goalButton], named: "Composer close-up: Goal on")
+        goalButton.click()
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-goal-button") }, timeout: 5), "Clicking the Goal button again should turn goal entry off.")
+        XCTAssertFalse(isModeOn("conversation-plan-button"), "Turning Goal off should not turn plan mode on.")
+        XCTAssertTrue(waitUntil({ self.modeHighlightPixels("conversation-goal-button") < 5 }, timeout: 3), "The Goal button loses its highlight when turned off.")
+        goalButton.click()
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5), "The Goal button turns goal entry back on.")
+        planButton.click()
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-plan-button") }, timeout: 5), "Plan mode should be selectable again after Goal.")
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-goal-button") }, timeout: 5), "Turning plan mode on should leave Goal mode.")
+        planButton.click()
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-plan-button") }, timeout: 5), "Clicking the Plan button again should turn plan mode off.")
+        planButton.click()
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-plan-button") }, timeout: 5), "Clicking the Plan button once more should turn plan mode back on.")
         let composer = element("message-composer")
 
         composer.click()
@@ -121,7 +135,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ streamingCode.exists && streamingCode.value as? String == "console.log(\"Hello, world!\");" }, timeout: 10),
                       "The completed code block should show all of its code; shown=\(String(describing: streamingCode.value)).")
         try FileManager.default.removeItem(at: deltaHold)
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should stay selected after a planning response completes.")
+        XCTAssertTrue(isModeOn("conversation-plan-button"), "Plan mode should stay selected after a planning response completes.")
         XCTAssertFalse(transcriptContains("<proposed_plan>"), "The plan should be shown automatically without its protocol wrapper.")
         XCTAssertFalse(transcriptContains("</proposed_plan>"), "The closing protocol wrapper should not be visible.")
 
@@ -141,11 +155,12 @@ extension PlayhouseUITests {
             return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
                 && turns.last?["conversationMode"] as? String == "plan"
         }, timeout: 30), "A follow-up instruction should complete another plan turn.")
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "A follow-up plan should leave Plan mode enabled.")
+        XCTAssertTrue(isModeOn("conversation-plan-button"), "A follow-up plan should leave Plan mode enabled.")
 
         element("back-to-board-button").click()
         openTask(named: "Plan mode Markdown")
-        XCTAssertTrue(element("conversation-mode-menu").label.contains("Plan mode"), "Reopening the task should preserve its planning mode.")
+        XCTAssertTrue(planButton.waitToExist(timeout: 10))
+        XCTAssertTrue(isModeOn("conversation-plan-button"), "Reopening the task should preserve its planning mode.")
         let reloadedHistory = try runCLI(
             ["conversation", "history", taskID],
             extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
@@ -290,7 +305,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(startImplementing.isEnabled, "Start Implementing should not require draft text.")
         XCTAssertFalse(element("start-implementing-unavailable-reason").exists, "A task with a working folder shows no missing-repository warning.")
         startImplementing.click()
-        XCTAssertTrue(waitUntil({ element("conversation-mode-menu").label.contains("Code mode") }, timeout: 5), "Starting implementation should switch the composer to Code mode.")
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-plan-button") }, timeout: 5), "Starting implementation should switch the composer to Code mode (Plan off).")
         XCTAssertTrue(waitUntil({
             let history = (try? runCLI(
                 ["conversation", "history", taskID],
@@ -328,13 +343,7 @@ extension PlayhouseUITests {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Plan without repository")
 
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
-        modeMenu.click()
-        let planMode = app.menuItems["Plan mode"]
-        XCTAssertTrue(planMode.waitToExist(timeout: 5))
-        planMode.click()
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        setPlanMode(true)
         let composer = element("message-composer")
         composer.click()
         composer.typeText("Plan the task.")
@@ -383,7 +392,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Start Implementing enabled once a repository is added")
 
         startImplementing.click()
-        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "Starting implementation switches the composer to Code mode.")
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-plan-button") }, timeout: 5), "Starting implementation switches the composer to Code mode (Plan off).")
         XCTAssertTrue(waitUntil({
             // The fixture reuses one user item ID per thread, so the handoff's user item replaces
             // the plan's in history; the fixture's own turn log below records their order.
@@ -449,11 +458,7 @@ extension PlayhouseUITests {
             XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-details")).contains(objective))
             expandButton.click()
 
-            let modeMenu = element("conversation-mode-menu")
-            modeMenu.click()
-            let goalMenuItem = app.menuItems["conversation-mode-goal"]
-            goalMenuItem.click()
-            XCTAssertTrue(modeMenu.label.contains("Goal"))
+            enterGoalMode()
             element("send-message-button").click()
             XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 5))
             XCTAssertTrue(element("codex-chat-error").label.contains("4,000 characters"))
@@ -493,18 +498,16 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("slash-command-goal").waitToExist(timeout: 5), "Typing /goal offers the command.")
         composer.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 5), "Choosing /goal removes the typed command.")
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
-        XCTAssertTrue(modeMenu.label.contains("Goal"))
+        let goalButton = element("conversation-goal-button")
+        XCTAssertTrue(goalButton.waitToExist(timeout: 5))
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5), "Choosing /goal turns the Goal button on.")
         element("send-message-button").click()
         XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 5), "Blank Goal text should show a validation error.")
         XCTAssertTrue(element("codex-chat-error").label.contains("4,000 characters"))
         XCTAssertTrue((try runCLI(["conversation", "goal", taskID, "get"])["result"] as? NSNull) != nil, "Blank Goal submission must not create an objective.")
 
-        modeMenu.click()
-        let goalMenuItem = app.menuItems["conversation-mode-goal"]
-        goalMenuItem.click()
-        XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer menu should provide Goal mode.")
+        enterGoalMode()
+        XCTAssertTrue(isModeOn("conversation-goal-button"), "The composer's Goal button should provide Goal mode.")
         composer.click()
         composer.typeText(objective)
         element("send-message-button").click()
@@ -587,8 +590,7 @@ extension PlayhouseUITests {
         composer.typeText("/goal")
         XCTAssertTrue(element("slash-command-goal").waitToExist(timeout: 5))
         composer.typeKey(.return, modifierFlags: [])
-        modeMenu.click()
-        app.menuItems["conversation-mode-goal"].click()
+        enterGoalMode()
         composer.click()
         composer.typeText(secondObjective)
         element("send-message-button").click()
@@ -733,10 +735,7 @@ extension PlayhouseUITests {
 
         // The window sets a Goal and follows the turn Codex starts for it.
         let objective = "Keep the shared server running."
-        let modeMenu = element("conversation-mode-menu")
-        modeMenu.click()
-        app.menuItems["conversation-mode-goal"].click()
-        XCTAssertTrue(modeMenu.label.contains("Goal"))
+        enterGoalMode()
         let composer = element("message-composer")
         composer.click()
         composer.typeText(objective)

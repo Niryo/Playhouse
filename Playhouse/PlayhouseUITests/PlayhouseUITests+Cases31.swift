@@ -331,10 +331,12 @@ extension PlayhouseUITests {
         XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, terminal.frame.minX + 1, "The toolbar placeholder sits beside the Terminal button.")
         XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, element("open-skills-button").frame.minX + 1, "It sits before the Skills button too.")
         XCTAssertLessThan(abs(toolbarPlaceholder.frame.midY - terminal.frame.midY), 4, "It shares the Terminal button's row.")
-        // A task keeps its Skills button in the sidebar, so the composer's toolbar starts with the placeholder.
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertLessThanOrEqual(composerPlaceholder.frame.maxX, modeMenu.frame.minX + 1, "The composer placeholder leads the composer's toolbar, before the mode menu.")
-        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - modeMenu.frame.midY), 4, "It shares the mode menu's row.")
+        // A task keeps its Skills button in the sidebar, so the composer's toolbar puts the
+        // placeholder right after its attach button.
+        let planButton = element("conversation-plan-button")
+        XCTAssertLessThanOrEqual(element("composer-attach-button").frame.maxX, composerPlaceholder.frame.minX + 1, "The composer placeholder follows the attach button.")
+        XCTAssertLessThanOrEqual(composerPlaceholder.frame.maxX, planButton.frame.minX + 1, "The composer placeholder sits before the Plan button.")
+        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - planButton.frame.midY), 4, "It shares the Plan button's row.")
         XCTAssertGreaterThan(sidebarPlaceholder.frame.minY, element("hide-task-sidebar-button").frame.maxY, "The sidebar placeholder is a section below the header.")
         XCTAssertLessThan(sidebarPlaceholder.frame.maxY, terminal.frame.minY, "It sits above the command row.")
         let changesTitle = element("workspace-changes-title")
@@ -1283,7 +1285,7 @@ extension PlayhouseUITests {
         for _ in 0..<4 { composer.typeKey(.leftArrow, modifierFlags: [.shift]) }
         let composerEntry = element("plugin-entry-context-composer")
         XCTAssertTrue(composerEntry.waitToExist(timeout: 5))
-        XCTAssertLessThanOrEqual(composerEntry.frame.maxX, element("conversation-mode-menu").frame.minX + 1, "Its button leads the composer's toolbar.")
+        XCTAssertLessThanOrEqual(composerEntry.frame.maxX, element("conversation-plan-button").frame.minX + 1, "Its button sits before the Plan button in the composer's toolbar.")
         XCTAssertEqual(abs(element("open-skills-button").frame.midY - element("toggle-terminal-button").frame.midY), 0, accuracy: 2, "A task's only Skills button is the sidebar's, beside the terminal button.")
         composerEntry.click()
         let popover = app.popovers.descendants(matching: .any)["plugin-surface-context-composer"]

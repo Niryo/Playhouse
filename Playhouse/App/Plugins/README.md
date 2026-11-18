@@ -54,7 +54,8 @@ the picker and each chip's settings as popovers, and the settings stay
 native. Change it whenever the chips or the picker change;
 `test_plugin_repository_chips_renders_from_atoms_like_native` compares those
 two. `catalog/Composer.js` does the same for `ComposerView`, the conversation
-composer's box: the editor, the Skills button, the + mode menu, Start
+composer's box: the editor, the attach button, the Skills button, the Plan
+and Goal buttons (an orange highlight while on, never both), Start
 Implementing, the provider menu, the model button with its popover, the
 schedule button and the send, stop, continue or schedule control. The
 conversation (`TaskConversationView.composer`) derives a `ComposerModel` and

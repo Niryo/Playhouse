@@ -48,10 +48,7 @@ extension PlayhouseUITests {
 
         // A pending blocking question shows Waiting Response while its turn still runs.
         openTask(named: "Manual review menu")
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
-        modeMenu.click()
-        app.menuItems["Plan mode"].click()
+        setPlanMode(true)
         element("message-composer").click()
         element("message-composer").typeText("Please share your plan.")
         element("send-message-button").click()
@@ -233,10 +230,7 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any])
         let waitingTaskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Direct waiting done")
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
-        modeMenu.click()
-        app.menuItems["Plan mode"].click()
+        setPlanMode(true)
         element("message-composer").click()
         element("message-composer").typeText("Please share your plan.")
         element("send-message-button").click()

@@ -333,7 +333,7 @@ extension TaskConversationView {
             errorMessage = error.localizedDescription
             if action == "set" {
                 draft = objective ?? ""
-                isEnteringGoal = true
+                enterGoal()
                 activeGoal = try? await conversationManager.goal(taskID: task.id)
             }
             return false
@@ -1033,6 +1033,17 @@ extension TaskConversationView {
     func setConversationMode(_ mode: ConversationMode) {
         conversationMode = mode
         WorkspaceSettings.preferencesStore.set(mode.rawValue, forKey: conversationModeDefaultsKey)
+    }
+
+    /// Plan mode and goal entry are never on together: turning one on turns the other off.
+    func enterPlanMode() {
+        isEnteringGoal = false
+        setConversationMode(.plan)
+    }
+
+    func enterGoal() {
+        isEnteringGoal = true
+        if conversationMode == .plan { setConversationMode(.code) }
     }
 
     func startImplementingPlan() {

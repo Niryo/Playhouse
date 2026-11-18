@@ -1,6 +1,7 @@
 import AppKit
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 
 extension TaskConversationView {
     // MARK: @ mentions
@@ -212,10 +213,9 @@ extension TaskConversationView {
             }
             replaceSlash(active, with: "")
             if entry.command == .goal {
-                isEnteringGoal = true
+                enterGoal()
             } else {
-                isEnteringGoal = false
-                setConversationMode(.plan)
+                enterPlanMode()
             }
             return
         }
@@ -1132,5 +1132,35 @@ extension TaskConversationView {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         try addImage(bitmap, preferJPEG: wasOversizedInput)
+    }
+
+    /// The attach button's file panel. Only images can be attached for now; other file
+    /// types widen `allowedContentTypes` once the conversation can send them.
+    func chooseAttachments() {
+        let panel = NSOpenPanel()
+        panel.title = "Attach files"
+        panel.prompt = "Attach"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image]
+        panel.begin { response in
+            guard response == .OK else { return }
+            let urls = panel.urls
+            DispatchQueue.main.async {
+                // One unreadable, over-limit or non-image file does not drop the rest; the first error is shown.
+                // Go to Folder can still pick a file the panel's type filter greys out, so the type is checked here too.
+                var firstError: String?
+                for url in urls {
+                    guard (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType?.conforms(to: .image) == true else {
+                        firstError = firstError ?? "Only images can be attached for now; \(url.lastPathComponent) is not an image."
+                        continue
+                    }
+                    do { try addImageData(try Data(contentsOf: url)) } catch { firstError = firstError ?? error.localizedDescription }
+                }
+                if let firstError { errorMessage = firstError }
+                composerDraft.focusRequest += 1
+            }
+        }
     }
 }

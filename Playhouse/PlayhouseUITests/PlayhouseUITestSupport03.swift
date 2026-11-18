@@ -666,6 +666,41 @@ extension PlayhouseUITests {
     func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
+    /// Whether the composer's Plan or Goal toggle button reports itself on.
+    func isModeOn(_ identifier: String) -> Bool {
+        element(identifier).value as? String == "On"
+    }
+    /// Orange pixels in a Plan or Goal button: its highlight and icon turn orange while it is on.
+    func modeHighlightPixels(_ identifier: String) -> Int {
+        orangePixelCount(in: element(identifier).screenshot())
+    }
+    /// The share of a Plan or Goal button's pixels carrying its faint orange background fill,
+    /// wherever the fill sits in the element's frame: warm but far paler than the orange icon.
+    func modeBackgroundTintFraction(_ button: XCUIElement) -> CGFloat {
+        let image = button.screenshot().image
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil), cgImage.width * cgImage.height > 0 else { return 0 }
+        let tinted = pixelCount(in: image) { color in
+            let warmth = color.redComponent - color.blueComponent
+            return warmth > 0.06 && warmth < 0.35
+        }
+        return CGFloat(tinted) / CGFloat(cgImage.width * cgImage.height)
+    }
+    /// Turns the composer's plan mode on or off with its Plan button; off is Code mode.
+    func setPlanMode(_ on: Bool, file: StaticString = #filePath, line: UInt = #line) {
+        let planButton = element("conversation-plan-button")
+        XCTAssertTrue(planButton.waitToExist(timeout: 10), "The composer should show its Plan button.", file: file, line: line)
+        if isModeOn("conversation-plan-button") != on { planButton.click() }
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-plan-button") == on }, timeout: 5),
+                      "The Plan button should turn plan mode \(on ? "on" : "off").", file: file, line: line)
+    }
+    /// Opens the composer's goal entry with its Goal button.
+    func enterGoalMode(file: StaticString = #filePath, line: UInt = #line) {
+        let goalButton = element("conversation-goal-button")
+        XCTAssertTrue(goalButton.waitToExist(timeout: 10), "The composer should show its Goal button.", file: file, line: line)
+        if !isModeOn("conversation-goal-button") { goalButton.click() }
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5),
+                      "The Goal button should open the goal entry.", file: file, line: line)
+    }
     @discardableResult
     func waitForSideChatBubble(
         at selection: XCUIElement? = nil, centered: Bool = false, hintScreenshot: String? = nil,
