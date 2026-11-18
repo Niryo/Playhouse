@@ -599,7 +599,7 @@ extension PlayhouseUITests {
                              "Reopening should restore the cross-paragraph highlight on its last paragraph.")
         attachScreenshot(named: "Restored comment spanning two reply paragraphs")
     }
-    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
+    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls, keeping its text clear of the scroller. The bubble shows its messages in 14-point text, the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
     func test_side_chat_forks_claude_conversation_read_only() throws {
         _ = try installClaudeFixture(named: "claude-fixture-side-chat")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
@@ -624,7 +624,7 @@ extension PlayhouseUITests {
         let compact = opened.bubble.frame
         XCTAssertLessThanOrEqual(compact.maxY, opened.reply.frame.minY + 4,
                                  "The bubble should open above the selected text (bubble \(compact), selection \(opened.reply.frame)).")
-        XCTAssertLessThan(compact.width, 480, "A new side chat bubble should start compact (\(compact)).")
+        XCTAssertTrue((440...470).contains(compact.width), "A new side chat bubble should start compact, 480 points wide with its padding (\(compact)).")
         XCTAssertLessThan(compact.height, 300, "A new side chat bubble should start compact (\(compact)).")
         let bubbleElements = opened.bubble.descendants(matching: .any)
         XCTAssertTrue(bubbleElements.matching(identifier: "add-comment-button").firstMatch.exists,
@@ -647,6 +647,15 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ opened.bubble.frame.width > compact.width + 60 && opened.bubble.frame.height > compact.height + 40 }, timeout: 5),
                       "The bubble should grow to wrap the conversation (compact \(compact), now \(opened.bubble.frame)).")
         let afterFirstAnswer = opened.bubble.frame
+        // The one-line question sits in a bubble 6pt above and below its text, so the row's height
+        // tells its font size apart from the 12.5-point text the side chat used to have.
+        let lineHeight = { (size: CGFloat) -> CGFloat in
+            let font = NSFont.systemFont(ofSize: size)
+            return font.ascender - font.descender + font.leading
+        }
+        let question = element("side-chat-user-message-0")
+        XCTAssertGreaterThan(question.frame.height, 12 + (lineHeight(12.5) + lineHeight(14)) / 2,
+                             "The side chat's messages should use 14-point text (question row \(question.frame)).")
         attachScreenshot(named: "Side chat answer with the task's context")
         // The bubble's own model picker: another model for the side chat, not for the task.
         let taskModelBefore = String(describing: try runCLI(["conversation", "model", opened.taskID])["result"] ?? "nil")
@@ -682,16 +691,29 @@ extension PlayhouseUITests {
         for index in stride(from: 7, through: 11, by: 2) {
             _ = sendSideChatMessage("Another point, number \(index)?", answerIndex: index, containing: "Side chat follow-up")
         }
-        XCTAssertTrue(waitUntil({ (330...342).contains(transcript.frame.height) }, timeout: 5),
+        XCTAssertTrue(waitUntil({ (430...442).contains(transcript.frame.height) }, timeout: 5),
                       "A long side chat should reach the transcript's maximum height (\(transcript.frame)).")
+        // The bubble animates its growth, so it reaches the transcript's range before it settles.
+        XCTAssertTrue(waitForStableFrame(opened.bubble), "The side chat bubble should settle at its maximum height (\(opened.bubble.frame)).")
         let capped = opened.bubble.frame
+        XCTAssertTrue((620...645).contains(capped.width), "A side chat with messages should be 660 points wide with its padding, room for its bigger text (\(capped)).")
+        // The overlay scroller floats over the transcript's trailing edge, so the messages stop short of it.
+        let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .overlay)
+        for identifier in ["side-chat-user-message-0", "side-chat-assistant-message-1"] {
+            let message = element(identifier)
+            XCTAssertLessThanOrEqual(message.frame.maxX, transcript.frame.maxX - scrollerWidth + 1,
+                                     "\(identifier) should stay clear of the scroller (message \(message.frame), transcript \(transcript.frame)).")
+        }
         let lastAnswer = sendSideChatMessage("One more point?", answerIndex: 13, containing: "Side chat follow-up")
         XCTAssertEqual(opened.bubble.frame.height, capped.height, accuracy: 2, "At its maximum the bubble stops growing.")
         XCTAssertTrue(waitUntil({ transcript.frame.contains(CGPoint(x: lastAnswer.frame.midX, y: lastAnswer.frame.maxY - 2)) }, timeout: 5),
                       "The newest answer should be scrolled into view (answer \(lastAnswer.frame), transcript \(transcript.frame)).")
         let firstQuestion = element("side-chat-user-message-0")
         XCTAssertLessThan(firstQuestion.frame.maxY, transcript.frame.minY + 1, "The first exchange should have scrolled out of view.")
-        attachElementScreenshot(opened.bubble, named: "Side chat bubble at its maximum height, scrolled to the newest answer")
+        // Its scroller shows only while the pointer is over the transcript.
+        transcript.hover()
+        Thread.sleep(forTimeInterval: 0.4)
+        attachElementScreenshot(opened.bubble, named: "Side chat bubble at its maximum height, scrolled to the newest answer, its scroller beside the text")
         XCTAssertTrue(waitUntil({
             transcript.scroll(byDeltaX: 0, deltaY: 400)
             return transcript.frame.contains(CGPoint(x: firstQuestion.frame.midX, y: firstQuestion.frame.midY))
