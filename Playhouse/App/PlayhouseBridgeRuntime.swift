@@ -652,7 +652,8 @@ final class PlayhouseBridgeRuntime {
             case "plugin.versions":
                 let library = try pluginLibrary()
                 let id = try request.requiredString("pluginID")
-                result = .object(["versions": .array(try library.versions(id: id).map { .integer($0) })])
+                result = .object(["versions": .array(try library.versions(id: id).map { .integer($0) }),
+                                  "hasChanges": .boolean(library.hasDraftChanges(id: id))])
             case "plugin.save", "plugin.discard", "plugin.restore":
                 let library = try pluginLibrary()
                 let id = try request.requiredString("pluginID")
@@ -669,6 +670,10 @@ final class PlayhouseBridgeRuntime {
                   return try await taskManager.withPluginEditorsReserved(id: id) {
                     switch request.command {
                     case "plugin.save":
+                        // Publishing an unchanged draft would only add an identical version.
+                        if library.isInstalled(id: id), !library.hasDraftChanges(id: id) {
+                            throw BridgeCommandError(code: "invalid_argument", message: "The plugin has no unpublished changes.")
+                        }
                         let published = try library.saveDraft(id: id)
                         return .object(["plugin": try Self.value(published.plugin), "revision": .integer(settings.bumpPluginsRevision()),
                                         "draftSyncFailed": .boolean(published.draftSyncFailed)])
