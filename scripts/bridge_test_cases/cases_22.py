@@ -954,7 +954,7 @@ class BridgeTestCases22:
         self.assertIn("Claude Code wasn't found", failed["statusMessage"], "The message names why the run couldn't start.")
         self.assertEqual(failed["savedPrompt"], "Tell me a story.")
         self.assertTrue(failed["hasUnsentDraft"], "The prompt waits as the draft for a retry.")
-    # case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and in the Scheduled Tasks popover. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is cleared a later run reaches Review in PR mode. The template's last run is the latest run, and the Scheduled Tasks popover's Open Last Run closes the popover and opens that run, so going back from it returns to the board.
+    # case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and in the Scheduled Tasks popover. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is changed to PR a later run reaches Review in PR mode. Saving PR for the tasks saved while PR was the default (once, at a first launch since Manual became the default) leaves such a run with no mode of its own, still inheriting its schedule's, while a run whose schedule was deleted gets PR saved as its own. The template's last run is the latest run, and the Scheduled Tasks popover's Open Last Run closes the popover and opens that run, so going back from it returns to the board.
     def test_schedule_recurring_template_hidden_and_spawns_runs(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-recurring")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
@@ -994,6 +994,13 @@ class BridgeTestCases22:
         self.assertIn("Tell me a story.", self.fixture_user_prompts(executable))
         self.assertIsNone(self.pull_request_mode(run_id), "A run saves no mode of its own.")
         self.wait_for(lambda: review_modes(run_id) == ["manual"], "The run reached Review in its schedule's Manual mode.")
+        # Saving PR for the tasks saved while PR was the default leaves a run whose schedule exists
+        # inheriting its schedule's mode.
+        subprocess.run(["/usr/bin/defaults", "delete", self.defaults_suite, "existingTaskPullRequestModesPinned"], check=False, capture_output=True)
+        self.assertFalse(self.default_exists("existingTaskPullRequestModesPinned"))
+        self.assertIsNone(self.pull_request_mode(run_id), "A run whose schedule exists keeps no mode of its own.")
+        self.assertEqual(self.pull_request_mode(template_id), "manual", "A schedule's chosen mode is kept.")
+        self.assertTrue(self.default_exists("existingTaskPullRequestModesPinned"))
         self.assertIn(run_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A run is followed on the board.")
         after = self.assert_success(self.call_cli("task", "get", template_id)[0])
         self.assertEqual(after["schedule"]["lastRunTaskID"], run_id)
@@ -1009,12 +1016,12 @@ class BridgeTestCases22:
         resumed = self.assert_success(self.call_cli("schedule", "resume", template_id)[0])
         self.assertFalse(resumed["schedule"]["paused"])
 
-        self.set_pull_request_mode(template_id, None)
+        self.set_pull_request_mode(template_id, "pr")
         now_run = self.assert_success(self.call_cli("schedule", "run-now", template_id, extra_environment=environment)[0])
         self.assertFalse(now_run["dropped"])
         self.assertNotIn(now_run["taskID"], {run_id, template_id})
         self.wait_for_task_status(now_run["taskID"], {"Review"})
-        self.wait_for(lambda: review_modes(now_run["taskID"]) == ["pr"], "With the schedule's mode cleared, a run is in PR mode.")
+        self.wait_for(lambda: review_modes(now_run["taskID"]) == ["pr"], "With the schedule set to PR, a run is in PR mode.")
         last_run = [task for task in self.assert_success(self.call_cli("schedule", "list")[0])["tasks"] if task["id"] == template_id][0]
         self.assertEqual(last_run["schedule"]["lastRunTaskID"], now_run["taskID"], "The template's last run is the latest one, which the page opens.")
 
@@ -1022,6 +1029,12 @@ class BridgeTestCases22:
         self.assertIsNone(cleared.get("schedule"))
         self.assertIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "Clearing the schedule puts the task on the board.")
         self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
+        # A run whose schedule is gone was in PR mode while PR was the default, so it gets PR saved as its own.
+        self.assertTrue(self.assert_success(self.call_cli("task", "delete", template_id)[0])["deleted"])
+        subprocess.run(["/usr/bin/defaults", "delete", self.defaults_suite, "existingTaskPullRequestModesPinned"], check=False, capture_output=True)
+        self.assertFalse(self.default_exists("existingTaskPullRequestModesPinned"))
+        self.assertEqual(self.pull_request_mode(run_id), "pr", "A run whose schedule was deleted gets PR saved as its own.")
+        self.assertTrue(self.default_exists("existingTaskPullRequestModesPinned"))
     # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks popover beside it, over the board, whose New Task (header, or the button in the empty popover) closes the popover and opens a task conversation with the schedule hint already open on Recurring; opening a scheduled task from it closes it too, so going back returns to the bare board. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the popover. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, the message stays in the composer as its draft and Send sends again while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove leaves the message in the composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     def test_scheduled_task_edit_and_page_management(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-edit")

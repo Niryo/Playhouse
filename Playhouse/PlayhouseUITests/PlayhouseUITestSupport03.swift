@@ -395,7 +395,7 @@ extension PlayhouseUITests {
     func setPullRequestMode(_ mode: String?, taskID: String) throws {
         _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", taskID, "--value", mode.map { "\"\($0)\"" } ?? "null"])
     }
-    /// The mode the `pull-request-mode` plugin keeps for a task, or nil for the default (PR).
+    /// The mode the `pull-request-mode` plugin keeps for a task, or nil for the default (Manual).
     func pullRequestMode(taskID: String) throws -> String? {
         let result = try runCLI(["plugin", "state", "--id", "pull-request-mode"])["result"] as? [String: Any]
         return (result?["state"] as? [String: Any])?[taskID] as? String
