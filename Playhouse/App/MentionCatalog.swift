@@ -42,7 +42,8 @@ struct MentionItem: Codable, Equatable, Identifiable, Sendable {
 }
 
 /// Everything a task's composer can mention, ordered skills, MCP servers, agents,
-/// repositories, then other tasks, plus the IDs of the most recently sent mentions.
+/// repositories, then the other tasks on the board (never Done ones), plus the IDs of the
+/// most recently sent mentions.
 struct MentionCatalog: Codable, Equatable, Sendable {
     static let recentLimit = 10
 
@@ -191,7 +192,7 @@ enum MentionText {
 
 /// Builds a task's mention catalog from the same skill and MCP catalogs the Skills page
 /// shows, the agents both providers define, the repositories under the repository root and the
-/// other board tasks; expands a sent message's mentions; and remembers the recent ones. The GUI
+/// other tasks on the board, leaving out Done ones as the board does; expands a sent message's mentions; and remembers the recent ones. The GUI
 /// and the CLI reach it through the same bridge command, and every send goes through `expand`.
 @MainActor
 final class MentionCatalogManager {
@@ -335,8 +336,10 @@ final class MentionCatalogManager {
         }
     }
 
+    /// The board's tasks other than `taskID`, newest first. Done tasks are off the board, so a
+    /// mention of one, even a recent one, no longer resolves and is sent as typed.
     private func taskItems(excluding taskID: UUID, tasks: BoardTaskManager) -> [MentionItem] {
-        ((try? tasks.list()) ?? []).filter { $0.id != taskID }.sorted { $0.createdAt > $1.createdAt }.map { record in
+        ((try? tasks.list()) ?? []).filter { $0.id != taskID && $0.status != TaskStatus.done.rawValue }.sorted { $0.createdAt > $1.createdAt }.map { record in
             var reference = "the Playhouse board task \"\(record.title)\" (ID \(record.id.uuidString), status \(record.status))"
             let worktrees = record.repositoryWorktrees.map { "`\($0.worktreePath)`" }
             if !worktrees.isEmpty { reference += ", whose worktrees are " + worktrees.joined(separator: ", ") }
