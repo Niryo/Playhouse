@@ -12,14 +12,20 @@ the test that started it. Routes:
   POST /echo      200 JSON {"method", "token" (the X-Token header), "contentType", "body"}
   GET  /missing   404 text "nothing here"
   GET  /redirect  302 to /greeting
+  GET  /avatar.png        200 image/png, Cache-Control: no-store: a 16 x 8 picture, red on the left, blue on the right
+  GET  /not-an-image.png  200 image/png whose body is text, so it doesn't decode
   GET  /requests  200 JSON: every request before this one, [{"method", "path", "token", "body"}]
 """
 
+import base64
 import json
 import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# The Image atom case's picture, the same one its UI case serves.
+AVATAR_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAABAAAAAICAIAAAB/FOjAAAAAGElEQVR42mN46uGLFdkl38WKGEY10EIDAHRHvgHbOOZdAAAAAElFTkSuQmCC")
 
 requests = []
 requests_lock = threading.Lock()
@@ -30,7 +36,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def respond(self, status, body, content_type="application/json", headers=None):
-        data = body.encode("utf-8")
+        data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -56,6 +62,10 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, "nothing here", content_type="text/plain")
         elif method == "GET" and self.path == "/redirect":
             self.respond(302, "", content_type="text/plain", headers={"Location": "/greeting"})
+        elif method == "GET" and self.path == "/avatar.png":
+            self.respond(200, AVATAR_PNG, content_type="image/png", headers={"Cache-Control": "no-store"})
+        elif method == "GET" and self.path == "/not-an-image.png":
+            self.respond(200, "not a picture", content_type="image/png", headers={"Cache-Control": "no-store"})
         else:
             self.respond(405 if self.path in ("/greeting", "/echo", "/missing", "/redirect") else 404, "unexpected", content_type="text/plain")
 

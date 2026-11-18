@@ -158,6 +158,12 @@ It uses these globals:
   `network_error`. Plain `http` only reaches IP addresses and local hosts; use
   `https` for other hosts. While `plugin refresh` validates a plugin, `fetch`
   rejects with `unavailable`, so handle the rejection.
+- To show a picture (a profile picture, a thumbnail), use the `Image` atom
+  with its `url` (`https`, local `http`, `file://` or `data:image/…`) rather
+  than `fetch`, whose bodies are text: `h(Image, { url: avatarURL, size: 32,
+  circle: true, placeholder: "person.crop.circle", label: name })`. The app
+  loads and caches it, and shows the `placeholder` symbol while it loads or
+  when it fails. Give it a `label` unless it is decorative.
 - `setTimeout`, `setInterval`, `console`.
 
 Compose only atoms. Raw strings go only inside a `Text`. The atoms, their props

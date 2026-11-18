@@ -155,6 +155,71 @@ struct AtomIcon: View {
     }
 }
 
+/// A picture from a URL, loaded and cached by `AtomImageLoader`, showing its
+/// placeholder while it loads and when it fails.
+struct AtomImage: View {
+    var props: ImageProps
+    var common = AtomCommon()
+
+    /// The last load this view finished, for the URL it was made for.
+    @State private var loaded: (url: URL, image: NSImage?)?
+
+    var body: some View {
+        let source = props.source
+        let image = source.flatMap { source in
+            loaded?.url == source ? loaded?.image : AtomImageLoader.shared.cached(source)
+        }
+        let width = (props.size ?? common.width).map { CGFloat($0) }
+        let height = (props.size ?? common.height).map { CGFloat($0) }
+        Color.clear
+            // Without both sides set, the picture's own aspect ratio sizes it.
+            .modifier(Applied(when: width == nil || height == nil) {
+                $0.aspectRatio(image.map { $0.size.height > 0 ? $0.size.width / $0.size.height : 1 } ?? 1, contentMode: .fit)
+            })
+            .frame(width: width, height: height)
+            .overlay {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: props.contentMode == "fit" ? .fit : .fill)
+                } else {
+                    placeholder
+                }
+            }
+            .clipShape(shape)
+            .contentShape(shape)
+            .modifier(Applied(when: common.label == nil) { $0.accessibilityHidden(true) })
+            .modifier(Applied(when: common.label != nil) {
+                $0.accessibilityElement(children: .ignore).accessibilityAddTraits(.isImage)
+            })
+            .atomCommon(common, atom: .image)
+            .task(id: source) {
+                guard let source, AtomImageLoader.shared.cached(source) == nil else { return }
+                let image = await AtomImageLoader.shared.load(source)
+                if !Task.isCancelled { loaded = (source, image) }
+            }
+    }
+
+    private var shape: AnyShape {
+        if props.circle == true { return AnyShape(Circle()) }
+        if let radius = props.cornerRadius { return AnyShape(RoundedRectangle(cornerRadius: CGFloat(radius), style: .continuous)) }
+        return AnyShape(Rectangle())
+    }
+
+    private var placeholder: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Rectangle().fill(.primary.opacity(0.06))
+                if let name = props.placeholder {
+                    Image(systemName: name)
+                        .font(.system(size: max(1, min(proxy.size.width, proxy.size.height) * 0.5)))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
 struct AtomLabel: View {
     var props: LabelProps
     var common = AtomCommon()
