@@ -17,26 +17,38 @@ func daemonLog(_ message: String) {
 final class DaemonLifecycle: @unchecked Sendable {
     private let lock = NSLock()
     private var openConnections = 0
+    /// Connections accepted after a shutdown began, which are only ever refused, and when the last arrived.
+    private var lateConnections = 0
+    private var lastLateConnection = Date.distantPast
     private var inFlightRequests = 0
     private var idleWorkItem: DispatchWorkItem?
     private let gracePeriod: TimeInterval
     /// Runs before an idle exit, off the main thread, and returns once it finished.
     var beforeIdleExit: (() -> Void)?
+    /// Removes the socket path, so later callers start the daemon that follows this one.
+    var releaseSocketPath: (() -> Void)?
 
     init(gracePeriod: TimeInterval = 10) {
         self.gracePeriod = gracePeriod
     }
 
-    func connectionOpened() {
+    /// Returns whether the connection arrived after a shutdown began.
+    func connectionOpened() -> Bool {
         lock.lock()
+        defer { lock.unlock() }
         openConnections += 1
         cancelIdleTimerLocked()
-        lock.unlock()
+        if stopping {
+            lateConnections += 1
+            lastLateConnection = Date()
+        }
+        return stopping
     }
 
-    func connectionClosed() {
+    func connectionClosed(late: Bool) {
         lock.lock()
         openConnections = max(0, openConnections - 1)
+        if late { lateConnections = max(0, lateConnections - 1) }
         scheduleIdleExitIfNeededLocked()
         lock.unlock()
     }
@@ -124,6 +136,22 @@ final class DaemonLifecycle: @unchecked Sendable {
         abandoning = true
         lock.unlock()
         beforeIdleExit?()
+        // Callers that connected just now are still queued on the socket; exiting at once would
+        // drop their requests unanswered. Later callers start the next daemon, and these are
+        // refused as exiting, which tells them to send again, before this daemon leaves.
+        lock.lock()
+        lastLateConnection = Date()
+        lock.unlock()
+        releaseSocketPath?()
+        let drainDeadline = Date().addingTimeInterval(2)
+        while Date() < drainDeadline {
+            lock.lock()
+            let drained = lateConnections == 0 && Date().timeIntervalSince(lastLateConnection) >= 0.1
+            lock.unlock()
+            if drained { break }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        daemonLog("released the socket, exiting")
         exit(0)
     }
 }
@@ -187,6 +215,11 @@ enum PlayhouseBridgeDaemonMain {
         let socketURL = environment["PLAYHOUSE_BRIDGE_SOCKET_PATH"].map { URL(fileURLWithPath: $0) }
             ?? BridgeContract.socketURL(forServiceName: serviceName)
 
+        // One daemon serves a socket at a time. A stopping daemon gives up its socket path just
+        // before it exits, so a successor a caller starts in that moment waits here, until the
+        // other process has exited, before it takes over any agent.
+        waitForPredecessorExit(socketPath: socketURL.path)
+
         let listener: BridgeSocketListener
         do {
             listener = try BridgeSocketListener.listen(at: socketURL.path)
@@ -202,14 +235,15 @@ enum PlayhouseBridgeDaemonMain {
         let acceptThread = Thread {
             while true {
                 guard let connection = try? listener.accept() else { continue }
-                lifecycle.connectionOpened()
+                let late = lifecycle.connectionOpened()
                 Thread.detachNewThread {
-                    handleConnection(connection, lifecycle: lifecycle)
+                    handleConnection(connection, lifecycle: lifecycle, late: late)
                 }
             }
         }
         acceptThread.name = "playhouse-daemon.accept"
         acceptThread.start()
+        lifecycle.releaseSocketPath = { unlink(socketURL.path) }
         // A scheduled turn a tick starts runs on after the tick's request ends.
         BridgeBackgroundWork.onBegin = { lifecycle.requestStarted() }
         BridgeBackgroundWork.onEnd = { lifecycle.requestFinished() }
@@ -229,6 +263,32 @@ enum PlayhouseBridgeDaemonMain {
         }
         startScheduleTicker(environment: environment)
         RunLoop.current.run()
+    }
+
+    /// Takes the socket's instance lock for the life of this process. It is closed on exec, so
+    /// the agents this daemon starts never hold it after the daemon exits.
+    private static func waitForPredecessorExit(socketPath: String) {
+        try? FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: socketPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let descriptor = Darwin.open(socketPath + ".instance.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { return }
+        let deadline = Date().addingTimeInterval(30)
+        while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+            // Another successor already took over and serves the socket; this one isn't needed.
+            if let live = try? BridgeSocketConnection.connect(to: socketPath) {
+                live.close()
+                daemonLog("another daemon already serves \(socketPath); exiting")
+                exit(0)
+            }
+            guard Date() < deadline else {
+                daemonLog("the previous daemon still holds \(socketPath).instance.lock; starting anyway")
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
     }
 
     /// While the daemon is up, fires due schedules of the default store every 30
@@ -256,11 +316,11 @@ enum PlayhouseBridgeDaemonMain {
     /// the main actor, since every bridge manager is main-actor-isolated),
     /// streaming any event frames back as they're produced, then the final
     /// response frame.
-    private static func handleConnection(_ connection: BridgeSocketConnection, lifecycle: DaemonLifecycle) {
+    private static func handleConnection(_ connection: BridgeSocketConnection, lifecycle: DaemonLifecycle, late: Bool) {
         defer {
             connection.shutdown()
             connection.close()
-            lifecycle.connectionClosed()
+            lifecycle.connectionClosed(late: late)
         }
 
         var buffer = Data()

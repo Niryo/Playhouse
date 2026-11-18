@@ -427,11 +427,11 @@ class BridgeTestCases27:
             for service in (environment, other):
                 self.call_cli("daemon", "shutdown", extra_environment=service, cli=own_cli)
 
-    # case-contract: test_update_restart_now_keeps_claude_turn_running | Restarting to update while a Claude Code turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the Claude Code process keeps running, the next daemon is the new version and reattaches the same run; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same run back; and when the turn finishes its answer is kept once and the task settles through its outcome.
+    # case-contract: test_update_restart_now_keeps_claude_turn_running | Restarting to update while a Claude Code turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the Claude Code process keeps running, the next daemon is the new version and reattaches the same run; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, gives up its socket before it exits so callers already queued on it are refused rather than dropped, and the daemon that follows starts only once it has exited, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same run back; and when the turn finishes its answer is kept once and the task settles through its outcome.
     def test_update_restart_now_keeps_claude_turn_running(self):
         self.assert_restart_now_keeps_turn_running("claude")
 
-    # case-contract: test_update_restart_now_keeps_codex_turn_running | Restarting to update while a Codex turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the shared Codex app-server keeps running, the next daemon is the new version and reconnects to the same server; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same server back; and when the turn finishes its answer is kept once and the task settles through its outcome.
+    # case-contract: test_update_restart_now_keeps_codex_turn_running | Restarting to update while a Codex turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the shared Codex app-server keeps running, the next daemon is the new version and reconnects to the same server; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, gives up its socket before it exits so callers already queued on it are refused rather than dropped, and the daemon that follows starts only once it has exited, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same server back; and when the turn finishes its answer is kept once and the task settles through its outcome.
     def test_update_restart_now_keeps_codex_turn_running(self):
         self.assert_restart_now_keeps_turn_running("codex")
 
@@ -445,6 +445,7 @@ class BridgeTestCases27:
         try:
             time.sleep(0.2)
             requested = log.read_text(encoding="utf-8").count("shutdown requested") if log.is_file() else 0
+            released = log.read_text(encoding="utf-8").count("released the socket, exiting") if log.is_file() else 0
             stopper = self.start_cli("daemon", "shutdown", extra_environment=environment, cli=cli)
             self.wait_for(lambda: log.read_text(encoding="utf-8").count("shutdown requested") > requested,
                           "The daemon should log the shutdown request.")
@@ -461,6 +462,11 @@ class BridgeTestCases27:
             holder.close()
         self.assertNotEqual(status["processID"], daemon_pid, "The refused request is answered by the next daemon.")
         self.assertTrue(self.wait_until_process_exits(daemon_pid, 25), "The stopped daemon exits.")
+        log_text = log.read_text(encoding="utf-8")
+        self.assertEqual(log_text.count("released the socket, exiting"), released + 1,
+                         "The stopping daemon gives up its socket before it exits, so callers queued on it are refused rather than dropped.")
+        self.assertGreater(log_text.rfind("listening at"), log_text.rfind("released the socket, exiting"),
+                           "The next daemon starts only after the stopping daemon has exited.")
         response, _ = self.finish_cli(stopper, "daemon shutdown", timeout=30)
         self.assert_success(response)
         self.assertEqual([m["process"] for kind, _, m in self.agent_manifests() if kind == provider and m["serviceName"] == service], agents,
