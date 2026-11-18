@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the side chat bubble, whose Comment button can still add a new comment there.
+    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them, as the composer chip's Discard comments badge does. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation through the selection pill's Comment popover are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the comment popover, whose field can still add a new comment there. The comment chip's X badge (Discard comments) discards every unsent comment at once: the chip and their highlights go, the sent comment stays, and pendingCommentCount is 0 on a fresh read.
     func test_conversation_persists_unsent_comments() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("unsent-comments-fixture-state", isDirectory: true)
@@ -28,7 +28,7 @@ extension PlayhouseUITests {
         openTask(named: "Unsent comments")
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
-        // The reply sits below the top of the transcript, so the Side chat hint above it stays clickable.
+        // The reply sits below the top of the transcript, so the selection pill above it stays clickable.
         // The latest turn's final answer: the transcript opens on that turn, so an earlier turn's reply
         // may not be rendered, and commentary folds into the collapsed Worked for once the turn ends.
         let sourceMessage = try XCTUnwrap(ordinaryMessages(messages).last {
@@ -44,12 +44,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(selectedText.isEmpty, "The reply should expose its selectable text.")
         sourceView.click()
         sourceView.typeKey("a", modifierFlags: .command)
-        let bubble = try waitForSideChatBubble(at: sourceView)
-        let field = element("side-chat-input")
-        XCTAssertTrue(field.waitToExist(timeout: 5))
-        field.typeText("Keep this unsent comment")
-        element("add-comment-button").click()
-        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
+        addCommentFromSelection("Keep this unsent comment")
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 1
         }, timeout: 10), "An added comment should be saved with the task draft.")
@@ -104,22 +99,89 @@ extension PlayhouseUITests {
             (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 0
         }, timeout: 10), "Sending should clear the saved comments.")
         XCTAssertFalse(element("pending-comment-count").exists, "No pending comment should remain after sending.")
-        // The sent comment stays orange; clicking it reopens it read-only, beside a Comment button.
+        // The sent comment stays orange; clicking it reopens it read-only in the comment popover,
+        // whose field still adds a new comment.
         XCTAssertTrue(sourceView.waitToExist(timeout: 10) || revealWholeTranscript())
         XCTAssertTrue(waitForStableFrame(sourceView))
-        clickHighlightedText(sourceView)
-        let sentBubble = element("side-chat-bubble")
-        XCTAssertTrue(sentBubble.waitToExist(timeout: 8), "Clicking a sent comment's text should reopen its bubble.")
-        let sentComment = element("side-chat-comment-text")
-        XCTAssertTrue(sentComment.waitToExist(timeout: 5), "A sent comment should show in the reopened bubble.")
+        func openSentCommentPopover() -> XCUIElement {
+            clickHighlightedText(sourceView)
+            let popover = element("comment-popover")
+            XCTAssertTrue(popover.waitToExist(timeout: 8), "Clicking a sent comment's text should open its comment popover.")
+            XCTAssertFalse(element("side-chat-bubble").exists, "Text with only a comment opens no side chat bubble.")
+            return popover
+        }
+        let sentPopover = openSentCommentPopover()
+        let sentComment = element("sent-comment-text")
+        XCTAssertTrue(sentComment.waitToExist(timeout: 5), "A sent comment should show in the reopened popover.")
         XCTAssertTrue(accessibleLabelOrValue(of: sentComment).contains("Keep this unsent comment"))
-        XCTAssertFalse(element("side-chat-comment-field").exists, "A sent comment can't be edited.")
-        XCTAssertFalse(element("side-chat-comment-save").exists)
-        XCTAssertTrue(element("add-comment-button").exists, "Another comment can still be added on a sent comment's text.")
-        attachElementScreenshot(sentBubble, named: "Sent comment reopened read-only")
+        let sentField = element("comment-input-field")
+        XCTAssertTrue(sentField.waitToExist(timeout: 5), "Another comment can still be added on a sent comment's text.")
+        XCTAssertEqual(sentField.placeholderValue, "Add an optional comment…", "The field beside a sent comment adds a new one.")
+        XCTAssertFalse(accessibleLabelOrValue(of: sentField).contains("Keep this unsent comment"), "A sent comment can't be edited.")
+        XCTAssertEqual(element("add-comment-button").label, "Add comment")
+        XCTAssertFalse(element("discard-comment-button").exists, "A sent comment can't be discarded.")
+        attachElementScreenshot(sentPopover, named: "Sent comment reopened read-only in the comment popover")
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(sentBubble.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(sentPopover.waitForNonExistence(timeout: 5))
         XCTAssertFalse(element("pending-comment-count").exists, "Reopening a sent comment adds no pending comment.")
+
+        // A new comment on the sent text and one on the latest reply are discarded together by the
+        // X badge on the composer's comment chip.
+        _ = openSentCommentPopover()
+        sentField.click()
+        sentField.typeText("A second look")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("comment-popover").waitForNonExistence(timeout: 5), "Return should add the new comment.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 1 }, timeout: 10),
+                      "A comment added beside a sent one should be saved as unsent.")
+        let latestHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        // The reply to the send that carried the comment: later recovery turns may add replies
+        // that aren't rendered as ordinary assistant messages.
+        let latestMessages = try XCTUnwrap(latestHistory["messages"] as? [[String: Any]])
+        let commentSendIndex = try XCTUnwrap(latestMessages.lastIndex {
+            $0["role"] as? String == "user" && ($0["text"] as? String ?? "").contains("<response-comments>")
+        }, "The sent comment should be in the history.")
+        let latestReply = try XCTUnwrap(latestMessages[(commentSendIndex + 1)...].first {
+            $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer"
+                && !($0["text"] as? String ?? "").isEmpty
+        }, "The comment send should produce a new reply.")
+        let latestReplyView = element("assistant-message-\(try XCTUnwrap(latestReply["id"] as? String))")
+            .descendants(matching: .staticText).firstMatch
+        // The reply may sit outside the visible transcript, above a later reply to Playhouse's
+        // outcome reminder or below, where clicking it would select nothing.
+        XCTAssertTrue(latestReplyView.waitToExist(timeout: 10))
+        XCTAssertTrue(scrollFullyIntoView(latestReplyView, in: element("conversation-scroll-view")),
+                      "The latest reply should scroll into view.")
+        XCTAssertTrue(waitForStableFrame(latestReplyView))
+        let latestOrangeBefore = orangePixelCount(in: latestReplyView.screenshot())
+        latestReplyView.click()
+        latestReplyView.typeKey("a", modifierFlags: .command)
+        addCommentFromSelection("And this reply")
+        let chip = element("pending-comment-count")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: chip).contains("2 comments") }, timeout: 10),
+                      "The composer should count both unsent comments.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 2 }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.orangePixelCount(in: latestReplyView.screenshot()) > latestOrangeBefore + 5 }, timeout: 5),
+                      "The new comment should highlight the latest reply.")
+        let discardAll = element("discard-pending-comments-button")
+        XCTAssertTrue(discardAll.waitToExist(timeout: 5), "The comment chip should carry an X badge.")
+        XCTAssertEqual(discardAll.label, "Discard comments")
+        attachScreenshot(named: "Comment chip with its Discard comments badge")
+        attachElementScreenshot(chip, named: "Two unsent comments in the composer chip")
+        discardAll.click()
+        XCTAssertTrue(chip.waitForNonExistence(timeout: 5), "Discarding all comments should remove the chip.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 0 }, timeout: 10),
+                      "Discarding all comments should clear the saved comments.")
+        XCTAssertTrue(waitUntil({ self.orangePixelCount(in: latestReplyView.screenshot()) <= latestOrangeBefore + 5 }, timeout: 5),
+                      "A discarded comment's highlight should go.")
+        XCTAssertFalse(element("send-message-button").isEnabled, "No comment is left to send.")
+        attachScreenshot(named: "Unsent comments discarded from the chip badge")
+        // The sent comment is not unsent, so it stays.
+        _ = openSentCommentPopover()
+        XCTAssertTrue(element("sent-comment-text").waitToExist(timeout: 5), "Discarding unsent comments keeps the sent one.")
+        XCTAssertFalse(element("discard-comment-button").exists, "The discarded unsent comment should not reopen.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(element("comment-popover").waitForNonExistence(timeout: 5))
 
         element("back-to-board-button").click()
         openTask(named: "Unsent comments")
@@ -129,7 +191,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try taskRecord(id: taskID)?["pendingCommentCount"] as? Int, 0)
         attachScreenshot(named: "Sent comment reopened without a pending duplicate")
     }
-    // case-contract: test_side_chat_and_comment_reopen_from_highlighted_text | Clicking commented or side-chatted conversation text, without selecting any, reopens its bubble with that selection's comment and side chat. A side chat opened on a selection is saved on the task with its source range, selected text, provider conversation, model and every answered exchange; closing its bubble keeps it, its text renders purple while no comment covers it and orange once a comment does, and reopening it shows its history and continues the same forked conversation, so its next answer is saved after the earlier ones. An unsent comment opens in an editable field: saving changed text keeps the comment with the new text, and clearing it and saving deletes it, leaving the side chat and its purple text. Through CLI/XPC, conversation side-chats lists the saved side chats, a side chat's source must name a message and a non-empty range, task comments edit changes an unsent comment's text, empty text deletes it, and an unknown comment is not_found. Edits and side chats survive a fresh read and relaunching the app.
+    // case-contract: test_side_chat_and_comment_reopen_from_highlighted_text | Clicking commented or side-chatted conversation text, without selecting any, reopens what it holds: text with only a comment opens its comment popover, text with only a side chat opens its side chat bubble, and text with both shows the Comment and Side chat pill to choose between them. A side chat opened on a selection is saved on the task with its source range, selected text, provider conversation, model and every answered exchange; closing its bubble keeps it, its text renders purple while no comment covers it and orange once a comment does, and reopening it shows its history and continues the same forked conversation, so its next answer is saved after the earlier ones. A comment is added on side-chatted text by selecting it and choosing the pill's Comment. An unsent comment opens in the comment popover prefilled to edit, with a Save comment button that stays disabled until the text changes and a Discard comment button: saving changed text keeps the comment with the new text, Escape closes it unchanged, Discard deletes only that comment, leaving the side chat and its purple text, and saving it emptied deletes it. Through CLI/XPC, conversation side-chats lists the saved side chats, a side chat's source must name a message and a non-empty range, task comments edit changes an unsent comment's text, empty text deletes it (as Discard does) leaving the other comments, and an unknown comment is not_found. Edits and side chats survive a fresh read and relaunching the app.
     func test_side_chat_and_comment_reopen_from_highlighted_text() throws {
         _ = try installClaudeFixture(named: "claude-fixture-side-chat")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
@@ -157,47 +219,79 @@ extension PlayhouseUITests {
         XCTAssertEqual((saved["messages"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((saved["source"] as? [String: Any])?["messageID"] as? String, replyID, "The side chat should save where its text is.")
 
-        // The side chat's text is purple, and clicking it reopens the bubble with its history.
+        // The side chat's text is purple, and clicking it, with only a side chat, reopens the bubble
+        // with its history and no comment UI.
         clickHighlightedText(reply)
-        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking side-chatted text should reopen its bubble.")
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking text with only a side chat should reopen its bubble.")
+        XCTAssertFalse(element("comment-popover").exists, "Text with only a side chat opens no comment popover.")
         XCTAssertGreaterThan(purplePixelCount(in: reply.screenshot()), purpleBefore + 5, "A side chat without a comment should color its text purple.")
         XCTAssertLessThan(orangePixelCount(in: reply.screenshot()), orangeBefore + 5, "Side-chatted text without a comment is not orange.")
         XCTAssertEqual(element("side-chat-user-message-0").label, "What does this mean?", "The reopened bubble should show the saved question.")
         XCTAssertTrue(element("side-chat-assistant-message-1").label.contains("Side chat about"), "The reopened bubble should show the saved answer.")
-        XCTAssertFalse(element("side-chat-comment-field").exists, "A side chat without a comment has no comment to edit.")
-        XCTAssertTrue(element("add-comment-button").exists, "A side chat without a comment can still add one.")
+        XCTAssertFalse(bubble.descendants(matching: .any).matching(identifier: "add-comment-button").firstMatch.exists,
+                       "The side chat bubble has no comment UI.")
         attachScreenshot(named: "Side chat reopened from its purple text")
         _ = sendSideChatMessage("And then?", answerIndex: 3, containing: "Side chat follow-up 2 on")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
 
-        // Adding a comment on the same text turns it orange.
-        let input = element("side-chat-input")
-        input.click()
-        input.typeText("Explain the parser here")
-        element("add-comment-button").click()
-        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Add comment should close the bubble.")
+        // Selecting the same text by dragging across it (a click would reopen the bubble) shows the
+        // pill, whose Comment adds a comment on the side-chatted text, turning it orange.
+        XCTAssertTrue(waitForStableFrame(reply))
+        reply.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 1, dy: 10))
+            .press(forDuration: 0.3, thenDragTo: reply.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 1)).withOffset(CGVector(dx: -1, dy: -3)))
+        addCommentFromSelection("Explain the parser here")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: opened.taskID)?["pendingCommentCount"] as? Int) == 1 }, timeout: 10))
         XCTAssertTrue(waitUntil({ self.orangePixelCount(in: reply.screenshot()) > orangeBefore + 5 }, timeout: 5),
                       "Text with both a comment and a side chat should be orange.")
         XCTAssertLessThan(purplePixelCount(in: reply.screenshot()), purpleBefore + 5, "The comment's orange should cover the side chat's purple.")
         attachElementScreenshot(reply, named: "Commented side chat text renders orange")
 
-        // Clicking it reopens the comment, editable, beside the side chat's history.
+        // Text holding both shows the pill on click; its Comment opens the unsent comment to edit.
+        func clickBothAndChoose(_ choice: String, context: String) {
+            clickHighlightedText(reply)
+            let pill = waitForSelectionActionsPill()
+            Thread.sleep(forTimeInterval: 0.5)
+            XCTAssertFalse(bubble.exists, "Text with a comment and a side chat opens nothing until a pill action is chosen \(context).")
+            XCTAssertFalse(element("comment-popover").exists, "Text with a comment and a side chat opens nothing until a pill action is chosen \(context).")
+            (choice == "Comment" ? pill.comment : pill.sideChat).click()
+        }
         clickHighlightedText(reply)
-        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking commented text should reopen its bubble.")
-        let commentField = element("side-chat-comment-field")
-        XCTAssertTrue(commentField.waitToExist(timeout: 5), "The reopened bubble should show the comment in an editable field.")
-        XCTAssertEqual(commentField.value as? String, "Explain the parser here")
-        XCTAssertTrue(element("side-chat-assistant-message-3").label.contains("Side chat follow-up 2 on"), "The side chat history should show beside the comment.")
-        XCTAssertFalse(element("add-comment-button").exists, "An existing comment is edited in its field, not added again.")
-        XCTAssertFalse(element("side-chat-comment-save").isEnabled, "An unchanged comment has nothing to save.")
-        attachScreenshot(named: "Comment and side chat reopened together")
+        _ = waitForSelectionActionsPill()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertFalse(bubble.exists, "Text with a comment and a side chat shows the pill instead of the bubble.")
+        XCTAssertFalse(element("comment-popover").exists, "Text with a comment and a side chat shows the pill instead of the popover.")
+        attachScreenshot(named: "Comment and Side chat pill on text holding both")
+        waitForSelectionActionsPill().comment.click()
+        let popover = element("comment-popover")
+        let commentField = element("comment-input-field")
+        let saveComment = element("add-comment-button")
+        XCTAssertTrue(popover.waitToExist(timeout: 8), "The pill's Comment should open the comment popover.")
+        XCTAssertTrue(commentField.waitToExist(timeout: 5))
+        XCTAssertEqual(commentField.value as? String, "Explain the parser here", "The unsent comment should open prefilled to edit.")
+        XCTAssertEqual(commentField.placeholderValue, "Empty, saving deletes the comment")
+        XCTAssertEqual(saveComment.label, "Save comment")
+        XCTAssertFalse(saveComment.isEnabled, "An unchanged comment has nothing to save.")
+        let discardComment = element("discard-comment-button")
+        XCTAssertTrue(discardComment.exists, "An unsent comment can be discarded from its popover.")
+        XCTAssertEqual(discardComment.label, "Discard comment")
+        XCTAssertFalse(element("sent-comment-text").exists, "An unsent comment is not shown as sent.")
+        attachElementScreenshot(popover, named: "Unsent comment reopened to edit with Save and Discard")
         commentField.click()
         commentField.typeKey("a", modifierFlags: .command)
         commentField.typeText("Explain it again")
-        attachElementScreenshot(bubble, named: "Comment edited in the reopened bubble")
-        element("side-chat-comment-save").click()
-        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Saving the comment should close the bubble.")
+        XCTAssertTrue(saveComment.isEnabled, "A changed comment can be saved.")
+        attachElementScreenshot(popover, named: "Comment edited in the comment popover")
+        saveComment.click()
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Saving the comment should close the popover.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("pending-comment-count")).contains("1 comment"), "Editing keeps the one comment.")
+        // The pill's Side chat opens the bubble with the side chat's history and no comment UI.
+        clickBothAndChoose("Side chat", context: "before choosing Side chat")
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "The pill's Side chat should reopen the bubble.")
+        XCTAssertTrue(element("side-chat-assistant-message-3").label.contains("Side chat follow-up 2 on"), "The side chat history should reopen.")
+        XCTAssertFalse(bubble.descendants(matching: .any).matching(identifier: "add-comment-button").firstMatch.exists)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
 
         // The edit and the side chat survive relaunching.
         Thread.sleep(forTimeInterval: 1)
@@ -205,35 +299,156 @@ extension PlayhouseUITests {
         openTask(named: title)
         XCTAssertTrue(reply.waitToExist(timeout: 10) || revealWholeTranscript())
         XCTAssertTrue(waitForStableFrame(reply))
-        // The saved side chats load beside the transcript; the bubble opens with what is loaded.
+        // The saved side chats load beside the transcript; the pill opens with what is loaded.
         Thread.sleep(forTimeInterval: 1)
-        clickHighlightedText(reply)
-        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Commented text should reopen its bubble after relaunching.")
+        clickBothAndChoose("Comment", context: "after relaunching")
+        XCTAssertTrue(popover.waitToExist(timeout: 8), "Commented text should reopen its popover after relaunching.")
         XCTAssertTrue(commentField.waitToExist(timeout: 5))
         XCTAssertEqual(commentField.value as? String, "Explain it again", "The edited comment should be saved.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Escape should close the popover without changes.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("pending-comment-count")).contains("1 comment"), "Escape keeps the comment.")
+        clickBothAndChoose("Side chat", context: "after relaunching")
+        XCTAssertTrue(bubble.waitToExist(timeout: 8))
         XCTAssertTrue(element("side-chat-assistant-message-3").waitToExist(timeout: 5), "The side chat history should survive relaunching.")
-        attachScreenshot(named: "Edited comment and side chat after relaunching")
+        attachScreenshot(named: "Side chat reopened from the pill after relaunching")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
 
-        // Clearing the comment and saving deletes it; the side chat stays, purple again.
-        commentField.click()
-        commentField.typeKey("a", modifierFlags: .command)
-        commentField.typeKey(.delete, modifierFlags: [])
-        XCTAssertTrue(element("side-chat-comment-save").isEnabled, "An emptied comment can be saved to delete it.")
-        element("side-chat-comment-save").click()
-        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Saving an empty comment should close the bubble.")
+        // Discard deletes the comment; the side chat stays, purple again.
+        clickBothAndChoose("Comment", context: "before discarding")
+        XCTAssertTrue(discardComment.waitToExist(timeout: 8))
+        discardComment.click()
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Discarding the comment should close the popover.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: opened.taskID)?["pendingCommentCount"] as? Int) == 0 }, timeout: 10),
-                      "Saving an empty comment should delete it.")
+                      "Discard should delete the comment.")
         XCTAssertFalse(element("pending-comment-count").exists, "No pending comment should remain.")
         XCTAssertTrue(waitUntil({ self.purplePixelCount(in: reply.screenshot()) > purpleBefore + 5 }, timeout: 5),
-                      "Deleting the comment should leave the side chat's purple text.")
+                      "Discarding the comment should leave the side chat's purple text.")
         XCTAssertLessThan(orangePixelCount(in: reply.screenshot()), orangeBefore + 5)
-        attachElementScreenshot(reply, named: "Deleted comment leaves the side chat purple")
+        attachElementScreenshot(reply, named: "Discarded comment leaves the side chat purple")
         clickHighlightedText(reply)
-        XCTAssertTrue(bubble.waitToExist(timeout: 8))
-        XCTAssertFalse(element("side-chat-comment-field").exists, "The deleted comment should not reopen.")
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "With only its side chat left, clicking the text opens the bubble directly.")
         XCTAssertEqual(element("side-chat-user-message-2").label, "And then?", "The side chat should still reopen with its history.")
         XCTAssertEqual((try savedSideChats().first?["messages"] as? [[String: Any]])?.count, 4)
         app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
+
+        // Text with only a comment opens its popover on click; saving it emptied deletes it.
+        let questionID = try XCTUnwrap(ordinaryMessages(try XCTUnwrap(history["messages"] as? [[String: Any]]))
+            .first { ($0["role"] as? String) == "user" }?["id"] as? String)
+        var question: XCUIElement { element("user-message-\(questionID)").textViews.firstMatch }
+        XCTAssertTrue(question.waitToExist(timeout: 5) || scrollTranscriptUntilExists(question))
+        XCTAssertTrue(waitForStableFrame(question))
+        question.click()
+        question.typeKey("a", modifierFlags: .command)
+        addCommentFromSelection("Clarify the question")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: opened.taskID)?["pendingCommentCount"] as? Int) == 1 }, timeout: 10))
+        clickHighlightedText(question)
+        XCTAssertTrue(popover.waitToExist(timeout: 8), "Clicking text with only a comment should open its popover.")
+        XCTAssertFalse(bubble.exists, "Text with only a comment opens no side chat bubble.")
+        XCTAssertEqual(commentField.value as? String, "Clarify the question")
+        commentField.click()
+        commentField.typeKey("a", modifierFlags: .command)
+        commentField.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(saveComment.isEnabled, "An emptied comment can be saved to delete it.")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Saving an empty comment should close the popover.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: opened.taskID)?["pendingCommentCount"] as? Int) == 0 }, timeout: 10),
+                      "Saving an empty comment should delete it.")
+        XCTAssertFalse(element("pending-comment-count").exists, "No pending comment should remain.")
+    }
+    // case-contract: test_side_chat_keeps_answering_after_bubble_closes | A side chat keeps answering in the background after its bubble closes. Through CLI/XPC, a first side chat message whose answer the provider holds completes once released and is saved with its exchange; closing the side chat with side-chat-close while a held follow-up is still answering does not stop it, and another message meanwhile is rejected as still answering rather than starting a second turn: once released the follow-up's answer is returned, saved after the earlier exchange and listed by conversation side-chats, and a further follow-up continues the same forked session, leaving the task's own session alone. In the app, the selected text turns purple as soon as the first question is sent; closing the bubble with Escape before the answer arrives and clicking the text reopens it with the question and Thinking, which the answer replaces once it arrives; after closing it while a held follow-up answers, going back to the board and reopening the task, clicking the text shows the answer that arrived meanwhile, and a further follow-up continues the same saved side chat.
+    func test_side_chat_keeps_answering_after_bubble_closes() throws {
+        _ = try installClaudeFixture(named: "claude-fixture-side-chat-hold")
+        let executable = try XCTUnwrap(claudeFixtureExecutable)
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        launchApp(defaultParent: fixture.parent.path)
+        let title = "Background side chat"
+        let opened = try openSideChatOnReply(title: title)
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", opened.taskID])["result"] as? [String: Any])
+        let replyID = try XCTUnwrap(ordinaryMessages(try XCTUnwrap(history["messages"] as? [[String: Any]]))
+            .last { ($0["role"] as? String) == "assistant" }?["id"] as? String)
+        // Looked up on each use: reopening the task renders the reply again.
+        var reply: XCUIElement { element("assistant-message-\(replyID)").descendants(matching: .staticText).firstMatch }
+        var bubble: XCUIElement { element("side-chat-bubble") }
+        let purpleBefore = purplePixelCount(in: reply.screenshot())
+        let ready = URL(fileURLWithPath: executable + ".side-chat-hold-ready")
+        let release = URL(fileURLWithPath: executable + ".side-chat-hold-release")
+        try? FileManager.default.removeItem(at: ready)
+        try? FileManager.default.removeItem(at: release)
+        // A failure below must not leave the fixture holding its answer.
+        defer { try? Data().write(to: release) }
+        func savedMessageCount() -> Int {
+            let chats = (try? self.runCLI(["conversation", "side-chats", opened.taskID]))?["result"] as? [[String: Any]]
+            return (chats?.first?["messages"] as? [[String: Any]])?.count ?? 0
+        }
+
+        let question = "Please hold-side-chat until released."
+        let input = element("side-chat-input")
+        XCTAssertTrue(input.waitToExist(timeout: 5))
+        input.click()
+        input.typeText(question + "\r")
+        XCTAssertTrue(element("side-chat-user-message-0").waitToExist(timeout: 10), "The bubble should show the question it sent.")
+        XCTAssertEqual(element("side-chat-user-message-0").label, question)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 30),
+                      "The fixture should hold the side chat's answer.")
+        XCTAssertTrue(element("side-chat-responding").waitToExist(timeout: 5), "The bubble should show Thinking while the side chat answers.")
+        attachElementScreenshot(bubble, named: "Side chat thinking before its answer arrives")
+
+        // Closing the bubble before the answer arrives keeps the side chat answering, and its text
+        // turns purple as soon as the question is sent.
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Escape should close the side chat bubble while it answers.")
+        XCTAssertTrue(waitUntil({ self.purplePixelCount(in: reply.screenshot()) > purpleBefore + 5 }, timeout: 5),
+                      "The selected text should turn purple once the first question is sent.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: release.path), "The answer should still be held.")
+        attachElementScreenshot(reply, named: "Side-chatted text purple while its answer is held")
+        clickHighlightedText(reply)
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking the text should reopen the answering side chat.")
+        XCTAssertEqual(element("side-chat-user-message-0").label, question, "The reopened bubble should show the question.")
+        XCTAssertTrue(element("side-chat-responding").waitToExist(timeout: 5), "The reopened bubble should still show Thinking.")
+        XCTAssertFalse(element("side-chat-assistant-message-1").exists, "The held answer has not arrived yet.")
+        attachScreenshot(named: "Reopened side chat still thinking in the background")
+
+        // Released while the reopened bubble shows it, the answer replaces Thinking there.
+        try Data().write(to: release)
+        let answer = element("side-chat-assistant-message-1")
+        XCTAssertTrue(waitUntil({ answer.exists && answer.label.contains("Side chat about") }, timeout: 30),
+                      "The reopened bubble should show the answer once it arrives.")
+        XCTAssertTrue(element("side-chat-responding").waitForNonExistence(timeout: 5), "The side chat is no longer answering.")
+        XCTAssertTrue(waitUntil({ savedMessageCount() == 2 }, timeout: 10), "The answered exchange should be saved.")
+        attachElementScreenshot(bubble, named: "Reopened side chat shows the answer replacing Thinking")
+
+        // A held follow-up answers while the task is not even open, and is saved with its exchange.
+        try? FileManager.default.removeItem(at: ready)
+        let followUp = "Please hold-side-chat on the follow-up."
+        input.click()
+        input.typeText(followUp + "\r")
+        XCTAssertTrue(element("side-chat-user-message-2").waitToExist(timeout: 10), "The bubble should show the follow-up it sent.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 30),
+                      "The fixture should hold the follow-up's answer.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
+        try Data().write(to: release)
+        XCTAssertTrue(waitUntil({ savedMessageCount() == 4 }, timeout: 30),
+                      "The side chat should save the follow-up's exchange once it answers in the background.")
+        openTask(named: title)
+        XCTAssertTrue(reply.waitToExist(timeout: 10) || revealWholeTranscript())
+        XCTAssertTrue(waitForStableFrame(reply))
+        clickHighlightedText(reply)
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking the text should reopen the side chat.")
+        let followUpAnswer = element("side-chat-assistant-message-3")
+        XCTAssertTrue(waitUntil({ followUpAnswer.exists && followUpAnswer.label.contains("Side chat follow-up 2 on") }, timeout: 10),
+                      "The reopened bubble should show the answer that arrived in the background.")
+        XCTAssertFalse(element("side-chat-responding").exists, "The side chat is no longer answering.")
+        attachScreenshot(named: "Reopened side chat shows the answer that arrived in the background")
+        _ = sendSideChatMessage("And after that?", answerIndex: 5, containing: "Side chat follow-up 3 on")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(savedMessageCount(), 6, "The follow-up continues the same saved side chat.")
     }
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     func test_claude_auto_branch_uses_generated_title_and_fallback() throws {
