@@ -101,8 +101,12 @@ extension CodexAppServerClient {
         })
         serverExitSource?.cancel()
         serverExitSource = AgentRunHost.onExit(identity) { _ in
-            // The server's exit closes the socket too; the connection's close reports it.
-            connection.shutdownConnection()
+            // The server's exit closes its end of the socket, and the reader reports the close
+            // once it has read everything the server wrote before exiting. Shutting the socket
+            // down at once would discard what is still unread, such as a question or a final
+            // message followed by a quick exit, reporting a crash that lost it. Only a socket
+            // something else still holds open is shut down, a moment later.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { connection.shutdownConnection() }
         }
         lastServerActivity = Date()
         startIdleServerWatch()
