@@ -33,6 +33,34 @@ extension EnvironmentValues {
     }
 }
 
+/// A conversation whose Token Stats the window shows.
+struct TokenStatsTarget: Equatable {
+    let id: UUID
+    let title: String
+}
+
+/// Opens the window's Token Stats modal for a conversation. The board presents it over the
+/// whole window, so a reply in the narrow chat sidebar can open it without clipping it.
+/// Always equal, like SwiftUI's own actions: the board makes a new one each time its body
+/// runs, and a change would re-render the whole chat behind its `.equatable()` boundary.
+struct ShowTokenStatsAction: Equatable {
+    let open: (TokenStatsTarget) -> Void
+    func callAsFunction(_ target: TokenStatsTarget) { open(target) }
+    static func == (lhs: Self, rhs: Self) -> Bool { true }
+}
+
+private struct ShowTokenStatsKey: EnvironmentKey {
+    static let defaultValue: ShowTokenStatsAction? = nil
+}
+
+extension EnvironmentValues {
+    /// Set on the standalone chat sidebar; nil where no window-wide Token Stats modal exists.
+    var showTokenStats: ShowTokenStatsAction? {
+        get { self[ShowTokenStatsKey.self] }
+        set { self[ShowTokenStatsKey.self] = newValue }
+    }
+}
+
 /// Lays out a conversation's Skills page `skillsPageWindowWidth` wide when set. It reads that
 /// value itself, so a window resize re-renders only this frame rather than the whole conversation.
 struct SkillsPageWindowFrame<Content: View>: View {
@@ -162,7 +190,7 @@ struct KanbanBoardView: View {
     @State var selectedTask: BoardTask?
     @State var isSelectedTaskNew = false
     @State var taskBeingRenamed: BoardTask?
-    @State var taskShowingTokenStats: BoardTask?
+    @State var taskShowingTokenStats: TokenStatsTarget?
     @State var taskBeingDeleted: BoardTask?
     @State var isShowingDeleteConfirmation = false
     @State var isDoneTargetActive = false
@@ -681,6 +709,7 @@ struct KanbanBoardView: View {
                 .equatable()
                 // The chat's Skills page spans the window, not just the sidebar.
                 .environment(\.skillsPageWindowWidth, boardContentWidth > 0 ? boardContentWidth : nil)
+                .environment(\.showTokenStats, ShowTokenStatsAction { taskShowingTokenStats = $0 })
                 .onPreferenceChange(SkillsPageShowingKey.self) { isChatSkillsPageShowing = $0 }
                 // The open page labels widen the sidebar, pushing the board aside, and the chat moves
                 // its rows right by the same width in the same update, so they never narrow.
@@ -743,7 +772,7 @@ struct KanbanBoardView: View {
                 taskBeingDeleted = $0
                 isShowingDeleteConfirmation = true
             },
-            onShowTaskTokenStats: { taskShowingTokenStats = $0 },
+            onShowTaskTokenStats: { taskShowingTokenStats = TokenStatsTarget(id: $0.id, title: $0.title) },
             draggedTaskID: $draggedTaskID,
             acceptsDraggedTask: status == .review && draggedTaskStatus.map(TaskStatus.manualReviewSources.contains) ?? false,
             minHeight: minHeight

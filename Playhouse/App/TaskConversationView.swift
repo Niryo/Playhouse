@@ -55,6 +55,7 @@ struct TaskConversationView: View {
     }
 
     @Environment(\.modelContext) var modelContext
+    @Environment(\.showTokenStats) var showTokenStats
     /// Read without observing; `runtimeSlice` re-renders this view for its own task's changes.
     @Environment(\.conversationRuntimeModel) var runtimeModel
     @StateObject var runtimeSlice = ConversationRuntimeSliceObserver()
