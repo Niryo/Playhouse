@@ -9,7 +9,7 @@
   },
   {
     "id": "test_standalone_chat_page_sessions_isolate_context",
-    "expectation": "Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript."
+    "expectation": "Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt, which explains the page metadata header and tells the agent to run chat page read only for a page the message continues, plus a Playhouse page metadata header, never a User line, that names the current page by title and ID with a shortened excerpt of its latest exchange and lists recent pages newest first by title and ID only. Later turns on that page resume it without repeating the header, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries that whole page into the current turn, marked as a Playhouse page. A page whose latest answer is long sends only the start of that answer, and the agent loads the whole page itself with the real chat page read command. Rotating sessions still leaves every page's messages visible in the transcript."
   },
   {
     "id": "test_standalone_chat_separate_model_and_pages_round_trip",

@@ -494,34 +494,38 @@ extension ConversationManager {
         )
     }
 
-    /// Renders the given pages' archived turns as one handoff block. This is what keeps a page
-    /// standalone: a page session only ever receives its own page (plus any page an annotation
-    /// explicitly points at), never the whole chat.
-    func standaloneChatPageContext(taskID: UUID, pageIDs: [String]) -> String? {
-        guard !pageIDs.isEmpty, let chatManager = try? tasks.standaloneChatManager() else { return nil }
-        var messages: [ConversationMessage] = []
-        for pageID in pageIDs {
+    /// Renders the chat page context block. This is what keeps a page standalone and cheap: a
+    /// fresh page session (`headerPageID`) learns only the IDs and titles of its own page and
+    /// the recent pages, with a short excerpt of its page's latest exchange, and loads a page
+    /// with `chat page read` when the user's message continues it. Only pages the user
+    /// explicitly attached (`fullPageIDs`, from an annotation or a recalled page title) and a
+    /// page whose lost session is being rebuilt travel whole; the whole chat never does.
+    func standaloneChatPageContext(headerPageID: String?, fullPageIDs: [String]) -> String? {
+        guard headerPageID != nil || !fullPageIDs.isEmpty,
+              let chatManager = try? tasks.standaloneChatManager() else { return nil }
+        func chatPage(_ pageID: String) -> ConversationHandoff.ChatPage? {
             guard let page = try? chatManager.page(id: pageID),
-                  let archived = try? chatManager.messages(pageID: pageID), !archived.isEmpty else { continue }
-            messages.append(ConversationMessage(
-                id: "chat-page-\(page.id)", role: .user,
-                text: "[Page: \(page.title)]", turnID: "chat-page-\(page.id)"
-            ))
-            messages += archived.map { message in
+                  let archived = try? chatManager.messages(pageID: pageID) else { return nil }
+            return ConversationHandoff.ChatPage(page: page, messages: archived.map { message in
                 ConversationMessage(
                     id: message.id,
                     role: ConversationRole(rawValue: message.role) ?? .user,
-                    text: message.text,
+                    // A prompt archived with the context block it was sent with must not
+                    // replay that older block.
+                    text: ConversationHandoff.stripContext(from: message.text),
                     turnID: message.turnID,
                     provider: ConversationProvider(rawValue: page.provider)
                 )
-            }
+            })
         }
-        guard !messages.isEmpty else { return nil }
-        let provider = (try? tasks.conversationSubject(taskID))?.conversationProvider ?? .claude
-        return ConversationHandoff.context(
-            for: provider, messages: messages, preamble: ConversationHandoff.chatPagePreamble
-        )
+        let current = headerPageID.flatMap(chatPage)
+        let attached = fullPageIDs.compactMap(chatPage).filter { !$0.messages.isEmpty }
+        let recentPages = current == nil ? [] : ((try? chatManager.listPages(limit: ConversationHandoff.recentChatPageLimit + 1)) ?? [])
+            .filter { $0.id != headerPageID && $0.messageCount > 0 }
+            .prefix(ConversationHandoff.recentChatPageLimit)
+        // A brand-new chat has nothing to point at yet.
+        if let current, current.messages.isEmpty, recentPages.isEmpty, attached.isEmpty { return nil }
+        return ConversationHandoff.chatPageContext(current: current, recentPages: Array(recentPages), fullPages: attached)
     }
 
     /// Files a finished chat turn and settles its page decision. Both GUI and CLI sends pass

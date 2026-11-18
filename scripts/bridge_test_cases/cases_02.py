@@ -415,7 +415,7 @@ class BridgeTestCases02:
         recovered_messages = self.assert_success(self.call_cli("chat", "page", "read", recovered_status["activePage"]["id"])[0])["messages"]
         self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
         self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
-    # case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript.
+    # case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt, which explains the page metadata header and tells the agent to run chat page read only for a page the message continues, plus a Playhouse page metadata header, never a User line, that names the current page by title and ID with a shortened excerpt of its latest exchange and lists recent pages newest first by title and ID only. Later turns on that page resume it without repeating the header, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries that whole page into the current turn, marked as a Playhouse page. A page whose latest answer is long sends only the start of that answer, and the agent loads the whole page itself with the real chat page read command. Rotating sessions still leaves every page's messages visible in the transcript.
     def test_standalone_chat_page_sessions_isolate_context(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
@@ -481,13 +481,24 @@ class BridgeTestCases02:
                 "Every page session must carry the standalone chat system prompt.",
             )
         self.assertTrue(second["resumed"], "A turn sent into an existing page resumes its session.")
+        third_instructions = third["arguments"][third["arguments"].index("--append-system-prompt") + 1]
+        self.assertIn("Playhouse page metadata block", third_instructions,
+                      "The chat instructions explain the page metadata header.")
+        self.assertIn("chat page read <page-id> to load that page before answering", third_instructions,
+                      "The chat instructions tell the agent to load a continued page itself.")
         self.assertIn(
-            "Tell me about Saturn's rings", third["userText"],
-            "A fresh page session is seeded with its own page's turns.",
+            "User: Tell me about Saturn's rings", third["userText"],
+            "A fresh page session gets its own page's latest exchange as an excerpt.",
         )
+        self.assertIn("Playhouse chat page metadata, not part of the user's message.", third["userText"])
+        self.assertIn(f'Current page: "Saturn Rings" (id: {saturn["id"]}, ', third["userText"],
+                      "The header names the current page by title and ID.")
+        self.assertIn(f'Recent pages, newest first:\n- "Volcanoes" (id: {volcanoes["id"]}, ', third["userText"],
+                      "The header lists earlier pages by title and ID.")
+        self.assertNotIn("[Page:", third["userText"], "A page title is never written as a user line.")
         self.assertNotIn(
             "Tell me about volcanoes", third["userText"],
-            "An earlier page must never be sent as context for a later page.",
+            "An earlier page's turns are never sent as context for a later page, only its title and ID.",
         )
         self.assertNotIn("Tell me about volcanoes", second["userText"])
 
@@ -507,9 +518,38 @@ class BridgeTestCases02:
         wait_for_page("Saturn Rings")
         annotated = turn_for("What did we say before?")
         self.assertIn(
-            "Tell me about volcanoes", annotated["userText"],
-            "A page referenced by an annotation travels with the turn that quotes it.",
+            "User: Tell me about volcanoes", annotated["userText"],
+            "A page referenced by an annotation travels whole with the turn that quotes it.",
         )
+        self.assertIn(f'Playhouse page "Volcanoes" (id: {volcanoes["id"]}, ', annotated["userText"],
+                      "An attached page is marked as a Playhouse page, not as a user line.")
+        self.assertNotIn("[Page:", annotated["userText"])
+
+        # A page whose answer is long: the next turn, in that page's fresh session, gets only a
+        # shortened excerpt of the latest exchange, and loads the whole page with chat page read.
+        send("Open a lava page long-answer-page:Lava-Flows")
+        lava = wait_for_page("Lava Flows")["activePage"]
+        recall = f"recall-earlier-pages page-id:{lava['id']}"
+        send(recall)
+        wait_for_page("Lava Flows")
+        recalled = turn_for(recall)
+        self.assertFalse(recalled["resumed"], "The new page's first turn starts that page's own session.")
+        header = recalled["userText"]
+        self.assertIn(f'Current page: "Lava Flows" (id: {lava["id"]}, ', header)
+        self.assertIn(f'- "Saturn Rings" (id: {saturn["id"]}, ', header, "Recent pages are listed newest first.")
+        self.assertLess(header.index('- "Saturn Rings"'), header.index('- "Volcanoes"'))
+        self.assertIn("Claude: Lava Flows full answer: lava detail", header, "The excerpt keeps the start of the latest answer.")
+        self.assertIn(" […]", header, "A long answer is shortened in the excerpt.")
+        self.assertNotIn("END-OF-LONG-ANSWER", header, "The whole answer is not sent until the agent reads the page.")
+        self.assertNotIn("Lava Flows opening note.", header, "Only the latest exchange is excerpted.")
+        self.assertNotIn("One more thought about Saturn", header, "Another page's turns never travel with the header.")
+        self.assertLess(len(header) - len(recall), 3_500, "The header stays small however long the page is.")
+        reads = [item for item in recalled["reportCommands"] if " chat page read " in item["command"]]
+        self.assertEqual(len(reads), 1, "The agent loads the continued page itself.")
+        loaded = json.loads(reads[0]["output"])["result"]
+        self.assertEqual(loaded["page"]["id"], lava["id"])
+        self.assertTrue(any(message["text"].endswith("END-OF-LONG-ANSWER") for message in loaded["messages"]),
+                        "chat page read returns the whole page, long answer included.")
 
         # Rotating sessions must not hide earlier pages from the visible transcript.
         visible = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
