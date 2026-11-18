@@ -489,6 +489,19 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.text("msg_comments", answer)
     elif user_text.rstrip().endswith("What happened earlier?"):
         runtime.text("msg_recovered", runtime.SIMPLE_ANSWER)
+    elif long_page := runtime.re.search(r"long-answer-page:([A-Za-z0-9-]+)\s*$", user_text):
+        # A standalone chat turn that opens its own titled page (hyphens for spaces) with a
+        # short note and then a final answer far longer than a page excerpt, ending on a
+        # marker only the full page holds.
+        slug = long_page.group(1)
+        title = slug.replace("-", " ")
+        close_turn = runtime.report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            command = close_turn.replace("--continues true", f"--continues false --new-title {runtime.shlex.quote(title)}")
+            commands.append({"command": command,
+                             "output": runtime.run_tool(f"toolu_long_page_{slug}", "Bash", {"command": command}, command)})
+        runtime.text(f"msg_long_page_{slug}_note", f"{title} opening note.")
+        runtime.text(f"msg_long_page_{slug}_answer", f"{title} full answer: " + "lava detail " * 200 + "END-OF-LONG-ANSWER")
     elif anchor_page := runtime.re.search(r"anchor-page:([A-Za-z0-9-]+):(\d+)\s*$", user_text):
         # A standalone chat turn that opens its own titled page (a message ending with
         # "anchor-page:<Title>:<replies>", hyphens for spaces) and answers with that many

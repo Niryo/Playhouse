@@ -727,7 +727,7 @@ class BridgeTestCases13:
             'PlayhouseBridgeConversationOperations', 'PlayhouseBridgeOverview', 'PlayhouseBridgePullRequests', 'PlayhouseBridgeRequestDiagnostics',
             'PlayhouseBridgeRuntime', 'PlayhouseBridgeSettings', 'PlayhouseBridgeTaskWorkspace', 'PlayhouseDiagnostics',
             'PlayhouseStore', 'PlayhouseWorktreeServices', 'ProviderTokenMap', 'PullRequestServices',
-            'SkillCatalogModels', 'SkillManifest', 'WorkspaceActivity', 'WorkspaceTaskManagers',
+            'SkillCatalogModels', 'SkillManifest', 'WorkspaceActivity', 'WorkspaceTaskManagers', 'UpdateManager',
         ]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
@@ -741,8 +741,9 @@ class BridgeTestCases13:
         command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Core").glob("*.swift")))
         # Its plugin services (the pull-request-mode plugin's), which the daemon runs too.
         command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Services").glob("*.swift")))
-        command.extend([str(root / "Playhouse/Bridge/BridgeContract.swift"),
-                        str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
+        # The daemon's update commands, as build-bridge.sh compiles them for the daemon.
+        command.extend(str(root / "Playhouse/Bridge" / f"{name}.swift") for name in ("BridgeContract", "BridgeSocket", "UpdateCore", "ReleaseSigningKey"))
+        command.extend([str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
         compiled = subprocess.run(command, capture_output=True, text=True, timeout=180)
         self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
         environment = os.environ.copy()

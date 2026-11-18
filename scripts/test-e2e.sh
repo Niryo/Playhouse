@@ -95,6 +95,13 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/context-compaction-policy-tests.swift" \
   -o "${context_compaction_tests}"
 "${context_compaction_tests}"
+# Pure-logic unit checks of where provider dividers and goal achievements sit in the transcript.
+transcript_row_anchor_tests="${test_output_dir}/transcript-row-anchors-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/TranscriptRowAnchors.swift" \
+  "${repository_root}/scripts/unit/transcript-row-anchors-tests.swift" \
+  -o "${transcript_row_anchor_tests}"
+"${transcript_row_anchor_tests}"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1

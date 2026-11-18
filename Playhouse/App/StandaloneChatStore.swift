@@ -156,6 +156,8 @@ final class StandaloneChatManager {
         );
         """)
         try exec("CREATE INDEX IF NOT EXISTS chat_messages_page_idx ON chat_messages(page_id, timeline_order);")
+        // The page labels read the newest pages, a few at a time, without sorting every page.
+        try exec("CREATE INDEX IF NOT EXISTS chat_pages_chat_created_idx ON chat_pages(chat_id, created_at);")
         try exec("""
         CREATE TABLE IF NOT EXISTS chat_meta (
             chat_id TEXT PRIMARY KEY,

@@ -14,14 +14,23 @@ class BridgeTestCases22:
         self.assert_failure(self.call_cli("plugin", "mode", "--sideways", expected_status=2)[0], "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
-    # case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision.
+    # case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision. A draft with no unpublished changes can't be published: `plugin save` refuses it as invalid_argument and adds no version, and `plugin versions` reports `hasChanges`. In the editor, Publish is disabled and Discard changes is hidden until the draft differs from the published plugin, and both return to that state after publishing or discarding.
     def test_plugin_draft_versions_and_restore(self):
         source = self.PLUGIN_CONTEXT_SOURCE
         installed = self.write_installed_plugin("versioned", source, placement="mainSidebar")
         editor = self.assert_success(self.call_cli("plugin", "edit", "--id", "versioned")[0])["task"]
         draft = Path(editor["contextFolders"][0]) / "versioned"
+        def versions():
+            return self.assert_success(self.call_cli("plugin", "versions", "--id", "versioned")[0])
+        # An unchanged draft has nothing to publish: saving it adds no version.
+        self.assertEqual(versions(), {"versions": [], "hasChanges": False})
+        manifest = (installed / "plugin.json").read_text()
+        self.assert_failure(self.call_cli("plugin", "save", "--id", "versioned", expected_status=2)[0], "invalid_argument")
+        self.assertEqual((installed / "plugin.json").read_text(), manifest, "The refused save leaves the installed plugin untouched.")
+        self.assertFalse((self.plugins_folder() / ".versions" / "versioned").exists())
         changed = source.replace("props.plugin.placement", '"draft change"')
         (draft / "index.js").write_text(changed, encoding="utf-8")
+        self.assertTrue(versions()["hasChanges"])
         self.assertEqual((installed / "index.js").read_text(), source)
         self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", "versioned")[0])["task"]["id"], editor["id"])
         self.assertEqual((draft / "index.js").read_text(), changed)
@@ -29,13 +38,16 @@ class BridgeTestCases22:
         self.assertEqual(saved["version"], 1)
         self.assertEqual(json.loads((installed / "plugin.json").read_text())["version"], 1)
         self.assertEqual((installed / "index.js").read_text(), changed)
-        self.assertEqual(self.assert_success(self.call_cli("plugin", "versions", "--id", "versioned")[0])["versions"], [0])
+        self.assertEqual(versions(), {"versions": [0], "hasChanges": False}, "The published draft matches the plugin again.")
+        self.assert_failure(self.call_cli("plugin", "save", "--id", "versioned", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(versions()["versions"], [0], "Saving again without changes adds no version.")
         self.assertEqual(json.loads((self.plugins_folder() / ".versions" / "versioned" / "0" / "plugin.json").read_text())["version"], 0)
         (draft / "index.js").write_text("invalid javascript !", encoding="utf-8")
         self.assertNotEqual(self.call_cli("plugin", "save", "--id", "versioned", expected_status=1)[0]["ok"], True)
         self.assertEqual((installed / "index.js").read_text(), changed)
         self.assert_success(self.call_cli("plugin", "discard", "--id", "versioned")[0])
         self.assertEqual((draft / "index.js").read_text(), changed)
+        self.assertFalse(versions()["hasChanges"], "Discarding leaves no unpublished changes.")
         (draft / "index.js").write_text("unsaved changes", encoding="utf-8")
         self.assertNotEqual(self.call_cli("plugin", "restore", "--id", "versioned", "--version", "99", expected_status=1)[0]["ok"], True)
         self.assertEqual((draft / "index.js").read_text(), "unsaved changes")
@@ -56,7 +68,7 @@ class BridgeTestCases22:
         self.assertEqual((installed / "index.js").read_text(), changed)
         self.assertEqual((draft / "index.js").read_text(), changed)
 
-    # case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard draft in an unsaved plugin's editor asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
+    # case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard changes in an unsaved plugin's editor, shown even before it has a draft, asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
     def test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it(self):
         def sessions():
             return [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]]
@@ -803,6 +815,71 @@ class BridgeTestCases22:
         self.assertEqual(local["hostCalls"][1]["error"]["code"], "invalid_argument")
         with urllib.request.urlopen(f"{base}/requests", timeout=10) as response:
             self.assertEqual(len(json.loads(response.read())), before + 1, "Only the mount's greeting reached the server; file:// made no request.")
+    # case-contract: test_plugin_image_atom_loads_caches_and_falls_back | An Image atom shows a picture its window loads natively from its url. An installed page plugin's circular 48-point Image of a PNG served over http from 127.0.0.1 draws the picture's red and blue halves clipped to a circle and is one accessibility element with its label, a 64 by 32 file:// Image draws the same PNG from the plugin's folder with its corners rounded, an unlabeled Image of the same URL is decorative (hidden from accessibility), and an Image whose URL answers with something that isn't a picture, or whose server refuses the connection, draws its placeholder symbol instead, with no plugin error. The window loads the served picture once: the copies mounted together share one request, and a second copy mounted by a re-render (the readout reads Copies: 2) and the page closed and opened again draw it with no further request to the server, which marks it no-store; the failed URL isn't asked for again at once either. The Plugin Catalog's Image page draws a data:image picture filled (covering its 64-point square, cropped), fitted (letterboxed inside it), clipped to a circle and with rounded corners, shows the failing URL's placeholder symbol, and keeps its unlabeled Image out of accessibility. `plugin render` reports the plugin's Image nodes and their props (url, size, width and height, circle, cornerRadius, contentMode, placeholder, label) without loading any picture, the added copy is one commit that creates one Image and changes the readout, and the catalog page renders without errors. An Image url that isn't an absolute https, http, file or data:image URL (ftp, a relative path, a data URL of text, an https URL with no host), a missing url, a mistyped size, circle or contentMode, a child, or an event is reported in errors with exit 1, naming the prop and what is wrong.
+    def test_plugin_image_atom_loads_caches_and_falls_back(self):
+        base, closed = self.start_plugin_fetch_server()
+        folder = self.write_installed_plugin("avatars", None, placement="mainSidebar", presentation="page")
+        picture = folder / "avatar.png"
+        picture.write_bytes(base64.b64decode(self.IMAGE_ATOM_PNG))
+        source = f'var BASE = "{base}";\nvar CLOSED = "{closed}";\nvar FILE = "{picture.as_uri()}";\n' + self.PLUGIN_IMAGE_SOURCE
+        (folder / "index.js").write_text(source, encoding="utf-8")
+        plugins = [plugin for plugin in self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"] if not plugin["builtIn"]]
+        self.assertEqual([(plugin["id"], plugin["valid"], plugin["errors"]) for plugin in plugins], [("avatars", True, [])], "A plugin of Images is valid.")
+
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "avatars", "--event", "image-add-copy:onPress")[0])
+        self.assertEqual(rendered["errors"], [])
+        self.assertEqual(rendered["hostCalls"], [], "Images are the window's to load; the plugin makes no host call for them.")
+        first = self.plugin_node(rendered["tree"], "image-remote-1")
+        self.assertEqual((first["type"], first.get("events", []), first.get("children", [])), ("Image", [], []))
+        self.assertEqual(first["props"], {"url": f"{base}/avatar.png", "size": 48, "circle": True, "label": "Avatar 1", "testID": "image-remote-1"})
+        self.assertEqual(self.plugin_node(rendered["tree"], "image-remote-2")["props"]["url"], f"{base}/avatar.png", "The added copy shows the same URL.")
+        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "image-copies")), "Copies: 2")
+        added = rendered["commits"][-1]
+        self.assertEqual((added["step"], added["ops"].count("create"), "text" in added["ops"]), ("image-add-copy:onPress", 1, True),
+                         "Adding a copy creates one Image and changes the readout.")
+        on_disk = self.plugin_node(rendered["tree"], "image-file")["props"]
+        self.assertEqual((on_disk["url"], on_disk["width"], on_disk["height"], on_disk["cornerRadius"]), (picture.as_uri(), 64, 32, 8))
+        broken = self.plugin_node(rendered["tree"], "image-broken")["props"]
+        self.assertEqual((broken["url"], broken["placeholder"]), (f"{base}/not-an-image.png", "person.crop.circle"))
+        self.assertEqual(self.plugin_node(rendered["tree"], "image-refused")["props"]["url"], f"{closed}/avatar.png")
+        decorative = self.plugin_node(rendered["tree"], "image-decorative")["props"]
+        self.assertEqual((decorative["url"], decorative["size"], "label" in decorative), (f"{base}/avatar.png", 24, False), "An Image without a label is decorative.")
+        with urllib.request.urlopen(f"{base}/requests", timeout=10) as response:
+            self.assertEqual(json.loads(response.read()), [], "Rendering and validating the plugin loaded no picture.")
+
+        page = self.assert_success(self.call_cli("plugin", "render", "--page", "Image")[0])
+        self.assertEqual(page["errors"], [])
+        filled = self.plugin_node(page["tree"], "image-fill")["props"]
+        self.assertTrue(filled["url"].startswith("data:image/png;base64,"), "The catalog page draws a data URL, so it needs no network.")
+        self.assertEqual((filled["size"], "contentMode" in filled), (64, False), "fill is the default contentMode.")
+        self.assertEqual(self.plugin_node(page["tree"], "image-fit")["props"]["contentMode"], "fit")
+        self.assertTrue(self.plugin_node(page["tree"], "image-circle")["props"]["circle"])
+        self.assertEqual(self.plugin_node(page["tree"], "image-rounded")["props"]["cornerRadius"], 12)
+        self.assertEqual(self.plugin_node(page["tree"], "image-failed")["props"]["placeholder"], "person.crop.circle")
+        self.assertNotIn("label", self.plugin_node(page["tree"], "image-decorative-catalog")["props"], "The page shows a decorative Image too.")
+
+        for source, message in [
+            ('Playhouse.render(h(Image, { url: "https://example.com/a.png", size: 48 }));', None),
+            ('Playhouse.render(h(Image, { url: "http://localhost:8080/a.png", contentMode: "fit" }));', None),
+            ('Playhouse.render(h(Image, { url: "file:///tmp/a.png" }));', None),
+            ('Playhouse.render(h(Image, { url: "data:image/gif;base64,R0lGODlhAQABAAAAACw=" }));', None),
+            ('Playhouse.render(h(Image, { url: "ftp://example.com/a.png" }));', '<Image> has an invalid prop: url: expected an absolute https, http, file or data:image URL, found "ftp://example.com/a.png"'),
+            ('Playhouse.render(h(Image, { url: "avatar.png" }));', '<Image> has an invalid prop: url: expected an absolute https, http, file or data:image URL, found "avatar.png"'),
+            ('Playhouse.render(h(Image, { url: "data:text/plain,hi" }));', "<Image> has an invalid prop: url: expected an absolute"),
+            ('Playhouse.render(h(Image, { url: "https:///a.png" }));', "<Image> has an invalid prop: url: expected an absolute"),
+            ('Playhouse.render(h(Image, { size: 48 }));', "<Image> has an invalid prop: url: missing"),
+            ('Playhouse.render(h(Image, { url: "https://example.com/a.png", size: "big" }));', "<Image> has an invalid prop: size: expected a number, found a string"),
+            ('Playhouse.render(h(Image, { url: "https://example.com/a.png", circle: "yes" }));', "<Image> has an invalid prop: circle: expected a boolean, found a string"),
+            ('Playhouse.render(h(Image, { url: "https://example.com/a.png", contentMode: 1 }));', "<Image> has an invalid prop: contentMode: expected a string, found 1"),
+            ('Playhouse.render(h(Image, { url: "https://example.com/a.png" }, h(Text, null, "x")));', "<Image> can't hold <Text>"),
+            ('Playhouse.render(h(Image, { url: "https://example.com/a.png", onPress: function () {} }));', '<Image> has no event "onPress"'),
+        ]:
+            if message is None:
+                accepted = self.assert_success(self.render_plugin(source))
+                self.assertEqual(accepted["errors"], [], f"{source} is a URL an Image may load.")
+                continue
+            failed = self.render_plugin(source, expected_status=1)
+            self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{source} reports {message}: {failed['result']['errors']}")
     # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     def test_debug_highlight_native_atoms_outlines_atoms(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])
@@ -812,7 +889,7 @@ class BridgeTestCases22:
         self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover", "Modal", "Page", "SidePanel"},
                          "Only the atoms that lay out a composite's structure are containers.")
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
-        self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],
+        self.assertEqual(leaves, ["Text", "Icon", "Image", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],
                          "Every other atom, including a Button or Link that holds children, is a leaf.")
 # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. A task with its own title keeps it, while an untitled task scheduled once (from the composer or schedule set) shows Generating title… and is then named from its prompt by the provider's title turn, as a first send would, without starting a conversation turn. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again. An existing conversation still shows scheduling, offers one-time messages only, preserves its lifecycle state, keeps the scheduled message in the composer as its unsent draft while Send returns to sending, and sends the due message, including edits made to that draft since it was scheduled, to that same task and conversation, preserving its Claude session or Codex thread identifier; once it is sent, the draft is cleared from storage and from the open composer. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     def test_schedule_one_time_task_fires_when_due(self):

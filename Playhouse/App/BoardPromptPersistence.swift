@@ -118,6 +118,7 @@ extension BoardTaskManager {
             task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
             task.draftImageDataURLs = imageDataURLs
             task.hasUnsentDraft = task.savedPrompt != nil || !imageDataURLs.isEmpty
+            task.draftEditedAt = task.hasUnsentDraft ? Date() : nil
             try await saveTaskContext(taskID: id)
             PlayhouseDiagnostics.record("task.draft.write.succeeded", fields: [
                 "taskID": id.uuidString,

@@ -121,8 +121,11 @@ shared_sources=(
   "${repository_root}/Playhouse/App/Plugins/Services/PluginServiceHost.swift"
   "${repository_root}/Playhouse/App/Plugins/Services/PullRequestModeService.swift"
   "${repository_root}/Playhouse/App/Plugins/Services/BuiltInCommandsPlugin.swift"
+  "${repository_root}/Playhouse/App/UpdateManager.swift"
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
+  "${repository_root}/Playhouse/Bridge/UpdateCore.swift"
+  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"
   "${repository_root}/Playhouse/App/BoardConversationStorage.swift"
   "${repository_root}/Playhouse/App/BoardLifecycleStatus.swift"
   "${repository_root}/Playhouse/App/BoardOperationLocks.swift"
@@ -186,6 +189,8 @@ shared_sources=(
 cli_sources=(
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
+  "${repository_root}/Playhouse/Bridge/UpdateCore.swift"
+  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"
   "${repository_root}/Playhouse/CLI/BridgeClient.swift"
   "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift"
   "${repository_root}/Playhouse/CLI/PlayhouseCLIParsing.swift"
@@ -253,6 +258,7 @@ xcrun --sdk macosx swiftc \
   -framework SwiftData \
   -framework Combine \
   -framework JavaScriptCore \
+  -framework Security \
   -I "${grdb_module}" \
   -I "${repository_root}/Vendor/GRDB.swift/Sources/GRDBSQLite" \
   -L "${grdb_module}" \
@@ -269,6 +275,7 @@ xcrun --sdk macosx swiftc \
   "${optimization_flag}" \
   ${debug_flags[@]+"${debug_flags[@]}"} \
   -framework Foundation \
+  -framework Security \
   "${cli_sources[@]}" \
   -o "${cli_executable}"
 

@@ -261,3 +261,99 @@ class BridgeTestCases26:
         self.assertEqual(self.assert_success(self.call_cli("task", "move", task["id"], "Done", extra_environment=gh_environment)[0])["status"], "Done")
         done, _ = self.call_cli(*link, "https://github.com/playhouse-test/fixture/pull/621", expected_status=1, extra_environment=gh_environment)
         self.assert_failure(done, "invalid_transition")
+    # case-contract: test_standalone_chat_reply_shows_turn_token_usage | A standalone chat shows what each turn cost under the turn's last reply. Providers report usage once per turn, so a history read marks only the last assistant reply of each turn with that turn's recorded usage (input, output, cache read and cache write exactly as the turn's Token Stats row), leaving the user's message and earlier commentary unmarked, and an empty chat has nothing marked. A second turn that replies twice (Claude Code's no-visible-output notice between its answer and a later reply) marks only its last reply, with its own row, while the first reply keeps the first turn's. A history page that ends inside a turn marks none of that turn's messages, because its last reply is on a later page, while an earlier turn whose reply is in the page stays marked, including a reply that ends the page when the next page starts another turn. In the chat, the marked reply shows a small token counter (1.6K tokens) directly beneath it, whose tooltip names the turn's total and its four buckets, while prompts and a turn's earlier replies show none, and clicking it opens the window's usual Token Stats modal for the chat with the turn rows, which Done closes. Usage is attributed to Playhouse's local turn on the shared recording path for both Claude and Codex, so one representative provider (Claude) covers the case.
+    def test_standalone_chat_reply_shows_turn_token_usage(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        environment = self.install_claude_fixture("claude-fixture-chat-token-usage")
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
+        turn_usage = {"inputTokens": 1000, "outputTokens": 200, "cacheReadTokens": 300, "cacheCreationTokens": 100}
+
+        def history(*options):
+            return self.assert_success(self.call_cli("conversation", "history", chat_id, *options, extra_environment=environment)[0])
+
+        def marked(messages):
+            return [message for message in messages if message.get("turnTokenUsage")]
+
+        self.assertEqual(marked(history()["messages"]), [], "An empty chat has no reply to mark.")
+        # The fixture's close-turn-first chat turn answers once; its Saturn turn answers, gets Claude
+        # Code's no-visible-output notice, and replies again, so that turn has two replies.
+        prompts = ["Name the largest moon of Jupiter.", "Name the largest moon of Saturn."]
+        for prompt in prompts:
+            self.assert_success(self.call_cli("conversation", "send", chat_id, "--message", prompt, extra_environment=environment)[0])
+
+        messages = history()["messages"]
+        rows = {turn["id"]: turn["usage"] for turn in self.assert_success(self.call_cli("task", "token-usage", chat_id)[0])["turns"]}
+        turn_ids = [next(message["turnID"] for message in messages if message["role"] == "user" and message["text"] == prompt) for prompt in prompts]
+        self.assertEqual(len(set(turn_ids)), 2, "Each prompt starts its own turn.")
+        for turn_id in turn_ids:
+            self.assertEqual(rows.get(turn_id), turn_usage, "Token Stats records each chat turn under the turn the messages carry.")
+            turn = [message for message in messages if message.get("turnID") == turn_id]
+            replies = [message for message in turn if message["role"] == "assistant" and message.get("phase") != "subagent_report"]
+            self.assertTrue(replies, "The fixture turn should reply.")
+            self.assertEqual([message["id"] for message in marked(turn)], [replies[-1]["id"]],
+                             "Only the turn's last reply carries the turn's tokens.")
+            self.assertEqual(replies[-1]["turnTokenUsage"], rows[turn_id], "The reply shows exactly its turn's Token Stats row.")
+        self.assertEqual(len(marked(messages)), 2, "No other message is marked.")
+        second_replies = [message for message in messages if message.get("turnID") == turn_ids[1] and message["role"] == "assistant"]
+        self.assertEqual([message["text"] for message in second_replies], ["Titan is the largest moon of Saturn.", "I already answered above."])
+        self.assertIsNone(second_replies[0].get("turnTokenUsage"), "A turn's earlier reply is not marked; its last reply is.")
+
+        # A page that ends on the second turn's prompt holds none of that turn's replies, so its
+        # prompt stays unmarked, while the first turn's reply in the page keeps its tokens.
+        second_prompt_id = next(message["id"] for message in messages if message.get("turnID") == turn_ids[1] and message["role"] == "user")
+        after_prompt = messages[messages.index(next(m for m in messages if m["id"] == second_prompt_id)) + 1]["id"]
+        # A page that ends exactly on the first turn's last reply keeps it marked: the message
+        # after the page starts another turn.
+        seam = history("--before", second_prompt_id, "--limit", "2")
+        self.assertGreater(seam["laterMessageCount"], 0)
+        self.assertEqual(seam["messages"][-1]["turnID"], turn_ids[0])
+        self.assertEqual([message.get("turnID") for message in marked(seam["messages"])], [turn_ids[0]],
+                         "A reply that ends a page stays marked when the next page starts a new turn.")
+        page = history("--before", after_prompt, "--limit", "3")
+        self.assertGreater(page["laterMessageCount"], 0)
+        self.assertEqual(page["messages"][-1]["id"], second_prompt_id)
+        self.assertEqual([message.get("turnID") for message in marked(page["messages"])], [turn_ids[0]],
+                         "A turn that runs past the page marks nothing; the earlier turn's reply stays marked.")
+    # case-contract: test_transcript_rows_stay_with_older_messages | A provider divider and a goal achievement stay right after the message they were recorded after. A long Claude history whose switch from Codex sits on its older page, with a switch to Claude and back that sent nothing stored on the same message, has one Codex-to-Claude divider after the last Codex message in complete and paged CLI/XPC history, the empty switch pair dropped, and the newest page leaves that message out; another turn leaves the divider where it was. Opened on its newest page, the visible transcript draws neither that divider nor a goal achievement recorded after the last Codex message, at the bottom or anywhere after a newer message, and they stay hidden after a new message is sent from the composer; a goal achievement recorded after the latest turn's folded commentary follows that turn's question, above its answer, not the newest message. Scrolling up loads the older page and shows the one divider, then that goal achievement, right after the last Codex message and before the next question, with no Switched to Codex divider. The placement is Playhouse-owned and the same for both providers, so one switch from Codex to Claude covers the case.
+    def test_transcript_rows_stay_with_older_messages(self):
+        claude = self.install_provider_fixture("claude", "claude-fixture-row-anchors")
+        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        task_id = self.create_task("Rows with older messages", roots=[self.primary])["id"]
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-row-anchors", message="Start with Codex.")
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=fixtures)[0])
+        self.seed_long_history(task_id, switch_after_turn=10, latest_commentary=True)
+        anchor = "item_long_history_assistant_10"
+
+        def boundaries(history):
+            return [(boundary["provider"], boundary["afterMessageID"]) for boundary in history["providerBoundaries"]]
+
+        full = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        ids = [message["id"] for message in full["messages"]]
+        self.assertEqual(boundaries(full), [("claude", anchor)], "The undone switch pair leaves no dividers of its own.")
+        self.assertEqual(full["messages"][ids.index(anchor)]["provider"], "codex")
+        self.assertEqual(full["messages"][ids.index(anchor) + 1]["text"], "Long history user 11.")
+        self.assertEqual(full["messages"][ids.index(anchor) + 1]["provider"], "claude")
+        commentary = full["messages"][ids.index("item_long_history_commentary_60")]
+        self.assertEqual((commentary["role"], commentary["phase"]), ("assistant", "commentary"))
+
+        newest = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+        self.assertEqual(newest["earlierMessageCount"], len(ids) - 80)
+        self.assertNotIn(anchor, [message["id"] for message in newest["messages"]], "The divider's message sits on the older page.")
+        self.assertEqual(boundaries(newest), [("claude", anchor)], "The newest page names the divider's message, not its own last one.")
+
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Tell me a very short dog story.", extra_environment=fixtures)[0])
+        after = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        self.assertTrue(ordinary_messages(after["messages"])[-1]["text"].startswith("BISCUIT-7"), after["messages"][-1])
+        self.assertEqual(boundaries(after), [("claude", anchor)], "A new turn leaves the divider after the message it follows.")
+        newest_after = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+        self.assertNotIn(anchor, [message["id"] for message in newest_after["messages"]])
+        self.assertEqual(boundaries(newest_after), [("claude", anchor)])
+        older = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--before", newest_after["messages"][0]["id"]
+        )[0])
+        older_ids = [message["id"] for message in older["messages"]]
+        self.assertIn(anchor, older_ids, "Loading the older page brings the divider's message.")
+        self.assertEqual(older["messages"][older_ids.index(anchor) + 1]["text"], "Long history user 11.")
+        self.assertEqual(boundaries(older), [("claude", anchor)])

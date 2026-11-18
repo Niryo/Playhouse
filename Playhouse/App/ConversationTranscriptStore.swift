@@ -667,6 +667,88 @@ enum ConversationHandoff {
     static let chatPagePreamble = "Earlier turns of this standalone chat, provided as context. This chat is split into pages and each page is its own conversation: only the pages below are in scope for this turn."
 
     static func context(for provider: ConversationProvider, messages: [ConversationMessage], preamble: String? = nil) -> String? {
+        guard let transcript = transcript(messages: messages) else { return nil }
+        return """
+        \(openTag)
+        \(preamble ?? defaultPreamble)
+
+        \(transcript)
+        \(closeTag)
+        """
+    }
+
+    /// One standalone chat page and its archived turns, as a chat page context block shows it.
+    struct ChatPage {
+        let page: StandaloneChatPage
+        let messages: [ConversationMessage]
+    }
+
+    /// How many earlier pages a fresh page session is told about, newest first.
+    static let recentChatPageLimit = 8
+    /// Each side of the current page's latest exchange is cut to this many characters. A
+    /// follow-up usually only needs the last answer's gist, and anything more is one
+    /// `chat page read` away, so the excerpt stays small however long the page grows.
+    static let chatPageExcerptCharacterLimit = 1_200
+
+    /// The context a standalone chat page session receives. A fresh page session gets only
+    /// metadata: the current page's ID and title with a short excerpt of its latest exchange,
+    /// and the IDs and titles of recent pages, so the agent loads a page with `chat page read`
+    /// only when the user's message actually continues it. Pages the user explicitly attached
+    /// to this turn (`fullPages`) still travel whole, under a Playhouse page marker rather
+    /// than a line that reads as something the user typed.
+    static func chatPageContext(current: ChatPage?, recentPages: [StandaloneChatPage], fullPages: [ChatPage]) -> String? {
+        var sections: [String] = []
+        if let current {
+            var header = ["Playhouse chat page metadata, not part of the user's message. This standalone chat is split into titled pages, and each page is its own conversation. This session has not loaded any page's turns."]
+            header.append("Current page: \(chatPageLabel(current.page))")
+            if let excerpt = latestExchange(of: current) {
+                header.append("Its latest exchange, shortened:\n\(excerpt)")
+            }
+            if !recentPages.isEmpty {
+                header.append("Recent pages, newest first:\n" + recentPages.map { "- \(chatPageLabel($0))" }.joined(separator: "\n"))
+            }
+            header.append("If the user's message continues the current page or a recent page and this excerpt is not enough, run chat page read <page-id> to load that page before answering. Otherwise do not load any page.")
+            sections.append(header.joined(separator: "\n\n"))
+        }
+        // Attached pages share one transcript budget, so several never outgrow a single page.
+        let pageLimit = characterLimit / max(fullPages.count, 1)
+        let full = fullPages.compactMap { page -> String? in
+            transcript(messages: page.messages, limit: pageLimit).map { "Playhouse page \(chatPageLabel(page.page)):\n\n\($0)" }
+        }
+        if !full.isEmpty {
+            let preamble = current == nil ? chatPagePreamble : "Pages the user attached to this turn, in full:"
+            sections.append(([preamble] + full).joined(separator: "\n\n"))
+        }
+        guard !sections.isEmpty else { return nil }
+        return """
+        \(openTag)
+        \(sections.joined(separator: "\n\n"))
+        \(closeTag)
+        """
+    }
+
+    private static func chatPageLabel(_ page: StandaloneChatPage) -> String {
+        let count = page.messageCount == 1 ? "1 message" : "\(page.messageCount) messages"
+        return "\"\(page.title)\" (id: \(page.id), \(count))"
+    }
+
+    /// The page's last user message and the last reply after it, each cut to the excerpt limit.
+    private static func latestExchange(of page: ChatPage) -> String? {
+        let visible = page.messages.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard let questionIndex = visible.lastIndex(where: { $0.role == .user }) else { return nil }
+        let exchange = [visible[questionIndex]] + (visible[(questionIndex + 1)...].last(where: { $0.role == .assistant }).map { [$0] } ?? [])
+        return exchange.map { message in
+            let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortened = text.count > chatPageExcerptCharacterLimit
+                ? String(text.prefix(chatPageExcerptCharacterLimit)) + " […]"
+                : text
+            let speaker = message.role == .user ? "User" : (message.provider ?? .codex).displayName
+            return "\(speaker): \(shortened)"
+        }.joined(separator: "\n\n")
+    }
+
+    /// The visible turns as `Speaker: text` lines, newest kept when they exceed the limit.
+    static func transcript(messages: [ConversationMessage], limit: Int = characterLimit) -> String? {
         // A turn whose answer was only recorded as commentary still hands off its
         // last commentary, so a misclassified answer is never silently dropped.
         let answeredTurns = Set(messages.compactMap { $0.role == .assistant && $0.phase != "commentary" ? $0.turnID : nil })
@@ -684,16 +766,10 @@ enum ConversationHandoff {
         }
         guard !lines.isEmpty else { return nil }
         var transcript = lines.joined(separator: "\n\n")
-        if transcript.count > characterLimit {
-            transcript = "[Earlier turns omitted]\n\n" + String(transcript.suffix(characterLimit))
+        if transcript.count > limit {
+            transcript = "[Earlier turns omitted]\n\n" + String(transcript.suffix(limit))
         }
-        return """
-        \(openTag)
-        \(preamble ?? defaultPreamble)
-
-        \(transcript)
-        \(closeTag)
-        """
+        return transcript
     }
 
     static func prompt(_ text: String, context: String?) -> String {

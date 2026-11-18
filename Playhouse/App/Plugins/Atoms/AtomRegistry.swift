@@ -24,6 +24,9 @@ enum AtomRegistry {
         register(.icon) { node, _ in
             AnyView(AtomIcon(props: try .decode(node.props), common: try .decode(node.props)))
         }
+        register(.image) { node, _ in
+            AnyView(AtomImage(props: try .decode(node.props), common: try .decode(node.props)))
+        }
         register(.label) { node, _ in
             AnyView(AtomLabel(props: try .decode(node.props), common: try .decode(node.props)))
         }

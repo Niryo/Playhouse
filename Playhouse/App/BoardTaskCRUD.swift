@@ -5,6 +5,20 @@ import Darwin
 import SQLite3
 
 extension BoardTaskManager {
+    /// How long after the last edit an unsent draft counts as being written.
+    static let draftWritingInterval: TimeInterval = 10 * 60
+
+    /// Tasks and chats whose unsent message is being written: the composer saved it in the last
+    /// few minutes. A draft left longer, or a task's description that hasn't been sent, is saved
+    /// and survives a restart, so it doesn't count.
+    func unsentDraftCount() throws -> Int {
+        let since = Date().addingTimeInterval(-Self.draftWritingInterval)
+        let tasks = try modelContext.fetch(FetchDescriptor<BoardTask>(predicate: #Predicate { $0.hasUnsentDraft }))
+        let chats = try modelContext.fetch(FetchDescriptor<StandaloneChat>(predicate: #Predicate { $0.hasUnsentDraft }))
+        return tasks.filter { ($0.draftEditedAt ?? .distantPast) > since }.count
+            + chats.filter { ($0.draftEditedAt ?? .distantPast) > since }.count
+    }
+
     func list(status: TaskStatus? = nil) throws -> [BoardTaskRecord] {
         // A chat left over as a hidden task would otherwise list as an ordinary card. This is
         // best-effort maintenance on a read path: if the store itself is unreadable, the fetch
@@ -153,6 +167,7 @@ extension BoardTaskManager {
                 chat.savedPrompt = task.savedPrompt
                 chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
                 chat.hasUnsentDraft = task.hasUnsentDraft
+                chat.draftEditedAt = task.draftEditedAt
                 chat.draftImageDataURLsData = task.draftImageDataURLsData
                 chat.pendingAnnotationsData = task.pendingAnnotationsData
                 chat.sideChatsData = task.sideChatsData

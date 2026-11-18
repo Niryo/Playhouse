@@ -373,19 +373,29 @@ extension PlayhouseUITests {
         _ = try runCLI(["plugin", "mode", "--off"])
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
-    // case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision.
+    // case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision. A draft with no unpublished changes can't be published: `plugin save` refuses it as invalid_argument and adds no version, and `plugin versions` reports `hasChanges`. In the editor, Publish is disabled and Discard changes is hidden until the draft differs from the published plugin, and both return to that state after publishing or discarding.
     func test_plugin_draft_versions_and_restore() throws {
         try writeInstalledPlugin("versioned", source: Self.pluginContextSource, placement: "mainSidebar", name: "Versioned")
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["plugin", "refresh"])
         clickInstalledPluginAction("Edit…", pluginRow: "Versioned — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
+        let publish = app.buttons["Publish"]
+        let discard = app.buttons["Discard changes"]
+        func expectPublishable(_ publishable: Bool, _ message: String) {
+            XCTAssertTrue(waitUntil({ publish.exists && publish.isEnabled == publishable && discard.exists == publishable }, timeout: 10), message)
+        }
+        // An unchanged draft can't be published and has nothing to discard.
+        expectPublishable(false, "Publish is disabled and Discard changes hidden while the draft matches the plugin.")
+        attachAppWindowScreenshot(named: "Plugin editor without changes: Publish disabled, no Discard changes")
+        attachElementScreenshot(element("plugin-creation-preview"), named: "Plugin controls without changes")
         let draft = pluginsFolder.appendingPathComponent(".drafts/plugins/versioned/index.js")
         let original = try String(contentsOf: draft, encoding: .utf8)
         let changed = original.replacingOccurrences(of: "props.plugin.placement", with: "\"draft change\"")
         try changed.write(to: draft, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
         XCTAssertEqual(try String(contentsOf: pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8), original)
+        expectPublishable(true, "A changed draft can be published or discarded.")
         attachAppWindowScreenshot(named: "Plugin draft preview")
         let toolbarCapture = XCTAttachment(screenshot: element("plugin-creation-preview").screenshot())
         toolbarCapture.name = "Plugin draft controls"
@@ -398,22 +408,35 @@ extension PlayhouseUITests {
         clickInstalledPluginAction("Edit…", pluginRow: "Versioned — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
-        app.buttons["Save"].click()
+        expectPublishable(true, "The reopened draft still has changes.")
+        publish.click()
         XCTAssertTrue(app.staticTexts["Version 1"].waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ ((try? String(contentsOf: self.pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8)) == changed) }, timeout: 10))
+        expectPublishable(false, "After publishing, there is nothing left to publish or discard.")
+        attachAppWindowScreenshot(named: "Plugin published: Publish disabled again")
+        attachElementScreenshot(element("plugin-creation-preview"), named: "Plugin controls after publishing")
+        app.typeKey("s", modifierFlags: .command)
+        XCTAssertFalse(app.sheets.firstMatch.waitToExist(timeout: 2), "Command-S on a disabled Publish does nothing.")
+        XCTAssertTrue(app.staticTexts["Version 1"].exists, "Command-S without changes publishes nothing.")
+        let unchanged = try XCTUnwrap(try runCLI(["plugin", "versions", "--id", "versioned"])["result"] as? [String: Any])
+        XCTAssertEqual(unchanged["versions"] as? [Int], [0])
+        XCTAssertEqual(unchanged["hasChanges"] as? Bool, false)
         try original.write(to: draft, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
-        app.buttons["Discard draft"].click()
-        XCTAssertTrue(app.sheets.staticTexts["The preview will be reset to the saved plugin."].waitToExist(timeout: 5), "A saved plugin's discard only resets its draft.")
+        expectPublishable(true, "Editing the published plugin shows Discard changes again.")
+        discard.click()
+        XCTAssertTrue(app.sheets.staticTexts["The preview will be reset to the published plugin."].waitToExist(timeout: 5), "A saved plugin's discard only resets its draft.")
         app.sheets.buttons["Discard"].click()
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: draft, encoding: .utf8)) == changed }, timeout: 10))
+        expectPublishable(false, "Discarding leaves no unpublished changes.")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
         try "invalid javascript !".write(to: draft, atomically: true, encoding: .utf8)
-        app.buttons["Save"].click()
+        expectPublishable(true, "An invalid draft is still a change.")
+        publish.click()
         XCTAssertTrue(app.sheets.buttons["OK"].waitToExist(timeout: 10))
         attachAppWindowScreenshot(named: "Plugin invalid draft error")
         app.sheets.buttons["OK"].click()
-        app.buttons["Discard draft"].click()
+        discard.click()
         app.sheets.buttons["Discard"].click()
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: draft, encoding: .utf8)) == changed }, timeout: 10))
         let unsaved = original.replacingOccurrences(of: "props.plugin.placement", with: "\"unsaved draft\"")
@@ -430,7 +453,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: self.pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8)) == original }, timeout: 10))
         XCTAssertEqual(try String(contentsOf: draft, encoding: .utf8), unsaved, "Restore preserves the dirty draft.")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "unsaved draft" }, timeout: 10))
-        app.buttons["Discard draft"].click()
+        expectPublishable(true, "The draft kept through a restore still differs from the restored plugin.")
+        discard.click()
         app.sheets.buttons["Discard"].click()
         XCTAssertTrue(app.staticTexts["Version 2"].waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
@@ -439,7 +463,8 @@ extension PlayhouseUITests {
         let draftDirectory = draft.deletingLastPathComponent().deletingLastPathComponent()
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: draftDirectory.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: draftDirectory.path) }
-        app.buttons["Save"].click()
+        expectPublishable(true, "The changed draft can be published.")
+        publish.click()
         XCTAssertTrue(app.sheets.staticTexts["The plugin was published, but the draft could not be refreshed. Your existing draft was preserved."].waitToExist(timeout: 10))
         attachAppWindowScreenshot(named: "Plugin published with draft refresh warning")
         XCTAssertEqual(try String(contentsOf: draft, encoding: .utf8), changed)
@@ -448,7 +473,7 @@ extension PlayhouseUITests {
         app.sheets.buttons["OK"].click()
     }
 
-    // case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard draft in an unsaved plugin's editor asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
+    // case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard changes in an unsaved plugin's editor, shown even before it has a draft, asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
     func test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it() throws {
         launchApp(defaultParent: fixture.parent.path)
         func sessions() throws -> [String] {
@@ -494,14 +519,14 @@ extension PlayhouseUITests {
         // Closed menu-bar items stay in the accessibility tree, so wait for the menu to stop taking hits instead.
         // The pointer is parked in the editor so it cannot leave a menu bar title tracking.
         element("plugin-creation-preview").hover()
-        XCTAssertTrue(waitUntil({ !menu.menus.firstMatch.isHittable && self.app.buttons["Discard draft"].isHittable }, timeout: 5), "The menu closes.")
+        XCTAssertTrue(waitUntil({ !menu.menus.firstMatch.isHittable && self.app.buttons["Discard changes"].isHittable }, timeout: 5), "The menu closes.")
 
         // Discarding an unsaved plugin removes its draft and conversation and closes its editor.
         let blamosDraft = drafts.appendingPathComponent(blamosID)
         try FileManager.default.createDirectory(at: blamosDraft, withIntermediateDirectories: true)
         try "draft".write(to: blamosDraft.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
         XCTAssertTrue(FileManager.default.fileExists(atPath: blamosDraft.appendingPathComponent("index.js").path))
-        app.buttons["Discard draft"].click()
+        app.buttons["Discard changes"].click()
         XCTAssertTrue(app.sheets.staticTexts["Discard plugin?"].waitToExist(timeout: 5))
         XCTAssertTrue(app.sheets.staticTexts["Discard plugin?"].isHittable, "No menu covers the confirmation.")
         XCTAssertTrue(app.sheets.staticTexts["This plugin was never saved. Its draft and this conversation will be deleted."].exists)
@@ -1476,6 +1501,150 @@ extension PlayhouseUITests {
         press("fetch-file", expecting: "error: invalid_argument", "A file URL is refused.")
         attachScreenshot(named: "A plugin's fetch refused for a file URL")
     }
+    // case-contract: test_plugin_image_atom_loads_caches_and_falls_back | An Image atom shows a picture its window loads natively from its url. An installed page plugin's circular 48-point Image of a PNG served over http from 127.0.0.1 draws the picture's red and blue halves clipped to a circle and is one accessibility element with its label, a 64 by 32 file:// Image draws the same PNG from the plugin's folder with its corners rounded, an unlabeled Image of the same URL is decorative (hidden from accessibility), and an Image whose URL answers with something that isn't a picture, or whose server refuses the connection, draws its placeholder symbol instead, with no plugin error. The window loads the served picture once: the copies mounted together share one request, and a second copy mounted by a re-render (the readout reads Copies: 2) and the page closed and opened again draw it with no further request to the server, which marks it no-store; the failed URL isn't asked for again at once either. The Plugin Catalog's Image page draws a data:image picture filled (covering its 64-point square, cropped), fitted (letterboxed inside it), clipped to a circle and with rounded corners, shows the failing URL's placeholder symbol, and keeps its unlabeled Image out of accessibility. `plugin render` reports the plugin's Image nodes and their props (url, size, width and height, circle, cornerRadius, contentMode, placeholder, label) without loading any picture, the added copy is one commit that creates one Image and changes the readout, and the catalog page renders without errors. An Image url that isn't an absolute https, http, file or data:image URL (ftp, a relative path, a data URL of text, an https URL with no host), a missing url, a mistyped size, circle or contentMode, a child, or an event is reported in errors with exit 1, naming the prop and what is wrong.
+    func test_plugin_image_atom_loads_caches_and_falls_back() throws {
+        let server = try PluginFetchServer()
+        addTeardownBlock { withExtendedLifetime(server) {} }
+        let base = "http://127.0.0.1:\(server.port)", closed = "http://127.0.0.1:\(try PluginFetchServer.closedPort())"
+        try writeInstalledPlugin("avatars", source: nil, placement: "mainSidebar", presentation: "page", name: "Avatars", icon: "person.2")
+        let picture = pluginsFolder.appendingPathComponent("avatars/avatar.png")
+        try PluginFetchServer.avatarPNG.write(to: picture)
+        let source = "var BASE = \"\(base)\";\nvar CLOSED = \"\(closed)\";\nvar FILE = \"\(picture.absoluteString)\";\n" + Self.pluginImageSource
+        try source.write(to: pluginsFolder.appendingPathComponent("avatars/index.js"), atomically: true, encoding: .utf8)
+        launchApp(defaultParent: fixture.parent.path)
+        let plugins = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        XCTAssertEqual(plugins.filter { $0["builtIn"] as? Bool != true }.map { $0["valid"] as? Bool }, [true], "A plugin of Images is valid: \(plugins)")
+
+        // The picture's red left half and blue right half, which a placeholder never shows.
+        let red = (229, 72, 77), blue = (62, 99, 221)
+        func rgb(_ element: XCUIElement, x: CGFloat, y: CGFloat) -> (Int, Int, Int)? {
+            guard let image = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let color = NSBitmapImageRep(cgImage: image).colorAt(x: min(image.width - 1, Int(CGFloat(image.width) * x)),
+                                                                       y: min(image.height - 1, Int(CGFloat(image.height) * y)))?.usingColorSpace(.deviceRGB)
+            else { return nil }
+            return (Int((color.redComponent * 255).rounded()), Int((color.greenComponent * 255).rounded()), Int((color.blueComponent * 255).rounded()))
+        }
+        func near(_ element: XCUIElement, x: CGFloat, y: CGFloat, _ expected: (Int, Int, Int)) -> Bool {
+            guard let color = rgb(element, x: x, y: y) else { return false }
+            return max(abs(color.0 - expected.0), abs(color.1 - expected.1), abs(color.2 - expected.2)) <= 30
+        }
+        func showsPicture(_ element: XCUIElement) -> Bool {
+            element.exists && near(element, x: 0.3, y: 0.5, red) && near(element, x: 0.7, y: 0.5, blue)
+        }
+        func showsNoPicture(_ element: XCUIElement) -> Bool {
+            [0.3, 0.5, 0.7].allSatisfy { x in !near(element, x: x, y: 0.5, red) && !near(element, x: x, y: 0.5, blue) }
+        }
+        // The placeholder symbol: a share of the middle's pixels clearly darker or lighter than the faint fill above
+        // the symbol (inside a circle too), which a plain fill or nothing at all doesn't draw.
+        func drawsSymbol(_ element: XCUIElement) -> Bool {
+            guard let image = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return false }
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            func luminance(_ x: Int, _ y: Int) -> CGFloat? {
+                bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB).map { 0.3 * $0.redComponent + 0.59 * $0.greenComponent + 0.11 * $0.blueComponent }
+            }
+            guard let fill = luminance(image.width / 2, image.height / 8) else { return false }
+            var marked = 0, total = 0
+            for y in stride(from: image.height / 4, to: image.height * 3 / 4, by: 2) {
+                for x in stride(from: image.width / 4, to: image.width * 3 / 4, by: 2) {
+                    total += 1
+                    if let value = luminance(x, y), abs(value - fill) > 0.15 { marked += 1 }
+                }
+            }
+            return total > 0 && Double(marked) / Double(total) > 0.03
+        }
+
+        let entry = element("plugin-entry-avatars")
+        XCTAssertTrue(entry.waitToExist(timeout: 15))
+        entry.click()
+        var page = element("plugin-surface-avatars")
+        XCTAssertTrue(page.waitToExist(timeout: 10), "The Avatars plugin opens.")
+        XCTAssertTrue(waitForStableFrame(page), "The page finishes sliding in before its pictures are read.")
+        let avatar = page.descendants(matching: .any)["image-remote-1"]
+        XCTAssertTrue(avatar.waitToExist(timeout: 10), "A labeled Image is one accessibility element.")
+        XCTAssertEqual(avatar.label, "Avatar 1")
+        XCTAssertEqual(avatar.frame.width, 48, accuracy: 1)
+        XCTAssertEqual(avatar.frame.height, 48, accuracy: 1)
+        XCTAssertTrue(waitUntil({ showsPicture(avatar) }, timeout: 15), "The window loads the served PNG over http: \(String(describing: rgb(avatar, x: 0.3, y: 0.5)))")
+        XCTAssertFalse(near(avatar, x: 0.06, y: 0.06, red) || near(avatar, x: 0.94, y: 0.06, blue), "circle clips the picture's corners.")
+        XCTAssertEqual(server.requests(to: "/avatar.png"), 1, "The served picture is requested once.")
+
+        let onDisk = page.descendants(matching: .any)["image-file"]
+        XCTAssertTrue(onDisk.waitToExist(timeout: 10))
+        XCTAssertEqual(onDisk.frame.width, 64, accuracy: 1)
+        XCTAssertEqual(onDisk.frame.height, 32, accuracy: 1)
+        XCTAssertTrue(waitUntil({ showsPicture(onDisk) }, timeout: 10), "A file:// Image draws the PNG from the plugin's folder.")
+        XCTAssertFalse(near(onDisk, x: 0.01, y: 0.02, red), "cornerRadius rounds the picture's corners.")
+        XCTAssertFalse(page.descendants(matching: .any)["image-decorative"].exists, "An Image without a label is decorative: hidden from accessibility.")
+
+        let broken = page.descendants(matching: .any)["image-broken"], refused = page.descendants(matching: .any)["image-refused"]
+        XCTAssertTrue(broken.waitToExist(timeout: 10) && refused.exists, "The Images that can't load are still shown.")
+        XCTAssertTrue(waitUntil({ server.requests(to: "/not-an-image.png") == 1 }, timeout: 10), "The window asked for the URL that isn't a picture.")
+        XCTAssertFalse(waitUntil({ !showsNoPicture(broken) || !showsNoPicture(refused) }, timeout: 2),
+                       "A response that isn't a picture, and a refused connection, leave the placeholder.")
+        XCTAssertTrue(drawsSymbol(broken) && drawsSymbol(refused), "The failed Images draw their placeholder symbol.")
+        XCTAssertFalse(element("plugin-error").exists, "A failed load is not a plugin error.")
+        XCTAssertFalse(element("plugin-node-error").exists, "A failed load is not a node error.")
+        attachScreenshot(named: "Image atoms: an http avatar clipped to a circle, a file picture and two placeholders")
+        attachElementScreenshot(page.descendants(matching: .any)["image-plugin"], named: "Image atoms close up: avatar, file picture and placeholders")
+
+        page.descendants(matching: .any)["image-add-copy"].click()
+        let copy = page.descendants(matching: .any)["image-remote-2"]
+        XCTAssertTrue(copy.waitToExist(timeout: 10), "The re-render mounts a second copy.")
+        XCTAssertEqual(pluginText(page.descendants(matching: .any)["image-copies"]), "Copies: 2")
+        XCTAssertTrue(waitUntil({ showsPicture(copy) }, timeout: 10), "The copy draws the cached picture.")
+        XCTAssertTrue(showsPicture(avatar), "The first copy keeps its picture through the re-render.")
+        XCTAssertEqual(server.requests(to: "/avatar.png"), 1, "Neither the re-render nor the new copy loads the picture again.")
+        attachScreenshot(named: "Image atoms after a second copy of the avatar mounted from the cache")
+        attachElementScreenshot(page.descendants(matching: .any)["image-plugin"], named: "Image atoms close up: two copies of the cached avatar")
+
+        element("plugin-surface-close").click()
+        XCTAssertTrue(waitUntil({ !page.exists }, timeout: 10), "The page closes.")
+        entry.click()
+        page = element("plugin-surface-avatars")
+        XCTAssertTrue(page.waitToExist(timeout: 10) && waitForStableFrame(page), "The page opens again.")
+        let reopened = page.descendants(matching: .any)["image-remote-1"]
+        XCTAssertTrue(reopened.waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ showsPicture(reopened) }, timeout: 10), "The reopened page draws the picture.")
+        XCTAssertEqual(server.requests(to: "/avatar.png"), 1, "Reopening the page loads nothing again; the server marked it no-store, so the memory cache answered.")
+        XCTAssertFalse(waitUntil({ server.requests(to: "/not-an-image.png") > 1 }, timeout: 2), "A failed load is remembered, so reopening doesn't ask again at once.")
+
+        clickPluginsMenuItem("Plugin Catalog")
+        let imagePage = catalogSidebarRow("plugin-catalog-atom-Image")
+        imagePage.click()
+        let filled = element("image-fill"), fitted = element("image-fit"), round = element("image-circle")
+        XCTAssertTrue(filled.waitToExist(timeout: 10) && fitted.exists && round.exists, "The catalog's Image page shows its Images.")
+        XCTAssertFalse(element("plugin-error").exists, "The Image page renders without a plugin error.")
+        XCTAssertEqual(filled.frame.width, 64, accuracy: 1)
+        XCTAssertTrue(waitUntil({ showsPicture(filled) && showsPicture(fitted) && showsPicture(round) }, timeout: 10), "The data:image picture draws.")
+        XCTAssertTrue(near(filled, x: 0.3, y: 0.08, red), "fill covers the square, cropping the picture's sides.")
+        XCTAssertFalse(near(fitted, x: 0.3, y: 0.08, red), "fit letterboxes the 2:1 picture inside the square.")
+        XCTAssertFalse(near(round, x: 0.06, y: 0.06, red), "circle clips the corners.")
+        let rounded = element("image-rounded"), failed = element("image-failed")
+        XCTAssertTrue(showsPicture(rounded) && !near(rounded, x: 0.02, y: 0.02, red), "cornerRadius rounds the corners.")
+        XCTAssertTrue(waitUntil({ drawsSymbol(failed) }, timeout: 10) && showsNoPicture(failed), "A URL that fails shows its placeholder symbol.")
+        XCTAssertFalse(element("image-decorative-catalog").exists, "The unlabeled Image is decorative.")
+        attachScreenshot(named: "Plugin Catalog — Image page: fill, fit, circle, rounded and a failed URL")
+        attachElementScreenshot(element("image-page"), named: "Plugin Catalog — Image page close up")
+    }
+    static let pluginImageSource = #"""
+function Avatars() {
+  var copies = React.useState(1);
+  var avatars = [];
+  for (var index = 1; index <= copies[0]; index++) {
+    avatars.push(h(Image, { key: index, url: BASE + "/avatar.png", size: 48, circle: true, label: "Avatar " + index, testID: "image-remote-" + index }));
+  }
+  return h(Stack, { spacing: 12, align: "leading", group: true, testID: "image-plugin" },
+    h(Stack, { axis: "h", spacing: 12 }, avatars),
+    h(Button, { style: "bordered", testID: "image-add-copy", onPress: function () { copies[1](copies[0] + 1); } }, h(Text, null, "Add a copy")),
+    h(Text, { size: 11, testID: "image-copies" }, "Copies: ", String(copies[0])),
+    h(Image, { url: FILE, width: 64, height: 32, cornerRadius: 8, label: "Picture from disk", testID: "image-file" }),
+    h(Image, { url: BASE + "/avatar.png", size: 24, testID: "image-decorative" }),
+    h(Stack, { axis: "h", spacing: 12 },
+      h(Image, { url: BASE + "/not-an-image.png", size: 48, placeholder: "person.crop.circle", label: "Not a picture", testID: "image-broken" }),
+      h(Image, { url: CLOSED + "/avatar.png", size: 48, placeholder: "person.crop.circle", label: "Unreachable picture", testID: "image-refused" })));
+}
+Playhouse.render(h(Avatars));
+"""#
     static let taskCardPluginSource = #"""
 function Card() {
   var props = Playhouse.useProps();

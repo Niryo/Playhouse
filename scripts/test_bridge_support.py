@@ -12,6 +12,7 @@ import os
 import select
 import signal
 import shutil
+import socket
 import shlex
 import sqlite3
 import stat

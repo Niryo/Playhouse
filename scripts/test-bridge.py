@@ -97,8 +97,9 @@ from bridge_test_cases.cases_23 import BridgeTestCases23
 from bridge_test_cases.cases_24 import BridgeTestCases24
 from bridge_test_cases.cases_25 import BridgeTestCases25
 from bridge_test_cases.cases_26 import BridgeTestCases26
+from bridge_test_cases.cases_27 import BridgeTestCases27
 
-class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestCases23, BridgeTestCases24, BridgeTestCases25, BridgeTestCases26, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
+class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestCases23, BridgeTestCases24, BridgeTestCases25, BridgeTestCases26, BridgeTestCases27, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cli = arguments.cli.absolute()
@@ -152,7 +153,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
 
 
 
-    def call_cli(self, *command, expected_status=0, timeout=90, extra_environment=None):
+    def call_cli(self, *command, expected_status=0, timeout=90, extra_environment=None, cli=None):
         environment = os.environ.copy()
         environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
@@ -165,7 +166,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         completed = subprocess.run(
-            [str(self.cli), *map(str, command)],
+            [str(cli or self.cli), *map(str, command)],
             check=False,
             capture_output=True,
             text=True,
@@ -187,7 +188,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         self.assertIn("id", response)
         return response, [json.loads(line) for line in lines[:-1]]
 
-    def start_cli(self, *command, extra_environment=None, binary_output=False):
+    def start_cli(self, *command, extra_environment=None, binary_output=False, cli=None):
         environment = os.environ.copy()
         environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
@@ -200,7 +201,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         return subprocess.Popen(
-            [str(self.cli), *map(str, command)],
+            [str(cli or self.cli), *map(str, command)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=not binary_output,
@@ -671,6 +672,28 @@ Playhouse.render(h(Context));
 
 
 
+    # The Image atom case's picture: 16 x 8, red on the left, blue on the right (also served by plugin-fetch-server.py).
+    IMAGE_ATOM_PNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAICAIAAAB/FOjAAAAAGElEQVR42mN46uGLFdkl38WKGEY10EIDAHRHvgHbOOZdAAAAAElFTkSuQmCC"
+    # The UI case's pluginImageSource is the same script.
+    PLUGIN_IMAGE_SOURCE = """
+function Avatars() {
+  var copies = React.useState(1);
+  var avatars = [];
+  for (var index = 1; index <= copies[0]; index++) {
+    avatars.push(h(Image, { key: index, url: BASE + "/avatar.png", size: 48, circle: true, label: "Avatar " + index, testID: "image-remote-" + index }));
+  }
+  return h(Stack, { spacing: 12, align: "leading", group: true, testID: "image-plugin" },
+    h(Stack, { axis: "h", spacing: 12 }, avatars),
+    h(Button, { style: "bordered", testID: "image-add-copy", onPress: function () { copies[1](copies[0] + 1); } }, h(Text, null, "Add a copy")),
+    h(Text, { size: 11, testID: "image-copies" }, "Copies: ", String(copies[0])),
+    h(Image, { url: FILE, width: 64, height: 32, cornerRadius: 8, label: "Picture from disk", testID: "image-file" }),
+    h(Image, { url: BASE + "/avatar.png", size: 24, testID: "image-decorative" }),
+    h(Stack, { axis: "h", spacing: 12 },
+      h(Image, { url: BASE + "/not-an-image.png", size: 48, placeholder: "person.crop.circle", label: "Not a picture", testID: "image-broken" }),
+      h(Image, { url: CLOSED + "/avatar.png", size: 48, placeholder: "person.crop.circle", label: "Unreachable picture", testID: "image-refused" })));
+}
+Playhouse.render(h(Avatars));
+"""
     # The UI case's pluginFetchSource is the same script.
     PLUGIN_FETCH_SOURCE = """
 function Fetcher() {

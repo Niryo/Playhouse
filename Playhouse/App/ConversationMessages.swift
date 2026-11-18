@@ -19,6 +19,9 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     var provider: ConversationProvider?
     /// Model selected when this message's turn was dispatched, when known.
     var modelID: String?
+    /// What this message's turn cost, set by a history read on the turn's last reply only
+    /// (see `ConversationManager.attachingTurnTokenUsage`); never stored in the transcript.
+    var turnTokenUsage: ConversationTokenUsage?
 
     init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil, createdAt: Date? = .now, modelID: String? = nil) {
         self.id = id
@@ -76,7 +79,7 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         return false
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, imagesDeferred, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }
+    private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, imagesDeferred, phase, turnID, timelineOrder, asyncQuestions, provider, modelID, turnTokenUsage }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -91,6 +94,7 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         asyncQuestions = try container.decodeIfPresent([ConversationAsyncQuestion].self, forKey: .asyncQuestions)
         provider = try container.decodeIfPresent(ConversationProvider.self, forKey: .provider)
         modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        turnTokenUsage = try container.decodeIfPresent(ConversationTokenUsage.self, forKey: .turnTokenUsage)
     }
 }
 

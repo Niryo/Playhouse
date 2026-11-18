@@ -10,6 +10,7 @@ struct PlayhouseApp: App {
     @StateObject private var conversationRuntime: ConversationRuntimeModel
     @StateObject private var cpuUsageModel: TaskCPUUsageModel
     @StateObject private var agentUsageModel = AgentUsageModel(client: DaemonClient())
+    @StateObject private var updateController: UpdateController
     @State private var pluginRegistry = PluginRegistry()
 
     private var windowTitle: String {
@@ -27,11 +28,14 @@ struct PlayhouseApp: App {
         _conversationRuntime = StateObject(wrappedValue: runtime)
         let cpuUsage = TaskCPUUsageModel(client: DaemonClient())
         _cpuUsageModel = StateObject(wrappedValue: cpuUsage)
+        let updates = UpdateController(client: DaemonClient())
+        _updateController = StateObject(wrappedValue: updates)
         // The bridge daemon owns every provider turn, so quitting the window
         // doesn't stop one; it just stops watching.
-        PlayhouseApplicationDelegate.terminationHandler = { [weak runtime, weak cpuUsage] in
+        PlayhouseApplicationDelegate.terminationHandler = { [weak runtime, weak cpuUsage, weak updates] in
             runtime?.stop()
             cpuUsage?.stop()
+            updates?.stop()
         }
         // The built-in plugins' services run in the daemon; a change this
         // window saves itself (a card dragged to Review) reaches them there.
@@ -76,6 +80,9 @@ struct PlayhouseApp: App {
         .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentSize)
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesMenuItem(updates: updateController)
+            }
             CommandGroup(after: .textEditing) {
                 Button("Search Tasks") {
                     NotificationCenter.default.post(name: .playhouseShowBoardSearch, object: nil)
@@ -103,6 +110,7 @@ struct PlayhouseApp: App {
 
         Settings {
             WorkspaceSettingsView()
+                .environmentObject(updateController)
                 .defaultAppStorage(appPreferences)
         }
     }
@@ -114,6 +122,7 @@ struct PlayhouseApp: App {
             .environment(\.conversationRuntimeModel, conversationRuntime)
             .environmentObject(cpuUsageModel)
             .environmentObject(agentUsageModel)
+            .environmentObject(updateController)
             .environment(pluginRegistry)
             .atomHighlightRoot()
             .defaultAppStorage(appPreferences)
@@ -135,6 +144,8 @@ private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegat
         Task.detached(priority: .utility) { _ = TaskConversationView.prepareBodyTypeMetadata() }
     }
 
+    /// The reply comes from a main-actor task, so a programmatic quit must not start
+    /// inside a main-queue block or task; defer it to the run loop instead.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let terminationHandler = Self.terminationHandler else { return .terminateNow }
         Task {
@@ -153,6 +164,7 @@ private struct MainWindowView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @EnvironmentObject private var cpuUsageModel: TaskCPUUsageModel
+    @EnvironmentObject private var updateController: UpdateController
     @State private var lifecycleError: String?
     @State private var isLifecycleReady = false
 
@@ -185,6 +197,7 @@ private struct MainWindowView: View {
         }
         .tint(WorkspaceTheme.accent)
         .preferredColorScheme(appearance == "light" ? .light : .dark)
+        .background(UpdateTitlebarAccessory(updates: updateController, preferences: WorkspaceSettings.preferencesStore))
         .task {
             guard !isLifecycleReady else { return }
             do {
@@ -194,6 +207,7 @@ private struct MainWindowView: View {
                 )
                 conversationRuntime.start()
                 cpuUsageModel.start()
+                updateController.start()
                 isLifecycleReady = true
             } catch {
                 lifecycleError = error.localizedDescription
@@ -378,5 +392,17 @@ enum PluginManagement {
                 failure.runModal()
             }
         }
+    }
+}
+
+/// The app menu's Check for Updates… item.
+struct CheckForUpdatesMenuItem: View {
+    @ObservedObject var updates: UpdateController
+
+    var body: some View {
+        Button("Check for Updates…") { Task { await updates.checkNow() } }
+            .buttonHoverPointer()
+            .help("Check GitHub for a newer Playhouse release")
+            .disabled(!updates.isRelease || updates.isWorking)
     }
 }

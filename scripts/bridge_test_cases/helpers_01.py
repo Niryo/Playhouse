@@ -44,15 +44,30 @@ class BridgeTestHelpers01:
                 "ON CONFLICT(task_id) DO UPDATE SET payload = excluded.payload",
                 (task_id.upper(), json.dumps(state)),
             )
-    def seed_long_history(self, task_id, sent_prompt=False, mid_history_command=False, tall_latest_answer=False):
+    def seed_long_history(self, task_id, sent_prompt=False, mid_history_command=False, tall_latest_answer=False,
+                          switch_after_turn=None, latest_commentary=False):
         """Replaces the task's stored turns with 60 settled question-and-answer turns in its newest
         provider segment, as earlier sessions would have recorded them. Playhouse keeps the transcript
         itself, so a long history is written into its store rather than read from a provider. The
-        UI suite's `seedLongHistory` writes the same rows."""
+        UI suite's `seedLongHistory` writes the same rows.
+
+        With `switch_after_turn`, the turns up to it belong to the previous segment and the rest to
+        the newest, with a switch to the newest provider and back stored between them with nothing
+        sent in between, as older conversations recorded an undone switch. `latest_commentary` gives
+        the newest turn a commentary message before its answer."""
         key = task_id.upper()
         with sqlite3.connect(self.conversation_database(), timeout=30) as connection:
             state = json.loads(connection.execute("SELECT payload FROM conversation_state WHERE task_id = ?", (key,)).fetchone()[0])
             segment = state["segments"][-1]
+            earlier_segment = segment
+            if switch_after_turn is not None:
+                earlier_segment = state["segments"][-2]
+                undone = [
+                    dict(segment, id="segment_undone_switch", codexTurnIDs=[], codexTurnModelIDs={}),
+                    dict(earlier_segment, id="segment_undone_switch_back", codexTurnIDs=[], codexTurnModelIDs={}),
+                ]
+                state["segments"][-1:-1] = undone
+                connection.execute("UPDATE conversation_state SET payload = ? WHERE task_id = ?", (json.dumps(state), key))
             for table in ("conversation_turns", "conversation_messages", "conversation_activities"):
                 connection.execute(f"DELETE FROM {table} WHERE task_id = ?", (key,))
             turns = []
@@ -75,18 +90,20 @@ class BridgeTestHelpers01:
                         "durationMs": 5, "isContextCompaction": False, "afterMessageID": "item_long_history_user_21",
                         "output": "".join(f"history-file-{line}.txt\n" for line in range(1, 7)),
                     })
-                turns.append((f"turn_long_history_{index}", [
-                    (f"item_long_history_user_{index}", "user", f"Long history user {index:02d}."),
-                    (f"item_long_history_assistant_{index}", "assistant", answer),
-                ], activities))
+                messages = [(f"item_long_history_user_{index}", "user", f"Long history user {index:02d}.")]
+                if index == 60 and latest_commentary:
+                    messages.append(("item_long_history_commentary_60", "commentary", "Long history commentary 60."))
+                messages.append((f"item_long_history_assistant_{index}", "assistant", answer))
+                turns.append((f"turn_long_history_{index}", messages, activities))
             for seq, (turn_id, messages, activities) in enumerate(turns, start=1):
+                turn_segment = earlier_segment if switch_after_turn is not None and seq <= switch_after_turn else segment
                 connection.execute("INSERT INTO conversation_turns (task_id, id, segment_id, seq) VALUES (?, ?, ?, ?)",
-                                   (key, turn_id, segment["id"], seq))
+                                   (key, turn_id, turn_segment["id"], seq))
                 for position, (message_id, role, text) in enumerate(messages):
-                    payload = {"id": message_id, "role": role, "text": text, "turnID": turn_id, "imageDataURLs": [],
-                               "provider": segment["provider"]}
-                    if role == "assistant":
-                        payload["phase"] = "final_answer"
+                    payload = {"id": message_id, "role": "assistant" if role == "commentary" else role, "text": text,
+                               "turnID": turn_id, "imageDataURLs": [], "provider": turn_segment["provider"]}
+                    if role != "user":
+                        payload["phase"] = role if role == "commentary" else "final_answer"
                     connection.execute(
                         "INSERT INTO conversation_messages (task_id, turn_id, id, position, payload) VALUES (?, ?, ?, ?, ?)",
                         (key, turn_id, message_id, position, json.dumps(payload)),
@@ -271,10 +288,39 @@ class BridgeTestHelpers01:
             return True
         return True
     @staticmethod
+    def bridge_socket(service):
+        digest = hashlib.sha256(service.encode("utf-8")).hexdigest()[:32]
+        return Path("/tmp/playhouse-bridge") / str(os.getuid()) / f"{digest}.sock"
+
+    @staticmethod
+    def raw_bridge_response(connection, command):
+        """Sends one request over an open bridge socket, without the CLI's retries, and returns its response."""
+        payload = json.dumps({"version": 1, "id": str(uuid.uuid4()), "command": command, "arguments": {}}).encode("utf-8")
+        connection.sendall(struct.pack(">I", len(payload)) + payload)
+        buffer = b""
+        while True:
+            while len(buffer) >= 4 and len(buffer) >= 4 + struct.unpack(">I", buffer[:4])[0]:
+                length = struct.unpack(">I", buffer[:4])[0]
+                message = json.loads(buffer[4:4 + length])
+                buffer = buffer[4 + length:]
+                if message["kind"] == "response":
+                    return message["value"]
+            chunk = connection.recv(65536)
+            if not chunk:
+                return None
+            buffer += chunk
+
+    def open_bridge_connection(self, service):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(10)
+        connection.connect(str(self.bridge_socket(service)))
+        return connection
+
+    @staticmethod
     def daemon_log_pids(service):
         """Every daemon process that wrote to this service's socket log (each logs on start)."""
-        digest = hashlib.sha256(service.encode("utf-8")).hexdigest()[:32]
-        log = Path("/tmp/playhouse-bridge") / str(os.getuid()) / f"{digest}.sock.log"
+        socket_path = BridgeTestHelpers01.bridge_socket(service)
+        log = socket_path.with_name(socket_path.name + ".log")
         text = log.read_text(encoding="utf-8") if log.is_file() else ""
         return {int(pid) for pid in re.findall(r"playhouse-daemon\[(\d+)\]", text)}
     def wait_until_process_exits(self, pid, timeout):

@@ -30,6 +30,10 @@
 		A1000000000000000000F305 /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F305 /* ComposerView.swift */; };
 		A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F306 /* KanbanColumnSection.swift */; };
 		A1000000000000000000F307 /* DoneArchiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F307 /* DoneArchiveView.swift */; };
+		A1000000000000000000F7A1 /* UpdateCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A1 /* UpdateCore.swift */; };
+		A1000000000000000000F7A2 /* ReleaseSigningKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A2 /* ReleaseSigningKey.swift */; };
+		A1000000000000000000F7A3 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A3 /* UpdateManager.swift */; };
+		A1000000000000000000F7A4 /* UpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A4 /* UpdateController.swift */; };
 		A1000000000000000000F401 /* TaskSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F401 /* TaskSchedule.swift */; };
 		A1000000000000000000F402 /* SchedulerAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F402 /* SchedulerAgent.swift */; };
 		A1000000000000000000F201 /* AgentUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F201 /* AgentUsageStore.swift */; };
@@ -62,6 +66,7 @@
 		A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* ProcessCPUSampler.swift */; };
 		A1000000000000000000F403 /* AgentRunHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F403 /* AgentRunHost.swift */; };
 		A1000000000000000000F601 /* ContextCompaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F601 /* ContextCompaction.swift */; };
+		A1000000000000000000F701 /* TranscriptRowAnchors.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F701 /* TranscriptRowAnchors.swift */; };
 		A1000000000000000000001C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* GRDB */; };
 		A1000000000000000000F501 /* TaskItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F501 /* TaskItemView.swift */; };
 		A100000000000000000000DB /* DebugConversationImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000DB /* DebugConversationImport.swift */; };
@@ -184,6 +189,7 @@
 		0FA47B9FBE153C45FB99B7D7 /* PlayhouseUITests+Cases30.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17CCFD0BAF57A77DC569CB68 /* PlayhouseUITests+Cases30.swift */; };
 		F9618F13F12375DABAECB5C9 /* PlayhouseUITests+Cases31.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E57C8246ACB4055D79D6A75 /* PlayhouseUITests+Cases31.swift */; };
 		3F0C9D706DCAB2233F04F10E /* PlayhouseUITests+Cases32.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB1E9C0A8D0BE8398F8DE6BF /* PlayhouseUITests+Cases32.swift */; };
+		A1000000000000000000F7A5 /* PlayhouseUITests+Cases33.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A5 /* PlayhouseUITests+Cases33.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -219,6 +225,10 @@
 		A2000000000000000000F305 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F306 /* KanbanColumnSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanColumnSection.swift; sourceTree = "<group>"; };
 		A2000000000000000000F307 /* DoneArchiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoneArchiveView.swift; sourceTree = "<group>"; };
+		A2000000000000000000F7A1 /* UpdateCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/UpdateCore.swift; sourceTree = "<group>"; };
+		A2000000000000000000F7A2 /* ReleaseSigningKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/ReleaseSigningKey.swift; sourceTree = "<group>"; };
+		A2000000000000000000F7A3 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
+		A2000000000000000000F7A4 /* UpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateController.swift; sourceTree = "<group>"; };
 		A2000000000000000000F401 /* TaskSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSchedule.swift; sourceTree = "<group>"; };
 		A2000000000000000000F402 /* SchedulerAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerAgent.swift; sourceTree = "<group>"; };
 		A2000000000000000000F201 /* AgentUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentUsageStore.swift; sourceTree = "<group>"; };
@@ -253,6 +263,7 @@
 		A2000000000000000000001B /* ProcessCPUSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessCPUSampler.swift; sourceTree = "<group>"; };
 		A2000000000000000000F403 /* AgentRunHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRunHost.swift; sourceTree = "<group>"; };
 		A2000000000000000000F601 /* ContextCompaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextCompaction.swift; sourceTree = "<group>"; };
+		A2000000000000000000F701 /* TranscriptRowAnchors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptRowAnchors.swift; sourceTree = "<group>"; };
 		A2000000000000000000F501 /* TaskItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskItemView.swift; sourceTree = "<group>"; };
 		A200000000000000000000DB /* DebugConversationImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConversationImport/DebugConversationImport.swift; sourceTree = "<group>"; };
 		B20000000000000000000001 /* ConversationMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMessages.swift; sourceTree = "<group>"; };
@@ -376,6 +387,7 @@
 		17CCFD0BAF57A77DC569CB68 /* PlayhouseUITests+Cases30.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlayhouseUITests+Cases30.swift"; sourceTree = "<group>"; };
 		3E57C8246ACB4055D79D6A75 /* PlayhouseUITests+Cases31.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlayhouseUITests+Cases31.swift"; sourceTree = "<group>"; };
 		EB1E9C0A8D0BE8398F8DE6BF /* PlayhouseUITests+Cases32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlayhouseUITests+Cases32.swift"; sourceTree = "<group>"; };
+		A2000000000000000000F7A5 /* PlayhouseUITests+Cases33.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlayhouseUITests+Cases33.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -460,6 +472,7 @@
 				17CCFD0BAF57A77DC569CB68 /* PlayhouseUITests+Cases30.swift */,
 				3E57C8246ACB4055D79D6A75 /* PlayhouseUITests+Cases31.swift */,
 				EB1E9C0A8D0BE8398F8DE6BF /* PlayhouseUITests+Cases32.swift */,
+				A2000000000000000000F7A5 /* PlayhouseUITests+Cases33.swift */,
 				09C3C829C28468AAEC418A41 /* PlayhouseUITestInfrastructure.swift */,
 				FDEAE2E2FD777185DE714AC8 /* PlayhouseUITestSupport01.swift */,
 				8F89ACA61AB93B9315B0AD33 /* PlayhouseUITestSupport02.swift */,
@@ -515,6 +528,10 @@
 				A2000000000000000000F305 /* ComposerView.swift */,
 				A2000000000000000000F306 /* KanbanColumnSection.swift */,
 				A2000000000000000000F307 /* DoneArchiveView.swift */,
+				A2000000000000000000F7A4 /* UpdateController.swift */,
+				A2000000000000000000F7A3 /* UpdateManager.swift */,
+				A2000000000000000000F7A2 /* ReleaseSigningKey.swift */,
+				A2000000000000000000F7A1 /* UpdateCore.swift */,
 				A2000000000000000000F401 /* TaskSchedule.swift */,
 				A2000000000000000000F402 /* SchedulerAgent.swift */,
 				A2000000000000000000F201 /* AgentUsageStore.swift */,
@@ -615,6 +632,7 @@
 				A2000000000000000000001B /* ProcessCPUSampler.swift */,
 				A2000000000000000000F403 /* AgentRunHost.swift */,
 				A2000000000000000000F601 /* ContextCompaction.swift */,
+				A2000000000000000000F701 /* TranscriptRowAnchors.swift */,
 				A200000000000000000000DB /* DebugConversationImport.swift */,
 				A2000000000000000000F501 /* TaskItemView.swift */,
 				A200000000000000000000F1 /* Plugins */,
@@ -824,6 +842,9 @@
 				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
 				"$(SRCROOT)/Playhouse/Bridge/BridgeContract.swift",
 				"$(SRCROOT)/Playhouse/Bridge/BridgeSocket.swift",
+				"$(SRCROOT)/Playhouse/Bridge/UpdateCore.swift",
+				"$(SRCROOT)/Playhouse/Bridge/ReleaseSigningKey.swift",
+				"$(SRCROOT)/Playhouse/App/UpdateManager.swift",
 				"$(SRCROOT)/Playhouse/Bridge/DaemonMain.swift",
 				"$(SRCROOT)/Playhouse/Bridge/SandboxCheck.h",
 				"$(SRCROOT)/Playhouse/CLI/BridgeClient.swift",
@@ -964,6 +985,7 @@
 				0FA47B9FBE153C45FB99B7D7 /* PlayhouseUITests+Cases30.swift in Sources */,
 				F9618F13F12375DABAECB5C9 /* PlayhouseUITests+Cases31.swift in Sources */,
 				3F0C9D706DCAB2233F04F10E /* PlayhouseUITests+Cases32.swift in Sources */,
+				A1000000000000000000F7A5 /* PlayhouseUITests+Cases33.swift in Sources */,
 				FC71939010CF910E39460ABE /* PlayhouseUITestInfrastructure.swift in Sources */,
 				C6BBA1ABA379B1A5BACB2D9A /* PlayhouseUITestSupport01.swift in Sources */,
 				6E810F521A3454FDBB24AC6C /* PlayhouseUITestSupport02.swift in Sources */,
@@ -1005,6 +1027,10 @@
 				A1000000000000000000F305 /* ComposerView.swift in Sources */,
 				A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */,
 				A1000000000000000000F307 /* DoneArchiveView.swift in Sources */,
+				A1000000000000000000F7A4 /* UpdateController.swift in Sources */,
+				A1000000000000000000F7A3 /* UpdateManager.swift in Sources */,
+				A1000000000000000000F7A2 /* ReleaseSigningKey.swift in Sources */,
+				A1000000000000000000F7A1 /* UpdateCore.swift in Sources */,
 				A1000000000000000000F401 /* TaskSchedule.swift in Sources */,
 				A1000000000000000000F402 /* SchedulerAgent.swift in Sources */,
 				A1000000000000000000F201 /* AgentUsageStore.swift in Sources */,
@@ -1030,6 +1056,7 @@
 				A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */,
 				A1000000000000000000F403 /* AgentRunHost.swift in Sources */,
 				A1000000000000000000F601 /* ContextCompaction.swift in Sources */,
+				A1000000000000000000F701 /* TranscriptRowAnchors.swift in Sources */,
 				A100000000000000000000DB /* DebugConversationImport.swift in Sources */,
 				B10000000000000000000004 /* PlayhouseStore.swift in Sources */,
 				B10000000000000000000005 /* PullRequestServices.swift in Sources */,

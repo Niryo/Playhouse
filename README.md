@@ -98,6 +98,16 @@ Extend Playhouse with JavaScript plugins built from the same native atoms as the
 - The [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI and/or the [Codex](https://github.com/openai/codex) CLI, signed in
 - The [GitHub CLI](https://cli.github.com) (`gh`) for pull request features
 
+**Install a release**
+
+Releases are Apple Silicon builds published to GitHub. Install the latest into `/Applications` with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Niryo/Playhouse/master/scripts/install-release.sh | bash
+```
+
+Installed releases check for updates once a day and show an Update button in the window's title bar. Releases are signed with a self-signed certificate and are not notarized. If you download the zip in a browser instead, allow it once in System Settings → Privacy & Security → Open Anyway. Maintainers publish releases with `scripts/release.sh`; see [docs/release-system.md](docs/release-system.md).
+
 **Build and run**
 
 ```sh
