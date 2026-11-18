@@ -1071,11 +1071,12 @@ extension PlayhouseUITests {
             XCTAssertTrue((invalid["errors"] as? [String] ?? []).contains { $0.contains(message) }, "\(source) reports \(message): \(invalid)")
         }
     }
-    func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension") throws {
+    func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension", commands: [[String: Any]]? = nil) throws {
         let folder = pluginsFolder.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
+        var manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
                                        "icon": icon, "placement": placement, "presentation": presentation]
+        if let commands { manifest["commands"] = commands }
         try JSONSerialization.data(withJSONObject: manifest).write(to: folder.appendingPathComponent("plugin.json"))
         if let source { try source.write(to: folder.appendingPathComponent("index.js"), atomically: true, encoding: .utf8) }
     }

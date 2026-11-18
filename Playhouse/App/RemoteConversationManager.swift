@@ -341,20 +341,6 @@ struct RemoteConversationManager {
         try await daemon.call("mentions.list", ["taskID": id(taskID)]).decoded(MentionCatalog.self)
     }
 
-    /// The composer's `/` menu for `query`, the text after the `/`; `includeStatus` also
-    /// asks both agents which MCP servers need a sign-in.
-    func slashCommands(taskID: UUID, query: String, includeStatus: Bool = false) async throws -> SlashCommandMenu {
-        try await daemon.call("slash.list", [
-            "taskID": id(taskID), "query": .string(query), "includeStatus": .boolean(includeStatus),
-        ]).decoded(SlashCommandMenu.self)
-    }
-
-    /// Starts the agent's account sign-in, shared with the Agents info section's Log in;
-    /// returns the link to open, which only Codex gives (Claude opens its own browser).
-    func login(provider: ConversationProvider) async throws -> String? {
-        try await daemon.call("usage.login", ["provider": .string(provider.rawValue)]).object?["loginURL"]?.string
-    }
-
     func rules(taskID: UUID) async throws -> RuleCatalog {
         try await daemon.call("rules.list", ["taskID": id(taskID)]).decoded(RuleCatalog.self)
     }

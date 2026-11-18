@@ -98,60 +98,53 @@ extension TaskConversationView {
     /// A mention being typed takes the keys instead.
     var typedSlash: (location: Int, length: Int, query: String)? {
         guard !isReadOnly, isComposerEditing, composerDraft.selection.length == 0, typedMention == nil else { return nil }
-        return SlashCommandText.activeQuery(in: draft, caret: composerDraft.selection.location)
+        let entries = slashEntries ?? []
+        return SlashCommandText.activeQuery(in: draft, caret: composerDraft.selection.location) { name in
+            entries.contains { $0.name == name && $0.list }
+        }
     }
 
     var activeSlash: (location: Int, length: Int, query: String)? {
-        guard let typed = typedSlash, typed.location != dismissedSlashLocation else { return nil }
+        guard let typed = typedSlash, typed.location != dismissedSlashLocation, !isRunningSlashCommand else { return nil }
         return typed
     }
 
     /// The command whose own list the open menu shows.
-    var activeSlashCommand: SlashCommand? { activeSlash.flatMap { SlashCommandCatalog.listedCommand($0.query) } }
+    var activeSlashCommand: SlashCommandEntry? {
+        activeSlash.flatMap { SlashCommandCatalog.listedCommand($0.query, in: slashEntries ?? []) }
+    }
 
     var isLoadingSlashItems: Bool {
-        activeSlashCommand != nil && (slashItemsCommand != activeSlashCommand || slashItems == nil)
+        guard let command = activeSlashCommand else { return slashEntries == nil }
+        return slashListCommand != command.name || slashList == nil
     }
 
     /// The open menu, or nil when nothing matches what was typed: a `/` that names no command
     /// (a path, say) or prose after a command's list shows no menu at all.
     var slashMenuModel: SlashCommandMenu? {
         guard let active = activeSlash else { return nil }
-        let menu = SlashCommandCatalog.menu(query: active.query, provider: provider) { command in
-            command == slashItemsCommand ? (slashItems ?? []) : []
-        }
-        if menu.command == nil { return menu.commands.isEmpty ? nil : menu }
-        return menu.items.isEmpty && !menu.filter.isEmpty && !isLoadingSlashItems ? nil : menu
+        let command = SlashCommandCatalog.listedCommand(active.query, in: slashEntries ?? [])
+        let menu = SlashCommandCatalog.menu(
+            query: active.query, entries: slashEntries ?? [], list: command?.name == slashListCommand ? slashList : nil
+        )
+        if menu.command == nil { return menu.commands.isEmpty && slashEntries != nil ? nil : menu }
+        return (menu.list?.items ?? []).isEmpty && !menu.filter.isEmpty && !isLoadingSlashItems ? nil : menu
     }
 
     @ViewBuilder
     var slashMenu: some View {
         if let menu = slashMenuModel, let active = activeSlash {
-            let count = menu.command == nil ? menu.commands.count : menu.items.count
+            let count = menu.command == nil ? menu.commands.count : (menu.list?.items.count ?? 0)
             ComposerSlashMenu(
                 menu: menu,
+                command: activeSlashCommand,
                 isLoading: isLoadingSlashItems,
-                isCheckingSignIn: menu.command == .mcp && isCheckingSlashSignIn,
                 selectedIndex: min(slashSelection, max(count - 1, 0)),
                 actions: ComposerSlashActions(
                     choose: { chooseSlashRow($0, in: menu, at: active) },
-                    gear: { item in
-                        replaceSlash(active, with: "")
-                        openSkillsPage(focus: item.kind == .mcp ? .mcpServer(id: item.targetID) : .skill(id: item.targetID))
-                    },
-                    signIn: { item, provider in
-                        replaceSlash(active, with: "")
-                        openSkillsPage(focus: .mcpSignIn(name: item.title, provider: provider))
-                    },
-                    edit: { item in
-                        replaceSlash(active, with: "")
-                        PluginManagement.edit(item.targetID, registry: pluginRegistry)
-                    },
-                    delete: { item in
-                        replaceSlash(active, with: "")
-                        PluginManagement.confirmDelete(
-                            item.targetID, name: item.title, detail: "Its folder is removed.", registry: pluginRegistry
-                        )
+                    press: { item, button in
+                        guard let command = activeSlashCommand, button.disabled != true else { return }
+                        runSlash(command, at: active) { try await $0.act(command, item: item, button: button.id, filter: menu.filter) }
                     }
                 )
             )
@@ -161,19 +154,44 @@ extension TaskConversationView {
         }
     }
 
-    /// Reads the items of the command the menu now lists; `/mcp` then asks both agents
-    /// which servers need a sign-in, which can take a few seconds.
-    func loadSlashItems(_ command: SlashCommand) async {
-        slashItemsCommand = command
-        slashItems = nil
-        let quick = try? await conversationManager.slashCommands(taskID: task.id, query: command.rawValue)
-        guard slashItemsCommand == command else { return }
-        slashItems = quick?.items ?? []
-        guard command == .mcp else { return }
-        isCheckingSlashSignIn = true
-        let checked = try? await conversationManager.slashCommands(taskID: task.id, query: command.rawValue, includeStatus: true)
-        isCheckingSlashSignIn = false
-        if slashItemsCommand == command, let checked { slashItems = checked.items }
+    /// The `/` commands of the window's active plugins, each run in this window: with the
+    /// composer placement's context and its host calls answered by `PluginHost`.
+    var slashCommandManager: SlashCommandManager {
+        let plugins = pluginRegistry.plugins
+        let props = Dictionary(plugins.map { ($0.id, pluginProps($0.at(.composerActions))) }) { first, _ in first }
+        let actions = pluginActions
+        return SlashCommandManager(
+            plugins: plugins,
+            props: { props[$0.id] ?? [:] },
+            host: { plugin in
+                { kind, name, arguments in await PluginHost(plugin: plugin, actions: actions).answer(kind: kind, name: name, arguments: arguments) }
+            }
+        )
+    }
+
+    /// Reads the commands each new `/` offers, with whether each can run now.
+    func loadSlashEntries() async {
+        let entries = await slashCommandManager.entries()
+        slashEntries = entries
+    }
+
+    /// Reads the list of the command the menu now lists; a list its plugin returns pending
+    /// (`/mcp`, which asks both agents which servers need a sign-in) is asked for again in full.
+    func loadSlashItems(_ command: SlashCommandEntry) async {
+        slashListCommand = command.name
+        slashList = nil
+        let manager = slashCommandManager
+        do {
+            let quick = try await manager.list(command, complete: false)
+            guard slashListCommand == command.name else { return }
+            slashList = quick
+            guard quick.pending != nil else { return }
+            let complete = try await manager.list(command, complete: true)
+            if slashListCommand == command.name { slashList = complete }
+        } catch {
+            guard slashListCommand == command.name else { return }
+            slashList = PluginCommandList(title: "/" + command.name, items: [], empty: error.localizedDescription)
+        }
     }
 
     /// The open `/` menu's keys, then the `@` menu's.
@@ -184,7 +202,7 @@ extension TaskConversationView {
     /// The arrows move the highlight, Return or Tab chooses it, Escape closes the menu.
     func handleSlashKey(_ key: ChatEditorKey) -> Bool {
         guard let active = activeSlash, let menu = slashMenuModel else { return false }
-        let count = menu.command == nil ? menu.commands.count : menu.items.count
+        let count = menu.command == nil ? menu.commands.count : (menu.list?.items.count ?? 0)
         switch key {
         case .up:
             slashSelection = max(0, min(slashSelection, count - 1) - 1)
@@ -200,39 +218,41 @@ extension TaskConversationView {
     }
 
     /// A command with its own list completes to `/name ` and shows the list; any other
-    /// choice removes the typed command, then acts: an MCP server or skill is mentioned.
+    /// choice runs its plugin's handler, whose outcome text replaces the typed command.
     func chooseSlashRow(_ index: Int, in menu: SlashCommandMenu, at active: (location: Int, length: Int, query: String)) {
         guard menu.command != nil else {
             guard menu.commands.indices.contains(index) else { return }
             let entry = menu.commands[index]
             guard entry.enabled else { return }
-            if entry.command.hasItems {
-                replaceSlash(active, with: "/" + entry.command.rawValue + " ")
+            if entry.list {
+                replaceSlash(active, with: "/" + entry.name + " ")
                 return
             }
-            replaceSlash(active, with: "")
-            if entry.command == .goal {
-                isEnteringGoal = true
-            } else {
-                isEnteringGoal = false
-                setConversationMode(.plan)
-            }
+            runSlash(entry, at: active) { try await $0.act(entry) }
             return
         }
-        guard menu.items.indices.contains(index) else { return }
-        let item = menu.items[index]
-        switch item.kind {
-        case .mcp, .skill:
-            replaceSlash(active, with: "@" + (item.handle ?? item.title) + " ")
-        case .login:
-            replaceSlash(active, with: "")
-            if let provider = ConversationProvider(rawValue: item.targetID) { login(provider) }
-        case .createPlugin:
-            replaceSlash(active, with: "")
-            PluginRegistry.setAddMode(true)
-        case .plugin:
-            replaceSlash(active, with: "")
-            PluginManagement.edit(item.targetID, registry: pluginRegistry)
+        guard let command = activeSlashCommand, let items = menu.list?.items, items.indices.contains(index) else { return }
+        let item = items[index]
+        runSlash(command, at: active) { try await $0.act(command, item: item, filter: menu.filter) }
+    }
+
+    /// Runs a command's handler with the menu closed, then replaces the typed command with
+    /// the text it returns (nothing by default). A failure shows in the composer's error.
+    func runSlash(
+        _ command: SlashCommandEntry, at active: (location: Int, length: Int, query: String),
+        _ perform: @escaping (SlashCommandManager) async throws -> PluginCommandOutcome
+    ) {
+        let manager = slashCommandManager
+        isRunningSlashCommand = true
+        Task { @MainActor in
+            defer { isRunningSlashCommand = false }
+            do {
+                let outcome = try await perform(manager)
+                replaceSlash(active, with: outcome.text ?? "")
+            } catch {
+                replaceSlash(active, with: "")
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -246,20 +266,6 @@ extension TaskConversationView {
         skillsFocus = focus
         skillsPresentation += 1
         isShowingSkills = true
-    }
-
-    /// Starts the agent's sign-in as the Agents info section's Log in does, opening the link
-    /// Codex returns (a test build never opens a browser).
-    func login(_ provider: ConversationProvider) {
-        Task { @MainActor in
-            do {
-                guard let link = try await conversationManager.login(provider: provider), let url = URL(string: link),
-                      !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) else { return }
-                NSWorkspace.shared.open(url)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
     }
 
     func userInputForm(_ request: ConversationUserInputRequest) -> some View {

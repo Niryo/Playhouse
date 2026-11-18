@@ -111,7 +111,19 @@ extension TaskConversationView {
             },
             composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) },
             openDiff: { openDiff($0) },
-            refreshWorkspace: { Task { await refreshWorkspaceChanges() } }
+            refreshWorkspace: { Task { await refreshWorkspaceChanges() } },
+            confirm: { PluginManagement.confirm($0) },
+            setMode: isReadOnly ? nil : { mode in
+                if mode == "goal" {
+                    isEnteringGoal = true
+                } else {
+                    isEnteringGoal = false
+                    setConversationMode(.plan)
+                }
+            },
+            openSkills: { openSkillsPage(focus: $0) },
+            editPlugin: { PluginManagement.edit($0, registry: pluginRegistry) },
+            willDeletePlugin: { await PluginManagement.prepareDelete($0, registry: pluginRegistry) }
         )
     }
 

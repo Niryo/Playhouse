@@ -40,6 +40,9 @@ message, for any the request leaves open. Don't guess:
     draws a collapsible header with the plugin's name and remembers whether
     it is collapsed (`state.collapsed`); render the section's content only.
     Render nothing to hide the section, header included.
+  - `headless`: only at `composerActions`. No button and no surface: the
+    plugin only adds `/` commands to the composer's command menu (see
+    "Slash commands" below). Pick it when the user wants a slash command.
 - **Name and icon**: a short name and an SF Symbol name for its button.
 
 The name, placement and presentation the user picked when the editor opened are
@@ -118,10 +121,16 @@ It uses these globals:
     card does, `resolveConflicts(taskID)` starts resolving its pull request's
     conflicts, and `alert(title, message)` shows an alert. They work only from
     `taskItem`; elsewhere they reject with `unavailable`.
+  - `composer.setMode(mode)` turns on the composer's `"plan"` mode or opens
+    its `"goal"` entry, in conversation placements.
+  - `openSkills(focus)` opens the Skills page: `{skillID}`, `{mcpServerID}`, or
+    `{signIn: {name, provider}}` to start an agent's sign-in to an MCP server.
+    `editPlugin(pluginID)` opens a plugin's editor. Both work in conversation
+    placements only.
   - `confirm({title, message, confirm, destructive})` asks the user and
     resolves true when they confirm, false when they cancel. It works on the
-    board (`mainSidebar`, `mainSidebarBottom` and `taskItem`); elsewhere it rejects with
-    `unavailable`.
+    board (`mainSidebar`, `mainSidebarBottom` and `taskItem`) and in
+    `composerActions`; elsewhere it rejects with `unavailable`.
   - `openURL(url)` opens an `http` or `https` link in the browser, from any
     placement; any other URL rejects with `invalid_argument`.
   - `newTask({schedule})` opens a new task; with `schedule` `"recurring"` or
@@ -186,6 +195,69 @@ function WordCount() {
 }
 Playhouse.render(h(WordCount));
 ```
+
+### Slash commands
+
+A plugin can add `/` commands to the composer's command menu. Declare each in
+`plugin.json`'s `commands`; a `headless` plugin has only commands, so it needs
+at least one:
+
+```json
+{
+  "id": "notes", "name": "Notes", "icon": "note.text",
+  "placement": "composerActions", "presentation": "headless",
+  "commands": [
+    { "name": "greet", "detail": "Greets the task", "icon": "hand.wave" },
+    { "name": "notes", "detail": "Lists the task's notes", "list": true }
+  ]
+}
+```
+
+A command's `name` is lowercase words joined by hyphens and can't be a
+built-in command (`mcp`, `plan`, `goal`, `skill`, `login`, `plugin`); `detail`
+is the row's second line and `icon` defaults to the plugin's. Then register
+each command's handlers in `index.js`, which calls no `Playhouse.render`:
+
+```js
+Playhouse.commands.register("greet", {
+  run: function () { return { text: "Hello from " + Playhouse.props.task.title + " " }; }
+});
+Playhouse.commands.register("notes", {
+  list: function (request) {
+    return Playhouse.bridge("task.get", { taskID: Playhouse.props.task.id }).then(function (task) {
+      return { title: "Notes", items: [
+        { id: "title", title: "Task title", detail: task.title, keywords: ["heading"],
+          buttons: [{ id: "plan", label: "Plan it", icon: "list.bullet" }], data: { text: task.title } }
+      ] };
+    });
+  },
+  choose: function (request) { return { text: request.item.data.text + " " }; },
+  press: function (request) { return Playhouse.ui.composer.setMode("plan"); }
+});
+```
+
+Each handler gets one request object and returns a value or a Promise of one:
+
+- `available()` (optional): `false` or `{enabled: false, reason}` greys the
+  command out with `reason`.
+- `run({filter})`, for a command without `list`, runs when it is chosen.
+- `list({filter, complete})`, for a command with `list`, returns the menu
+  shown once the command is typed in full: `{title, items, pending, empty,
+  noMatch}`. Each item is `{id, title, detail, icon, help, keywords, buttons,
+  data}`; the app filters the items by what the user types after the command
+  and a space. Set `pending` (a short note such as `"Checking…"`) to have the
+  app call `list` again with `complete` true for slower details.
+- `choose({item, filter})` runs when an item is chosen, and `press({item,
+  button})` when one of its `buttons` (`{id, label, help, icon, text, style:
+  "icon" or "bordered", disabled, destructive}`) is pressed.
+
+`run`, `choose` and `press` may return `{text}`, which replaces the typed
+command in the draft; otherwise the typed command is removed. Each handler
+runs in a fresh copy of the script with the `composerActions` props, so keep
+nothing between calls except through `Playhouse.setState`. Check the commands
+with `playhouse-cli slash-commands list --task <task-id> --query <name>` and
+`playhouse-cli slash-commands run --task <task-id> --command <name> [--item <id>
+[--button <id>]]` once the plugin is saved.
 
 ## 3. Check the draft
 

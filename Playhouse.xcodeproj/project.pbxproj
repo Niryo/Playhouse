@@ -888,6 +888,7 @@
 				"$(SRCROOT)/Playhouse/App/TaskSchedule.swift",
 				"$(SRCROOT)/Playhouse/App/Plugins/Services/PluginServiceHost.swift",
 				"$(SRCROOT)/Playhouse/App/Plugins/Services/PullRequestModeService.swift",
+				"$(SRCROOT)/Playhouse/App/Plugins/Services/BuiltInCommandsPlugin.swift",
 				"$(SRCROOT)/Playhouse/App/BoardTask.swift",
 				"$(SRCROOT)/Playhouse/App/WorkspaceSupport.swift",
 				"$(SRCROOT)/Playhouse/App/WorkspaceChanges.swift",
