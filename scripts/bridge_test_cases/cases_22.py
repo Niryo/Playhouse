@@ -14,14 +14,23 @@ class BridgeTestCases22:
         self.assert_failure(self.call_cli("plugin", "mode", "--sideways", expected_status=2)[0], "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
-    # case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision.
+    # case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision. A draft with no unpublished changes can't be published: `plugin save` refuses it as invalid_argument and adds no version, and `plugin versions` reports `hasChanges`. In the editor, Publish is disabled and Discard changes is hidden until the draft differs from the published plugin, and both return to that state after publishing or discarding.
     def test_plugin_draft_versions_and_restore(self):
         source = self.PLUGIN_CONTEXT_SOURCE
         installed = self.write_installed_plugin("versioned", source, placement="mainSidebar")
         editor = self.assert_success(self.call_cli("plugin", "edit", "--id", "versioned")[0])["task"]
         draft = Path(editor["contextFolders"][0]) / "versioned"
+        def versions():
+            return self.assert_success(self.call_cli("plugin", "versions", "--id", "versioned")[0])
+        # An unchanged draft has nothing to publish: saving it adds no version.
+        self.assertEqual(versions(), {"versions": [], "hasChanges": False})
+        manifest = (installed / "plugin.json").read_text()
+        self.assert_failure(self.call_cli("plugin", "save", "--id", "versioned", expected_status=2)[0], "invalid_argument")
+        self.assertEqual((installed / "plugin.json").read_text(), manifest, "The refused save leaves the installed plugin untouched.")
+        self.assertFalse((self.plugins_folder() / ".versions" / "versioned").exists())
         changed = source.replace("props.plugin.placement", '"draft change"')
         (draft / "index.js").write_text(changed, encoding="utf-8")
+        self.assertTrue(versions()["hasChanges"])
         self.assertEqual((installed / "index.js").read_text(), source)
         self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", "versioned")[0])["task"]["id"], editor["id"])
         self.assertEqual((draft / "index.js").read_text(), changed)
@@ -29,13 +38,16 @@ class BridgeTestCases22:
         self.assertEqual(saved["version"], 1)
         self.assertEqual(json.loads((installed / "plugin.json").read_text())["version"], 1)
         self.assertEqual((installed / "index.js").read_text(), changed)
-        self.assertEqual(self.assert_success(self.call_cli("plugin", "versions", "--id", "versioned")[0])["versions"], [0])
+        self.assertEqual(versions(), {"versions": [0], "hasChanges": False}, "The published draft matches the plugin again.")
+        self.assert_failure(self.call_cli("plugin", "save", "--id", "versioned", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(versions()["versions"], [0], "Saving again without changes adds no version.")
         self.assertEqual(json.loads((self.plugins_folder() / ".versions" / "versioned" / "0" / "plugin.json").read_text())["version"], 0)
         (draft / "index.js").write_text("invalid javascript !", encoding="utf-8")
         self.assertNotEqual(self.call_cli("plugin", "save", "--id", "versioned", expected_status=1)[0]["ok"], True)
         self.assertEqual((installed / "index.js").read_text(), changed)
         self.assert_success(self.call_cli("plugin", "discard", "--id", "versioned")[0])
         self.assertEqual((draft / "index.js").read_text(), changed)
+        self.assertFalse(versions()["hasChanges"], "Discarding leaves no unpublished changes.")
         (draft / "index.js").write_text("unsaved changes", encoding="utf-8")
         self.assertNotEqual(self.call_cli("plugin", "restore", "--id", "versioned", "--version", "99", expected_status=1)[0]["ok"], True)
         self.assertEqual((draft / "index.js").read_text(), "unsaved changes")
@@ -56,7 +68,7 @@ class BridgeTestCases22:
         self.assertEqual((installed / "index.js").read_text(), changed)
         self.assertEqual((draft / "index.js").read_text(), changed)
 
-    # case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard draft in an unsaved plugin's editor asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
+    # case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard changes in an unsaved plugin's editor, shown even before it has a draft, asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
     def test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it(self):
         def sessions():
             return [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]]

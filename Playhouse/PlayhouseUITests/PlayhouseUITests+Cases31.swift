@@ -373,19 +373,29 @@ extension PlayhouseUITests {
         _ = try runCLI(["plugin", "mode", "--off"])
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
-    // case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision.
+    // case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision. A draft with no unpublished changes can't be published: `plugin save` refuses it as invalid_argument and adds no version, and `plugin versions` reports `hasChanges`. In the editor, Publish is disabled and Discard changes is hidden until the draft differs from the published plugin, and both return to that state after publishing or discarding.
     func test_plugin_draft_versions_and_restore() throws {
         try writeInstalledPlugin("versioned", source: Self.pluginContextSource, placement: "mainSidebar", name: "Versioned")
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["plugin", "refresh"])
         clickInstalledPluginAction("Edit…", pluginRow: "Versioned — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
+        let publish = app.buttons["Publish"]
+        let discard = app.buttons["Discard changes"]
+        func expectPublishable(_ publishable: Bool, _ message: String) {
+            XCTAssertTrue(waitUntil({ publish.exists && publish.isEnabled == publishable && discard.exists == publishable }, timeout: 10), message)
+        }
+        // An unchanged draft can't be published and has nothing to discard.
+        expectPublishable(false, "Publish is disabled and Discard changes hidden while the draft matches the plugin.")
+        attachAppWindowScreenshot(named: "Plugin editor without changes: Publish disabled, no Discard changes")
+        attachElementScreenshot(element("plugin-creation-preview"), named: "Plugin controls without changes")
         let draft = pluginsFolder.appendingPathComponent(".drafts/plugins/versioned/index.js")
         let original = try String(contentsOf: draft, encoding: .utf8)
         let changed = original.replacingOccurrences(of: "props.plugin.placement", with: "\"draft change\"")
         try changed.write(to: draft, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
         XCTAssertEqual(try String(contentsOf: pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8), original)
+        expectPublishable(true, "A changed draft can be published or discarded.")
         attachAppWindowScreenshot(named: "Plugin draft preview")
         let toolbarCapture = XCTAttachment(screenshot: element("plugin-creation-preview").screenshot())
         toolbarCapture.name = "Plugin draft controls"
@@ -398,22 +408,35 @@ extension PlayhouseUITests {
         clickInstalledPluginAction("Edit…", pluginRow: "Versioned — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
-        app.buttons["Save"].click()
+        expectPublishable(true, "The reopened draft still has changes.")
+        publish.click()
         XCTAssertTrue(app.staticTexts["Version 1"].waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ ((try? String(contentsOf: self.pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8)) == changed) }, timeout: 10))
+        expectPublishable(false, "After publishing, there is nothing left to publish or discard.")
+        attachAppWindowScreenshot(named: "Plugin published: Publish disabled again")
+        attachElementScreenshot(element("plugin-creation-preview"), named: "Plugin controls after publishing")
+        app.typeKey("s", modifierFlags: .command)
+        XCTAssertFalse(app.sheets.firstMatch.waitToExist(timeout: 2), "Command-S on a disabled Publish does nothing.")
+        XCTAssertTrue(app.staticTexts["Version 1"].exists, "Command-S without changes publishes nothing.")
+        let unchanged = try XCTUnwrap(try runCLI(["plugin", "versions", "--id", "versioned"])["result"] as? [String: Any])
+        XCTAssertEqual(unchanged["versions"] as? [Int], [0])
+        XCTAssertEqual(unchanged["hasChanges"] as? Bool, false)
         try original.write(to: draft, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
-        app.buttons["Discard draft"].click()
-        XCTAssertTrue(app.sheets.staticTexts["The preview will be reset to the saved plugin."].waitToExist(timeout: 5), "A saved plugin's discard only resets its draft.")
+        expectPublishable(true, "Editing the published plugin shows Discard changes again.")
+        discard.click()
+        XCTAssertTrue(app.sheets.staticTexts["The preview will be reset to the published plugin."].waitToExist(timeout: 5), "A saved plugin's discard only resets its draft.")
         app.sheets.buttons["Discard"].click()
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: draft, encoding: .utf8)) == changed }, timeout: 10))
+        expectPublishable(false, "Discarding leaves no unpublished changes.")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
         try "invalid javascript !".write(to: draft, atomically: true, encoding: .utf8)
-        app.buttons["Save"].click()
+        expectPublishable(true, "An invalid draft is still a change.")
+        publish.click()
         XCTAssertTrue(app.sheets.buttons["OK"].waitToExist(timeout: 10))
         attachAppWindowScreenshot(named: "Plugin invalid draft error")
         app.sheets.buttons["OK"].click()
-        app.buttons["Discard draft"].click()
+        discard.click()
         app.sheets.buttons["Discard"].click()
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: draft, encoding: .utf8)) == changed }, timeout: 10))
         let unsaved = original.replacingOccurrences(of: "props.plugin.placement", with: "\"unsaved draft\"")
@@ -430,7 +453,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ (try? String(contentsOf: self.pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8)) == original }, timeout: 10))
         XCTAssertEqual(try String(contentsOf: draft, encoding: .utf8), unsaved, "Restore preserves the dirty draft.")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "unsaved draft" }, timeout: 10))
-        app.buttons["Discard draft"].click()
+        expectPublishable(true, "The draft kept through a restore still differs from the restored plugin.")
+        discard.click()
         app.sheets.buttons["Discard"].click()
         XCTAssertTrue(app.staticTexts["Version 2"].waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
@@ -439,7 +463,8 @@ extension PlayhouseUITests {
         let draftDirectory = draft.deletingLastPathComponent().deletingLastPathComponent()
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: draftDirectory.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: draftDirectory.path) }
-        app.buttons["Save"].click()
+        expectPublishable(true, "The changed draft can be published.")
+        publish.click()
         XCTAssertTrue(app.sheets.staticTexts["The plugin was published, but the draft could not be refreshed. Your existing draft was preserved."].waitToExist(timeout: 10))
         attachAppWindowScreenshot(named: "Plugin published with draft refresh warning")
         XCTAssertEqual(try String(contentsOf: draft, encoding: .utf8), changed)
@@ -448,7 +473,7 @@ extension PlayhouseUITests {
         app.sheets.buttons["OK"].click()
     }
 
-    // case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard draft in an unsaved plugin's editor asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
+    // case-contract: test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it | A plugin that was never saved is discarded entirely: `plugin discard --id` on a new authoring session, before any prompt and after a turn wrote its draft, removes its draft folder and its editor conversation, so `plugin sessions` no longer lists it, `plugin edit --id` is not_found, and the plugins revision is bumped; `plugin delete --id` removes an unsaved plugin the same way. Discarding or deleting an unknown id is not_found, a saved plugin's discard still only resets its draft and keeps its editor, and when its draft can't be removed an unsaved plugin keeps its editor conversation for a retry. In the window, the Plugins menu lists each unsaved plugin as its own submenu labeled with its name, placement and (Unsaved), offering Edit and Delete, with no Edit item at the menu's root. Discard changes in an unsaved plugin's editor, shown even before it has a draft, asks to discard the plugin, then closes the editor and removes the plugin from the menu; Delete in its submenu, after confirming, removes another one the same way.
     func test_plugin_unsaved_discard_removes_plugin_and_menu_lists_it() throws {
         launchApp(defaultParent: fixture.parent.path)
         func sessions() throws -> [String] {
@@ -494,14 +519,14 @@ extension PlayhouseUITests {
         // Closed menu-bar items stay in the accessibility tree, so wait for the menu to stop taking hits instead.
         // The pointer is parked in the editor so it cannot leave a menu bar title tracking.
         element("plugin-creation-preview").hover()
-        XCTAssertTrue(waitUntil({ !menu.menus.firstMatch.isHittable && self.app.buttons["Discard draft"].isHittable }, timeout: 5), "The menu closes.")
+        XCTAssertTrue(waitUntil({ !menu.menus.firstMatch.isHittable && self.app.buttons["Discard changes"].isHittable }, timeout: 5), "The menu closes.")
 
         // Discarding an unsaved plugin removes its draft and conversation and closes its editor.
         let blamosDraft = drafts.appendingPathComponent(blamosID)
         try FileManager.default.createDirectory(at: blamosDraft, withIntermediateDirectories: true)
         try "draft".write(to: blamosDraft.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
         XCTAssertTrue(FileManager.default.fileExists(atPath: blamosDraft.appendingPathComponent("index.js").path))
-        app.buttons["Discard draft"].click()
+        app.buttons["Discard changes"].click()
         XCTAssertTrue(app.sheets.staticTexts["Discard plugin?"].waitToExist(timeout: 5))
         XCTAssertTrue(app.sheets.staticTexts["Discard plugin?"].isHittable, "No menu covers the confirmation.")
         XCTAssertTrue(app.sheets.staticTexts["This plugin was never saved. Its draft and this conversation will be deleted."].exists)
