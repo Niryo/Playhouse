@@ -225,10 +225,10 @@ protocol ConversationSubject: AnyObject, Observable {
 
 extension ConversationSubject {
     var authoringPluginPlacement: String? {
-        (self as? BoardTask)?.pluginPlacement ?? (self as? StandaloneChat)?.pluginPlacement
+        (self as? StandaloneChat)?.pluginPlacement
     }
     var authoringPluginID: String? {
-        (self as? BoardTask)?.authoredPluginID ?? (self as? StandaloneChat)?.authoredPluginID
+        (self as? StandaloneChat)?.authoredPluginID
     }
 
     var answeredAsyncQuestionIDs: [String] {

@@ -460,6 +460,9 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
 
     /// Sorted, so equal snapshots compare equal.
     var activeThreadIDs: [String] = []
+    /// Tasks with a turn running, by task ID. A window whose task model hasn't yet picked up
+    /// the conversation ID the daemon stored for a new conversation still sees its turn here.
+    var activeTaskIDs: [String] = []
     /// The active conversations whose turn can be paused right now.
     var interruptibleThreadIDs: [String] = []
     /// Conversations whose most recent turn was paused rather than finished.
@@ -470,6 +473,7 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     var goal = Goal()
 
     func isTurnActive(threadID: String) -> Bool { activeThreadIDs.contains(threadID) }
+    func isTurnActive(taskID: String) -> Bool { activeTaskIDs.contains(taskID) }
     func canInterruptActiveTurn(threadID: String) -> Bool { interruptibleThreadIDs.contains(threadID) }
     func wasLastTurnInterrupted(threadID: String) -> Bool { interruptedThreadIDs.contains(threadID) }
 
@@ -480,6 +484,7 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     func slice(taskID: String, threadIDs: Set<String>) -> ConversationRuntimeSnapshot {
         var slice = ConversationRuntimeSnapshot()
         slice.activeThreadIDs = activeThreadIDs.filter(threadIDs.contains)
+        slice.activeTaskIDs = activeTaskIDs.filter { $0 == taskID }
         slice.interruptibleThreadIDs = interruptibleThreadIDs.filter(threadIDs.contains)
         slice.interruptedThreadIDs = interruptedThreadIDs.filter(threadIDs.contains)
         slice.pendingUserInput = pendingUserInput.filter { threadIDs.contains($0.key) }
@@ -527,6 +532,7 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
         }
         snapshot.conversationRevisions = Dictionary(uniqueKeysWithValues: ConversationManager.visibleRevisions.map { ($0.key.uuidString, $0.value) })
         snapshot.activeThreadIDs = active.sorted()
+        snapshot.activeTaskIDs = ConversationTurnEvents.activeTaskIDs.map(\.uuidString).sorted()
         snapshot.interruptibleThreadIDs = interruptible.sorted()
         snapshot.interruptedThreadIDs = interrupted.sorted()
         return snapshot

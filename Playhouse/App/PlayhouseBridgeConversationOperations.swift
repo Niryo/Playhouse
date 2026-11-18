@@ -77,7 +77,11 @@ extension PlayhouseBridgeRuntime {
             return .object(["closed": .boolean(closed)])
         case "conversation.events.subscribe":
             let taskID = try request.requiredUUID("taskID")
-            _ = try taskManager.taskModel(taskID)
+            // A plugin editor is watched like a board task. The standalone chat files each turn
+            // under the page its close-turn picks, so it is followed through its history instead.
+            if try taskManager.conversationSubject(taskID).isStandaloneChat {
+                throw BridgeCommandError(code: "invalid_argument", message: "The standalone chat is followed through its history, not watched.")
+            }
             guard let updates = ConversationTurnEvents.watch(taskID) else {
                 return .object(["watched": .boolean(false)])
             }

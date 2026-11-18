@@ -272,18 +272,7 @@ struct KanbanBoardView: View {
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             } else if let selectedTask {
-                if let pluginID = selectedTask.authoredPluginID {
-                    HStack(spacing: 0) {
-                        conversationView(for: selectedTask)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        Divider()
-                        PluginAuthoringPreview(task: selectedTask, pluginID: pluginID, onClose: { self.selectedTask = nil })
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
-                    }
-                } else {
-                    conversationView(for: selectedTask)
-                }
+                conversationView(for: selectedTask)
             } else {
                 boardContent
             }
@@ -319,9 +308,8 @@ struct KanbanBoardView: View {
             guard let id = notification.object as? UUID else { return }
             openPluginConversation(id, draft: nil)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .playhousePreparePluginEdit)) { notification in
+        .onReceive(NotificationCenter.default.publisher(for: .playhousePreparePluginDelete)) { notification in
             guard let id = notification.object as? UUID else { return }
-            if selectedTask?.id == id { selectedTask = nil }
             if pluginChat?.id == id { pluginChat = nil; pluginInitialDraft = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhouseShowBoardSearch)) { _ in
@@ -1037,7 +1025,7 @@ struct RenameTaskSheet: View {
 extension Notification.Name {
     static let playhouseStartPluginCreation = Notification.Name("playhouseStartPluginCreation")
     static let playhouseEditPlugin = Notification.Name("playhouseEditPlugin")
-    static let playhousePreparePluginEdit = Notification.Name("playhousePreparePluginEdit")
+    static let playhousePreparePluginDelete = Notification.Name("playhousePreparePluginDelete")
 }
 
 /// An alert a plugin raised with `ui.alert`.

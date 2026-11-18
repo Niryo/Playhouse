@@ -406,7 +406,9 @@ struct TaskConversationView: View {
     /// Claude runs conversations in parallel, so a client-wide flag would miss
     /// this task's edge while another conversation keeps running.
     var providerTurnIsActive: Bool {
-        guard let threadID = task.activeConversationID else { return false }
+        // A new conversation whose ID this window's model hasn't picked up from the daemon yet,
+        // such as a plugin editor's first turn, is followed by its task's turn instead.
+        guard let threadID = task.activeConversationID else { return conversationRuntime.isTurnActive(taskID: task.id) }
         return conversationRuntime.isTurnActive(threadID: threadID)
     }
 
@@ -836,13 +838,13 @@ struct TaskConversationView: View {
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
                 && (task.status == .inProgress || task.status == .waitingResponse)
             guard let taskThreadID = task.activeConversationID else {
-                isResponding = submittedTurnIsPending
+                isResponding = submittedTurnIsPending || isTurnActive
                 return
             }
             let completedTurnIsVisible = hasCompletedAssistantResponse && !isTurnActive
             isResponding = completedTurnIsVisible
                 ? false
-                : submittedTurnIsPending || (isTurnActive && conversationRuntime.isTurnActive(threadID: taskThreadID))
+                : submittedTurnIsPending || isTurnActive
             // A turn stopped while this window followed it (not sent from it) can still be continued.
             if !isTurnActive, !isResponding, conversationRuntime.wasLastTurnInterrupted(threadID: taskThreadID) {
                 hasPausedResponse = true

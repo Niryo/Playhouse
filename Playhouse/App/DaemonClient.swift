@@ -229,6 +229,7 @@ final class ConversationRuntimeModel: ObservableObject {
     }
 
     func isTurnActive(threadID: String) -> Bool { snapshot.isTurnActive(threadID: threadID) }
+    func isTurnActive(taskID: UUID) -> Bool { snapshot.isTurnActive(taskID: taskID.uuidString) }
     func canInterruptActiveTurn(threadID: String) -> Bool { snapshot.canInterruptActiveTurn(threadID: threadID) }
     func wasLastTurnInterrupted(threadID: String) -> Bool { snapshot.wasLastTurnInterrupted(threadID: threadID) }
     func pendingUserInputRequest(forThread threadID: String) -> ConversationUserInputRequest? { snapshot.pendingUserInput[threadID] }
