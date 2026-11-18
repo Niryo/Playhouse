@@ -103,21 +103,15 @@ final class ChatPageAnchorsModel {
     }
 }
 
-/// How the standalone chat's transcript shares its width with the page labels.
+/// How the standalone chat's transcript makes room for the page labels: the open labels widen
+/// the chat sidebar by `pushWidth`, pushing the board aside, and the transcript's rows move right
+/// by as much, keeping their width so their text does not reflow.
 enum ChatPageAnchorsLayout {
-    /// Below this transcript width the labels would leave too little room for messages.
+    /// Below this transcript width the chat offers no labels.
     static let minimumTranscriptWidth: CGFloat = 380
     /// Where the transcript's rows start without the labels.
     static let transcriptPadding: CGFloat = 28
     static let transcriptMaxWidth: CGFloat = 820
-    static let bubbleMaxWidth: CGFloat = 620
-
-    /// The width the labels take from the transcript's rows: the gap that agent replies used
-    /// to leave on their right, and whatever a wide chat has beyond a full-width message.
-    static func rowInset(transcriptWidth: CGFloat) -> CGFloat {
-        let rowWidth = min(transcriptWidth, transcriptMaxWidth) - transcriptPadding * 2
-        return min(168, max(101, rowWidth - bubbleMaxWidth))
-    }
 
     /// Labels in view at a time; older ones are scrolled to.
     static let visibleLabelCount = 15
@@ -138,10 +132,11 @@ enum ChatPageAnchorsLayout {
     /// Where the open labels start from the transcript column's edge: just right of the handle.
     static let labelsLeading = handleInset + handleWidth + labelsHandleGap
 
-    /// The labels' width: up to a little before the rows start.
-    static func labelsWidth(transcriptWidth: CGFloat) -> CGFloat {
-        rowInset(transcriptWidth: transcriptWidth) + transcriptPadding - labelsLeading - 12
-    }
+    /// The labels' width.
+    static let labelsWidth: CGFloat = 112
+    /// How far the open labels push the rows right, and widen the chat sidebar: the labels'
+    /// room, ending a little before the rows start.
+    static let pushWidth = labelsLeading + labelsWidth + 12 - transcriptPadding
     /// How the labels slide out from their handle, pushing the messages right, and back in.
     static let slideAnimation = Animation.easeInOut(duration: 0.22)
 
@@ -151,9 +146,32 @@ enum ChatPageAnchorsLayout {
         return rows * labelHeight + (rows - 1) * labelSpacing + labelsVerticalPadding * 2
     }
 
-    /// Where the transcript's centered column starts.
-    static func columnLeading(transcriptWidth: CGFloat) -> CGFloat {
-        max(0, (transcriptWidth - transcriptMaxWidth) / 2)
+    /// Where the transcript's centered column starts, while the labels push it by `push`.
+    static func columnLeading(transcriptWidth: CGFloat, push: CGFloat) -> CGFloat {
+        max(0, (transcriptWidth - transcriptMaxWidth - push) / 2)
+    }
+}
+
+/// How far the chat's open page labels ask the chat sidebar to widen, so the board makes room
+/// for them instead of the transcript's rows narrowing.
+struct ChatPageAnchorsPushKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct ChatPageAnchorsPushEnvironmentKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    /// The width the chat sidebar has grown by for the page labels. The transcript moves its
+    /// rows right by this much, in the same update that widens the sidebar, so the rows keep
+    /// their width throughout.
+    var chatPageAnchorsPush: CGFloat {
+        get { self[ChatPageAnchorsPushEnvironmentKey.self] }
+        set { self[ChatPageAnchorsPushEnvironmentKey.self] = newValue }
     }
 }
 

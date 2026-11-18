@@ -94,11 +94,12 @@ extension TaskConversationView {
                         }
                     }
                 }
-                // The chat's page labels take the room on the rows' leading side.
-                .padding(.leading, showsPageAnchors ? ChatPageAnchorsLayout.rowInset(transcriptWidth: viewport.size.width) : 0)
+                // The open page labels widen the chat sidebar and push the rows right by as much,
+                // so the rows keep their width and their text stays as it was.
+                .padding(.leading, chatPageAnchorsPush)
                 .padding(.horizontal, ChatPageAnchorsLayout.transcriptPadding)
                 .padding(.vertical, Self.conversationVerticalPadding)
-                .frame(maxWidth: ChatPageAnchorsLayout.transcriptMaxWidth)
+                .frame(maxWidth: ChatPageAnchorsLayout.transcriptMaxWidth + chatPageAnchorsPush)
                 .frame(maxWidth: .infinity)
                 .hoverRevealScrollers()
                 .transcriptScroll(
@@ -117,6 +118,7 @@ extension TaskConversationView {
                 chatPageAnchorsOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
             }
             .overlay(alignment: .bottom) { jumpToLatestButton }
+            .preference(key: ChatPageAnchorsPushKey.self, value: showsPageAnchors ? ChatPageAnchorsLayout.pushWidth : 0)
             .onChange(of: offersChatPageAnchors(transcriptWidth: viewport.size.width)) { _, offers in
                 // Labels slid out before the chat grew too narrow for them stay folded when it widens,
                 // and the parts that vanished under the pointer no longer count as hovered.

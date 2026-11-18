@@ -259,6 +259,8 @@ struct TaskConversationView: View {
     @AppStorage(WorkspaceSettings.pluginAddModeKey, store: WorkspaceSettings.preferencesStore) var isPluginAddModeOn = false
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) var pluginAppearance = "dark"
     @Environment(PluginRegistry.self) var pluginRegistry
+    /// How far the chat sidebar has widened for the open page labels.
+    @Environment(\.chatPageAnchorsPush) var chatPageAnchorsPush
     /// A modal, sidebar or page plugin opened from this conversation's placements.
     @State var openConversationPlugin: PluginRecord?
     @State var isStartingPluginTask = false
