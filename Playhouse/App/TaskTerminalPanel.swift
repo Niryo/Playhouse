@@ -2,42 +2,98 @@ import AppKit
 import SwiftTerm
 import SwiftUI
 
-/// One task's shell. The session outlives the panel: hiding the panel keeps the shell and its
-/// scrollback, and only closing the task's conversation (or restarting after an exit) ends it.
+/// One task's shells: one pane per created repository worktree, so a multi-repository task opens
+/// a split view. The session outlives the panel: hiding the panel keeps the shells and their
+/// scrollback, and only closing the task's conversation (or restarting after an exit) ends them.
 @MainActor
 final class TaskTerminalSession: ObservableObject {
-    @Published private(set) var launch: TaskTerminalLaunch?
+    @Published private(set) var panes: [TaskTerminalPane] = []
     @Published private(set) var launchError: String?
-    @Published private(set) var exitStatus: String?
-    @Published private(set) var currentDirectory: String?
-    private(set) var terminalView: PlayhouseTerminalView?
-    private var processObserver: ProcessObserver?
     private(set) var taskID: UUID?
 
-    var isRunning: Bool { terminalView?.process?.running == true }
-
-    /// Starts the shell the first time the panel opens for this task; later calls reuse it.
+    /// Starts the shells the first time the panel opens for this task. Later calls reuse running
+    /// shells, open a pane for a worktree created since, and close the pane of a worktree the
+    /// task no longer has.
     func startIfNeeded(taskID: UUID, workspaceManager: WorkspaceManager) {
         if self.taskID != taskID { terminate() }
-        guard terminalView == nil else { return }
         self.taskID = taskID
-        exitStatus = nil
         do {
             let launch = try workspaceManager.terminalLaunch(for: taskID)
             launchError = nil
-            startShell(launch, taskID: taskID)
+            sync(launch)
         } catch {
-            launch = nil
+            // Shells already running stay open, and a pane left without one closes; the error
+            // replaces the panes only once none runs.
+            guard !panes.contains(where: \.isRunning) else {
+                panes.removeAll { $0.terminalView == nil }
+                return
+            }
+            terminate()
             launchError = error.localizedDescription
         }
     }
 
-    private func startShell(_ launch: TaskTerminalLaunch, taskID: UUID) {
+    private func sync(_ launch: TaskTerminalLaunch) {
+        let existing = panes
+        for pane in existing where !launch.panes.contains(where: { $0.directory == pane.directory }) {
+            pane.terminate()
+        }
+        panes = launch.panes.map { spec in
+            let pane = existing.first { $0.directory == spec.directory } ?? TaskTerminalPane(spec, taskID: launch.taskID)
+            if pane.terminalView == nil { pane.start(launch) }
+            return pane
+        }
+    }
+
+    /// Starts every pane again from a fresh launch, as Try Again after a launch error does.
+    func restart(workspaceManager: WorkspaceManager) {
+        guard let taskID else { return }
+        terminate()
+        startIfNeeded(taskID: taskID, workspaceManager: workspaceManager)
+    }
+
+    /// Starts a new shell in one pane's worktree, leaving the other panes' shells running.
+    func restart(_ pane: TaskTerminalPane, workspaceManager: WorkspaceManager) {
+        guard let taskID else { return }
+        pane.terminate()
+        startIfNeeded(taskID: taskID, workspaceManager: workspaceManager)
+    }
+
+    func terminate() {
+        panes.forEach { $0.terminate() }
+        panes = []
+    }
+}
+
+/// One shell in the terminal panel, running in one repository worktree.
+@MainActor
+final class TaskTerminalPane: ObservableObject, Identifiable {
+    let repositoryPath: String
+    let name: String
+    /// The worktree the shell starts in, which identifies the pane across launches.
+    let directory: String
+    let taskID: UUID
+    @Published private(set) var exitStatus: String?
+    @Published private(set) var currentDirectory: String?
+    @Published private(set) var terminalView: PlayhouseTerminalView?
+    private var processObserver: ProcessObserver?
+
+    nonisolated var id: String { directory }
+    var isRunning: Bool { terminalView?.process?.running == true }
+
+    init(_ spec: TaskTerminalLaunch.Pane, taskID: UUID) {
+        repositoryPath = spec.repositoryPath
+        name = spec.name
+        directory = spec.directory
+        self.taskID = taskID
+    }
+
+    fileprivate func start(_ launch: TaskTerminalLaunch) {
         let view = PlayhouseTerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
         view.font = TerminalTheme.font
         view.optionAsMetaKey = false
         view.setAccessibilityIdentifier("task-terminal-view")
-        let observer = ProcessObserver(session: self)
+        let observer = ProcessObserver(pane: self)
         view.processDelegate = observer
         var environment = ProcessInfo.processInfo.environment
         environment.merge(launch.environment) { _, playhouse in playhouse }
@@ -45,32 +101,25 @@ final class TaskTerminalSession: ObservableObject {
             executable: launch.shell,
             args: launch.arguments,
             environment: environment.map { "\($0.key)=\($0.value)" },
-            currentDirectory: launch.directory
+            currentDirectory: directory
         )
         processObserver = observer
         terminalView = view
-        self.launch = launch
-        currentDirectory = launch.directory
+        exitStatus = nil
+        currentDirectory = directory
         PlayhouseDiagnostics.record("terminal.session.started", fields: [
             "taskID": taskID.uuidString,
-            "directory": launch.directory,
+            "directory": directory,
             "shell": launch.shell
         ])
     }
 
-    func restart(workspaceManager: WorkspaceManager) {
-        guard let taskID else { return }
-        terminate()
-        startIfNeeded(taskID: taskID, workspaceManager: workspaceManager)
-    }
-
-    func terminate() {
+    fileprivate func terminate() {
         if isRunning { terminalView?.terminate() }
         terminalView?.processDelegate = nil
         terminalView?.removeFromSuperview()
         terminalView = nil
         processObserver = nil
-        launch = nil
         currentDirectory = nil
     }
 
@@ -78,12 +127,11 @@ final class TaskTerminalSession: ObservableObject {
         // A shell replaced by Restart can report its exit after the new one started.
         guard source === terminalView else { return }
         exitStatus = code.map { "Shell exited with status \($0)." } ?? "Shell exited."
-        if let taskID {
-            PlayhouseDiagnostics.record("terminal.session.exited", fields: [
-                "taskID": taskID.uuidString,
-                "exitCode": code.map(String.init) ?? "unknown"
-            ])
-        }
+        PlayhouseDiagnostics.record("terminal.session.exited", fields: [
+            "taskID": taskID.uuidString,
+            "directory": directory,
+            "exitCode": code.map(String.init) ?? "unknown"
+        ])
     }
 
     fileprivate func directoryChanged(_ source: TerminalView, _ directory: String?) {
@@ -93,16 +141,16 @@ final class TaskTerminalSession: ObservableObject {
 
     /// SwiftTerm's delegate is a non-isolated protocol, so a small object relays its callbacks.
     private final class ProcessObserver: LocalProcessTerminalViewDelegate {
-        weak var session: TaskTerminalSession?
-        init(session: TaskTerminalSession) { self.session = session }
+        weak var pane: TaskTerminalPane?
+        init(pane: TaskTerminalPane) { self.pane = pane }
 
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-            Task { @MainActor [weak session] in session?.directoryChanged(source, directory) }
+            Task { @MainActor [weak pane] in pane?.directoryChanged(source, directory) }
         }
         func processTerminated(source: TerminalView, exitCode: Int32?) {
-            Task { @MainActor [weak session] in session?.processExited(source, code: exitCode) }
+            Task { @MainActor [weak pane] in pane?.processExited(source, code: exitCode) }
         }
     }
 }
@@ -145,6 +193,8 @@ enum TerminalPanelLayout {
     static let minimumWidth: CGFloat = 320
     /// The conversation keeps at least this much of the space the panel floats over.
     static let minimumUncovered: CGFloat = 260
+    /// Each shell in a multi-repository split keeps at least this height.
+    static let minimumPaneHeight: CGFloat = 90
 
     static func clampedWidth(_ width: CGFloat, available: CGFloat) -> CGFloat {
         let maximum = max(minimumWidth, available - minimumUncovered)
@@ -152,10 +202,12 @@ enum TerminalPanelLayout {
     }
 }
 
-/// The terminal panel that slides in from the right edge of a task's conversation.
+/// The terminal panel that slides in from the right edge of a task's conversation. A task with
+/// several repository worktrees shows one shell per worktree, stacked in a resizable split view.
 struct TaskTerminalPanel: View {
     @ObservedObject var session: TaskTerminalSession
     let onRestart: () -> Void
+    let onRestartPane: (TaskTerminalPane) -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -167,14 +219,8 @@ struct TaskTerminalPanel: View {
                 Text("Terminal")
                     .font(.system(size: 13, weight: .semibold))
                     .accessibilityIdentifier("task-terminal-title")
-                if let directory = session.currentDirectory {
-                    Text(Self.abbreviated(directory))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                        .help(directory)
-                        .accessibilityIdentifier("task-terminal-directory")
+                if session.panes.count == 1, let pane = session.panes.first {
+                    TerminalPaneDirectory(pane: pane)
                 }
                 Spacer(minLength: 0)
                 Button(action: onClose) {
@@ -218,11 +264,80 @@ struct TaskTerminalPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("task-terminal-error")
-            } else if let terminalView = session.terminalView {
-                TerminalViewHost(view: terminalView)
+            } else if session.panes.count == 1, let pane = session.panes.first {
+                TerminalPaneView(pane: pane, showsHeader: false, focusesOnAttach: true) { onRestartPane(pane) }
+            } else if !session.panes.isEmpty {
+                VSplitView {
+                    ForEach(session.panes) { pane in
+                        TerminalPaneView(pane: pane, showsHeader: true, focusesOnAttach: pane === session.panes.first) {
+                            onRestartPane(pane)
+                        }
+                        .frame(minHeight: TerminalPanelLayout.minimumPaneHeight, maxHeight: .infinity)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("task-terminal-split")
+            }
+        }
+        // Clear profiles blur what lies behind their translucent background.
+        .background(.ultraThinMaterial)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-terminal-panel")
+    }
+}
+
+/// A pane's current folder, abbreviated against the home folder.
+private struct TerminalPaneDirectory: View {
+    @ObservedObject var pane: TaskTerminalPane
+
+    var body: some View {
+        if let directory = pane.currentDirectory {
+            Text(Self.abbreviated(directory))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .help(directory)
+                .accessibilityIdentifier("task-terminal-directory")
+        }
+    }
+
+    private static func abbreviated(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+}
+
+/// One worktree's shell; in a split view it carries a header naming its repository.
+private struct TerminalPaneView: View {
+    @ObservedObject var pane: TaskTerminalPane
+    let showsHeader: Bool
+    let focusesOnAttach: Bool
+    let onRestart: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if showsHeader {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(pane.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("task-terminal-pane-name")
+                    TerminalPaneDirectory(pane: pane)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.04))
+            }
+            if let terminalView = pane.terminalView {
+                TerminalViewHost(view: terminalView, focusesOnAttach: focusesOnAttach)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .overlay(alignment: .bottom) {
-                        if let exitStatus = session.exitStatus {
+                        if let exitStatus = pane.exitStatus {
                             HStack(spacing: 10) {
                                 Text(exitStatus)
                                     .font(.system(size: 11, weight: .medium))
@@ -231,7 +346,7 @@ struct TaskTerminalPanel: View {
                                 Button("Restart", action: onRestart)
                                     .controlSize(.small)
                                     .buttonHoverPointer()
-                                    .nativeHelp("Start a new shell in the task's folder")
+                                    .nativeHelp("Start a new shell in this worktree")
                                     .accessibilityIdentifier("restart-terminal-button")
                             }
                             .padding(.horizontal, 12)
@@ -241,15 +356,9 @@ struct TaskTerminalPanel: View {
                     }
             }
         }
-        // Clear profiles blur what lies behind their translucent background.
-        .background(.ultraThinMaterial)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("task-terminal-panel")
-    }
-
-    private static func abbreviated(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+        .accessibilityLabel(pane.name)
+        .accessibilityIdentifier("task-terminal-pane")
     }
 }
 
@@ -321,6 +430,8 @@ struct TerminalTheme: Equatable {
 /// reattaches the same shell instead of starting a new one.
 private struct TerminalViewHost: NSViewRepresentable {
     let view: PlayhouseTerminalView
+    /// Opening the panel focuses one shell: the only one, or the split's first.
+    let focusesOnAttach: Bool
     @Environment(\.colorScheme) private var colorScheme
 
     func makeNSView(context: Context) -> NSView {
@@ -352,6 +463,7 @@ private struct TerminalViewHost: NSViewRepresentable {
             view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
         // Opening the panel is a request to type in it.
+        guard focusesOnAttach else { return }
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
     }
 }

@@ -56,6 +56,8 @@ final class PluginRuntime {
     @ObservationIgnored private var pendingTimers: [Int: DispatchWorkItem] = [:]
     @ObservationIgnored private var manualTimers: [(id: Int, due: Double)] = []
     @ObservationIgnored private var manualClock: Double = 0
+    @ObservationIgnored private var commandResults: [Int: Result<PluginValue, PluginHostError>] = [:]
+    @ObservationIgnored private var nextCommandToken = 0
 
     /// Loads the runtime from `resources` and runs `source`. `props` is the
     /// plugin's input, readable as `Playhouse.props`. A script that throws
@@ -143,6 +145,34 @@ final class PluginRuntime {
         manualClock = target
     }
 
+    /// With `.manual` timers: fires the earliest pending timer, advancing the
+    /// clock to it. Returns false when no timer is pending.
+    @discardableResult
+    func runNextTimer() -> Bool {
+        guard let next = manualTimers.min(by: { $0.due < $1.due }) else { return false }
+        runDueTimers(advancing: max(0, next.due - manualClock))
+        return true
+    }
+
+    /// The command names the script registered with `Playhouse.commands.register`.
+    func registeredCommands() -> [String] {
+        context.objectForKeyedSubscript("__playhouseCommandNames")?.call(withArguments: [])?.toArray()?.compactMap { $0 as? String } ?? []
+    }
+
+    /// Starts the `phase` handler of command `name` with `request`; its result
+    /// arrives in `commandResult(_:)` once the handler's promise settles.
+    func runCommand(_ name: String, phase: String, request: PluginValue) -> Int {
+        nextCommandToken += 1
+        let token = nextCommandToken
+        context.objectForKeyedSubscript("__playhouseRunCommand")?.call(withArguments: [token, name, phase, request.javaScriptValue(in: context)])
+        return token
+    }
+
+    /// What command run `token` settled with, or nil while it runs.
+    func commandResult(_ token: Int) -> Result<PluginValue, PluginHostError>? {
+        commandResults[token]
+    }
+
     private func installNative() {
         let native = JSValue(newObjectIn: context)!
         // A commit's op array arrives as a JavaScript value and is read directly, with no JSON string.
@@ -171,6 +201,18 @@ final class PluginRuntime {
             pendingHostCalls.append(call)
             onHostCall?(call)
         }
+        let commandResult: @convention(block) (Int, Bool, JSValue) -> Void = { [weak self] token, ok, value in
+            let result = (try? PluginValue(javaScript: value)) ?? .null
+            if ok {
+                self?.commandResults[token] = .success(result)
+            } else {
+                let object = result.object ?? [:]
+                self?.commandResults[token] = .failure(PluginHostError(
+                    code: object["code"]?.string ?? "script_error", message: object["message"]?.string ?? "The command failed."
+                ))
+            }
+        }
+        native.setObject(commandResult, forKeyedSubscript: "commandResult" as NSString)
         native.setObject(hostCall, forKeyedSubscript: "hostCall" as NSString)
         native.setObject(commit, forKeyedSubscript: "commit" as NSString)
         native.setObject(log, forKeyedSubscript: "log" as NSString)

@@ -12,3 +12,9 @@ __pycache__/
 .tmp-plan-attachments/
 .tmp-plan-results.json
 .tmp-xcresult-*/
+*.profraw
+
+# Local engineering notes and nightly test reports; never committed
+docs/nightly-tests/
+docs/performance/
+docs/workflow-improvements/

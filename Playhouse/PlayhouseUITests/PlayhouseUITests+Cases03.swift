@@ -697,7 +697,7 @@ extension PlayhouseUITests {
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
         attachScreenshot(named: "Done removes the worktree and keeps the branch")
     }
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the button is the built-in pull requests plugin's, which `plugin list` reports as an enabled inline task card plugin.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover and keeps showing the pointing-hand cursor while its tooltip is up, with the arrow over the window's title bar, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover with the pointing-hand cursor, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the button is the built-in pull requests plugin's, which `plugin list` reports as an enabled inline task card plugin.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -706,7 +706,7 @@ extension PlayhouseUITests {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
-        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        // Manual, the default, kept explicit: this case drives the manual PR path.
         try setPullRequestMode("manual", taskID: taskID)
         XCTAssertEqual(created["status"] as? String, "Backlog")
         XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 5), "The backlog task card should render before checking its PR controls.")
@@ -750,6 +750,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(activeCreateButton.label, "PR. Create a pull request for each repository linked to this task")
         assertNativeHelpText(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
         attachScreenshot(named: "Active task PR control shows its help text", fullScreen: true)
+        // The hand must survive the tooltip: AppKit re-evaluating the cursor once left the arrow.
+        assertPointingHandCursor(whileShowingHelp: "Create a pull request for each repository linked to this task", "The active card's PR button")
         dismissNativeHelpText(named: "Create a pull request for each repository linked to this task")
         assertNoNativeHelpText(whileHovering: element("task-title-\(taskID)"), containing: "Open task")
         XCTAssertTrue(element("task-card-\(taskID)").isHittable, "The card should still be a clickable control without its tooltip.")
@@ -767,6 +769,7 @@ extension PlayhouseUITests {
         assertNativeHelpText(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
         attachScreenshot(named: "Completed task PR action shows its help text in the archive")
         attachElementScreenshot(createButton, named: "Completed task PR action help text")
+        assertPointingHandCursor(whileShowingHelp: "Create a pull request for each repository linked to this completed task", "The archived task's PR action")
         dismissNativeHelpText(named: "Create a pull request for each repository linked to this completed task")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false

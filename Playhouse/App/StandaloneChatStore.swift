@@ -327,10 +327,24 @@ final class StandaloneChatManager {
         if isOutsideTransaction { try syncPageFile(pageID: pageID) }
     }
 
-    func listPages(chatID: String = defaultChatID, limit: Int = 50) throws -> [StandaloneChatPage] {
-        try queryPages(
-            "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?;",
-            bindings: [.text(chatID), .integer(Int64(limit))]
+    /// The newest pages, or with `titleContaining` only those whose title contains that text,
+    /// ignoring case, as the search above the chat's page labels finds them.
+    func listPages(chatID: String = defaultChatID, limit: Int = 50, titleContaining: String? = nil) throws -> [StandaloneChatPage] {
+        let titleText = titleContaining?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !titleText.isEmpty else {
+            return try queryPages(
+                "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?;",
+                bindings: [.text(chatID), .integer(Int64(limit))]
+            )
+        }
+        // The title's own % and _ match only themselves.
+        let pattern = "%" + titleText
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_") + "%"
+        return try queryPages(
+            "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? AND title LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?;",
+            bindings: [.text(chatID), .text(pattern), .integer(Int64(limit))]
         )
     }
 

@@ -920,4 +920,115 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ handle.exists && handle.value as? String == "folded" }, timeout: 10), "Unlocked labels stay folded into the handle after a relaunch.")
         XCTAssertFalse(anchors.exists)
     }
+
+    // case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest forty labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    func test_standalone_chat_page_labels_search() throws {
+        executionTimeAllowance = 240
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-search")
+        try copyFixtureFile(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+
+        // The oldest page lies beyond the newest forty the labels read at first.
+        let topics = ["Kyoto temples"] + (1...42).map { String(format: "Topic %02d", $0) } + ["Kyoto ramen", "Harbor"]
+        for title in topics {
+            _ = try runCLI(["conversation", "send", chatID, "--message", "anchor-page:\(title.replacingOccurrences(of: " ", with: "-")):1"])
+        }
+        let listed = try XCTUnwrap((try runCLI(["chat", "page", "list", "--limit", "100"])["result"] as? [String: Any])?["pages"] as? [[String: Any]])
+        var pageIDs: [String: String] = [:]
+        for page in listed where (page["messageCount"] as? Int ?? 0) > 0 {
+            pageIDs[try XCTUnwrap(page["title"] as? String)] = try XCTUnwrap(page["id"] as? String)
+        }
+        XCTAssertEqual(pageIDs.count, topics.count, "Each turn opens its own titled page.")
+
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        waitForConversationLoad()
+
+        let scrollView = element("conversation-scroll-view")
+        let anchors = app.scrollViews.matching(identifier: "chat-page-anchors").firstMatch
+        let handle = element("chat-page-anchors-handle")
+        let search = element("chat-page-anchors-search")
+        let clear = element("chat-page-anchors-search-clear")
+        let noMatches = element("chat-page-anchors-no-matches")
+        func label(_ title: String) -> XCUIElement { element("chat-page-anchor-\(pageIDs[title] ?? "missing")") }
+        func shownTitles() -> [String] {
+            anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-")).allElementsBoundByIndex.map(\.label)
+        }
+        func moveOffLabels() {
+            scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).hover()
+        }
+
+        // The search sits just above the labels the handle slides out.
+        XCTAssertTrue(handle.waitToExist(timeout: 10))
+        XCTAssertFalse(search.exists, "The search folds away with the labels.")
+        handle.hover()
+        XCTAssertTrue(waitUntil({ anchors.exists && search.exists }, timeout: 5), "Hovering the handle shows the labels and their search.")
+        XCTAssertLessThanOrEqual(search.frame.maxY, anchors.frame.minY + 1, "The search sits above the labels.")
+        XCTAssertGreaterThan(search.frame.maxY, anchors.frame.minY - 12, "The search sits just above the labels.")
+        // The field's text starts after the magnifying glass at the labels' leading edge.
+        XCTAssertGreaterThanOrEqual(search.frame.minX, anchors.frame.minX - 1, "The search starts within the labels' column.")
+        XCTAssertLessThanOrEqual(search.frame.minX, anchors.frame.minX + 20, "The search starts at the labels' leading edge.")
+        XCTAssertLessThanOrEqual(search.frame.maxX, anchors.frame.maxX + 1, "The search is no wider than the labels.")
+        XCTAssertFalse(label("Kyoto temples").exists, "The oldest page is not among the labels read first.")
+        XCTAssertTrue(label("Harbor").exists)
+        // The search is inside the labels' hovered area: resting on it keeps unlocked labels out.
+        search.hover()
+        _ = waitUntil({ false }, timeout: 0.8)
+        XCTAssertTrue(anchors.exists && handle.value as? String == "open", "Hovering the search keeps the labels out.")
+        attachScreenshot(named: "chat-page-labels-search-empty")
+        attachRegionScreenshot([search, anchors], named: "chat-page-labels-search-empty-closeup")
+
+        // Typing narrows the labels to matching titles from the whole chat.
+        search.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        search.typeText("kyoto")
+        XCTAssertTrue(waitUntil({ shownTitles() == ["Kyoto temples", "Kyoto ramen"] }, timeout: 5),
+                      "The search shows only matching pages, oldest at the top; shown \(shownTitles()).")
+        XCTAssertTrue(clear.exists, "Typed text offers a clear button.")
+        attachScreenshot(named: "chat-page-labels-search-matches")
+        attachRegionScreenshot([search, anchors], named: "chat-page-labels-search-matches-closeup")
+
+        // While the search has the keyboard, unlocked labels stay out after the pointer leaves.
+        moveOffLabels()
+        _ = waitUntil({ false }, timeout: 0.8)
+        XCTAssertTrue(anchors.exists && handle.value as? String == "open", "Labels stay out while their search has the keyboard.")
+
+        // A match jumps to its page, even one older than the labels first read.
+        label("Kyoto temples").click()
+        XCTAssertTrue(waitUntil({
+            (self.chatPageSeparators("Kyoto temples").first.map { $0.minY - scrollView.frame.minY } ?? 1_000) < 80
+        }, timeout: 15), "Clicking a match shows its page from its first message.")
+        XCTAssertTrue((scrollView.value as? String ?? "").hasPrefix("Showing earlier"), scrollView.value as? String ?? "")
+
+        // Text that matches nothing says so; clearing shows every label again.
+        handle.hover()
+        XCTAssertTrue(waitUntil({ search.exists }, timeout: 5))
+        search.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        search.typeText(" zzz")
+        XCTAssertTrue(waitUntil({ noMatches.exists && shownTitles().isEmpty }, timeout: 5), "Text matching no title shows No matching pages; shown \(shownTitles()).")
+        attachScreenshot(named: "chat-page-labels-search-no-matches")
+        attachRegionScreenshot([search, anchors], named: "chat-page-labels-search-no-matches-closeup")
+        clear.click()
+        XCTAssertTrue(waitUntil({ !noMatches.exists && label("Harbor").exists && !clear.exists }, timeout: 5), "Clearing restores every label.")
+        XCTAssertEqual(search.value as? String ?? "", "", "Clearing empties the search.")
+
+        // Escape clears too.
+        search.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        search.typeText("ramen")
+        XCTAssertTrue(waitUntil({ shownTitles() == ["Kyoto ramen"] }, timeout: 5), "shown \(shownTitles())")
+        search.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ label("Harbor").exists && label("Topic 42").exists }, timeout: 5), "Escape restores every label.")
+        XCTAssertEqual(search.value as? String ?? "", "", "Escape empties the search.")
+        XCTAssertFalse(clear.exists, "An empty search offers no clear button.")
+    }
 }

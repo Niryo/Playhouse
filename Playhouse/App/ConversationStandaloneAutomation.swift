@@ -199,12 +199,23 @@ extension ConversationManager {
         confirm: @MainActor (_ action: String) async -> Bool = { _ in true },
         onStatus: @escaping ([PullRequestReviewState]) -> Void = { _ in }
     ) async throws -> PullRequestAutopilotOutcome {
+        // A pull request opened outside Playhouse, or a worktree on another branch, is
+        // recorded before the autopilot looks for linked pull requests. A turn holding the
+        // task skips it: that pass is skipped below, and detecting first would outlast the
+        // turn and hide that it was. Detection is best-effort; the pass goes on without it.
+        if try tasks.taskModel(taskID).status == .review, try !tasks.hasConversationTurnReservation(taskID) {
+            do {
+                try await tasks.detectPullRequests(taskID)
+            } catch {
+                PlayhouseDiagnostics.record("task.pr.detect.failed", fields: ["taskID": taskID.uuidString, "error": "\(error)"])
+            }
+        }
         let task = try tasks.taskModel(taskID)
         func outcome(_ action: String, _ states: [PullRequestReviewState] = [], reason: String? = nil) throws -> PullRequestAutopilotOutcome {
             PullRequestAutopilotOutcome(action: action, states: states, taskStatus: try tasks.taskModel(taskID).status.rawValue, reason: reason)
         }
         guard task.status == .review else { return try outcome("inactive", reason: "Autopilot acts only on tasks in Review.") }
-        guard task.repositoryWorktrees.contains(where: { !$0.isPending && $0.pullRequestNumber != nil }) else {
+        guard task.repositoryWorktrees.contains(where: { !$0.isPending && $0.pullRequestNumber != nil && !$0.isPullRequestClosed }) else {
             return try outcome("inactive", reason: "This task has no linked pull request yet.")
         }
         guard Self.autopilotRunningTaskIDs.insert(taskID).inserted else {

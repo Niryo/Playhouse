@@ -208,7 +208,7 @@ extension ConversationManager {
             // branch can otherwise allocate "untitled-task" before the generated
             // title arrives.
             let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
-                $0.isPending && $0.branch == "auto"
+                $0.isPending && RepositoryWorktreeRecord.isAutomaticBranch($0.branch)
             }
             resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
             if resolveTitleBeforeWorktree {

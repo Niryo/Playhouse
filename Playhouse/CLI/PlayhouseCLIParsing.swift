@@ -19,6 +19,17 @@ extension PlayhouseCLI {
         return result
     }
 
+    /// The worktree a repository command names: `--worktree <path>`, `--repo <path>` (one
+    /// worktree of it on the task), and `--worktree-branch` for a worktree not created yet.
+    static func worktreeArguments(_ flags: [String: [String]], usage: String) throws -> [String: BridgeValue] {
+        var arguments: [String: BridgeValue] = [:]
+        if let repository = flags["--repo"]?.last { arguments["repositoryPath"] = .string(repository) }
+        if let worktree = flags["--worktree"]?.last { arguments["worktreePath"] = .string(worktree) }
+        if let branch = flags["--worktree-branch"]?.last { arguments["worktreeBranch"] = .string(branch) }
+        guard arguments["repositoryPath"] != nil || arguments["worktreePath"] != nil else { throw CLIError.usage(usage) }
+        return arguments
+    }
+
     static func parse(_ args: [String]) throws -> BridgeRequest {
         guard let group = args.first else { throw CLIError.usage("Missing command group.") }
         let rest = Array(args.dropFirst())
@@ -116,15 +127,28 @@ extension PlayhouseCLI {
                     ]
                     if let confirmWith = options.confirmWith { arguments["confirmWith"] = .string(confirmWith) }
                     return BridgeRequest(command: "task.pr.autopilot", arguments: arguments)
-                case "create" where tail.count == 2 || (tail.count == 3 && tail[2] == "--if-needed"):
-                    return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1]), "ifNeeded": .boolean(tail.count == 3)])
+                case "create":
+                    let rest = Array(tail.dropFirst(2))
+                    let flags = try parseFlags(rest.filter { $0 != "--if-needed" }, valueFlags: ["--title", "--body"])
+                    var arguments: [String: BridgeValue] = ["taskID": .string(tail[1]), "ifNeeded": .boolean(rest.contains("--if-needed"))]
+                    if let title = flags["--title"]?.last { arguments["title"] = .string(title) }
+                    if let body = flags["--body"]?.last { arguments["body"] = .string(body) }
+                    return BridgeRequest(command: "task.pr.create", arguments: arguments)
+                case "link":
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo", "--worktree", "--url"])
+                    var arguments = try Self.worktreeArguments(flags, usage: "Use: playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>")
+                    arguments["taskID"] = .string(tail[1])
+                    arguments["url"] = .string(try requiredFlag("--url", flags: flags).first!)
+                    return BridgeRequest(command: "task.pr.link", arguments: arguments)
                 case "conflicts" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.conflicts", arguments: ["taskID": .string(tail[1])])
                 case "status" where Set(tail.dropFirst(2)).isSubset(of: ["--review-threads", "--shared"]):
                     return BridgeRequest(command: "task.pr.status", arguments: [
                         "taskID": .string(tail[1]),
                         "reviewThreads": .boolean(tail.contains("--review-threads")),
-                        "shared": .boolean(tail.contains("--shared"))
+                        "shared": .boolean(tail.contains("--shared")),
+                        // Every recorded pull request, closed and retired ones included.
+                        "all": .boolean(true)
                     ])
                 case "verify" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
@@ -133,7 +157,7 @@ extension PlayhouseCLI {
                 case "sync" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr create <task-id> --if-needed, playhouse task pr status <task-id> [--review-threads] [--shared], or playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr create <task-id> [--if-needed] [--title <title>] [--body <text>], playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>, playhouse task pr status <task-id> [--review-threads] [--shared], or playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: playhouse task progress publish|custom|clear <task-id> ...") }
@@ -187,7 +211,7 @@ extension PlayhouseCLI {
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
             case "repository":
-                guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove|renew|recent <task-id> ...") }
+                guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task repository add|add-batch|add-worktree|replace|edit|remove|renew|recent <task-id> ...") }
                 let id = tail[1]
                 switch tail[0] {
                 case "add-batch":
@@ -204,34 +228,45 @@ extension PlayhouseCLI {
                         "taskID": .string(id),
                         "repositoryPaths": .array(repositories.map(BridgeValue.string))
                     ])
-                case "add", "remove", "renew":
+                case "add":
                     let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
                     let repository = try requiredFlag("--repo", flags: flags).first!
                     return BridgeRequest(
-                        command: "task.repository.\(tail[0])",
+                        command: "task.repository.add",
                         arguments: ["taskID": .string(id), "repositoryPath": .string(repository)]
                     )
+                case "add-worktree":
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo", "--branch", "--branch-from"])
+                    var arguments: [String: BridgeValue] = [
+                        "taskID": .string(id), "repositoryPath": .string(try requiredFlag("--repo", flags: flags).first!)
+                    ]
+                    if let branch = flags["--branch"]?.last { arguments["branch"] = .string(branch) }
+                    if let branchFrom = flags["--branch-from"]?.last { arguments["branchFrom"] = .string(branchFrom) }
+                    return BridgeRequest(command: "task.repository.add-worktree", arguments: arguments)
+                case "remove", "renew":
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo", "--worktree", "--worktree-branch"])
+                    var arguments = try Self.worktreeArguments(flags, usage: "Use: playhouse task repository \(tail[0]) <task-id> (--repo <path>|--worktree <path>)")
+                    arguments["taskID"] = .string(id)
+                    return BridgeRequest(command: "task.repository.\(tail[0])", arguments: arguments)
                 case "recent":
                     guard tail.count == 2 else { throw CLIError.usage("Use: playhouse task repository recent <task-id>") }
                     return BridgeRequest(command: "task.repository.recent", arguments: ["taskID": .string(id)])
                 case "edit":
                     let flags = try parseFlags(
                         Array(tail.dropFirst(2)),
-                        valueFlags: ["--repo", "--branch", "--branch-from", "--merge-target"]
+                        valueFlags: ["--repo", "--worktree", "--worktree-branch", "--branch", "--branch-from", "--merge-target"]
                     )
-                    let repository = try requiredFlag("--repo", flags: flags).first!
+                    var arguments = try Self.worktreeArguments(flags, usage: "Use: playhouse task repository edit <task-id> (--repo <path>|--worktree <path>) --branch <name> --branch-from <ref> [--merge-target <ref>]")
                     let branch = try requiredFlag("--branch", flags: flags).first!
                     let branchFrom = try requiredFlag("--branch-from", flags: flags).first!
                     let mergeTarget = flags["--merge-target"]?.last ?? ""
-                    return BridgeRequest(command: "task.repository.edit", arguments: [
-                        "taskID": .string(id),
-                        "repositoryPath": .string(repository),
-                        "branch": .string(branch),
-                        "branchFrom": .string(branchFrom),
-                        "mergeTarget": .string(mergeTarget)
-                    ])
+                    arguments["taskID"] = .string(id)
+                    arguments["branch"] = .string(branch)
+                    arguments["branchFrom"] = .string(branchFrom)
+                    arguments["mergeTarget"] = .string(mergeTarget)
+                    return BridgeRequest(command: "task.repository.edit", arguments: arguments)
                 default:
-                    throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove|renew|recent <task-id> ...")
+                    throw CLIError.usage("Use: playhouse task repository add|add-batch|add-worktree|replace|edit|remove|renew|recent <task-id> ...")
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
@@ -363,9 +398,10 @@ extension PlayhouseCLI {
             let tail = Array(rest.dropFirst(2))
             switch rest[1] {
             case "list":
-                let flags = try parseFlags(tail, valueFlags: ["--limit"])
+                let flags = try parseFlags(tail, valueFlags: ["--limit", "--title"])
                 var arguments: [String: BridgeValue] = [:]
                 if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
+                if let title = flags["--title"]?.first { arguments["title"] = .string(title) }
                 return BridgeRequest(command: "chat.page.list", arguments: arguments)
             case "search":
                 let query = try firstPositional(tail)
@@ -723,14 +759,25 @@ extension PlayhouseCLI {
             if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
             return BridgeRequest(command: "mentions.list", arguments: arguments)
         case "slash-commands":
-            let use = "Use: playhouse slash-commands list --task <task-id> [--query <text>] [--status]"
-            guard rest.first == "list" else { throw CLIError.usage(use) }
+            let use = "Use: playhouse slash-commands list --task <task-id> [--query <text>] [--complete] [--draft <text>] | run --task <task-id> --command <name> [--item <item-id> [--button <button-id>]] [--confirm] [--draft <text>]"
+            guard let operation = rest.first, ["list", "run"].contains(operation) else { throw CLIError.usage(use) }
+            let switches: Set<String> = ["--status", "--complete", "--confirm"]
             let options = Array(rest.dropFirst())
-            let flags = try parseFlags(options.filter { $0 != "--status" }, valueFlags: ["--task", "--query"])
+            let flags = try parseFlags(options.filter { !switches.contains($0) }, valueFlags: ["--task", "--query", "--command", "--item", "--button", "--draft"])
             var arguments: [String: BridgeValue] = ["taskID": .string(try requiredFlag("--task", flags: flags).first!)]
-            if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
-            if options.contains("--status") { arguments["includeStatus"] = .boolean(true) }
-            return BridgeRequest(command: "slash.list", arguments: arguments)
+            if let draft = flags["--draft"]?.first { arguments["draft"] = .string(draft) }
+            if operation == "list" {
+                if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
+                // `--status` is the older name of `--complete`.
+                if options.contains("--complete") || options.contains("--status") { arguments["complete"] = .boolean(true) }
+                return BridgeRequest(command: "slash.list", arguments: arguments)
+            }
+            guard let command = flags["--command"]?.first else { throw CLIError.usage(use) }
+            arguments["command"] = .string(command)
+            if let item = flags["--item"]?.first { arguments["item"] = .string(item) }
+            if let button = flags["--button"]?.first { arguments["button"] = .string(button) }
+            if options.contains("--confirm") { arguments["confirm"] = .boolean(true) }
+            return BridgeRequest(command: "slash.run", arguments: arguments)
         case "schedule":
             guard let operation = rest.first else {
                 throw CLIError.usage("Use: playhouse schedule list|set|clear|pause|resume|run-now|tick ...")

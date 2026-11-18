@@ -584,7 +584,7 @@ class BridgeTestCases16:
         self.assertFalse(terminal_events[-1]["succeeded"])
         final_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
         self.assertIn("Continue after asynchronous failure.", [message["text"] for message in final_history["messages"]])
-    # case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    # case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Hovering the panel's left border shows the left-right resize cursor, and dragging it resizes the panel against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
     def test_task_terminal_opens_shell_in_task_worktree(self):
         repository = self.data_directory / "terminal-repository"
         repository.mkdir()
@@ -662,6 +662,56 @@ class BridgeTestCases16:
         chat_id = self.assert_success(self.call_cli("chat", "open")[0])["id"]
         response, _ = self.call_cli("task", "terminal", chat_id, expected_status=3)
         self.assert_failure(response, "not_found")
+    # case-contract: test_task_terminal_splits_per_repository_worktree | A task with more than one created repository worktree opens its terminal as a split view with one shell per worktree. The CLI reports one pane per created worktree, in the task's repository order, each naming its source repository's folder and opening in that repository's worktree, never in a source repository, and the launch's directory is the first pane's; a single-repository task reports exactly one pane, and a worktree that no longer exists is left out while the others still open. In the app, opening the terminal for a two-repository task stacks one terminal pane per worktree in the panel, the first above the second, each headed by its repository's name and each shell running in its own worktree as a different process; hiding and reopening the panel keeps both shells. Exiting one pane's shell offers Restart only in that pane while the other shell keeps running, and Restart starts a new shell in that pane's worktree. A repository added to the task while its shells run gets its own pane when the panel is next opened, while the existing shells keep running.
+    def test_task_terminal_splits_per_repository_worktree(self):
+        first_repository = self.make_skill_repository("terminal-split-first", {})
+        second_repository = self.make_skill_repository("terminal-split-second", {})
+        task_id = self.create_task(title="Terminal split task", roots=[])["id"]
+        added = self.assert_success(self.call_cli("task", "repository", "add", task_id, "--repo", str(first_repository))[0])
+        self.assertEqual(len(added["repositoryWorktrees"]), 1)
+        single = self.assert_success(self.call_cli("task", "terminal", task_id)[0])
+        self.assertEqual(len(single["panes"]), 1, "A single-repository task opens one shell.")
+        self.assertEqual(single["panes"][0]["directory"], single["directory"])
+
+        added = self.assert_success(self.call_cli("task", "repository", "add", task_id, "--repo", str(second_repository))[0])
+        worktrees = {item["repositoryPath"]: os.path.normpath(item["worktreePath"]) for item in added["repositoryWorktrees"]}
+        self.assertFalse(any(item["isPending"] for item in added["repositoryWorktrees"]))
+        launch = self.assert_success(self.call_cli("task", "terminal", task_id)[0])
+        self.assertEqual(
+            [(pane["repositoryPath"], pane["name"], pane["directory"]) for pane in launch["panes"]],
+            [
+                (str(first_repository), "terminal-split-first", worktrees[str(first_repository)]),
+                (str(second_repository), "terminal-split-second", worktrees[str(second_repository)]),
+            ],
+            "Each created worktree gets its own pane, in the task's repository order.",
+        )
+        self.assertEqual(launch["directory"], launch["panes"][0]["directory"], "The launch's directory is the first pane's.")
+        for pane, repository in zip(launch["panes"], (first_repository, second_repository)):
+            self.assertNotEqual(os.path.realpath(pane["directory"]), os.path.realpath(repository), "A pane never opens in a source repository.")
+            shell = subprocess.run(
+                [launch["shell"], *launch["arguments"], "-c", 'pwd -P; printf "%s\\n" "$PLAYHOUSE_TASK_ID"'],
+                cwd=pane["directory"],
+                env={**os.environ, **launch["environment"]},
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(shell.returncode, 0, shell.stderr)
+            self.assertEqual(shell.stdout.strip().splitlines()[-2:], [os.path.realpath(pane["directory"]), task_id])
+        fresh = self.assert_success(self.call_cli("task", "terminal", task_id)[0])
+        self.assertEqual(fresh, launch, "A fresh CLI/XPC connection resolves the same split.")
+
+        # A worktree that no longer exists is left out; the remaining one still opens.
+        missing = worktrees[str(first_repository)]
+        os.rename(missing, missing + "-moved")
+        try:
+            remaining = self.assert_success(self.call_cli("task", "terminal", task_id)[0])
+            self.assertEqual([pane["directory"] for pane in remaining["panes"]], [worktrees[str(second_repository)]])
+            self.assertEqual(remaining["directory"], worktrees[str(second_repository)])
+        finally:
+            os.rename(missing + "-moved", missing)
+        restored = self.assert_success(self.call_cli("task", "terminal", task_id)[0])
+        self.assertEqual(len(restored["panes"]), 2, "The pane returns with its worktree.")
     # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown. Excluding cache reads (uncached input + cache write + output, subagent included) is 855 per turn, doubling after a second turn, and also reaches the live stream when the session files cannot be read; an empty task reports it unavailable. A task saved before the cache split existed (call usage without the split, plus turn-level buckets) still loads, reports its call counts and total sent, omits the per-call excluding-cache figures, and falls back to the turn buckets minus cache reads (170 for 100 input, 50 output, 400 cache read and 20 cache write); its modal hides the Excluding cache reads headline. The modal also labels 'Excluding cache reads (incl. subagents)' with its main-agent and subagent split.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.

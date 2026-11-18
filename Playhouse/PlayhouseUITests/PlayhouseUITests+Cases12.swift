@@ -820,11 +820,8 @@ extension PlayhouseUITests {
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         XCTAssertEqual((history["providerBoundaries"] as? [Any])?.count, 0)
 
-        let modeMenu = element("conversation-mode-menu")
-        modeMenu.click()
-        XCTAssertTrue(app.menuItems["Plan mode"].waitToExist(timeout: 5))
-        XCTAssertFalse(app.menuItems["conversation-mode-goal"].exists, "Claude tasks hide Goal mode.")
-        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(element("conversation-plan-button").waitToExist(timeout: 5), "Claude tasks show the Plan button.")
+        XCTAssertFalse(element("conversation-goal-button").exists, "Claude tasks hide the Goal button.")
         let goal = try runCLI(["conversation", "goal", taskID, "set", "--text", "Ship it"], expectedStatus: 1)
         XCTAssertEqual((goal["error"] as? [String: Any])?["code"] as? String, "invalid_transition")
         XCTAssertTrue(((goal["error"] as? [String: Any])?["message"] as? String ?? "").contains("Goals are available only in Codex conversations"))

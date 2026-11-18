@@ -28,13 +28,23 @@ struct PluginUIActions {
     /// Shows an alert with a title and a message over the window.
     var alert: ((String, String) -> Void)? = nil
     /// Asks the user to confirm and answers whether they did; nil where the
-    /// window can't ask (only the board does).
+    /// window can't ask (the board and the composer's `/` commands can).
     var confirm: ((PluginConfirmation) async -> Bool)? = nil
     /// Opens a new task, with its schedule picker up for a schedule kind;
     /// nil where there is no board.
     var newTask: ((TaskScheduleKind?) -> Void)? = nil
     /// Opens Login Items in System Settings; nil where there is no board.
     var openLoginItems: (() -> Void)? = nil
+    /// Turns on the composer's plan or goal mode; nil where there is no composer.
+    var setMode: ((String) -> Void)? = nil
+    /// Opens the task's Skills page, at a skill, an MCP server or its sign-in;
+    /// nil where there is no task.
+    var openSkills: ((SkillsPageFocus?) -> Void)? = nil
+    /// Opens a plugin's editor conversation; nil where the window can't.
+    var editPlugin: ((String) -> Void)? = nil
+    /// Called before a `plugin.delete` bridge call, so the plugin's editor
+    /// conversation lets go of it first.
+    var willDeletePlugin: ((String) async -> Void)? = nil
     /// Opens a web link; a test build never opens a browser.
     var openURL: (URL) -> Void = { url in
         guard !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) else { return }
@@ -80,6 +90,9 @@ struct PluginHost {
         }
         switch (kind, name) {
         case ("bridge", let command):
+            if command == "plugin.delete", let id = arguments.object?["pluginID"]?.string {
+                await actions.willDeletePlugin?(id)
+            }
             do {
                 let value = try await DaemonClient().call(command, BridgeValue(plugin: arguments).object ?? [:])
                 return .success(PluginValue(bridge: value))
@@ -161,6 +174,32 @@ struct PluginHost {
                 return .failure(PluginHostError(code: "unavailable", message: "This window can't open Login Items."))
             }
             openLoginItems()
+        case ("ui", "composer.setMode"):
+            guard let setMode = actions.setMode else {
+                return .failure(PluginHostError(code: "unavailable", message: "There is no composer at this placement."))
+            }
+            // `PluginHostRules` has already refused any other mode.
+            setMode(arguments.object?["mode"]?.string ?? "")
+        case ("ui", "openSkills"):
+            guard let openSkills = actions.openSkills else {
+                return .failure(PluginHostError(code: "unavailable", message: "There is no task's Skills page here."))
+            }
+            let object = arguments.object ?? [:]
+            let signIn = object["signIn"]?.object
+            if let id = object["skillID"]?.string {
+                openSkills(.skill(id: id))
+            } else if let id = object["mcpServerID"]?.string {
+                openSkills(.mcpServer(id: id))
+            } else if let name = signIn?["name"]?.string, let provider = signIn?["provider"]?.string.flatMap(ConversationProvider.init(rawValue:)) {
+                openSkills(.mcpSignIn(name: name, provider: provider))
+            } else {
+                openSkills(nil)
+            }
+        case ("ui", "editPlugin"):
+            guard let editPlugin = actions.editPlugin else {
+                return .failure(PluginHostError(code: "unavailable", message: "This window can't open a plugin's editor."))
+            }
+            editPlugin(arguments.object?["pluginID"]?.string ?? "")
         case ("ui", let name) where name.hasPrefix("composer."):
             guard let composer = actions.composer else {
                 return .failure(PluginHostError(code: "unavailable", message: "There is no composer at this placement."))
@@ -216,7 +255,8 @@ final class PluginConfirmations {
     }
 }
 
-/// The confirmation dialog a plugin's `ui.confirm` shows over the board.
+/// The confirmation dialog a plugin's `ui.confirm` shows over the board, or
+/// inside a popover plugin's popover.
 struct PluginConfirmationModifier: ViewModifier {
     let confirmations: PluginConfirmations
 

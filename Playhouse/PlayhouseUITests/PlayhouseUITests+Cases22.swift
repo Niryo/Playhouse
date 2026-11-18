@@ -786,11 +786,7 @@ extension PlayhouseUITests {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-question-isolation-plan-slow").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Codex questions")
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
-        modeMenu.click()
-        app.menuItems["Plan mode"].click()
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        setPlanMode(true)
         element("message-composer").click()
         element("message-composer").typeText("Please share your plan.")
         element("send-message-button").click()

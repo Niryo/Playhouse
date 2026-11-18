@@ -493,8 +493,28 @@ extension PlayhouseUITests {
         }
         element("back-to-board-button").click()
         XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the task conversation.")
-        XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 10), "Going back returns to the empty Scheduled Tasks page.")
-        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The page should finish sliding back in.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "Going back returns to the board.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The Scheduled Tasks popover closed for the task.")
+        openScheduledTasksPopover()
+        XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 10), "The reopened Scheduled Tasks popover is still empty.")
+    }
+    /// Opens the Scheduled Tasks popover from the board's sidebar and waits for it to settle,
+    /// since clicks during its opening animation can miss.
+    func openScheduledTasksPopover() {
+        let entry = element("plugin-entry-scheduled-tasks")
+        XCTAssertTrue(waitUntil({ entry.exists && entry.isHittable }, timeout: 10), "The board's sidebar shows the Scheduled Tasks button.")
+        entry.click()
+        let surface = element("plugin-surface-scheduled-tasks")
+        XCTAssertTrue(surface.waitToExist(timeout: 10), "The Scheduled Tasks button opens its popover.")
+        XCTAssertTrue(waitForStableFrame(surface), "The Scheduled Tasks popover should finish opening.")
+        XCTAssertTrue(waitUntil({ entry.frame.maxX <= surface.frame.minX + 1 }, timeout: 5), "The popover opens beside the sidebar button, not over the board: \(surface.frame) vs \(entry.frame).")
+    }
+    /// Closes the Scheduled Tasks popover with Escape.
+    func closeScheduledTasksPopover() {
+        let surface = element("plugin-surface-scheduled-tasks")
+        guard surface.exists else { return }
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(surface, timeout: 5), "Escape closes the Scheduled Tasks popover.")
     }
     func openScheduleHint() -> XCUIElement {
         let button = element("schedule-task-button")
@@ -1054,11 +1074,12 @@ extension PlayhouseUITests {
             XCTAssertTrue((invalid["errors"] as? [String] ?? []).contains { $0.contains(message) }, "\(source) reports \(message): \(invalid)")
         }
     }
-    func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension") throws {
+    func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension", commands: [[String: Any]]? = nil) throws {
         let folder = pluginsFolder.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
+        var manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
                                        "icon": icon, "placement": placement, "presentation": presentation]
+        if let commands { manifest["commands"] = commands }
         try JSONSerialization.data(withJSONObject: manifest).write(to: folder.appendingPathComponent("plugin.json"))
         if let source { try source.write(to: folder.appendingPathComponent("index.js"), atomically: true, encoding: .utf8) }
     }
@@ -1072,6 +1093,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitForStableFrame(row), "The \(pluginRow) row should settle before it is hovered.", file: file, line: line)
         row.hover()
         let item = row.descendants(matching: .menuItem)[action]
+        // A pointer that reaches the row while crossing the rows above can leave its submenu closed; hover it afresh.
+        if !waitUntil({ item.isHittable }, timeout: 3) {
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).hover()
+            row.hover()
+        }
         XCTAssertTrue(waitUntil({ item.isHittable }, timeout: 5), "The \(pluginRow) submenu offers \(action).", file: file, line: line)
         // The submenu is still opening too; a click on its first frame can miss the item.
         XCTAssertTrue(waitForStableFrame(item), "The \(action) item should settle before it is clicked.", file: file, line: line)

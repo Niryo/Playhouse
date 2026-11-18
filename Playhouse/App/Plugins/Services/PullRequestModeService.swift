@@ -10,8 +10,10 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
     case autopilot
     case merge
 
-    /// A task the user never set a mode for opens its pull request on Review.
-    static let defaultMode = PullRequestMode.pullRequest
+    /// A task the user never set a mode for leaves its pull request to the
+    /// user. Tasks saved while PR was the default keep it as their own saved
+    /// mode (`BoardTaskManager.pinPullRequestModeOfExistingTasks`).
+    static let defaultMode = PullRequestMode.manual
 
     var label: String {
         switch self {
@@ -163,8 +165,8 @@ final class PullRequestModeService: PluginService {
             PlayhouseDiagnostics.record("task.pr.autopilot.failed", fields: ["taskID": taskID, "error": "\(error)"])
             return
         }
-        PlayhouseDiagnostics.record("plugin.pull_request_mode.result", fields: [
-            "taskID": taskID, "trigger": trigger, "action": outcome["action"]?.string ?? "",
+        PlayhouseDiagnostics.record("plugin.pull_request_mode.followed", fields: [
+            "taskID": taskID, "trigger": trigger, "action": outcome["action"]?.string ?? ""
         ])
         switch outcome["action"]?.string {
         case "pending":

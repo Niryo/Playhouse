@@ -486,7 +486,7 @@ extension PlayhouseUITests {
             "Steering a queued row should deliver its image to the active turn, not only its text."
         )
     }
-    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts pasted images, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, stores those image URLs with the turn in Playhouse's transcript store, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The composer's attach button, left of the Plan button, opens a file panel limited to images, and the chosen image appears in the composer preview and persists as a draft image until removed; a non-image file picked anyway (through Go to Folder) is refused with an image-only error and adds no draft image. The conversation composer also accepts pasted images, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, stores those image URLs with the turn in Playhouse's transcript store, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -496,8 +496,57 @@ extension PlayhouseUITests {
         let image = dataDirectory.appendingPathComponent("chat-image.png")
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         try bitmap.representation(using: .png, properties: [:])!.write(to: image)
-        // The composer's paperclip became the Skills button, so images arrive by paste.
-        XCTAssertFalse(element("attach-chat-image-button").exists, "The composer no longer has an image picker button.")
+        // The attach button opens a file panel that takes images; the chosen image joins the draft.
+        // A larger, coloured image keeps the attached preview visible in the screenshot.
+        let attachImage = dataDirectory.appendingPathComponent("attach-image.png")
+        let attachBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for x in 0..<64 { for y in 0..<64 { attachBitmap.setColor(NSColor(calibratedRed: 0.2, green: 0.45, blue: 0.95, alpha: 1), atX: x, y: y) } }
+        try attachBitmap.representation(using: .png, properties: [:])!.write(to: attachImage)
+        let notAnImage = dataDirectory.appendingPathComponent("notes.txt")
+        try "Not an image".write(to: notAnImage, atomically: true, encoding: .utf8)
+        let attachButton = element("composer-attach-button")
+        XCTAssertTrue(attachButton.waitToExist(timeout: 10))
+        XCTAssertEqual(attachButton.label, "Attach files")
+        XCTAssertLessThanOrEqual(attachButton.frame.maxX, element("conversation-plan-button").frame.minX, "The attach button sits left of the Plan button.")
+        attachButton.click()
+        let attachPanel = openFolderPanel
+        XCTAssertTrue(attachPanel.waitToExist(timeout: 10), "The attach button opens a file panel.")
+        func goTo(_ path: String) {
+            attachPanel.typeKey("g", modifierFlags: [.command, .shift])
+            let goToSheet = app.sheets.firstMatch
+            XCTAssertTrue(goToSheet.waitToExist(timeout: 5), "Go to Folder did not open from the attach panel.")
+            let pathField = goToSheet.textFields.firstMatch
+            XCTAssertTrue(pathField.waitToExist(timeout: 5))
+            pathField.click()
+            pathField.typeKey("a", modifierFlags: .command)
+            pathField.typeText(path)
+            pathField.typeKey(.return, modifierFlags: [])
+        }
+        let attachConfirm = attachPanel.buttons["Attach"]
+        // The panel lists images only, but Go to Folder can still pick another file; the composer refuses it.
+        goTo(notAnImage.path)
+        if waitUntil({ attachConfirm.exists && attachConfirm.isEnabled }, timeout: 5) { attachConfirm.click() }
+        XCTAssertTrue(waitUntil({ !attachPanel.exists }, timeout: 5), "Attach closes the panel.")
+        let attachError = element("codex-chat-error")
+        XCTAssertTrue(attachError.waitToExist(timeout: 5), "Attaching a non-image file shows an error.")
+        XCTAssertTrue(attachError.label.contains("Only images can be attached"), "The error names the image-only limit: \(attachError.label)")
+        XCTAssertFalse(element("pending-chat-images").exists, "A refused non-image file adds no preview.")
+        let refusedTaskID = try XCTUnwrap(try taskRecord(named: "Image conversation")?["id"] as? String)
+        XCTAssertEqual((try taskRecord(id: refusedTaskID)?["draftImageDataURLs"] as? [String]) ?? [], [], "A refused non-image file adds no draft image.")
+        attachButton.click()
+        XCTAssertTrue(attachPanel.waitToExist(timeout: 10), "The attach button reopens the file panel.")
+        goTo(attachImage.path)
+        XCTAssertTrue(waitUntil({ attachConfirm.exists && attachConfirm.isEnabled }, timeout: 10), "Choosing the image enables Attach.")
+        attachConfirm.click()
+        XCTAssertTrue(waitUntil({ !attachPanel.exists }, timeout: 5), "Attach closes the panel.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The chosen image appears in the composer preview.")
+        let attachedTaskID = try XCTUnwrap(try taskRecord(named: "Image conversation")?["id"] as? String)
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: attachedTaskID))??["draftImageDataURLs"] as? [String])?.first?.hasPrefix("data:image/png;base64,") == true }, timeout: 5),
+                      "The attached image persists as a draft image.")
+        attachScreenshot(named: "Composer: an image attached with the attach button")
+        attachRegionScreenshot([attachButton, element("pending-chat-images")], named: "Composer close-up: the attach button and the attached image")
+        app.buttons["Remove image"].firstMatch.click()
+        XCTAssertTrue(waitUntil({ !self.element("pending-chat-images").exists }, timeout: 5), "Removing the attached image clears the preview.")
         let pasteComposer = element("message-composer")
         XCTAssertTrue(pasteComposer.waitToExist(timeout: 10))
         NSPasteboard.general.clearContents()

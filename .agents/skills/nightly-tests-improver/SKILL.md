@@ -36,10 +36,12 @@ Principles that made the previous rounds work:
    Record `git status --short` and `git diff --stat`; note any pre-existing staged
    or unstaged paths so they are never swept into the final commit. Confirm the
    Tart VM `playhouse-ui` is available (`export PATH=/opt/homebrew/bin:$PATH; tart list`).
-   Read the whole most recent report, `ls docs/nightly-tests/*.md | sort | tail -1`.
-   Also run `git log --oneline -- docs/nightly-tests/` and list the commits since that
-   report (`git log --oneline <report commit>..HEAD`), so you know what changed after
-   that round.
+   Reports live outside the repository, in `/tmp/playhouse-nightly-tests/`, and are
+   never committed. Read the whole most recent report,
+   `ls /tmp/playhouse-nightly-tests/*.md | sort | tail -1` (if there is none, start
+   cold). List the commits since the commit the report records
+   (`git log --oneline <report commit>..HEAD`), so you know what changed after that
+   round.
 
 1a. **Resume from the latest report.** Each round picks up where the previous one
    stopped instead of starting cold. From the latest report, extract:
@@ -197,12 +199,14 @@ Principles that made the previous rounds work:
    known-red suite unless an external blocker prevents any progress, in which case
    report the exact blocker.
 
-10. **Report and commit.** Write `docs/nightly-tests/<YYYY-MM-DD>.md` with: totals
+10. **Report and commit.** Write `/tmp/playhouse-nightly-tests/<YYYY-MM-DD>.md`
+    (create the folder if needed; never write the report into the repository) with:
+    the `HEAD` commit the round started from and the commit it pushed, totals
     and wall time of the first and final runs, the daemon peak, each failure with
     its proven cause and fix, what happened to each carried failure and open item from
     the previous report (step 1a), flaky cases fixed, speed changes with before/after
     seconds, quality changes, what was deliberately left alone and why, and open
-    items for the next night. Then stage only the paths this round changed
+    items for the next night. Then stage only the repository paths this round changed
     (explicit `git add <path>`), commit with a message that names the round and
     its fixes, and push to the configured upstream. Leave pre-existing staged or
     unstaged work untouched and mention it in the report. The only exception is the

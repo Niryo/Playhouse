@@ -96,7 +96,8 @@ extension PlayhouseCLI {
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
       playhouse task move <task-id> Done --discard-changes
-      playhouse task pr create <task-id> [--if-needed]
+      playhouse task pr create <task-id> [--if-needed] [--title <title>] [--body <text>]
+      playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>   (register a PR opened outside Playhouse; its head must be the worktree's branch)
       playhouse task pr status <task-id> [--review-threads] [--shared]
       playhouse task pr verify <task-id>
       playhouse task pr sync <task-id>
@@ -113,10 +114,13 @@ extension PlayhouseCLI {
       playhouse schedule tick
       playhouse task repository add <task-id> --repo <path>
       playhouse task repository add-batch <task-id> --repo <path> [--repo <path>...]
+      playhouse task repository add-worktree <task-id> --repo <path> [--branch <name>] [--branch-from <ref>]   (another worktree, on its own branch, of a repository the task already has)
       playhouse task repository replace <task-id> --repo <path> [--repo <path>...]
-      playhouse task repository edit <task-id> --repo <path> --branch <name> --branch-from <ref> [--merge-target <ref>]
-      playhouse task repository remove <task-id> --repo <path>
-      playhouse task repository renew <task-id> --repo <path>   (after its pull request merged: fresh worktree from the merge target)
+      playhouse task repository edit <task-id> (--repo <path>|--worktree <path>) --branch <name> --branch-from <ref> [--merge-target <ref>]
+      playhouse task repository remove <task-id> (--repo <path>|--worktree <path>)
+      playhouse task repository renew <task-id> (--repo <path>|--worktree <path>)   (after its pull request merged: fresh worktree from the merge target)
+        --repo works when the task has one worktree of that repository; otherwise pass --worktree <path>,
+        plus --worktree-branch <branch> to pick a worktree that isn't started yet.
       playhouse task repository recent <task-id>
       playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
       playhouse task draft <task-id> --text <draft> [--image <path>...]
@@ -134,7 +138,7 @@ extension PlayhouseCLI {
       playhouse task delete-check <task-id>
       playhouse chat open
       playhouse chat status
-      playhouse chat page list [--limit <n>]
+      playhouse chat page list [--limit <n>] [--title <text>]
       playhouse chat page search <query>
       playhouse chat page read <page-id>
       playhouse chat page new --title <title>
@@ -162,7 +166,8 @@ extension PlayhouseCLI {
       playhouse skills fix --task <task-id> --skill <skill-id> [--skill <skill-id>...]
       playhouse skills bridge --task <task-id> [--message <text>]
       playhouse mentions list --task <task-id> [--query <text>]
-      playhouse slash-commands list --task <task-id> [--query <text>] [--status]
+      playhouse slash-commands list --task <task-id> [--query <text>] [--complete] [--draft <text>]
+      playhouse slash-commands run --task <task-id> --command <name> [--item <item-id> [--button <button-id>]] [--confirm] [--draft <text>]
       playhouse rules list [--task <task-id>]
       playhouse rules get --rule <rule-id> [--task <task-id>]
       playhouse rules create --scope <repo|global> [--name <name>] [--path <glob>...] --body <text> [--task <task-id>] [--root <repo-path>]

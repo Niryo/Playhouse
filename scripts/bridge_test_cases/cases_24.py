@@ -152,7 +152,7 @@ function Page() {
 }
 Playhouse.render(h(Page));
 """
-    # case-contract: test_plugin_main_sidebar_schedules_context_and_new_task | A plugin at the board's mainSidebar placement gets `props.schedules`: `tasks`, the scheduled tasks exactly as `schedule list` returns them (soonest first, each with its schedule's kind and paused state), and `needsLoginItemsApproval`; with no schedules the list is empty, and a conversation sidebar plugin gets no schedules. ui.newTask (with schedule "recurring", "once" or none) and ui.openLoginItems are host calls only the board answers: a conversation sidebar plugin is refused as unavailable, and any other schedule is invalid_argument. The board's Scheduled Tasks button and page are the built-in scheduled-tasks plugin, which can't be rendered headlessly (invalid_argument). In the window, a mainSidebar page plugin lists the schedules and follows them live as one is paused, and its ui.newTask opens a new task with the schedule picker up; disabling the built-in Scheduled Tasks removes its sidebar button, and enabling it brings back the button, which opens the Scheduled Tasks page.
+    # case-contract: test_plugin_main_sidebar_schedules_context_and_new_task | A plugin at the board's mainSidebar placement gets `props.schedules`: `tasks`, the scheduled tasks exactly as `schedule list` returns them (soonest first, each with its schedule's kind and paused state), and `needsLoginItemsApproval`; with no schedules the list is empty, and a conversation sidebar plugin gets no schedules. ui.newTask (with schedule "recurring", "once" or none) and ui.openLoginItems are host calls only the board answers: a conversation sidebar plugin is refused as unavailable, and any other schedule is invalid_argument. The board's Scheduled Tasks button and popover are the built-in scheduled-tasks popover plugin, which can't be rendered headlessly (invalid_argument). In the window, a mainSidebar page plugin lists the schedules and follows them live as one is paused, and its ui.newTask opens a new task with the schedule picker up; disabling the built-in Scheduled Tasks removes its sidebar button, and enabling it brings back the button, which opens the Scheduled Tasks popover.
     def test_plugin_main_sidebar_schedules_context_and_new_task(self):
         self.write_installed_plugin("schedules-probe", self.SCHEDULES_PAGE_SOURCE, placement="mainSidebar", presentation="page")
         self.write_installed_plugin("schedules-conversation", self.SCHEDULES_PAGE_SOURCE, placement="conversationSidebar", presentation="popover")
@@ -207,9 +207,9 @@ Playhouse.render(h(Page));
             result, call = press("schedules-conversation", button, "--task", once["id"])
             self.assertEqual((result, call["error"]["code"]), (f"{button}: unavailable", "unavailable"), "Only a plugin on the board opens a new task or Login Items.")
 
-        # The Scheduled Tasks page itself is a built-in plugin.
+        # The Scheduled Tasks popover itself is a built-in plugin.
         builtin = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"]}["scheduled-tasks"]
-        self.assertEqual((builtin["placement"], builtin["presentation"], builtin["builtIn"]), ("mainSidebar", "page", True))
+        self.assertEqual((builtin["placement"], builtin["presentation"], builtin["builtIn"]), ("mainSidebar", "popover", True))
         self.assert_failure(self.call_cli("plugin", "render", "--plugin", "scheduled-tasks", expected_status=2)[0], "invalid_argument")
     # case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     def test_standalone_chat_page_anchors_jump_and_recall(self):
@@ -284,3 +284,40 @@ Playhouse.render(h(Page));
         self.assertIn("anchor-page:Topic-03:1", recalled["userText"], "The recalled page travels with the turn.")
         self.assertIn("Topic 03 reply 1.", recalled["userText"])
         self.assertNotIn("Topic 04 reply 1.", recalled["userText"], "Only the recalled page is carried.")
+    # case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest forty labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    def test_standalone_chat_page_labels_search(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-page-search"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+
+        def cli(*arguments, **options):
+            return self.call_cli(*arguments, extra_environment=environment, **options)[0]
+
+        def titles(*flags):
+            return [page["title"] for page in self.assert_success(cli("chat", "page", "list", *flags))["pages"] if page["messageCount"] > 0]
+
+        # The oldest page lies beyond the newest forty the labels read at first.
+        topics = ["Kyoto temples"] + [f"Topic {number:02d}" for number in range(1, 43)] + ["Kyoto ramen", "Harbor"]
+        for title in topics:
+            self.assert_success(cli("conversation", "send", chat_id, "--message", f"anchor-page:{title.replace(' ', '-')}:1"))
+        self.assertNotIn("Kyoto temples", titles("--limit", "40"), "The oldest page is not among the newest forty.")
+
+        # The title search reads matches from the whole chat, newest first, ignoring case.
+        self.assertEqual(titles("--title", "kyoto"), ["Kyoto ramen", "Kyoto temples"])
+        self.assertEqual(titles("--title", "KYOTO", "--limit", "1"), ["Kyoto ramen"], "The limit applies to the matches.")
+        self.assertEqual(titles("--title", "  Topic 4  "), ["Topic 42", "Topic 41", "Topic 40"], "Surrounding spaces are ignored.")
+        # It matches titles only, and its wildcard characters only themselves.
+        self.assertEqual(titles("--title", "reply"), [], "Message text is not searched.")
+        self.assertEqual(titles("--title", "%"), [])
+        self.assertEqual(titles("--title", "_"), [])
+        self.assertEqual(titles("--title", "nothing like this"), [])
+        # Blank search text lists the newest pages as without it.
+        self.assertEqual(titles("--title", "   ", "--limit", "5"), titles("--limit", "5"))
+        self.assert_failure(cli("chat", "page", "list", "--title", expected_status=2), "invalid_argument")
