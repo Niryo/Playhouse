@@ -136,7 +136,6 @@ extension PlayhouseBridgeRuntime {
     static func autoCompactionValue(_ settings: ContextCompactionSettings) -> BridgeValue {
         .object([
             "enabled": .boolean(settings.enabled),
-            "thresholdTokens": .integer(settings.thresholdTokens),
             "idleMinutes": .integer(settings.idleMinutes),
             "minimumTokens": .integer(settings.minimumTokens),
         ])

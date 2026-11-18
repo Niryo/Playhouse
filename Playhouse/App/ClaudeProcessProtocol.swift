@@ -74,11 +74,6 @@ extension ClaudeSessionRunner {
         environment["LOGNAME"] = environment["LOGNAME"] ?? NSUserName()
         if let configDirectoryOverride { environment["CLAUDE_CONFIG_DIR"] = configDirectoryOverride }
         if let effort { environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort.rawValue }
-        // Claude Code auto-compacts once the context nears this many tokens,
-        // instead of near the model's whole (up to 1M-token) window.
-        if let window = workspace.claudeAutoCompactWindowTokens {
-            environment[ContextCompactionSettings.autoCompactWindowVariable] = String(window)
-        }
         // The CLI is a child of Playhouse, not an IDE integration or nested session.
         environment.removeValue(forKey: "CLAUDECODE")
         environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")

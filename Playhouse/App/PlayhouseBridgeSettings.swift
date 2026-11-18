@@ -19,13 +19,12 @@ extension PlayhouseBridgeRuntime {
         case "settings.set-auto-compaction":
             let arguments = request.arguments
             let enabled = arguments["enabled"]?.bool
-            let threshold = arguments["thresholdTokens"]?.int
             let idleMinutes = arguments["idleMinutes"]?.int
             let minimum = arguments["minimumTokens"]?.int
-            guard enabled != nil || threshold != nil || idleMinutes != nil || minimum != nil else {
-                throw BridgeCommandError(code: "invalid_argument", message: "Give at least one of enabled, thresholdTokens, idleMinutes or minimumTokens.")
+            guard enabled != nil || idleMinutes != nil || minimum != nil else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Give at least one of enabled, idleMinutes or minimumTokens.")
             }
-            try manager.setContextCompaction(enabled: enabled, thresholdTokens: threshold, idleMinutes: idleMinutes, minimumTokens: minimum)
+            try manager.setContextCompaction(enabled: enabled, idleMinutes: idleMinutes, minimumTokens: minimum)
             return .object(["autoCompaction": Self.autoCompactionValue(manager.contextCompaction)])
         case "settings.set-token-usage-color-max":
             try manager.setTokenUsageColorMax(request.requiredInt("max"))

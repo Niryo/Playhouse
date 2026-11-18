@@ -12,19 +12,24 @@ import Foundation
 // Everything here is Foundation-only and pure apart from reading a session
 // file, so scripts/unit/context-compaction-policy-tests.swift compiles it on
 // its own.
+//
+// When the context fills up, each provider's own auto-compaction decides when
+// to compact, at its native default: Playhouse never sets Claude Code's
+// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or Codex's `model_auto_compact_token_limit`.
+// Earlier builds lowered that window to 200k, which compacted busy sessions
+// every few minutes and cost more than it saved.
+//
 // Codex's app-server exposes `thread/compact/start`. Its usage notifications
 // provide the latest context size but no matching prompt-cache TTL, so Codex
-// compacts at the configured threshold and before model switches; the cache-
-// timed warm-idle and expired-cache resume policies apply only to Claude.
+// compacts only before model switches; the cache-timed warm-idle and
+// expired-cache resume policies apply only to Claude.
 
-/// The user's automatic compaction settings, shared across provider task sessions.
-/// Disabling them leaves each provider's prior native behavior in place.
+/// The user's settings for Playhouse's own compaction triggers (warm-idle,
+/// cold-resume and model-switch), shared across provider task sessions.
+/// Each provider's native auto-compaction stays on whatever these say.
 struct ContextCompactionSettings: Equatable {
-    static let defaultThresholdTokens = 200_000
     static let defaultIdleMinutes = 50
     static let defaultMinimumTokens = 150_000
-    /// The range Claude Code accepts for `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
-    static let thresholdRange = 100_000...1_000_000
     /// Claude's idle wait has to fire before the one-hour cache TTL runs out.
     static let idleMinutesRange = 5...55
     static let minimumTokensRange = 10_000...1_000_000
@@ -32,17 +37,10 @@ struct ContextCompactionSettings: Equatable {
     static let cacheLifetime: TimeInterval = 3600
 
     var enabled = true
-    var thresholdTokens = defaultThresholdTokens
     var idleMinutes = defaultIdleMinutes
     var minimumTokens = defaultMinimumTokens
 
     static let defaults = ContextCompactionSettings()
-
-    /// The environment variable Claude Code (2.1.296 and later) reads as its
-    /// auto-compact window, in tokens; nil leaves Claude Code's own default.
-    static let autoCompactWindowVariable = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
-
-    var autoCompactWindowTokens: Int? { enabled ? thresholdTokens : nil }
 
     /// Accept the grouping separator displayed by the settings field, but
     /// never turn a sign, decimal point or arbitrary text into an integer.
@@ -59,7 +57,9 @@ struct ContextCompactionSettings: Equatable {
 
 /// Why a session's context was compacted.
 enum ContextCompactionTrigger: String, Codable, CaseIterable, Equatable {
-    /// Claude Code's own auto-compaction at the threshold Playhouse configures.
+    /// The provider's own auto-compaction, at its native default. The raw
+    /// value predates Playhouse leaving the window to the provider, and stays
+    /// so recorded events keep decoding.
     case threshold
     /// Playhouse compacted an idle session before its prompt cache expired.
     case warmIdle = "warm-idle"
@@ -75,7 +75,7 @@ enum ContextCompactionTrigger: String, Codable, CaseIterable, Equatable {
     /// The label the conversation timeline and Token Stats show.
     var label: String {
         switch self {
-        case .threshold: "Context threshold"
+        case .threshold: "Provider auto-compaction"
         case .warmIdle: "Idle, before the cache expired"
         case .coldResume: "Resume after the cache expired"
         case .modelSwitch: "Model switch"
@@ -315,12 +315,13 @@ enum ContextCompactionPolicy {
         guard settings.enabled, let state, let lastCallAt = state.lastCallAt,
               !state.compactedSinceLastCall else { return nil }
         if provider == "codex" {
+            // Codex app-server provides context usage and a manual compact RPC,
+            // but no cache TTL signal, so the idle and cold-cache rules are
+            // Claude-specific. A large context is left to Codex's own
+            // auto-compaction, which can also compact mid-turn.
             if state.contextTokens >= settings.minimumTokens,
                let model = state.model, isModelSwitch(from: model, to: requestedModel) { return .modelSwitch }
-            // Codex app-server provides context usage and a manual compact RPC,
-            // but no cache TTL signal. Compact its oversized history before the
-            // next turn; the idle and cold-cache rules are Claude-specific.
-            return state.contextTokens >= settings.thresholdTokens ? .threshold : nil
+            return nil
         }
         guard state.contextTokens >= settings.minimumTokens else { return nil }
         if now.timeIntervalSince(lastCallAt) >= ContextCompactionSettings.cacheLifetime { return .coldResume }
