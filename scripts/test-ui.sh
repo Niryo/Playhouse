@@ -396,6 +396,18 @@ else
   mv -f "${build_stamp}.tmp" "${build_stamp}"
 fi
 
+# The update cases need apps the sandboxed runner can't make: whatever it writes is
+# quarantined, so a copied app won't launch and its tools won't run, and it can't run
+# xcrun to compile the release tool. Both are prepared here, outside the sandbox.
+for ui_case in "${selected_cases[@]}"; do
+  if [[ "${ui_case}" == test_update_* ]]; then
+    PLAYHOUSE_RELEASE_TOOL_CACHE="${fixture_root}/release-tool" "${repository_root}/scripts/release-tool.sh" keygen >/dev/null
+    python3 "${repository_root}/scripts/make-update-fixture.py" --source-app "${compiled_app}" \
+      --stage-apps "${fixture_root}/update-apps" >/dev/null
+    break
+  fi
+done
+
 # One xcodebuild session runs every selected case: starting xcodebuild and the test
 # runner costs about ten seconds per session, a quarter of a full run when each case
 # had its own. XCTest's execution time allowance ends a stalled case by itself (it

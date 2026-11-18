@@ -231,6 +231,34 @@ final class PlayhouseBridgeRuntime {
                 result = try await bridgeOverviewOperation(
                     request, taskManager: taskManager, settings: settings
                 )
+            case "update.status", "update.check", "update.download", "update.cancel", "update.install", "update.set-auto-check", "update.launched", "update.dismiss-notice":
+                let updates = UpdateManager(request: request, storeDirectory: storeDirectory, runtimeScope: dataDirectory, preferences: preferences) {
+                    (try? taskManager.unsentDraftCount()) ?? 0
+                }
+                defer { updates.resumeWaitingInstall() }
+                switch request.command {
+                case "update.check":
+                    result = try Self.value(await updates.check(automatic: request.arguments["automatic"]?.bool == true))
+                case "update.download":
+                    result = try Self.value(await updates.download { fraction in
+                        eventHandler(BridgeEvent(requestID: request.id, type: "update_progress", payload: .object(["progress": .decimal(fraction)])))
+                    })
+                case "update.cancel":
+                    result = try Self.value(updates.cancelDownload())
+                case "update.install":
+                    result = .object(try updates.install(whenIdle: request.arguments["whenIdle"]?.bool == true))
+                case "update.set-auto-check":
+                    guard let enabled = request.arguments["enabled"]?.bool else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "Give enabled as true or false.")
+                    }
+                    result = try Self.value(updates.setAutoCheck(enabled))
+                case "update.launched":
+                    result = try Self.value(updates.markLaunched())
+                case "update.dismiss-notice":
+                    result = try Self.value(updates.dismissNotice())
+                default:
+                    result = try Self.value(updates.status())
+                }
             case "task.create":
                 let title = try request.requiredString("title")
                 let roots = try request.requiredStrings("roots")
@@ -1152,6 +1180,14 @@ final class PlayhouseBridgeRuntime {
             ) { _, new in new })
             await PlayhouseDiagnostics.endBatch()
             return response
+        } catch let error as ReleaseVerificationError {
+            PlayhouseDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
+                "errorCode": error.code,
+                "errorDescription": error.message,
+                "durationMilliseconds": Self.elapsedMilliseconds(since: requestStartedAt)
+            ]) { _, new in new })
+            await PlayhouseDiagnostics.endBatch()
+            return .failure(request, code: error.code, message: error.message)
         } catch let error as BridgeCommandError {
             PlayhouseDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
                 "errorCode": error.code,

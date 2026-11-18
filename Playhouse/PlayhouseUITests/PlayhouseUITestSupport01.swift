@@ -1155,7 +1155,7 @@ extension PlayhouseUITests {
         let value = element.value as? String ?? ""
         return value.isEmpty ? element.label : value
     }
-    func launchApp(defaultParent: String?, environmentOverrides: [String: String] = [:]) {
+    func launchApp(defaultParent: String?, environmentOverrides: [String: String] = [:], appURL: URL? = nil) {
         clearSavedWindowFrames()
         launchDefaultParent = defaultParent
         let bundleIdentifier = Bundle(url: appBundle)?.bundleIdentifier ?? "com.playhouse.app.e2e"
@@ -1178,7 +1178,7 @@ extension PlayhouseUITests {
         for (key, value) in environmentOverrides {
             app.launchEnvironment[key] = value
         }
-        launchAppWithOpen(bundleIdentifier: bundleIdentifier, environmentOverrides: environmentOverrides)
+        launchAppWithOpen(bundleIdentifier: bundleIdentifier, environmentOverrides: environmentOverrides, appURL: appURL)
         waitForBoardOrAbortSuite()
         let newTaskButton = element("new-task-button")
         if newTaskButton.exists && !newTaskButton.isHittable {
@@ -1193,7 +1193,8 @@ extension PlayhouseUITests {
             app.activate()
         }
     }
-    func launchAppWithOpen(bundleIdentifier: String? = nil, environmentOverrides: [String: String] = [:]) {
+    /// `appURL` launches that copy of the app instead of the one found by bundle identifier.
+    func launchAppWithOpen(bundleIdentifier: String? = nil, environmentOverrides: [String: String] = [:], appURL: URL? = nil) {
         let targetBundleIdentifier = bundleIdentifier ?? Bundle(url: appBundle)?.bundleIdentifier ?? "com.playhouse.app.e2e"
         var environment = ProcessInfo.processInfo.environment
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
@@ -1217,7 +1218,7 @@ extension PlayhouseUITests {
         }
         environment.merge(environmentOverrides, uniquingKeysWith: { _, new in new })
         if !isLiveIntegration { addDefaultGitHubFixture(to: &environment) }
-        app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+        app = appURL.map { XCUIApplication(url: $0) } ?? XCUIApplication(bundleIdentifier: targetBundleIdentifier)
         app.launchEnvironment = environment
         // Every case starts from no restored windows. AppKit saves open windows on
         // quit and reopens them on the next launch; a plugin window left open by

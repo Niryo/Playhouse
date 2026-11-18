@@ -150,8 +150,17 @@ extension PlayhouseUITests {
     func restartServiceEnvironment(_ extra: [String: String] = [:]) -> [String: String] {
         ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).restart-\(UUID().uuidString.prefix(8))"].merging(extra) { _, new in new }
     }
+    /// The service's live agent, newest first: a title-generation server started earlier
+    /// under another key can still be listed while it idles out.
     func agentManifest(kind: String, service: [String: String]) -> (path: URL, manifest: [String: Any])? {
-        agentManifests().first { $0.kind == kind && $0.manifest["serviceName"] as? String == service["PLAYHOUSE_BRIDGE_SERVICE_NAME"] }
+        agentManifests()
+            .filter { $0.kind == kind && $0.manifest["serviceName"] as? String == service["PLAYHOUSE_BRIDGE_SERVICE_NAME"] }
+            .max { first, second in
+                let rank = { (entry: (kind: String, path: URL, manifest: [String: Any])) in
+                    (self.agentIsAlive(entry.manifest["process"] as? [String: Any]) ? 1 : 0, (entry.manifest["createdAt"] as? NSNumber)?.doubleValue ?? 0)
+                }
+                return rank(first) < rank(second)
+            }
             .map { ($0.path, $0.manifest) }
     }
     func killDaemon(environment: [String: String]) throws {
@@ -453,13 +462,15 @@ extension PlayhouseUITests {
         XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task session should be cleared: \(seedText)")
         XCTAssertTrue(seedText.contains("Cleared provider sessions"), seedText)
     }
+    /// A nil `expectedStatus` accepts any exit, for polls that may run while no daemon answers.
     func runCLI(
         _ arguments: [String],
-        expectedStatus: Int32 = 0,
-        extraEnvironment: [String: String] = [:]
+        expectedStatus: Int32? = 0,
+        extraEnvironment: [String: String] = [:],
+        cli: URL? = nil
     ) throws -> [String: Any] {
         let process = Process()
-        process.executableURL = cliURL
+        process.executableURL = cli ?? cliURL
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
@@ -492,7 +503,9 @@ extension PlayhouseUITests {
         errorDrained.wait()
         process.waitUntilExit()
         let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, expectedStatus, "CLI \(arguments) exited unexpectedly: \(output) \(errorOutput)")
+        if let expectedStatus {
+            XCTAssertEqual(process.terminationStatus, expectedStatus, "CLI \(arguments) exited unexpectedly: \(output) \(errorOutput)")
+        }
         let responseLine = try XCTUnwrap(output.split(whereSeparator: \.isNewline).last, "CLI returned no JSON for \(arguments)")
         let response = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(responseLine.utf8)) as? [String: Any],
@@ -510,10 +523,11 @@ extension PlayhouseUITests {
     }
     func startCLIProcess(
         _ arguments: [String],
-        extraEnvironment: [String: String] = [:]
+        extraEnvironment: [String: String] = [:],
+        cli: URL? = nil
     ) throws -> RunningCLIProcess {
         let process = Process()
-        process.executableURL = cliURL
+        process.executableURL = cli ?? cliURL
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
@@ -960,22 +974,25 @@ extension PlayhouseUITests {
         helpTagIsShowing(expected) || screenTextContains(expected)
     }
     func screenTextContains(_ expected: String) -> Bool {
-        guard let image = XCUIScreen.main.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return false
-        }
+        recognizedWords(in: XCUIScreen.main.screenshot()).contains(Self.words(expected))
+    }
+
+    /// The words read off `screenshot`, lowercased and without punctuation.
+    func recognizedWords(in screenshot: XCUIScreenshot) -> String {
+        guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return "" }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         try? VNImageRequestHandler(cgImage: image).perform([request])
-        // A tooltip wraps across lines, so compare word sequences without line breaks or punctuation.
-        func words(_ text: String) -> String {
-            text.lowercased()
-                .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
-        }
-        let onScreen = words((request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " "))
-        return onScreen.contains(words(expected))
+        return Self.words((request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " "))
+    }
+
+    /// A tooltip wraps across lines, so text is compared as word sequences without line breaks or punctuation.
+    static func words(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
     func helpTagIsShowing(_ text: String) -> Bool {
         app.descendants(matching: .helpTag)

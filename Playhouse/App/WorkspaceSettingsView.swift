@@ -160,6 +160,7 @@ struct WorkspaceSettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
+            UpdateSettingsSection()
         }
         .task {
             while !Task.isCancelled {

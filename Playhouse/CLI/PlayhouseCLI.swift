@@ -20,6 +20,18 @@ enum PlayhouseCLI {
             return
         }
 
+        do {
+            if let local = try runLocally(arguments) {
+                printResponse(local)
+                if !local.ok { exit(exitStatus(for: local.error?.code)) }
+                return
+            }
+        } catch {
+            let invalid = BridgeRequest(command: "invalid")
+            printResponse(.failure(invalid, code: "invalid_argument", message: error.localizedDescription))
+            exit(2)
+        }
+
         let request: BridgeRequest
         do {
             request = try parse(arguments)

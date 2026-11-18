@@ -90,6 +90,10 @@ final class DaemonClient: @unchecked Sendable {
         if let claude = configuration.claudeExecutable { request.arguments["__claudeExecutable"] = .string(claude) }
         if let codexHome = configuration.codexHome { request.arguments["__codexHome"] = .string(codexHome) }
         if let claudeConfig = configuration.claudeConfigDirectory { request.arguments["__claudeConfigDirectory"] = .string(claudeConfig) }
+        // Test overrides for the release feed; the daemon honors them only in a test bundle.
+        for (name, argument) in BridgeContract.updateOverrideArguments {
+            if let value = ProcessInfo.processInfo.environment[name], !value.isEmpty { request.arguments[argument] = .string(value) }
+        }
         request.dataDirectory = configuration.dataDirectory
         request.defaultsSuite = configuration.defaultsSuite
         request.worktreeDirectory = configuration.worktreeDirectory
@@ -123,18 +127,29 @@ final class DaemonClient: @unchecked Sendable {
                 continuation.finish()
             }
             do {
-                let connection = try BridgeDaemonLauncher.connect(
-                    socketPath: configuration.socketPath,
-                    serviceName: configuration.serviceName,
-                    daemonExecutablePath: Self.daemonExecutablePath
-                )
-                call.attach(connection)
-                try connection.write(BridgeFraming.frame(request))
-                var buffer = Data()
-                while true {
-                    for message in try connection.readMessages(as: BridgeWireMessage.self, buffer: &buffer) {
-                        continuation.yield(.message(message))
-                        if case .response = message { return }
+                // A daemon that is shutting down refuses the request without running it.
+                let retryDeadline = Date().addingTimeInterval(30)
+                attempts: while true {
+                    let connection = try BridgeDaemonLauncher.connect(
+                        socketPath: configuration.socketPath,
+                        serviceName: configuration.serviceName,
+                        daemonExecutablePath: Self.daemonExecutablePath
+                    )
+                    call.attach(connection)
+                    try connection.write(BridgeFraming.frame(request))
+                    var buffer = Data()
+                    while true {
+                        for message in try connection.readMessages(as: BridgeWireMessage.self, buffer: &buffer) {
+                            if case .response(let response) = message {
+                                if BridgeDaemonLauncher.shouldRetry(response, until: retryDeadline) {
+                                    call.detachAndClose()
+                                    continue attempts
+                                }
+                                continuation.yield(.message(message))
+                                return
+                            }
+                            continuation.yield(.message(message))
+                        }
                     }
                 }
             } catch {

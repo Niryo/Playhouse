@@ -192,6 +192,8 @@ protocol ConversationSubject: AnyObject, Observable {
     /// True while `savedPrompt` and the draft images are the user's unsent composer draft,
     /// rather than the last prompt that was sent.
     var hasUnsentDraft: Bool { get set }
+    /// When the composer last saved the unsent draft.
+    var draftEditedAt: Date? { get set }
     var draftImageDataURLsData: Data? { get set }
     /// JSON-encoded review comments written but not yet sent; part of the unsent draft.
     var pendingAnnotationsData: Data? { get set }
@@ -393,6 +395,7 @@ final class StandaloneChat {
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
     var hasUnsentDraft: Bool = false
+    var draftEditedAt: Date?
     var draftImageDataURLsData: Data?
     var pendingAnnotationsData: Data?
     var sideChatsData: Data?

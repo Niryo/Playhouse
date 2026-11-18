@@ -288,10 +288,39 @@ class BridgeTestHelpers01:
             return True
         return True
     @staticmethod
+    def bridge_socket(service):
+        digest = hashlib.sha256(service.encode("utf-8")).hexdigest()[:32]
+        return Path("/tmp/playhouse-bridge") / str(os.getuid()) / f"{digest}.sock"
+
+    @staticmethod
+    def raw_bridge_response(connection, command):
+        """Sends one request over an open bridge socket, without the CLI's retries, and returns its response."""
+        payload = json.dumps({"version": 1, "id": str(uuid.uuid4()), "command": command, "arguments": {}}).encode("utf-8")
+        connection.sendall(struct.pack(">I", len(payload)) + payload)
+        buffer = b""
+        while True:
+            while len(buffer) >= 4 and len(buffer) >= 4 + struct.unpack(">I", buffer[:4])[0]:
+                length = struct.unpack(">I", buffer[:4])[0]
+                message = json.loads(buffer[4:4 + length])
+                buffer = buffer[4 + length:]
+                if message["kind"] == "response":
+                    return message["value"]
+            chunk = connection.recv(65536)
+            if not chunk:
+                return None
+            buffer += chunk
+
+    def open_bridge_connection(self, service):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(10)
+        connection.connect(str(self.bridge_socket(service)))
+        return connection
+
+    @staticmethod
     def daemon_log_pids(service):
         """Every daemon process that wrote to this service's socket log (each logs on start)."""
-        digest = hashlib.sha256(service.encode("utf-8")).hexdigest()[:32]
-        log = Path("/tmp/playhouse-bridge") / str(os.getuid()) / f"{digest}.sock.log"
+        socket_path = BridgeTestHelpers01.bridge_socket(service)
+        log = socket_path.with_name(socket_path.name + ".log")
         text = log.read_text(encoding="utf-8") if log.is_file() else ""
         return {int(pid) for pid in re.findall(r"playhouse-daemon\[(\d+)\]", text)}
     def wait_until_process_exits(self, pid, timeout):

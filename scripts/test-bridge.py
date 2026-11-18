@@ -97,8 +97,9 @@ from bridge_test_cases.cases_23 import BridgeTestCases23
 from bridge_test_cases.cases_24 import BridgeTestCases24
 from bridge_test_cases.cases_25 import BridgeTestCases25
 from bridge_test_cases.cases_26 import BridgeTestCases26
+from bridge_test_cases.cases_27 import BridgeTestCases27
 
-class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestCases23, BridgeTestCases24, BridgeTestCases25, BridgeTestCases26, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
+class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestCases23, BridgeTestCases24, BridgeTestCases25, BridgeTestCases26, BridgeTestCases27, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cli = arguments.cli.absolute()
@@ -152,7 +153,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
 
 
 
-    def call_cli(self, *command, expected_status=0, timeout=90, extra_environment=None):
+    def call_cli(self, *command, expected_status=0, timeout=90, extra_environment=None, cli=None):
         environment = os.environ.copy()
         environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
@@ -165,7 +166,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         completed = subprocess.run(
-            [str(self.cli), *map(str, command)],
+            [str(cli or self.cli), *map(str, command)],
             check=False,
             capture_output=True,
             text=True,
@@ -187,7 +188,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         self.assertIn("id", response)
         return response, [json.loads(line) for line in lines[:-1]]
 
-    def start_cli(self, *command, extra_environment=None, binary_output=False):
+    def start_cli(self, *command, extra_environment=None, binary_output=False, cli=None):
         environment = os.environ.copy()
         environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
@@ -200,7 +201,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         return subprocess.Popen(
-            [str(self.cli), *map(str, command)],
+            [str(cli or self.cli), *map(str, command)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=not binary_output,
