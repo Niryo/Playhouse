@@ -30,7 +30,7 @@ final class PluginRegistry {
 
     /// The active plugins whose entry button goes in `placement`.
     func plugins(for placement: PluginPlacement) -> [PluginRecord] {
-        plugins.filter { $0.isActive && $0.placement == placement.rawValue && !$0.presentationKind.isInPlace }
+        plugins.filter { $0.isActive && $0.hasSurface && $0.placement == placement.rawValue && !$0.presentationKind.isInPlace }
     }
 
     /// The active plugins rendered in place as sections of `placement`.

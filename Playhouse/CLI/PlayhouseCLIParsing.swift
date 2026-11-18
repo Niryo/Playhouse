@@ -759,14 +759,25 @@ extension PlayhouseCLI {
             if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
             return BridgeRequest(command: "mentions.list", arguments: arguments)
         case "slash-commands":
-            let use = "Use: playhouse slash-commands list --task <task-id> [--query <text>] [--status]"
-            guard rest.first == "list" else { throw CLIError.usage(use) }
+            let use = "Use: playhouse slash-commands list --task <task-id> [--query <text>] [--complete] [--draft <text>] | run --task <task-id> --command <name> [--item <item-id> [--button <button-id>]] [--confirm] [--draft <text>]"
+            guard let operation = rest.first, ["list", "run"].contains(operation) else { throw CLIError.usage(use) }
+            let switches: Set<String> = ["--status", "--complete", "--confirm"]
             let options = Array(rest.dropFirst())
-            let flags = try parseFlags(options.filter { $0 != "--status" }, valueFlags: ["--task", "--query"])
+            let flags = try parseFlags(options.filter { !switches.contains($0) }, valueFlags: ["--task", "--query", "--command", "--item", "--button", "--draft"])
             var arguments: [String: BridgeValue] = ["taskID": .string(try requiredFlag("--task", flags: flags).first!)]
-            if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
-            if options.contains("--status") { arguments["includeStatus"] = .boolean(true) }
-            return BridgeRequest(command: "slash.list", arguments: arguments)
+            if let draft = flags["--draft"]?.first { arguments["draft"] = .string(draft) }
+            if operation == "list" {
+                if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
+                // `--status` is the older name of `--complete`.
+                if options.contains("--complete") || options.contains("--status") { arguments["complete"] = .boolean(true) }
+                return BridgeRequest(command: "slash.list", arguments: arguments)
+            }
+            guard let command = flags["--command"]?.first else { throw CLIError.usage(use) }
+            arguments["command"] = .string(command)
+            if let item = flags["--item"]?.first { arguments["item"] = .string(item) }
+            if let button = flags["--button"]?.first { arguments["button"] = .string(button) }
+            if options.contains("--confirm") { arguments["confirm"] = .boolean(true) }
+            return BridgeRequest(command: "slash.run", arguments: arguments)
         case "schedule":
             guard let operation = rest.first else {
                 throw CLIError.usage("Use: playhouse schedule list|set|clear|pause|resume|run-now|tick ...")

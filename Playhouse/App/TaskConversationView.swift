@@ -134,11 +134,13 @@ struct TaskConversationView: View {
     @State var mentionEdit: ChatEditorEdit?
     /// The `@` whose menu Escape closed; it stays closed until another mention starts.
     @State var dismissedMentionLocation: Int?
-    /// The items of the command the `/` menu lists, read from the daemon when that list opens.
-    @State var slashItems: [SlashCommandItem]?
-    @State var slashItemsCommand: SlashCommand?
-    /// Both agents are still asked which MCP servers in the `/mcp` list need a sign-in.
-    @State var isCheckingSlashSignIn = false
+    /// The plugins' `/` commands, read again as each new `/` is typed.
+    @State var slashEntries: [SlashCommandEntry]?
+    /// The list of the command the `/` menu lists, from its plugin when that list opens.
+    @State var slashList: PluginCommandList?
+    @State var slashListCommand: String?
+    /// A chosen command's handler is running; the menu stays closed meanwhile.
+    @State var isRunningSlashCommand = false
     /// The highlighted row of the open `/` menu.
     @State var slashSelection = 0
     /// The `/` whose menu Escape closed; it stays closed until another command starts.
