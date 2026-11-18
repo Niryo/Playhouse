@@ -101,6 +101,22 @@ final class PlayhouseUITests: XCTestCase {
             allow.click()
             return true
         }
+        dismissSystemPrivacyPrompts()
+    }
+
+    /// macOS shows privacy prompts (Local Network access, Automation) for processes in the
+    /// test VM as UserNotificationCenter windows above the app, where they swallow the
+    /// case's clicks and keyboard focus. Playhouse uses neither capability, so a prompt still
+    /// open before the case launches it is allowed.
+    func dismissSystemPrivacyPrompts() {
+        let center = XCUIApplication(bundleIdentifier: "com.apple.UserNotificationCenter")
+        guard center.state != .notRunning else { return }
+        for _ in 0..<5 {
+            let allow = center.buttons["Allow"].firstMatch
+            guard allow.exists else { return }
+            allow.click()
+            _ = waitUntil({ !allow.exists }, timeout: 3)
+        }
     }
 
     override func tearDownWithError() throws {

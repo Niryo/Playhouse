@@ -101,6 +101,108 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("provider-boundary-claude").exists)
         XCTAssertFalse(transcriptContains("playhouse-handoff-context"))
     }
+    // case-contract: test_conversation_transcript_reopens_from_local_store | Playhouse stores every conversation turn in its own transcript store, for Codex and Claude alike. After a Codex turn and, following a provider switch, a Claude turn, a fresh daemon serves the same messages, roles, texts, providers and order without asking Codex for its thread history: Codex replies stay labeled Codex with the model that wrote them, Claude replies stay labeled Claude, and a limited read returns only the latest page with the count of earlier messages and keeps the Codex-to-Claude boundary after the last Codex message.
+    func test_conversation_transcript_reopens_from_local_store() throws {
+        let executablePath = try makeCodexFixture(emptyQuestions: false).path
+        codexFixtureExecutable = executablePath
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-local-store")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
+        // Its own daemon, so killing it before reopening leaves the UI runner's shared one alone.
+        let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).local-store-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
+        try createTaskFixture(title: "Local transcript UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Local transcript UI")
+        openTask(named: "Local transcript UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Local transcript UI", prompt: "Start with Codex.")
+        let codexReply = transcriptMessage("Answers received: Blue / fixture-secret.")
+        XCTAssertTrue(codexReply.waitToExist(timeout: 10))
+
+        let providerMenu = element("conversation-provider-menu")
+        XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10))
+        providerMenu.click()
+        let claudeChoice = app.menuItems["conversation-provider-claude"]
+        XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
+        claudeChoice.click()
+        XCTAssertTrue(element("provider-boundary-claude").waitToExist(timeout: 10))
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+        composer.click()
+        composer.typeText("Tell me a very short dog story.")
+        element("send-message-button").click()
+        let story = "BISCUIT-7 waited by the gate every evening."
+        // A message's group carries its whole text as the label; matching every descendant's
+        // value instead snapshots the full tree and can time out in the VM.
+        let storyText = app.groups.matching(NSPredicate(format: "label BEGINSWITH %@", story)).firstMatch
+        XCTAssertTrue(storyText.waitToExist(timeout: 20), "The Claude reply streams into the transcript.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The Claude turn settles.")
+        attachScreenshot(named: "Codex and Claude turns in one transcript")
+        let before = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let beforeMessages = try XCTUnwrap(before["messages"] as? [[String: Any]])
+
+        // Reopening must come from Playhouse's own store, never from Codex's thread, even in a
+        // fresh daemon that has no turn of this conversation in memory.
+        let methods = URL(fileURLWithPath: executablePath + ".methods")
+        let loggedTurns = (try? String(contentsOf: methods, encoding: .utf8)) ?? ""
+        XCTAssertTrue(loggedTurns.split(separator: "\n").contains("turn/start"), "The method log records this case's Codex requests.")
+        try Data().write(to: methods, options: .atomic)
+        element("back-to-board-button").click()
+        let firstPID = try XCTUnwrap(try daemonProcessID(environment: daemonEnvironment))
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before reopening.")
+        kill(pid_t(firstPID), SIGKILL)
+        XCTAssertTrue(waitUntil({ kill(pid_t(firstPID), 0) != 0 }, timeout: 10), "The daemon that recorded the turns is gone.")
+        launchAppWithOpen(environmentOverrides: daemonEnvironment)
+        waitForBoardOrAbortSuite()
+        openTask(named: "Local transcript UI")
+        // A reopened conversation renders from its latest turn; earlier turns render as it scrolls up.
+        // The relaunch replaced `app`, so the queries are built again against it.
+        let reopenedStory = app.groups.matching(NSPredicate(format: "label BEGINSWITH %@", story)).firstMatch
+        let reopenedCodexReply = transcriptMessage("Answers received: Blue / fixture-secret.")
+        XCTAssertTrue(reopenedStory.waitToExist(timeout: 10), "The Claude reply reopens from the local store.")
+        let claudeReplyID = try XCTUnwrap(beforeMessages.last { $0["role"] as? String == "assistant" && $0["provider"] as? String == "claude" }?["id"] as? String)
+        let claudeLabel = element("assistant-provider-\(claudeReplyID)")
+        XCTAssertTrue(claudeLabel.waitToExist(timeout: 5))
+        XCTAssertTrue((claudeLabel.value as? String)?.hasPrefix("Claude") == true, "The Claude reply keeps its provider label.")
+        attachElementScreenshot(claudeLabel, named: "Reopened Claude reply keeps its provider label")
+        XCTAssertTrue(scrollTranscriptUntilExists(reopenedCodexReply), "The Codex reply reopens from the local store.")
+        let codexReplyID = try XCTUnwrap(beforeMessages.last { $0["role"] as? String == "assistant" && $0["provider"] as? String == "codex" }?["id"] as? String)
+        let codexLabel = element("assistant-provider-\(codexReplyID)")
+        XCTAssertEqual(codexLabel.value as? String, "Codex · Luna", "The Codex reply keeps its provider and model label.")
+        let boundary = element("provider-boundary-claude")
+        XCTAssertTrue(boundary.exists, "The provider boundary reopens between the turns.")
+        XCTAssertLessThan(reopenedCodexReply.frame.maxY, boundary.frame.minY, "The boundary follows the Codex turn.")
+        XCTAssertTrue(reopenedStory.exists, "Scrolling up keeps the Claude turn rendered below.")
+        XCTAssertLessThan(boundary.frame.maxY, reopenedStory.frame.minY, "The Codex turn stays before the Claude turn.")
+        attachScreenshot(named: "Transcript reopened from the local store after relaunch")
+        attachElementScreenshot(codexLabel, named: "Reopened Codex reply keeps its model label")
+
+        let secondPID = try XCTUnwrap(try daemonProcessID(environment: daemonEnvironment))
+        XCTAssertNotEqual(secondPID, firstPID, "A fresh daemon serves the reopened conversation.")
+        let after = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let afterMessages = try XCTUnwrap(after["messages"] as? [[String: Any]])
+        func summary(_ messages: [[String: Any]]) -> [String] {
+            messages.map { "\($0["id"] ?? "")|\($0["role"] ?? "")|\($0["provider"] ?? "")|\($0["modelID"] ?? "")|\($0["text"] ?? "")" }
+        }
+        XCTAssertEqual(summary(afterMessages), summary(beforeMessages), "The reopened transcript is unchanged.")
+        XCTAssertTrue(beforeMessages.contains { $0["role"] as? String == "assistant" && $0["provider"] as? String == "codex" && ($0["modelID"] as? String)?.isEmpty == false })
+        let page = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "2"])["result"] as? [String: Any])
+        XCTAssertEqual(summary(try XCTUnwrap(page["messages"] as? [[String: Any]])), Array(summary(beforeMessages).suffix(2)))
+        XCTAssertEqual(page["earlierMessageCount"] as? Int, beforeMessages.count - 2)
+        let lastCodexMessageID = try XCTUnwrap(beforeMessages.last { $0["provider"] as? String == "codex" }?["id"] as? String)
+        func boundaries(_ history: [String: Any]) -> [String] {
+            ((history["providerBoundaries"] as? [[String: Any]]) ?? []).map { "\($0["provider"] ?? "")|\($0["afterMessageID"] ?? "")" }
+        }
+        XCTAssertEqual(boundaries(after), ["claude|\(lastCodexMessageID)"])
+        XCTAssertEqual(boundaries(page), ["claude|\(lastCodexMessageID)"], "A limited read keeps the Codex-to-Claude boundary after the last Codex message.")
+        let requested = (try? String(contentsOf: methods, encoding: .utf8)) ?? ""
+        for method in ["thread/read", "thread/turns/list", "thread/items/list"] {
+            XCTAssertFalse(requested.split(separator: "\n").contains(Substring(method)), "Reopening never asks Codex for its thread history.")
+        }
+    }
     // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records the single private recovery prompt for each unreported turn; fresh history shows the nudge prompts and their replies. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     func test_claude_answer_stays_final_around_outcome_report() throws {
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
@@ -302,6 +404,178 @@ extension PlayhouseUITests {
         XCTAssertTrue(texts.contains("Tell me a very short dog story."))
         XCTAssertTrue(texts.contains("What happened earlier?"))
         XCTAssertTrue(texts.contains("OK."))
+    }
+    // case-contract: test_codex_resume_recovers_visible_history | After a Codex turn and a provider restart, a normal Codex send resumes the saved thread without handoff context. If Codex then reports that it no longer has the thread, Playhouse starts a new Codex thread, saves its ID on the task, and sends the prior visible conversation from Playhouse's persisted transcript together with the new prompt; Codex completes the turn, the replacement is recorded in diagnostics, the next send continues on the new thread without handoff context, and fresh CLI/XPC history and the visible UI retain every turn.
+    func test_codex_resume_recovers_visible_history() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-resume-recovery")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        codexFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        let title = "Codex resume recovery UI"
+        try createTaskFixture(title: title, roots: [fixture.primary.path])
+        let taskID = try taskID(named: title)
+        let turnStartsURL = URL(fileURLWithPath: executable.path + ".turn-starts")
+        let reply = "Answers received: Blue / fixture-secret."
+        func lastTurnStart(endingWith message: String) throws -> [String: Any] {
+            let lines = try String(contentsOf: turnStartsURL, encoding: .utf8).split(separator: "\n")
+            let starts = try lines.map { try XCTUnwrap(try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+            return try XCTUnwrap(starts.last { ($0["text"] as? String ?? "").hasSuffix(message) }, "Codex never started a turn for \(message).")
+        }
+        func codexThreadID() throws -> String {
+            try XCTUnwrap(try taskRecord(id: taskID)?["codexThreadID"] as? String)
+        }
+
+        openTask(named: title)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "Start with Codex.")
+        let originalThread = try codexThreadID()
+
+        // A working resume after a restart keeps the thread and sends no transcript.
+        try restartProvider(executable)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "Continue normally.")
+        let normal = try lastTurnStart(endingWith: "Continue normally.")
+        XCTAssertEqual(normal["threadId"] as? String, originalThread)
+        XCTAssertEqual(normal["text"] as? String, "Continue normally.", "A working resume must not receive duplicate transcript context.")
+
+        // Codex loses the thread while Playhouse is closed; the reopened conversation still shows it.
+        let missing = URL(fileURLWithPath: executable.path + ".missing-thread")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path))
+        try restartProvider(executable)
+        relaunchApp()
+        openTask(named: title)
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
+        XCTAssertTrue(scrollTranscriptUntilExists(transcriptMessage("Start with Codex.")), "The first prompt should restore from Playhouse's persisted transcript.")
+        XCTAssertTrue(scrollTranscriptUntilExists(transcriptMessage("Continue normally.")), "The second prompt should restore from Playhouse's persisted transcript.")
+        attachScreenshot(named: "Codex conversation reopened before its thread went missing")
+        // Armed only now, so the send's resume is the one that finds the thread gone.
+        try Data("Playhouse test owns this missing-thread trigger.\n".utf8).write(to: missing)
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "What happened earlier?")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path), "Codex should have been asked to resume the missing thread.")
+        let replacement = try codexThreadID()
+        XCTAssertNotEqual(replacement, originalThread, "A missing thread is replaced by a new one saved on the task.")
+        let recovered = try lastTurnStart(endingWith: "What happened earlier?")
+        XCTAssertEqual(recovered["threadId"] as? String, replacement)
+        let recoveryPrompt = try XCTUnwrap(recovered["text"] as? String)
+        XCTAssertTrue(recoveryPrompt.contains("<playhouse-handoff-context>"))
+        XCTAssertTrue(recoveryPrompt.contains("User: Start with Codex."))
+        XCTAssertTrue(recoveryPrompt.contains("User: Continue normally."))
+        XCTAssertTrue(recoveryPrompt.contains("Codex: \(reply)"))
+        XCTAssertFalse(recoveryPrompt.contains("User: What happened earlier?"), "The new prompt is not repeated inside its own context.")
+        XCTAssertTrue(recoveryPrompt.hasSuffix("What happened earlier?"))
+        let replaced = try diagnosticEvents().filter {
+            $0["event"] as? String == "conversation.thread.replaced_missing" && $0["taskID"] as? String == taskID
+        }
+        XCTAssertEqual(replaced.map { [$0["provider"] as? String, $0["missingThreadID"] as? String, $0["threadID"] as? String] },
+                       [["codex", originalThread, replacement]])
+        XCTAssertTrue(transcriptMessage("What happened earlier?").waitToExist(timeout: 10), "The transcript shows the user's own prompt.")
+        XCTAssertFalse(transcriptContains("<playhouse-handoff-context>"), "The transcript does not show the context sent with it.")
+        attachScreenshot(named: "Codex thread replaced after it went missing")
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "And after that?")
+        let following = try lastTurnStart(endingWith: "And after that?")
+        XCTAssertEqual(following["threadId"] as? String, replacement)
+        XCTAssertEqual(following["text"] as? String, "And after that?", "The replacement thread already has the conversation.")
+
+        relaunchApp()
+        openTask(named: title)
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
+        for prompt in ["Start with Codex.", "Continue normally.", "What happened earlier?", "And after that?"] {
+            XCTAssertTrue(scrollTranscriptUntilExists(transcriptMessage(prompt)), "\(prompt) should remain in the reopened transcript.")
+        }
+        attachScreenshot(named: "Every turn remains after the replaced thread continues")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let userTexts = messages.filter { $0["role"] as? String == "user" }.compactMap { $0["text"] as? String }
+        for prompt in ["Start with Codex.", "Continue normally.", "What happened earlier?", "And after that?"] {
+            XCTAssertTrue(userTexts.contains(prompt), "\(prompt) should persist in fresh CLI/XPC history.")
+        }
+        XCTAssertFalse(userTexts.contains { $0.contains("<playhouse-handoff-context>") })
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" && $0["text"] as? String == reply }.count, 4)
+    }
+    // case-contract: test_codex_standalone_chat_resume_recovers_page_history | A Codex standalone chat page keeps its own thread: after a provider restart, a send on the page resumes that thread without page context. If Codex then reports that it no longer has the page's thread, Playhouse starts a new Codex thread, saves it as the page's provider session, and sends only that page's turns from Playhouse's stored chat pages as context together with the new prompt, never an earlier page's turns or the new prompt itself; the replacement is recorded in diagnostics, the next send on the page continues on the new thread without context, and the page keeps every turn in fresh CLI/XPC reads and the visible chat.
+    func test_codex_standalone_chat_resume_recovers_page_history() throws {
+        let (executable, environment, chatID) = try launchRestartFixtureChat(provider: "codex")
+        func activePage() throws -> [String: Any] {
+            try XCTUnwrap(restartChatStatus(environment)?["activePage"] as? [String: Any])
+        }
+        func send(_ text: String, newTitle: String? = nil) throws -> [String: Any] {
+            _ = sendFiledRestartChatTurn(executable, text, newTitle: newTitle, environment: environment)
+            let ready = try String(contentsOfFile: executable + ".reattach-ready", encoding: .utf8)
+            return try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(ready.utf8)) as? [String: Any])
+        }
+
+        _ = try send("Name a moon of Mars.")
+        let earlierPageID = try XCTUnwrap(try activePage()["id"] as? String)
+        _ = try send("Tell me about volcanoes.", newTitle: "Volcanoes")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Volcanoes") }, timeout: 20))
+        let pageID = try XCTUnwrap(try activePage()["id"] as? String)
+        XCTAssertNotEqual(pageID, earlierPageID)
+        let seeded = try send("What about lava?")
+        let pageThread = try XCTUnwrap(try activePage()["providerSessionID"] as? String)
+        XCTAssertEqual(seeded["threadId"] as? String, pageThread, "The page's first turn starts the page's own thread.")
+
+        // A working resume after a restart keeps the page's thread and sends no page context.
+        let serverBefore = agentManifest(kind: "codex", service: environment)?.manifest["process"] as? NSDictionary
+        XCTAssertNotNil(serverBefore, "The chat's turns run on a shared Codex app-server.")
+        try restartProvider(URL(fileURLWithPath: executable))
+        let normal = try send("Continue normally.")
+        let serverAfter = try XCTUnwrap(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? NSDictionary)
+        XCTAssertNotEqual(serverAfter, serverBefore,
+                          "The send after a provider restart runs on a new app-server, which has to resume the page's thread.")
+        XCTAssertEqual(normal["threadId"] as? String, pageThread)
+        XCTAssertFalse((normal["text"] as? String ?? "").contains("<playhouse-handoff-context>"), "A working resume must not receive the page again.")
+
+        try restartProvider(URL(fileURLWithPath: executable))
+        let missing = executable + ".missing-thread"
+        try Data("Playhouse test owns this missing-thread trigger.\n".utf8).write(to: URL(fileURLWithPath: missing))
+        let recovered = try send("What happened earlier?")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing), "Codex should have been asked to resume the page's missing thread.")
+        let replacement = try activePage()
+        XCTAssertEqual(replacement["id"] as? String, pageID)
+        let replacementThread = try XCTUnwrap(replacement["providerSessionID"] as? String)
+        XCTAssertNotEqual(replacementThread, pageThread, "The page's missing thread is replaced by a new one saved on the page.")
+        XCTAssertEqual(recovered["threadId"] as? String, replacementThread)
+        let prompt = try XCTUnwrap(recovered["text"] as? String)
+        XCTAssertTrue(prompt.contains("<playhouse-handoff-context>"))
+        for earlier in ["Tell me about volcanoes.", "What about lava?", "Continue normally.", "After restart."] {
+            XCTAssertTrue(prompt.contains(earlier), "The new thread receives the page's own turn \(earlier).")
+        }
+        XCTAssertFalse(prompt.contains("Name a moon of Mars."), "An earlier page's turns never reach this page's thread.")
+        XCTAssertFalse(prompt.contains("User: What happened earlier?"), "The new prompt is not repeated inside its own context.")
+        XCTAssertTrue(prompt.hasSuffix("What happened earlier?"))
+        let replaced = try diagnosticEvents().filter {
+            $0["event"] as? String == "conversation.thread.replaced_missing" && $0["taskID"] as? String == chatID
+        }
+        XCTAssertEqual(replaced.map { [$0["provider"] as? String, $0["missingThreadID"] as? String, $0["threadID"] as? String] },
+                       [["codex", pageThread, replacementThread]])
+        XCTAssertTrue(waitUntil({ self.chatTranscriptShows("What happened earlier?", after: "Continue normally.") }, timeout: 20),
+                      "The chat shows the user's own prompt under its page's earlier turns.")
+        XCTAssertFalse(transcriptContains("<playhouse-handoff-context>"), "The chat does not show the context sent with it.")
+        attachScreenshot(named: "Codex chat page thread replaced after it went missing")
+
+        let following = try send("And after that?")
+        XCTAssertEqual(following["threadId"] as? String, replacementThread)
+        XCTAssertFalse((following["text"] as? String ?? "").contains("<playhouse-handoff-context>"), "The replacement thread already has the page.")
+        XCTAssertEqual(
+            restartChatPageTexts(pageID, environment: environment).filter { $0 != "Before restart." && $0 != "After restart." },
+            ["Tell me about volcanoes.", "What about lava?", "Continue normally.", "What happened earlier?", "And after that?"],
+            "The page keeps every turn, with the user's own prompts."
+        )
+        XCTAssertEqual(restartChatPageTexts(earlierPageID, environment: environment), ["Name a moon of Mars.", "Before restart.", "After restart."])
+
+        XCTAssertTrue(terminateAppAndWait(app))
+        launchApp(defaultParent: nil, environmentOverrides: environment)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        // The relaunched chat opens on its newest turn; earlier turns load as the reader scrolls up.
+        XCTAssertTrue(waitUntil({ self.transcriptMessage("And after that?").exists }, timeout: 20))
+        for (prompt, earlier) in [("What happened earlier?", "Continue normally."), ("And after that?", "What happened earlier?")] {
+            XCTAssertTrue(transcriptScan { self.chatTranscriptShows(prompt, after: earlier) },
+                          "\(prompt) should remain under its page after a relaunch.")
+        }
+        attachScreenshot(named: "Codex chat page keeps every turn after a relaunch")
     }
 
     // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.

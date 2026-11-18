@@ -5,7 +5,15 @@ import Darwin
 import SQLite3
 
 extension BoardTaskManager {
-    func persistConversationID(_ id: UUID, provider: ConversationProvider, id conversationID: String) async throws -> BoardTaskRecord {
+    /// Links the task to a provider conversation. `replacing` names a conversation the
+    /// provider no longer has, which a board task may swap for a new one; any other
+    /// existing link is kept.
+    func persistConversationID(
+        _ id: UUID,
+        provider: ConversationProvider,
+        id conversationID: String,
+        replacing missingConversationID: String? = nil
+    ) async throws -> BoardTaskRecord {
         guard !conversationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "\(provider.displayName) returned an empty conversation ID.")
         }
@@ -14,7 +22,8 @@ extension BoardTaskManager {
             let existing = task.conversationID(for: provider)
             // A standalone chat deliberately rotates sessions: each page owns one, and the task
             // pointer follows the active page. Board tasks keep exactly one conversation.
-            guard existing == nil || existing == conversationID || task.isStandaloneChat else {
+            guard existing == nil || existing == conversationID || task.isStandaloneChat
+                || (missingConversationID != nil && existing == missingConversationID) else {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task is already linked to a different \(provider.displayName) conversation.")
             }
             guard existing != conversationID else { return BoardTaskRecord(task: task) }
@@ -26,8 +35,8 @@ extension BoardTaskManager {
                 try await saveTaskContext(taskID: id)
             } catch {
                 switch provider {
-                case .codex: task.codexThreadID = nil
-                case .claude: task.claudeSessionID = nil
+                case .codex: task.codexThreadID = existing
+                case .claude: task.claudeSessionID = existing
                 }
                 throw error
             }

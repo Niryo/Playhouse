@@ -5,11 +5,12 @@ import Darwin
 import SQLite3
 
 extension ConversationManager {
+    /// Reads a conversation from Playhouse's own transcript store. Every turn,
+    /// whichever provider ran it, is recorded there as it streams, so history
+    /// never asks a provider runtime for its thread.
     func history(
         taskID: UUID,
         onActionRequest: @escaping () -> Void = {},
-        sensitiveUserInputAnswerValues: [String] = [],
-        restoringEarlierChatPages: Bool = false,
         messageLimit: Int? = nil,
         beforeMessageID: String? = nil,
         afterMessageID: String? = nil,
@@ -24,15 +25,11 @@ extension ConversationManager {
         if readsForward, beforeMessageID != nil || (afterMessageID != nil && chatPageID != nil) {
             throw BridgeCommandError(code: "invalid_argument", message: "Read history before a message, after a message, or from a chat page; choose one.")
         }
+        attachCodexThread(taskID: taskID, onActionRequest: onActionRequest)
         var source = "composed"
         var history: ConversationHistory
         if readsForward {
-            history = try await composedHistory(
-                taskID: taskID,
-                onActionRequest: onActionRequest,
-                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-                restoringEarlierChatPages: restoringEarlierChatPages
-            )
+            history = try composedHistory(taskID: taskID)
             let start = try forwardWindowStart(taskID: taskID, in: history.messages, after: afterMessageID, chatPageID: chatPageID)
             let end = messageLimit.map { min(history.messages.count, start + $0) } ?? history.messages.count
             history.earlierMessageCount = start
@@ -42,17 +39,12 @@ extension ConversationManager {
                 history.timelineActivities, visibleMessageIDs: Set(history.messages.map(\.id)), excludedTurnIDs: []
             )
             source = "composed-forward"
-        } else if let messageLimit, sensitiveUserInputAnswerValues.isEmpty,
+        } else if let messageLimit,
            let page = try storedTranscriptPage(taskID: taskID, messageLimit: messageLimit, beforeMessageID: beforeMessageID) {
             history = page
             source = "stored-page"
         } else {
-            history = try await composedHistory(
-                taskID: taskID,
-                onActionRequest: onActionRequest,
-                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-                restoringEarlierChatPages: restoringEarlierChatPages
-            )
+            history = try composedHistory(taskID: taskID)
             if messageLimit != nil || beforeMessageID != nil {
                 let end = try Self.pageEnd(of: history.messages, before: beforeMessageID)
                 let start = messageLimit.map { max(0, end - $0) } ?? 0
@@ -86,7 +78,6 @@ extension ConversationManager {
             history.messages = history.messages.enumerated().map { index, message in
                 var message = message
                 if index < inlineStart {
-                    // Codex returns a user's images inline with its thread; stored ones are only looked up.
                     let stored = deferredTurns[message.id].map { turns in
                         message.turnID.map(turns.contains) == true || turns.count == 1
                     } == true
@@ -122,28 +113,18 @@ extension ConversationManager {
     /// The images of the given messages, for a reader whose history read left
     /// them out (`imagesDeferred`). Messages without images are not returned.
     func messageImages(taskID: UUID, messageIDs: [String]) async throws -> [ConversationMessageImages] {
-        let task = try tasks.conversationSubject(taskID)
+        _ = try tasks.conversationSubject(taskID)
         let wanted = Set(messageIDs)
         guard !wanted.isEmpty, !wanted.contains("") else {
             throw BridgeCommandError(code: "invalid_argument", message: "Name at least one message to read images for.")
         }
-        var found = try transcripts.imageDataURLs(taskID, messageIDs: wanted).flatMap { id, byTurn in
+        let found = try transcripts.imageDataURLs(taskID, messageIDs: wanted).flatMap { id, byTurn in
             byTurn.map { ConversationMessageImages(id: id, turnID: $0.key, imageDataURLs: $0.value) }
-        }
-        let missing = wanted.subtracting(found.map(\.id))
-        // Codex keeps a user's images in its thread rather than in the transcript store.
-        if !missing.isEmpty, task.codexThreadID != nil {
-            let history = try await history(taskID: taskID, restoringEarlierChatPages: true)
-            found += history.messages.compactMap { message in
-                missing.contains(message.id) && !message.imageDataURLs.isEmpty
-                    ? ConversationMessageImages(id: message.id, turnID: message.turnID, imageDataURLs: message.imageDataURLs) : nil
-            }
         }
         PlayhouseDiagnostics.record("conversation.images.read", fields: [
             "taskID": taskID.uuidString,
             "requestedMessageCount": String(wanted.count),
             "returnedMessageCount": String(found.count),
-            "readProviderThread": String(!missing.isEmpty && task.codexThreadID != nil),
         ])
         return found.sorted { ($0.id, $0.turnID ?? "") < ($1.id, $1.turnID ?? "") }
     }
@@ -178,20 +159,13 @@ extension ConversationManager {
     }
 
     /// A page read straight from stored rows, loading only the turns it covers.
-    /// It applies only where composing the whole transcript would order these
-    /// messages by stored position alone: a Claude-only task with no Codex
-    /// thread, no pending private-answer redaction, and no positioned elements. Otherwise
-    /// returns nil and the caller composes the whole history and slices it.
+    /// It applies wherever composing the whole transcript would order these
+    /// messages by stored position alone: no positioned elements and turns whose
+    /// segments never move backward. Otherwise returns nil and the caller
+    /// composes the whole history and slices it.
     func storedTranscriptPage(taskID: UUID, messageLimit: Int, beforeMessageID: String?) throws -> ConversationHistory? {
-        let task = try tasks.conversationSubject(taskID)
-        guard !task.isStandaloneChat, task.codexThreadID == nil else { return nil }
         let store = try transcripts
         let state = try store.readState(taskID)
-        // Private Claude turns (`sensitiveTurnIDs`) only filter compaction rows in
-        // composition, and a page here has none, so they don't block this read.
-        guard !state.segments.isEmpty, state.segments.allSatisfy({ $0.provider == .claude }),
-              state.pendingSensitiveUserInputRedaction != true,
-              (state.sensitiveCodexTurnIDs ?? []).isEmpty else { return nil }
         let outline = try store.outline(taskID)
         guard !outline.hasPositionedElements else { return nil }
         // Composition orders by segment before position, so stored order holds
@@ -236,18 +210,13 @@ extension ConversationManager {
         let nudgeWork = partial.turns.filter { turn in activityTurns.dropFirst().contains { $0.id == turn.id } }
             .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
         partial.turns = partial.turns.filter { covered.contains($0.id) }
-        let composed = Self.compose(transcript: partial, codex: nil)
-        let modelIDs = state.segments.reduce(into: [String: String]()) { result, segment in
-            result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
-        }
+        let composed = Self.compose(transcript: partial)
         let pageStart = start - firstCoveredOffset
         // Composition numbers the covered turns from zero; every visible message
         // before them precedes them in the whole conversation's timeline.
         let pageMessages = composed.messages.dropFirst(pageStart).prefix(end - start).map { message -> ConversationMessage in
             var message = message
             message.timelineOrder = message.timelineOrder.map { $0 + firstCoveredOffset }
-            if message.provider == nil, message.turnID != nil { message.provider = .codex }
-            if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
             return message
         }
         let earlierTurnIDs = visibleTurns.prefix(max(latestIndex, 0)).map(\.id)
@@ -258,218 +227,139 @@ extension ConversationManager {
             timelineActivities: ConversationActivity.visibleTimelineActivities(
                 composed.timelineActivities, visibleMessageIDs: pageMessageIDs, excludedTurnIDs: []
             ),
-            diff: nil,
+            diff: state.latestDiff,
             answeredAsyncQuestionIDs: try tasks.answeredAsyncQuestionIDs(taskID: taskID),
             pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: state),
-            providerBoundaries: [],
+            providerBoundaries: Self.providerBoundaries(segments: state.segments, turns: visibleTurns),
             earlierMessageCount: start,
             laterMessageCount: messageIDs.count - end
         )
     }
 
-    func composedHistory(
-        taskID: UUID,
-        onActionRequest: @escaping () -> Void,
-        sensitiveUserInputAnswerValues: [String],
-        restoringEarlierChatPages: Bool
-    ) async throws -> ConversationHistory {
-        let task = try tasks.conversationSubject(taskID)
+    func composedHistory(taskID: UUID) throws -> ConversationHistory {
         let transcript = try transcripts.read(taskID, turns: .all, includeImages: false)
-        let answered = try tasks.answeredAsyncQuestionIDs(taskID: taskID)
-        // Tasks that never left Codex keep reading their native Codex thread.
-        let hasSensitiveRecoveryState = transcript.pendingUserInputRequest != nil
-            || transcript.pendingSensitiveUserInputRedaction == true
-            || !(transcript.sensitiveTurnIDs ?? []).isEmpty
-            || !(transcript.sensitiveCodexTurnIDs ?? []).isEmpty
-        guard !transcript.isEmpty || hasSensitiveRecoveryState else {
-            let codex = try await codexHistory(
-                task: task,
-                onActionRequest: onActionRequest,
-                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues
-            )
-                ?? ConversationHistory(messages: [], activities: [], diff: nil)
-            return ConversationHistory(
-                messages: Self.redactingSensitiveMessages(
-                    Self.codexMessagesForDisplay(codex.messages, transcript: transcript),
-                    turnIDs: [],
-                    redactAllMessages: transcript.pendingSensitiveUserInputRedaction == true
-                ),
-                activities: transcript.pendingSensitiveUserInputRedaction == true
-                    ? []
-                    : codex.activities.filter { $0.turnID.map(Self.sensitiveCodexTurnIDs(transcript).contains) != true },
-                timelineActivities: transcript.pendingSensitiveUserInputRedaction == true
-                    ? []
-                    : ConversationActivity.visibleTimelineActivities(
-                        codex.timelineActivities,
-                        visibleMessageIDs: Set(Self.codexMessagesForDisplay(codex.messages, transcript: transcript).map(\.id)),
-                        excludedTurnIDs: Self.sensitiveCodexTurnIDs(transcript).union(codex.messages.filter {
-                            $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
-                        }.compactMap(\.turnID))
-                    ),
-                diff: Self.shouldHideCodexDiff(transcript, codex: codex) ? nil : codex.diff,
-                answeredAsyncQuestionIDs: answered,
-                pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript)
-            )
-        }
-        // Codex can't list a thread before its first turn, so a mixed transcript
-        // reads Codex only once a Codex segment owns turns or has recovery state.
-        let usesCodex = task.codexThreadID != nil && (
-            transcript.segments.contains { $0.provider == .codex && !$0.codexTurnIDs.isEmpty }
-                || transcript.pendingSensitiveUserInputRedaction == true
-                || transcript.pendingUserInputRequest != nil
-                || !(transcript.sensitiveTurnIDs ?? []).isEmpty
-                || !(transcript.sensitiveCodexTurnIDs ?? []).isEmpty
-        )
-        let codex = usesCodex ? try await codexHistory(
-            task: task,
-            onActionRequest: onActionRequest,
-            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues
-        ) : nil
-        let composed = Self.compose(transcript: transcript, codex: codex)
-        let visibleMessages = Self.redactingSensitiveMessages(
-            composed.messages,
-            turnIDs: [],
-            redactAllMessages: transcript.pendingSensitiveUserInputRedaction == true
-        )
-        let modelIDs = transcript.segments.reduce(into: [String: String]()) { result, segment in
-            result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
-        }
-        let messages = visibleMessages.map { message -> ConversationMessage in
-            var message = message
-            if message.provider == nil, message.turnID != nil { message.provider = .codex }
-            if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
-            return message
-        }
-        return ConversationHistory(
-            messages: task.isStandaloneChat && restoringEarlierChatPages
-                ? standaloneChatMessagesRestoringEarlierPages(taskID: taskID, messages)
-                : messages,
-            activities: transcript.pendingSensitiveUserInputRedaction == true ? [] : composed.activities,
-            timelineActivities: composed.timelineActivities,
-            diff: transcript.pendingSensitiveUserInputRedaction == true ? nil : composed.diff,
-            answeredAsyncQuestionIDs: answered,
-            pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript),
-            providerBoundaries: composed.providerBoundaries
-        )
+        var history = Self.compose(transcript: transcript)
+        history.answeredAsyncQuestionIDs = try tasks.answeredAsyncQuestionIDs(taskID: taskID)
+        history.pendingUserInputRequest = visiblePendingUserInputRequest(taskID: taskID, transcript: transcript)
+        return history
     }
 
-    /// Each page runs in its own provider session, so a provider that answers history from its
-    /// native thread (Codex) only knows the current page. The local page archive restores the
-    /// earlier pages ahead of them, keeping the whole chat visible while context stays per page.
-    func standaloneChatMessagesRestoringEarlierPages(
-        taskID: UUID,
-        _ messages: [ConversationMessage]
-    ) -> [ConversationMessage] {
-        guard let chatManager = try? tasks.standaloneChatManager(),
-              let pages = try? chatManager.listPages(limit: 500), !pages.isEmpty else { return messages }
-        let knownTurnIDs = Set(messages.compactMap(\.turnID))
-        var restored: [ConversationMessage] = []
-        for page in pages.sorted(by: { $0.createdAt < $1.createdAt }) {
-            guard let archived = try? chatManager.messages(pageID: page.id) else { continue }
-            for message in archived where !knownTurnIDs.contains(message.turnID) {
-                restored.append(ConversationMessage(
-                    id: message.id,
-                    role: ConversationRole(rawValue: message.role) ?? .user,
-                    text: message.text,
-                    turnID: message.turnID,
-                    provider: ConversationProvider(rawValue: page.provider),
-                    createdAt: message.createdAt
-                ))
+    /// History no longer reads a Codex thread, but a window's read still
+    /// attaches to it in the background: that follows the thread's Goal turns,
+    /// which Codex starts on its own, and routes its approval requests here.
+    func attachCodexThread(taskID: UUID, onActionRequest: @escaping () -> Void) {
+        guard clients.observesGoalTurns, let task = try? tasks.conversationSubject(taskID),
+              let threadID = task.codexThreadID, task.conversationProvider == .codex else { return }
+        let codex = clients.codex
+        recordCodexContextlessTurns(taskID: taskID, threadID: threadID)
+        guard codex.goalObservationThreadID != threadID || codex.actionRequestHandler == nil else { return }
+        guard let workspace = try? launchWorkspace(for: task, roots: Self.historyRoots(task).map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        }) else { return }
+        let modelID = try? modelID(taskID: taskID)
+        let developerInstructions = TaskThreadDeveloperInstructions.make(
+            taskID: taskID,
+            repositories: task.repositoryWorktrees,
+            contextFolders: task.contextFolderPaths,
+            repositoryRootPath: settingsManager.defaultParentFolderURL?.path,
+            isStandaloneChat: task.isStandaloneChat,
+            isPluginEditor: task.authoringPluginID != nil,
+            isArchived: task.status == .done,
+            pluginPlacement: task.authoringPluginPlacement,
+            pluginID: task.authoringPluginID,
+            pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+            pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
+            pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
+        )
+        Task { @MainActor in
+            do {
+                try await codex.attachThread(
+                    id: threadID, workspace: workspace, modelID: modelID,
+                    developerInstructions: developerInstructions, onActionRequest: onActionRequest
+                )
+            } catch {
+                var fields = PlayhouseDiagnostics.errorFields(error)
+                fields["taskID"] = taskID.uuidString
+                fields["threadID"] = threadID
+                PlayhouseDiagnostics.record("conversation.codex_attach.failed", fields: fields)
             }
         }
-        return restored.isEmpty ? messages : restored + messages
     }
-    func codexHistory(
-        task: any ConversationSubject,
-        onActionRequest: @escaping () -> Void,
-        sensitiveUserInputAnswerValues: [String] = []
-    ) async throws -> ConversationHistory? {
-        guard let threadID = task.codexThreadID else { return nil }
-        let taskID = task.id
-        // A window and the CLI share one client and app-server; only a window's read follows the
-        // thread's Goal turns and takes the action handler (see `loadThread`).
-        let codex = clients.codex
-        let recoveryTranscript = try? transcripts.readState(taskID)
-        let hasSensitiveRecoveryState = recoveryTranscript?.pendingUserInputRequest != nil
-            || recoveryTranscript?.pendingSensitiveUserInputRedaction == true
-            || !(recoveryTranscript?.sensitiveTurnIDs ?? []).isEmpty
-            || !(recoveryTranscript?.sensitiveCodexTurnIDs ?? []).isEmpty
-        // Reading history can load the thread, which a later send then reuses,
-        // so it carries the same skill bridge a send would.
-        let workspace = try launchWorkspace(for: task, roots: Self.historyRoots(task).map {
-            URL(fileURLWithPath: $0, isDirectory: true)
-        })
-        let settings = settingsManager
-        let repositoryRoot = settings.defaultParentFolderURL
-        PlayhouseDiagnostics.record("conversation.history.started", fields: codex.diagnosticFields([
-            "taskID": taskID.uuidString,
-            "threadID": threadID,
-            "taskStatus": task.status.rawValue
-        ]))
+
+    /// Records a turn Codex ran on its own, such as a Goal's work turn, into its own local
+    /// turn when it ends, from the items it streamed; no Playhouse send's callbacks saw them.
+    func recordCodexGoalTurn(taskID: UUID, threadID: String, turnID: String, entries: [[String: Any]]) async {
         do {
-            let history = try await codex.loadThread(
-                id: threadID,
-                workspace: workspace,
-                modelID: try? modelID(taskID: taskID),
-                developerInstructions: TaskThreadDeveloperInstructions.make(
-                    taskID: taskID,
-                    repositories: task.repositoryWorktrees,
-                    contextFolders: task.contextFolderPaths,
-                    repositoryRootPath: repositoryRoot?.path,
-                    isStandaloneChat: task.isStandaloneChat,
-                    isPluginEditor: task.authoringPluginID != nil,
-                    isArchived: task.status == .done,
-                    pluginPlacement: task.authoringPluginPlacement,
-                    pluginID: task.authoringPluginID,
-                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
-                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
-                ),
-                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-                sensitiveConversation: hasSensitiveRecoveryState,
-                observeGoalTurns: clients.observesGoalTurns,
-                onActionRequest: onActionRequest
-            )
-            let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
-            let activities = history.activities.map { activity -> ConversationActivity in
-                var activity = activity
-                if activity.durationMs == nil { activity.durationMs = savedDurations[activity.id] }
-                return activity
+            let task = try tasks.conversationSubject(taskID)
+            // `.turn` also loads the latest turn, so the check names this turn.
+            guard task.codexThreadID == threadID,
+                  try !transcripts.read(taskID, turns: .turn(turnID), includeImages: false).turns.contains(where: { $0.id == turnID }) else {
+                PlayhouseDiagnostics.record("conversation.codex_goal_turn.skipped", fields: [
+                    "taskID": taskID.uuidString, "threadID": threadID, "turnID": turnID,
+                    "reason": task.codexThreadID == threadID ? "already_recorded" : "thread_changed",
+                ])
+                return
             }
-            PlayhouseDiagnostics.record("conversation.history.succeeded", fields: codex.diagnosticFields([
-                "taskID": taskID.uuidString,
-                "threadID": threadID,
-                "messageCount": String(history.messages.count),
-                "activityCount": String(history.activities.count)
-            ]))
-            return ConversationHistory(
-                messages: history.messages, activities: activities,
-                timelineActivities: history.timelineActivities, diff: history.diff
-            )
+            let messages = entries.compactMap(CodexAppServerClient.chatMessage(from:))
+            let activities = entries.compactMap { entry -> ConversationActivity? in
+                guard let item = entry["item"] as? [String: Any] else { return nil }
+                return ConversationActivity.from(item: item, lifecycle: "completed", turnID: turnID)
+            }
+            guard !messages.isEmpty else {
+                PlayhouseDiagnostics.record("conversation.codex_goal_turn.skipped", fields: [
+                    "taskID": taskID.uuidString, "threadID": threadID, "turnID": turnID, "reason": "no_messages",
+                ])
+                return
+            }
+            // The task's model belongs to its current provider; one that left Codex keeps the
+            // model Codex last ran with.
+            let currentModelID = try? modelID(taskID: taskID)
+            let modelID = task.conversationProvider == .codex
+                ? currentModelID ?? nil
+                : latestTranscriptModelID(taskID: taskID, provider: .codex)
+            try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
+                guard !transcript.turns.contains(where: { $0.id == turnID }) else { return }
+                // Codex ran this turn, whichever provider the task uses now: it joins the
+                // current Codex segment, or opens one that needs no handoff.
+                if transcript.segments.last?.provider != .codex {
+                    transcript.segments.append(.init(id: UUID().uuidString, provider: .codex, startedAt: .now, handoffDelivered: true))
+                }
+                guard let segmentID = transcript.segments.last?.id else { return }
+                transcript.turns.append(.init(
+                    id: turnID, segmentID: segmentID,
+                    messages: messages.map { message in
+                        var message = message
+                        message.provider = .codex
+                        message.modelID = message.modelID ?? modelID
+                        message.timelineOrder = nil
+                        message.createdAt = message.createdAt ?? .now
+                        return message
+                    },
+                    activities: activities.filter { !$0.isContextCompaction }
+                ))
+                if let index = transcript.segments.firstIndex(where: { $0.id == segmentID }) {
+                    if !transcript.segments[index].codexTurnIDs.contains(turnID) {
+                        transcript.segments[index].codexTurnIDs.append(turnID)
+                    }
+                    if let modelID { transcript.segments[index].codexTurnModelIDs[turnID] = modelID }
+                }
+            }
+            Self.bumpVisibleRevision(taskID)
         } catch {
-            var fields: [String: String]
-            if hasSensitiveRecoveryState && sensitiveUserInputAnswerValues.isEmpty {
-                // After a restart the answer is deliberately not persisted, so
-                // provider supplied error text cannot be safely scrubbed.
-                fields = ["errorDescription": "History for a private recovery conversation could not be loaded."]
-            } else {
-                fields = PlayhouseDiagnostics.errorFields(
-                    error,
-                    redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""] + sensitiveUserInputAnswerValues
-                )
-            }
+            var fields = PlayhouseDiagnostics.errorFields(error)
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = threadID
-            fields["taskStatus"] = task.status.rawValue
-            fields.merge(codex.diagnosticFields()) { _, new in new }
-            PlayhouseDiagnostics.record("conversation.history.failed", fields: fields)
-            if hasSensitiveRecoveryState {
-                throw BridgeCommandError(
-                    code: "operation_failed",
-                    message: "History for a private recovery conversation could not be loaded."
-                )
-            }
-            throw error
+            PlayhouseDiagnostics.record("conversation.codex_goal_turn.record_failed", fields: fields)
+        }
+    }
+
+    /// Has the Codex client record the turns it runs on its own in this task's thread.
+    /// The recorder holds this manager strongly: the bridge builds a manager per request, so a
+    /// weak one would be gone before the turn ends. Each install replaces the thread's last one.
+    func recordCodexContextlessTurns(taskID: UUID, threadID: String) {
+        clients.codex.contextlessTurnRecorders[threadID] = { [self] turnID, entries in
+            nonisolated(unsafe) let entries = entries
+            Task { @MainActor in await self.recordCodexGoalTurn(taskID: taskID, threadID: threadID, turnID: turnID, entries: entries) }
         }
     }
 
@@ -485,75 +375,43 @@ extension ConversationManager {
         return messages.lastIndex { $0.createdAt.map { $0 <= recordedAt } == true }
     }
 
+    /// The dividers `compose` draws, from turn outlines alone: one wherever the provider
+    /// changes, after the last message of the turns before that segment.
+    static func providerBoundaries(
+        segments: [ConversationTranscript.Segment], turns: [ConversationTranscriptStore.Outline.Turn]
+    ) -> [ConversationProviderBoundary] {
+        var lastMessageBefore: [String: String] = [:]
+        var lastMessageID: String?
+        var turnIndex = 0
+        for segment in segments {
+            lastMessageBefore[segment.id] = lastMessageID
+            while turnIndex < turns.count, turns[turnIndex].segmentID == segment.id {
+                lastMessageID = turns[turnIndex].messageIDs.last ?? lastMessageID
+                turnIndex += 1
+            }
+        }
+        return segments.indices.dropFirst().filter { segments[$0].provider != segments[$0 - 1].provider }.map { index in
+            ConversationProviderBoundary(
+                id: "provider-boundary-\(segments[index].id)",
+                provider: segments[index].provider,
+                afterMessageID: lastMessageBefore[segments[index].id]
+            )
+        }
+    }
+
     /// Orders every visible element by provider segment, then by its position
-    /// within that provider's own timeline, and inserts a divider wherever the
+    /// within that segment's turns, and inserts a divider wherever the
     /// provider changes.
-    static func compose(transcript: ConversationTranscript, codex: ConversationHistory?) -> ConversationHistory {
+    static func compose(transcript: ConversationTranscript) -> ConversationHistory {
         enum Element {
             case message(ConversationMessage)
             case compaction(ConversationActivity)
         }
         var elements: [(segment: Int, order: Int, tieBreak: Int, element: Element)] = []
         let segments = transcript.segments
-        let lastCodexSegment = segments.lastIndex { $0.provider == .codex } ?? -1
-        var codexSegmentByTurn: [String: Int] = [:]
-        for (index, segment) in segments.enumerated() where segment.provider == .codex {
-            for turnID in segment.codexTurnIDs where codexSegmentByTurn[turnID] == nil {
-                codexSegmentByTurn[turnID] = index
-            }
-        }
-        func codexSegment(_ turnID: String?) -> Int {
-            turnID.flatMap { codexSegmentByTurn[$0] } ?? lastCodexSegment
-        }
-        var codexTurnSegment: Int?
-        let sensitiveTurnIDs = Self.sensitiveCodexTurnIDs(transcript)
-        let safeCodexMessages = Self.codexMessagesForDisplay(codex?.messages ?? [], transcript: transcript)
-        func transcriptOrder(for message: ConversationMessage, fallback: Int) -> (order: Int, tieBreak: Int) {
-            guard message.provider == .codex, message.phase == "agent_image" else {
-                return (message.timelineOrder ?? fallback, 0)
-            }
-            if let order = message.timelineOrder { return (order, 0) }
-            let relevantMessages = message.turnID.map { turnID in
-                safeCodexMessages.filter { $0.turnID == turnID }
-            } ?? safeCodexMessages
-            guard let lastTurnOrder = relevantMessages.compactMap(\.timelineOrder).max() else {
-                return (fallback, 0)
-            }
-            // Keep the image just after the final native item of its turn and
-            // ahead of the next turn's first item, even when their orders touch.
-            return (lastTurnOrder, fallback + 1)
-        }
-        for (offset, message) in safeCodexMessages.enumerated() {
-            let segment = message.turnID.map(codexSegment) ?? codexTurnSegment ?? lastCodexSegment
-            codexTurnSegment = segment
-            var attributed = message
-            attributed.provider = attributed.provider ?? .codex
-            if attributed.modelID == nil, let turnID = attributed.turnID {
-                attributed.modelID = segments.compactMap { $0.codexTurnModelIDs[turnID] }.first
-            }
-            elements.append((segment, message.timelineOrder ?? offset, 0, .message(attributed)))
-        }
-        let privateReminderTurnIDs = Set(codex?.messages.filter {
-            $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
-        }.compactMap(\.turnID) ?? [])
         let privateTranscriptReminderTurnIDs = Set(transcript.turns.compactMap { turn in
             turn.messages.contains { $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text) } ? turn.id : nil
         })
-        let allSensitiveTurnIDs = Set(transcript.sensitiveTurnIDs ?? [])
-        let playhouseCodexCompactionIDs = Set((transcript.contextCompactions ?? []).compactMap {
-            $0.provider == ConversationProvider.codex.rawValue ? $0.providerActivityID : nil
-        })
-        let codexActivities = transcript.pendingSensitiveUserInputRedaction == true
-            ? []
-            : (codex?.activities ?? []).filter {
-                !playhouseCodexCompactionIDs.contains($0.id)
-                    && $0.turnID.map { sensitiveTurnIDs.contains($0) || privateReminderTurnIDs.contains($0) } != true
-            }
-        for activity in codexActivities where activity.isContextCompaction {
-            let order = activity.timelineOrder ?? Int.max
-            let precedingTurn = codex?.messages.last { ($0.timelineOrder ?? 0) < order }?.turnID
-            elements.append((codexSegment(activity.turnID ?? precedingTurn), order, 0, .compaction(activity)))
-        }
         let compactionRecordedAt = Dictionary(
             (transcript.contextCompactions ?? []).map { ($0.id, $0.recordedAt) }, uniquingKeysWith: { first, _ in first }
         )
@@ -563,13 +421,13 @@ extension ConversationManager {
             let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
             var messagePositions: [(order: Int, tieBreak: Int)] = []
             for message in turn.messages {
-                let position = transcriptOrder(for: message, fallback: localOrder)
-                elements.append((segment, position.order, position.tieBreak, .message(message)))
+                let position = (message.timelineOrder ?? localOrder, 0)
+                elements.append((segment, position.0, position.1, .message(message)))
                 messagePositions.append(position)
                 localOrder += 1
             }
             var compactionsAfterMessage: [Int: Int] = [:]
-            for activity in turn.activities where activity.turnID.map(allSensitiveTurnIDs.contains) != true {
+            for activity in turn.activities {
                 if activity.isContextCompaction {
                     if activity.timelineOrder == nil,
                        let anchor = Self.compactionAnchor(activity, in: turn.messages, recordedAt: compactionRecordedAt[activity.id]) {
@@ -621,45 +479,30 @@ extension ConversationManager {
             ))
         }
 
-        // Activity details follow the latest turn, as each provider reports them.
-        let activities: [ConversationActivity]
-        let diff: ConversationTurnDiff?
-        if segments.last?.provider == .claude {
-            let visibleTurns = transcript.turns.filter { !privateTranscriptReminderTurnIDs.contains($0.id) }
-            // The latest turn is the latest one the user started. Status nudges Playhouse sent
-            // after it are shown as messages, but only the work they did joins its activities.
-            let latestTurnIndex = visibleTurns.lastIndex { turn in
-                !turn.messages.contains { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }
-            } ?? visibleTurns.endIndex - 1
-            let latestTurn = latestTurnIndex >= 0 ? visibleTurns[latestTurnIndex] : nil
-            let nudgeWork = visibleTurns.suffix(from: min(latestTurnIndex + 1, visibleTurns.endIndex))
-                .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
-            let subagents = visibleTurns.enumerated().filter { $0.offset < latestTurnIndex }.flatMap { $0.element.activities.filter(\.isSubagent) }
-            // Compactions come from `compactions`, placed among the messages; the latest
-            // turn's own copies would draw each one a second time.
-            activities = subagents + (latestTurn?.activities ?? []).filter { !$0.isContextCompaction }
-                + nudgeWork + compactions
-            diff = nil
-        } else {
-            activities = codexActivities.filter { !$0.isContextCompaction } + compactions
-            diff = Self.shouldHideCodexDiff(transcript, codex: codex) ? nil : codex?.diff
-        }
+        // Activity details follow the latest turn the user started. Status nudges Playhouse
+        // sent after it are shown as messages, but only the work they did joins its activities.
+        let visibleTurns = transcript.turns.filter { !privateTranscriptReminderTurnIDs.contains($0.id) }
+        let latestTurnIndex = visibleTurns.lastIndex { turn in
+            !turn.messages.contains { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }
+        } ?? visibleTurns.endIndex - 1
+        let latestTurn = latestTurnIndex >= 0 ? visibleTurns[latestTurnIndex] : nil
+        let nudgeWork = visibleTurns.suffix(from: min(latestTurnIndex + 1, visibleTurns.endIndex))
+            .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
+        let subagents = visibleTurns.enumerated().filter { $0.offset < latestTurnIndex }.flatMap { $0.element.activities.filter(\.isSubagent) }
+        // Compactions come from `compactions`, placed among the messages; the latest
+        // turn's own copies would draw each one a second time.
+        let activities = subagents + (latestTurn?.activities ?? []).filter { !$0.isContextCompaction }
+            + nudgeWork + compactions
         // Every turn's tool calls, each placed after the message it followed.
-        var timelineActivities: [ConversationActivity] = []
-        if transcript.pendingSensitiveUserInputRedaction != true {
-            let visibleTurns = transcript.turns.filter { !privateTranscriptReminderTurnIDs.contains($0.id) }
-            timelineActivities = ConversationActivity.visibleTimelineActivities(
-                (codex?.timelineActivities ?? []).filter { !playhouseCodexCompactionIDs.contains($0.id) }
-                    + visibleTurns.flatMap(\.activities),
-                visibleMessageIDs: Set(messages.map(\.id)),
-                excludedTurnIDs: sensitiveTurnIDs.union(privateReminderTurnIDs).union(allSensitiveTurnIDs)
-                    .union(privateTranscriptReminderTurnIDs)
-            )
-        }
+        let timelineActivities = ConversationActivity.visibleTimelineActivities(
+            visibleTurns.flatMap(\.activities),
+            visibleMessageIDs: Set(messages.map(\.id)),
+            excludedTurnIDs: privateTranscriptReminderTurnIDs
+        )
         var history = ConversationHistory(
             messages: messages,
             activities: activities,
-            diff: diff,
+            diff: transcript.latestDiff,
             pendingUserInputRequest: transcript.pendingUserInputRequest,
             providerBoundaries: boundaries
         )
@@ -673,8 +516,11 @@ extension ConversationManager {
         guard let childID = activity.childThreadID else {
             throw BridgeCommandError(code: "invalid_argument", message: "That activity is not a subagent.")
         }
-        let isClaudeSubagent = try transcripts.read(taskID, turns: .all, includeImages: false).turns.contains { turn in
-            turn.activities.contains { $0.childThreadID == childID }
+        // Both providers' subagents are stored; the turn's segment tells which ran it.
+        let transcript = try transcripts.read(taskID, turns: .all, includeImages: false)
+        let claudeSegmentIDs = Set(transcript.segments.filter { $0.provider == .claude }.map(\.id))
+        let isClaudeSubagent = transcript.turns.contains { turn in
+            claudeSegmentIDs.contains(turn.segmentID) && turn.activities.contains { $0.childThreadID == childID }
         }
         guard isClaudeSubagent else {
             let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
@@ -686,7 +532,7 @@ extension ConversationManager {
         return ConversationHistory(messages: [report], activities: [], diff: nil)
     }
 
-    func searchArchive(query: String, codexHomePath: String? = nil) async throws -> [BoardTaskRecord] {
+    func searchArchive(query: String) async throws -> [BoardTaskRecord] {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "Archive search query can't be blank.")
@@ -694,31 +540,11 @@ extension ConversationManager {
         let completed = try tasks.list(status: .done)
         let titleMatches = completed.filter { $0.title.localizedCaseInsensitiveContains(normalizedQuery) }
         let titleIDs = Set(titleMatches.map(\.id))
-        let root: URL
-        if let codexHomePath, !codexHomePath.isEmpty {
-            root = URL(fileURLWithPath: codexHomePath, isDirectory: true)
-        } else if let environmentRoot = PlayhouseProcessEnvironment.current["CODEX_HOME"], !environmentRoot.isEmpty {
-            root = URL(fileURLWithPath: environmentRoot, isDirectory: true)
-        } else {
-            root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
-        }
-        let roots = [root.appendingPathComponent("sessions", isDirectory: true), root.appendingPathComponent("archived_sessions", isDirectory: true)]
-        let taskByThread = Dictionary(completed.compactMap { task -> (String, UUID)? in
-            guard !titleIDs.contains(task.id), let threadID = task.codexThreadID else { return nil }
-            return (threadID, task.id)
-        }, uniquingKeysWith: { first, _ in first })
-        let scanTask = Task.detached(priority: .userInitiated) {
-            try Self.searchSessionFiles(query: normalizedQuery, taskByThread: taskByThread, roots: roots)
-        }
-        var conversationIDs = try await withTaskCancellationHandler {
-            try await scanTask.value
-        } onCancel: {
-            scanTask.cancel()
-        }
-        // Claude turns live in Playhouse's transcript store rather than a provider session file.
+        // Every provider's turns live in Playhouse's transcript store.
         let store = try transcripts
         let needle = normalizedQuery.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        for task in completed where !titleIDs.contains(task.id) && !conversationIDs.contains(task.id) {
+        var conversationIDs = Set<UUID>()
+        for task in completed where !titleIDs.contains(task.id) {
             try Task.checkCancellation()
             let matches = try store.read(task.id, turns: .all, includeImages: false).turns.contains { turn in
                 turn.messages.contains { $0.text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }
@@ -729,66 +555,5 @@ extension ConversationManager {
         let titles = titleMatches.sorted { $0.createdAt > $1.createdAt }
         let conversations = conversationIDs.compactMap { byID[$0] }.sorted { $0.createdAt > $1.createdAt }
         return titles + conversations
-    }
-
-    nonisolated static func searchSessionFiles(query: String, taskByThread: [String: UUID], roots: [URL]) throws -> Set<UUID> {
-        var filesByThread: [String: [URL]] = [:]
-        for sessionsRoot in roots {
-            guard let enumerator = FileManager.default.enumerator(at: sessionsRoot, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
-            for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
-                try Task.checkCancellation()
-                let basename = fileURL.deletingPathExtension().lastPathComponent
-                guard let threadID = taskByThread.keys.first(where: { basename.hasSuffix("-\($0)") }) else { continue }
-                filesByThread[threadID, default: []].append(fileURL)
-            }
-        }
-        var conversationIDs = Set<UUID>()
-        for (threadID, taskID) in taskByThread {
-            for fileURL in filesByThread[threadID] ?? [] {
-                try Task.checkCancellation()
-                if try sessionFile(fileURL, contains: query) {
-                    conversationIDs.insert(taskID)
-                    break
-                }
-            }
-        }
-        return conversationIDs
-    }
-
-    nonisolated static func sessionFile(_ url: URL, contains query: String) throws -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
-        defer { try? handle.close() }
-        var pending = Data()
-        let needle = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        while let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-            try Task.checkCancellation()
-            pending.append(chunk)
-            while let newline = pending.firstRange(of: Data([0x0A])) {
-                let line = pending.subdata(in: pending.startIndex..<newline.lowerBound)
-                pending.removeSubrange(pending.startIndex..<newline.upperBound)
-                if Self.messageText(in: line).contains(where: { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }) { return true }
-            }
-        }
-        if !pending.isEmpty, Self.messageText(in: pending).contains(where: { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }) { return true }
-        return false
-    }
-
-    nonisolated static func messageText(in line: Data) -> [String] {
-        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let type = object["type"] as? String,
-              let payload = object["payload"] as? [String: Any] else { return [] }
-        if type == "response_item", let itemType = payload["type"] as? String, itemType == "message",
-           let role = payload["role"] as? String, role == "user" || role == "assistant",
-           let content = payload["content"] as? [[String: Any]] {
-            let searchableTextTypes: Set<String> = ["text", "input_text", "output_text"]
-            return content.compactMap {
-                guard let contentType = $0["type"] as? String, searchableTextTypes.contains(contentType) else { return nil }
-                return $0["text"] as? String
-            }
-        }
-        if type == "event_msg", let eventType = payload["type"] as? String,
-           eventType == "UserMessage" || eventType == "AgentMessage",
-           let message = payload["message"] as? String { return [message] }
-        return []
     }
 }

@@ -58,7 +58,7 @@ extension ConversationManager {
             }
             let callbacks = ConversationTurnCallbacks(
                 onDelta: { _ in }, onFinalMessage: { _ in },
-                onActivity: { activity in self.recordClaudeActivity(taskID: taskID, turnID: turnID, activity) },
+                onActivity: { activity in self.recordTurnActivity(taskID: taskID, turnID: turnID, activity) },
                 onDiff: { _ in }, onHistory: { _ in }, onActionRequest: {},
                 onUserInput: { _ in }, onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onMessageTimestamp: { _, _ in },
                 onTurnStarted: { _ in }, onTokenUsage: { usageReports.append($0) }
@@ -115,25 +115,23 @@ extension ConversationManager {
     ) async -> Bool {
         let turnID = UUID().uuidString.lowercased()
         do {
-            let history = try await clients.codex.compactThread(
+            try await clients.codex.compactThread(
                 id: threadID, workspace: workspace, modelID: modelID,
                 developerInstructions: developerInstructions
             )
-            let providerActivity = history.activities.last(where: \.isContextCompaction)
             let event = ContextCompactionEvent(
                 id: UUID().uuidString.lowercased(), recordedAt: now, trigger: trigger,
                 preTokens: state.contextTokens, postTokens: nil,
                 idleSeconds: state.lastCallAt.map { now.timeIntervalSince($0) }, model: modelID,
-                lastCallAt: state.lastCallAt, succeeded: true, provider: ConversationProvider.codex.rawValue,
-                providerActivityID: providerActivity?.id
+                lastCallAt: state.lastCallAt, succeeded: true, provider: ConversationProvider.codex.rawValue
             )
+            // The row is its own turn, so it lands after every turn recorded before it.
             let activity = ConversationActivity(
                 id: "playhouse-codex-compaction-\(event.id)",
                 title: "Context compacted automatically",
                 detail: ContextCompactionDetails(trigger: trigger, preTokens: state.contextTokens, postTokens: nil).summary,
                 status: "completed", isContextCompaction: true,
-                timelineOrder: providerActivity?.timelineOrder
-                    ?? ((history.timelineActivities.compactMap(\.timelineOrder).max() ?? 0) + 1),
+                timelineOrder: nil,
                 compaction: ContextCompactionDetails(trigger: trigger, preTokens: state.contextTokens, postTokens: nil)
             )
             try transcripts.mutate(taskID, turns: .none) { transcript in

@@ -486,7 +486,7 @@ extension PlayhouseUITests {
             "Steering a queued row should deliver its image to the active turn, not only its text."
         )
     }
-    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The composer's attach button, left of the Plan button, opens a file panel limited to images, and the chosen image appears in the composer preview and persists as a draft image until removed; a non-image file picked anyway (through Go to Folder) is refused with an image-only error and adds no draft image. The conversation composer also accepts pasted images, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The composer's attach button, left of the Plan button, opens a file panel limited to images, and the chosen image appears in the composer preview and persists as a draft image until removed; a non-image file picked anyway (through Go to Folder) is refused with an image-only error and adds no draft image. The conversation composer also accepts pasted images, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, stores those image URLs with the turn in Playhouse's transcript store, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -613,14 +613,23 @@ extension PlayhouseUITests {
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        let firstAnswer = element("assistant-message-item_assistant_fixture_1")
-        XCTAssertTrue(firstAnswer.waitToExist(timeout: 10))
-        XCTAssertEqual(firstAnswer.label, "Answers received: Blue / fixture-secret.")
-        XCTAssertTrue(element("user-message-item_user_fixture_1").waitToExist(timeout: 10), "Reloaded history should retain the pasted attachment.")
-        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitToExist(timeout: 10), "Conversation history should render the pasted image.")
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: imageTaskID)?["status"] as? String) == "Waiting Response"
         }, timeout: 10), "The first image turn should settle before the follow-up turn starts.")
+        // Playhouse names stored messages after its own turns, so read the IDs from the store.
+        let firstHistory = try runCLI(["conversation", "history", imageTaskID])["result"] as? [String: Any]
+        let firstMessages = firstHistory?["messages"] as? [[String: Any]] ?? []
+        let imagePromptID = try XCTUnwrap(firstMessages.first {
+            $0["role"] as? String == "user" && !($0["imageDataURLs"] as? [String] ?? []).isEmpty
+        }?["id"] as? String)
+        let firstAnswerID = try XCTUnwrap(firstMessages.first {
+            $0["role"] as? String == "assistant" && $0["text"] as? String == "Answers received: Blue / fixture-secret."
+        }?["id"] as? String)
+        let firstAnswer = element("assistant-message-\(firstAnswerID)")
+        XCTAssertTrue(firstAnswer.waitToExist(timeout: 10))
+        XCTAssertEqual(firstAnswer.label, "Answers received: Blue / fixture-secret.")
+        XCTAssertTrue(element("user-message-\(imagePromptID)").waitToExist(timeout: 10), "Reloaded history should retain the pasted attachment.")
+        XCTAssertTrue(element("chat-image-\(imagePromptID)-0").waitToExist(timeout: 10), "Conversation history should render the pasted image.")
 
         let followupPrompt = "Continue using the earlier image as context."
         composer.click()
@@ -635,16 +644,15 @@ extension PlayhouseUITests {
         element("submit-ai-answers-button").click()
         let followupMessage = transcriptMessage(followupPrompt)
         XCTAssertTrue(followupMessage.waitToExist(timeout: 10), "The follow-up prompt should appear in the conversation.")
-        // Hidden outcome reminders take fixture item numbers between visible turns.
-        // Visible replies to those reminders are assistant rows too, so match the answer itself.
+        // Visible replies to hidden outcome reminders are assistant rows too, so match the answer itself.
         let followupAnswer = app.groups.matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND identifier != %@ AND label == %@",
-            "assistant-message-item_assistant_fixture_", "assistant-message-item_assistant_fixture_1",
+            "assistant-message-", "assistant-message-\(firstAnswerID)",
             "Answers received: Blue / fixture-secret."
         )).firstMatch
         XCTAssertTrue(followupAnswer.waitToExist(timeout: 10), "The follow-up answer should render as its own assistant message.")
         XCTAssertTrue(revealWholeTranscript(), "The earlier image turn should load as the reader scrolls up.")
-        XCTAssertTrue(scrollTranscriptUntilExists(element("chat-image-item_user_fixture_1-0")), "Refreshing history after another turn should keep the earlier image visible.")
+        XCTAssertTrue(scrollTranscriptUntilExists(element("chat-image-\(imagePromptID)-0")), "Refreshing history after another turn should keep the earlier image visible.")
         let refreshedHistory = try runCLI(["conversation", "history", try taskID(named: "Image conversation")])["result"] as? [String: Any]
         let refreshedUserMessages = (refreshedHistory?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
         XCTAssertEqual(refreshedUserMessages.first?["imageDataURLs"] as? [String], [pickedImage], "A fresh XPC history read should retain the earlier image after a later turn.")
@@ -727,8 +735,12 @@ extension PlayhouseUITests {
             NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
         ).firstMatch
         XCTAssertTrue(pastedAnswer.waitToExist(timeout: 10))
-        XCTAssertTrue(element("user-message-item_user_fixture_1").waitToExist(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
-        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitToExist(timeout: 10), "Conversation history should render the pasted image itself.")
+        let pastedHistory = try runCLI(["conversation", "history", try taskID(named: "Pasted image conversation")])["result"] as? [String: Any]
+        let pastedPromptID = try XCTUnwrap((pastedHistory?["messages"] as? [[String: Any]] ?? []).first {
+            $0["role"] as? String == "user" && !($0["imageDataURLs"] as? [String] ?? []).isEmpty
+        }?["id"] as? String)
+        XCTAssertTrue(element("user-message-\(pastedPromptID)").waitToExist(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
+        XCTAssertTrue(element("chat-image-\(pastedPromptID)-0").waitToExist(timeout: 10), "Conversation history should render the pasted image itself.")
         let transcriptImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-")).firstMatch
         XCTAssertTrue(transcriptImage.waitToExist(timeout: 5))
         let thumbnailFrame = transcriptImage.frame
@@ -759,7 +771,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(serializedImageDiagnostics.contains(pastedImage))
         attachScreenshot(named: "Chat sends picker text-and-image and pasted image-only messages")
     }
-    // case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image. This active-turn attribution is Claude-specific: Codex history is composed from ordered timeline entries, so published images are standalone assistant messages verified for persistence and rendering in test_conversation_sends_image_attachments.
+    // case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image. Codex records the same active-turn attribution in the shared store, covered by test_codex_agent_image_published_during_active_turn.
     func test_claude_agent_image_published_during_active_turn() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))

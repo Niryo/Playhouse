@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases14:
-    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, waiting-response, and keep-working instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason.
+    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, waiting-response, and keep-working instructions, which fails the private turn; the rejected question and the private rejection instructions stay out of the transcript, while a prompt that applied the user's answer is stored and shown as sent. Playhouse then stops driving the work and marks the task Blocked naming that reason.
     def test_claude_outcome_reminder_rejects_user_questions(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-outcome-reminder-question"
@@ -60,7 +60,10 @@ class BridgeTestCases14:
         safe_history = self.assert_success(history)
         self.assertIsNone(safe_history.get("pendingUserInputRequest"))
         serialized_history = json.dumps(safe_history)
-        self.assertNotIn("Which color should I use?", serialized_history)
+        recovery_prompts = [message["text"] for message in safe_history["messages"]
+                            if message["role"] == "user" and "Answer: Blue" in message["text"]]
+        self.assertEqual(len(recovery_prompts), 1, "The prompt that applied the answer is stored once.")
+        self.assertIn("Question: Which color should I use?", recovery_prompts[0], "The answer's prompt is stored as sent.")
         self.assertNotIn("This is a private Playhouse status nudge.", serialized_history,
                          "Claude's private rejection instructions must not enter persisted conversation history.")
         settled = self.assert_success(self.call_cli("task", "get", task_id)[0])
@@ -88,7 +91,7 @@ class BridgeTestCases14:
         self.assertFalse(failed.get("ok", True), failed)
         self.assertIn("question", failed.get("error", {}).get("message", "").lower())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
-    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, which still shows the question that started it, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, stores and shows the prompt that carried it as sent, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, which still shows the question that started it, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     def test_claude_pending_question_recovers_after_provider_process_restarts(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-restart-question"
@@ -203,7 +206,8 @@ class BridgeTestCases14:
         resumed, _ = self.call_cli("conversation", "history", task_id)
         resumed_history = self.assert_success(resumed)
         self.assertTrue(any(message["text"] == "Recovered answer: Green." for message in resumed_history["messages"]))
-        self.assertFalse(any("Answer: Green" in message["text"] for message in resumed_history["messages"]))
+        self.assertTrue(any(message["role"] == "user" and "Question: Which color should I use?\nAnswer: Green" in message["text"]
+                            for message in resumed_history["messages"]), "The prompt that carried the answer is stored as sent.")
         self.assertNotIn("Answer: Green", self.assert_success(self.call_cli("task", "get", task_id)[0]).get("savedPrompt", ""))
         self.assertIsNone(resumed_history.get("pendingUserInputRequest"))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
@@ -814,7 +818,7 @@ class BridgeTestCases14:
             "SLOW WOKEN HANDLED",
             "A woken turn that stays quiet past the consumed-notification grace must still end on its own answer.",
         )
-    # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
+    # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, stores and shows the prompt that carried the answer as sent, and keeps it out of saved task state and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-recovery-failure"
@@ -844,7 +848,8 @@ class BridgeTestCases14:
         self.assertNotIn("Answer: Green", recovery_failure["error"]["message"])
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
         self.assertIsNotNone(history.get("pendingUserInputRequest"), "The failed answer must remain available for retry.")
-        self.assertFalse(any("Answer: Green" in message["text"] or "private recovery prompt" in message["text"].lower() for message in history["messages"]))
+        # The prompt that carried the answer was sent, so it is stored as sent.
+        self.assertTrue(any(message["role"] == "user" and "Answer: Green" in message["text"] for message in history["messages"]))
         task_record = self.assert_success(self.call_cli("task", "get", task_id, extra_environment=env)[0])
         self.assertEqual(task_record["status"], "Waiting Response", "An unanswered question stays available for retry after a failed recovery attempt.")
         self.assertNotIn("Answer: Green", task_record.get("savedPrompt", ""))

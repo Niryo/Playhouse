@@ -650,6 +650,18 @@ extension PlayhouseUITests {
         return chatTranscriptSnapshot(.group)
             .contains { ($0.label.contains(text) || $0.identifier == text) && $0.frame.minY > separator.minY }
     }
+    /// Whether `text` shows below `earlier` with no page separator between them. A long page's
+    /// own separator can sit above the rows the transcript renders, so this places a turn on
+    /// its page by the page's earlier turn instead.
+    func chatTranscriptShows(_ text: String, after earlier: String) -> Bool {
+        let groups = chatTranscriptSnapshot(.group)
+        guard let earlierFrame = groups.first(where: { $0.label.contains(earlier) })?.frame,
+              let frame = groups.first(where: { $0.label.contains(text) && $0.frame.minY > earlierFrame.minY })?.frame
+        else { return false }
+        return !chatTranscriptSnapshot(.staticText).contains {
+            $0.identifier == "chat-page-separator" && $0.frame.minY > earlierFrame.minY && $0.frame.minY < frame.minY
+        }
+    }
     func chatPageSeparatorIsVisible(_ title: String) -> Bool {
         element("chat-sidebar")
             .descendants(matching: .scrollView)

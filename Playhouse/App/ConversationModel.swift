@@ -205,6 +205,15 @@ protocol ConversationProviderClient: AnyObject {
     /// turns at once must not report another conversation's process or turn.
     func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
+    /// Loads an existing `threadID` for the send about to run on it, and returns false when the
+    /// provider no longer has it, so the send starts a new thread seeded with Playhouse's own
+    /// transcript instead. Other load failures return true and are left to the send to report.
+    /// Claude Code reports a missing session only as its process launches,
+    /// so it recovers inside `sendMessage` from `sessionRecoveryContext` and returns true here.
+    func loadThreadForSend(
+        threadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?,
+        sensitiveUserInputAnswerValues: [String], hideSensitiveRecoveryPrompt: Bool
+    ) async throws -> Bool
     /// A new conversation that starts with a copy of `sourceThreadID`'s whole context and
     /// runs on its own from then on, leaving the source conversation untouched.
     func forkThread(sourceThreadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
@@ -287,6 +296,10 @@ extension ConversationProviderClient {
     func forgetBackgroundJobs(threadID: String) {}
     func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String) {}
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {}
+    func loadThreadForSend(
+        threadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?,
+        sensitiveUserInputAnswerValues: [String], hideSensitiveRecoveryPrompt: Bool
+    ) async throws -> Bool { true }
 
     func diagnosticFields() -> [String: String] { diagnosticFields([:]) }
 

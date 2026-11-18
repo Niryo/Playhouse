@@ -44,6 +44,58 @@ class BridgeTestHelpers01:
                 "ON CONFLICT(task_id) DO UPDATE SET payload = excluded.payload",
                 (task_id.upper(), json.dumps(state)),
             )
+    def seed_long_history(self, task_id, sent_prompt=False, mid_history_command=False, tall_latest_answer=False):
+        """Replaces the task's stored turns with 60 settled question-and-answer turns in its newest
+        provider segment, as earlier sessions would have recorded them. Playhouse keeps the transcript
+        itself, so a long history is written into its store rather than read from a provider. The
+        UI suite's `seedLongHistory` writes the same rows."""
+        key = task_id.upper()
+        with sqlite3.connect(self.conversation_database(), timeout=30) as connection:
+            state = json.loads(connection.execute("SELECT payload FROM conversation_state WHERE task_id = ?", (key,)).fetchone()[0])
+            segment = state["segments"][-1]
+            for table in ("conversation_turns", "conversation_messages", "conversation_activities"):
+                connection.execute(f"DELETE FROM {table} WHERE task_id = ?", (key,))
+            turns = []
+            if sent_prompt:
+                # The sent prompt is the first stored user message, outside the newest history page.
+                turns.append(("turn_sent_prompt", [("item_sent_prompt", "user", "Create a long history.")], []))
+            for index in range(1, 61):
+                answer = f"Long history assistant {index:02d}."
+                if index == 60 and tall_latest_answer:
+                    # A newest answer taller than the transcript viewport, so a conversation opened
+                    # on its question differs visibly from one opened at its end.
+                    answer = "\n\n".join([answer, *(f"Long history closing paragraph {number:02d}." for number in range(1, 31))])
+                activities = []
+                if index == 21 and mid_history_command:
+                    # A mid-history call whose output runs past the clipped lines, so the UI can
+                    # expand it and check it stays expanded after its row is rendered lazily again.
+                    activities.append({
+                        "id": "item_long_history_command_21", "tool": "Bash", "title": "Running ls fixture-history",
+                        "input": "ls fixture-history", "detail": "ls fixture-history", "summary": "in /tmp/playhouse-fixture", "status": "completed",
+                        "durationMs": 5, "isContextCompaction": False, "afterMessageID": "item_long_history_user_21",
+                        "output": "".join(f"history-file-{line}.txt\n" for line in range(1, 7)),
+                    })
+                turns.append((f"turn_long_history_{index}", [
+                    (f"item_long_history_user_{index}", "user", f"Long history user {index:02d}."),
+                    (f"item_long_history_assistant_{index}", "assistant", answer),
+                ], activities))
+            for seq, (turn_id, messages, activities) in enumerate(turns, start=1):
+                connection.execute("INSERT INTO conversation_turns (task_id, id, segment_id, seq) VALUES (?, ?, ?, ?)",
+                                   (key, turn_id, segment["id"], seq))
+                for position, (message_id, role, text) in enumerate(messages):
+                    payload = {"id": message_id, "role": role, "text": text, "turnID": turn_id, "imageDataURLs": [],
+                               "provider": segment["provider"]}
+                    if role == "assistant":
+                        payload["phase"] = "final_answer"
+                    connection.execute(
+                        "INSERT INTO conversation_messages (task_id, turn_id, id, position, payload) VALUES (?, ?, ?, ?, ?)",
+                        (key, turn_id, message_id, position, json.dumps(payload)),
+                    )
+                for position, activity in enumerate(activities):
+                    connection.execute(
+                        "INSERT INTO conversation_activities (task_id, turn_id, id, position, payload) VALUES (?, ?, ?, ?, ?)",
+                        (key, turn_id, activity["id"], position, json.dumps({**activity, "turnID": turn_id})),
+                    )
     def conversation_row_counts(self, task_id):
         path = self.conversation_database()
         if not path.exists():
@@ -171,14 +223,11 @@ class BridgeTestHelpers01:
         self.assertTrue(received.is_file(), f"The {provider} fixture should confirm it received the native interrupt.")
         persisted = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(persisted["status"], "Waiting Response")
-        if provider == "codex":
-            recorded = self.conversation_state(task["id"])["messageTimestamps"]["item_user_fixture_1"]
-            restored = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
-            user = next(message for message in restored["messages"] if message["id"] == "item_user_fixture_1")
-            self.assertIsNotNone(recorded, "The event time was stored before interruption.")
-            self.assertIsNotNone(user.get("createdAt"), "Interrupted turns retain their observed message time.")
-            again = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
-            self.assertEqual(user["createdAt"], next(message for message in again["messages"] if message["id"] == user["id"])["createdAt"])
+        restored = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+        user = next(message for message in restored["messages"] if message["role"] == "user")
+        self.assertIsNotNone(user.get("createdAt"), "Interrupted turns keep the stored time of their prompt.")
+        again = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+        self.assertEqual(user["createdAt"], next(message for message in again["messages"] if message["id"] == user["id"])["createdAt"])
         settled = self.assert_success(self.call_cli("conversation", "runtime")[0])
         self.assertNotIn(thread_id, settled["activeThreadIDs"], "A stopped turn is no longer active in the daemon.")
         self.assertIn(thread_id, settled["interruptedThreadIDs"], "The daemon should remember that the turn was paused.")

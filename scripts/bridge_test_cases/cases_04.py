@@ -186,7 +186,7 @@ class BridgeTestCases04:
         self.assertEqual(third_record["branchFrom"], "branch-source-for-suffix")
         self.assertEqual(self.run_git(self.primary, "rev-parse", stale_slug).strip(), stale_commit)
         self.assertNotIn(f"branch refs/heads/{stale_slug}\n", self.run_git(self.primary, "worktree", "list", "--porcelain") + "\n")
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI and the visible archive search the task's stored transcript, matching both the user's prompts and the assistant's replies case-insensitively; the visible archive loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -269,23 +269,11 @@ class BridgeTestCases04:
         )
         messages = self.assert_success(history)["messages"]
         self.assertTrue(any(message["role"] == "assistant" and "Answers received: Blue / fixture-secret." in message["text"] for message in messages))
-        thread_id = started["codexThreadID"]
-        sessions = self.data_directory / "codex-home" / "sessions" / "2026" / "10" / "22"
-        sessions.mkdir(parents=True)
-        session_file = sessions / f"rollout-2026-10-22T00-00-00-{thread_id}.jsonl"
-        session_file.write_text(
-            json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "LOCAL-SESSION-ONLY-user-token"}]}})
-            + "\n"
-            + json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "LOCAL-SESSION-ONLY-assistant-token"}]}})
-            + "\n",
-            encoding="utf-8",
-        )
-        search_env = {"CODEX_HOME": str(self.data_directory / "codex-home")}
-        for query in ("local-session-only-user-TOKEN", "local-session-only-assistant-TOKEN"):
-            search, _ = self.call_cli("archive", "search", query, extra_environment=search_env)
+        for query in ("FIRST time CONTRIBUTORS tomorrow", "answers RECEIVED: blue"):
+            search, _ = self.call_cli("archive", "search", query)
             search_results = self.assert_success(search)
-            self.assertEqual([result["id"] for result in search_results], [task["id"]], "Archive search should find current Codex input_text/output_text content in the task's local session file.")
-        invalid_search, _ = self.call_cli("archive", "search", "   ", expected_status=2, extra_environment=search_env)
+            self.assertEqual([result["id"] for result in search_results], [task["id"]], "Archive search should find the user's prompt and the assistant's reply in the stored transcript.")
+        invalid_search, _ = self.call_cli("archive", "search", "   ", expected_status=2)
         self.assert_failure(invalid_search, "invalid_argument")
         filler_ids = []
         for index in range(1, 41):
