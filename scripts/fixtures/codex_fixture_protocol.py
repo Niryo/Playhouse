@@ -126,8 +126,11 @@ def start_thread(runtime, _session_state, message):
     # A slow provider start: the turn is still launching and nothing was sent to it yet.
     wait_for_release(runtime, "thread-start", "Codex is starting the thread.")
     # `-single-server` modes run several tasks' threads on one server.
-    if "-question-isolation-" in _session_state.mode or "-single-server" in _session_state.mode:
+    # The thread replacing a missing one gets an ID of its own, as a real new thread does.
+    if "-question-isolation-" in _session_state.mode or "-single-server" in _session_state.mode \
+            or getattr(_session_state, "replaces_missing_thread", False):
         runtime.THREAD_ID = str(runtime.uuid.uuid4())
+        _session_state.replaces_missing_thread = False
     _session_state.thread_start_instructions = message.get("params", {}).get("developerInstructions")
     if _session_state.serial_mode:
         _session_state.history = _session_state.serial_history()
@@ -154,6 +157,17 @@ def start_thread(runtime, _session_state, message):
 
 
 def resume_thread(runtime, _session_state, message):
+    # A one-shot marker: Codex no longer has the thread (its rollout was deleted) and
+    # answers the resume the way the real app-server does.
+    missing_thread = runtime.Path(str(runtime.sys.argv[0]) + ".missing-thread")
+    if missing_thread.is_file():
+        missing_thread.unlink(missing_ok=True)
+        _session_state.replaces_missing_thread = True
+        runtime.write({"jsonrpc": "2.0", "id": message["id"], "error": {
+            "code": -32600,
+            "message": f"no rollout found for thread id {message['params']['threadId']}",
+        }})
+        return
     if "-question-isolation-" in _session_state.mode or "-single-server" in _session_state.mode:
         runtime.THREAD_ID = message["params"]["threadId"]
     if "-single-server" in _session_state.mode:

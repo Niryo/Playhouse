@@ -333,7 +333,7 @@ extension ConversationManager {
                     pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 )
             }
-            let threadID: String
+            var threadID: String
             var resumesExistingSession = false
             // Each page owns its provider session. A page without one starts a fresh session that
             // carries the system prompt plus only that page's turns, so context never accumulates
@@ -388,6 +388,44 @@ extension ConversationManager {
                 phase = "thread-persistence"
                 _ = try await tasks.persistConversationID(taskID, provider: provider, id: threadID)
                 persistedThreadID = threadID
+            }
+            // A thread the provider no longer has is replaced by a new one that receives the
+            // conversation from Playhouse's own transcript with this turn's prompt.
+            var missingThreadRecoveryContext: String?
+            if resumesExistingSession || pageSessionID != nil,
+               try await !client.loadThreadForSend(
+                threadID: threadID, workspace: workspace, modelID: modelID,
+                developerInstructions: standaloneChatInstructions(),
+                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
+               ) {
+                let missingThreadID = threadID
+                threadID = try await client.startThread(
+                    workspace: workspace,
+                    modelID: modelID,
+                    developerInstructions: standaloneChatInstructions()
+                )
+                phase = "thread-persistence"
+                if let standaloneChatPage {
+                    try? tasks.standaloneChatManager().setProviderSession(
+                        pageID: standaloneChatPage.id, provider: provider.rawValue, sessionID: threadID
+                    )
+                }
+                _ = try await tasks.persistConversationID(
+                    taskID, provider: provider, id: threadID, replacing: missingThreadID
+                )
+                persistedThreadID = threadID
+                resumesExistingSession = false
+                missingThreadRecoveryContext = standaloneChatPage == nil
+                    ? ConversationHandoff.context(for: provider, messages: Self.withoutNudgeTurns(try await history(taskID: taskID).messages))
+                    : sessionRecoveryContext
+                PlayhouseDiagnostics.record("conversation.thread.replaced_missing", fields: [
+                    "taskID": taskID.uuidString,
+                    "provider": provider.rawValue,
+                    "missingThreadID": missingThreadID,
+                    "threadID": threadID
+                ])
+                phase = "thread-start"
             }
             // A resumed Claude session whose prompt cache has expired, or whose model
             // this turn changes, is compacted first, so the turn doesn't rewrite the
@@ -491,7 +529,8 @@ extension ConversationManager {
             try await client.sendMessage(
                 ConversationHandoff.prompt(
                     normalizedText,
-                    context: [segment?.handoff, standaloneChatSeedContext]
+                    // The recovered transcript already holds what a provider-switch handoff carries.
+                    context: [missingThreadRecoveryContext ?? segment?.handoff, standaloneChatSeedContext]
                         .compactMap { $0 }.joined(separator: "\n\n").nilWhenBlank
                 ),
                 imageDataURLs: imageDataURLs,

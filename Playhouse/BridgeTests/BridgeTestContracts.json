@@ -272,6 +272,14 @@
     "expectation": "A Claude turn that fails after Claude Code created its session leaves that session in place, and the next turn resumes it instead of claiming the same session ID again. After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context."
   },
   {
+    "id": "test_codex_resume_recovers_visible_history",
+    "expectation": "After a Codex turn and a provider restart, a normal Codex send resumes the saved thread without handoff context. If Codex then reports that it no longer has the thread, Playhouse starts a new Codex thread, saves its ID on the task, and sends the prior visible conversation from Playhouse's persisted transcript together with the new prompt; Codex completes the turn, the replacement is recorded in diagnostics, the next send continues on the new thread without handoff context, and fresh CLI/XPC history and the visible UI retain every turn."
+  },
+  {
+    "id": "test_codex_standalone_chat_resume_recovers_page_history",
+    "expectation": "A Codex standalone chat page keeps its own thread: after a provider restart, a send on the page resumes that thread without page context. If Codex then reports that it no longer has the page's thread, Playhouse starts a new Codex thread, saves it as the page's provider session, and sends only that page's turns from Playhouse's stored chat pages as context together with the new prompt, never an earlier page's turns or the new prompt itself; the replacement is recorded in diagnostics, the next send on the page continues on the new thread without context, and the page keeps every turn in fresh CLI/XPC reads and the visible chat."
+  },
+  {
     "id": "test_claude_auto_branch_uses_generated_title_and_fallback",
     "expectation": "An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged."
   },

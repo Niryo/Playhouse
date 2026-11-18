@@ -405,6 +405,178 @@ extension PlayhouseUITests {
         XCTAssertTrue(texts.contains("What happened earlier?"))
         XCTAssertTrue(texts.contains("OK."))
     }
+    // case-contract: test_codex_resume_recovers_visible_history | After a Codex turn and a provider restart, a normal Codex send resumes the saved thread without handoff context. If Codex then reports that it no longer has the thread, Playhouse starts a new Codex thread, saves its ID on the task, and sends the prior visible conversation from Playhouse's persisted transcript together with the new prompt; Codex completes the turn, the replacement is recorded in diagnostics, the next send continues on the new thread without handoff context, and fresh CLI/XPC history and the visible UI retain every turn.
+    func test_codex_resume_recovers_visible_history() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-resume-recovery")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        codexFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        let title = "Codex resume recovery UI"
+        try createTaskFixture(title: title, roots: [fixture.primary.path])
+        let taskID = try taskID(named: title)
+        let turnStartsURL = URL(fileURLWithPath: executable.path + ".turn-starts")
+        let reply = "Answers received: Blue / fixture-secret."
+        func lastTurnStart(endingWith message: String) throws -> [String: Any] {
+            let lines = try String(contentsOf: turnStartsURL, encoding: .utf8).split(separator: "\n")
+            let starts = try lines.map { try XCTUnwrap(try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]) }
+            return try XCTUnwrap(starts.last { ($0["text"] as? String ?? "").hasSuffix(message) }, "Codex never started a turn for \(message).")
+        }
+        func codexThreadID() throws -> String {
+            try XCTUnwrap(try taskRecord(id: taskID)?["codexThreadID"] as? String)
+        }
+
+        openTask(named: title)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "Start with Codex.")
+        let originalThread = try codexThreadID()
+
+        // A working resume after a restart keeps the thread and sends no transcript.
+        try restartProvider(executable)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "Continue normally.")
+        let normal = try lastTurnStart(endingWith: "Continue normally.")
+        XCTAssertEqual(normal["threadId"] as? String, originalThread)
+        XCTAssertEqual(normal["text"] as? String, "Continue normally.", "A working resume must not receive duplicate transcript context.")
+
+        // Codex loses the thread while Playhouse is closed; the reopened conversation still shows it.
+        let missing = URL(fileURLWithPath: executable.path + ".missing-thread")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path))
+        try restartProvider(executable)
+        relaunchApp()
+        openTask(named: title)
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
+        XCTAssertTrue(scrollTranscriptUntilExists(transcriptMessage("Start with Codex.")), "The first prompt should restore from Playhouse's persisted transcript.")
+        XCTAssertTrue(scrollTranscriptUntilExists(transcriptMessage("Continue normally.")), "The second prompt should restore from Playhouse's persisted transcript.")
+        attachScreenshot(named: "Codex conversation reopened before its thread went missing")
+        // Armed only now, so the send's resume is the one that finds the thread gone.
+        try Data("Playhouse test owns this missing-thread trigger.\n".utf8).write(to: missing)
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "What happened earlier?")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path), "Codex should have been asked to resume the missing thread.")
+        let replacement = try codexThreadID()
+        XCTAssertNotEqual(replacement, originalThread, "A missing thread is replaced by a new one saved on the task.")
+        let recovered = try lastTurnStart(endingWith: "What happened earlier?")
+        XCTAssertEqual(recovered["threadId"] as? String, replacement)
+        let recoveryPrompt = try XCTUnwrap(recovered["text"] as? String)
+        XCTAssertTrue(recoveryPrompt.contains("<playhouse-handoff-context>"))
+        XCTAssertTrue(recoveryPrompt.contains("User: Start with Codex."))
+        XCTAssertTrue(recoveryPrompt.contains("User: Continue normally."))
+        XCTAssertTrue(recoveryPrompt.contains("Codex: \(reply)"))
+        XCTAssertFalse(recoveryPrompt.contains("User: What happened earlier?"), "The new prompt is not repeated inside its own context.")
+        XCTAssertTrue(recoveryPrompt.hasSuffix("What happened earlier?"))
+        let replaced = try diagnosticEvents().filter {
+            $0["event"] as? String == "conversation.thread.replaced_missing" && $0["taskID"] as? String == taskID
+        }
+        XCTAssertEqual(replaced.map { [$0["provider"] as? String, $0["missingThreadID"] as? String, $0["threadID"] as? String] },
+                       [["codex", originalThread, replacement]])
+        XCTAssertTrue(transcriptMessage("What happened earlier?").waitToExist(timeout: 10), "The transcript shows the user's own prompt.")
+        XCTAssertFalse(transcriptContains("<playhouse-handoff-context>"), "The transcript does not show the context sent with it.")
+        attachScreenshot(named: "Codex thread replaced after it went missing")
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title, prompt: "And after that?")
+        let following = try lastTurnStart(endingWith: "And after that?")
+        XCTAssertEqual(following["threadId"] as? String, replacement)
+        XCTAssertEqual(following["text"] as? String, "And after that?", "The replacement thread already has the conversation.")
+
+        relaunchApp()
+        openTask(named: title)
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
+        for prompt in ["Start with Codex.", "Continue normally.", "What happened earlier?", "And after that?"] {
+            XCTAssertTrue(scrollTranscriptUntilExists(transcriptMessage(prompt)), "\(prompt) should remain in the reopened transcript.")
+        }
+        attachScreenshot(named: "Every turn remains after the replaced thread continues")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let userTexts = messages.filter { $0["role"] as? String == "user" }.compactMap { $0["text"] as? String }
+        for prompt in ["Start with Codex.", "Continue normally.", "What happened earlier?", "And after that?"] {
+            XCTAssertTrue(userTexts.contains(prompt), "\(prompt) should persist in fresh CLI/XPC history.")
+        }
+        XCTAssertFalse(userTexts.contains { $0.contains("<playhouse-handoff-context>") })
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" && $0["text"] as? String == reply }.count, 4)
+    }
+    // case-contract: test_codex_standalone_chat_resume_recovers_page_history | A Codex standalone chat page keeps its own thread: after a provider restart, a send on the page resumes that thread without page context. If Codex then reports that it no longer has the page's thread, Playhouse starts a new Codex thread, saves it as the page's provider session, and sends only that page's turns from Playhouse's stored chat pages as context together with the new prompt, never an earlier page's turns or the new prompt itself; the replacement is recorded in diagnostics, the next send on the page continues on the new thread without context, and the page keeps every turn in fresh CLI/XPC reads and the visible chat.
+    func test_codex_standalone_chat_resume_recovers_page_history() throws {
+        let (executable, environment, chatID) = try launchRestartFixtureChat(provider: "codex")
+        func activePage() throws -> [String: Any] {
+            try XCTUnwrap(restartChatStatus(environment)?["activePage"] as? [String: Any])
+        }
+        func send(_ text: String, newTitle: String? = nil) throws -> [String: Any] {
+            _ = sendFiledRestartChatTurn(executable, text, newTitle: newTitle, environment: environment)
+            let ready = try String(contentsOfFile: executable + ".reattach-ready", encoding: .utf8)
+            return try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(ready.utf8)) as? [String: Any])
+        }
+
+        _ = try send("Name a moon of Mars.")
+        let earlierPageID = try XCTUnwrap(try activePage()["id"] as? String)
+        _ = try send("Tell me about volcanoes.", newTitle: "Volcanoes")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Volcanoes") }, timeout: 20))
+        let pageID = try XCTUnwrap(try activePage()["id"] as? String)
+        XCTAssertNotEqual(pageID, earlierPageID)
+        let seeded = try send("What about lava?")
+        let pageThread = try XCTUnwrap(try activePage()["providerSessionID"] as? String)
+        XCTAssertEqual(seeded["threadId"] as? String, pageThread, "The page's first turn starts the page's own thread.")
+
+        // A working resume after a restart keeps the page's thread and sends no page context.
+        let serverBefore = agentManifest(kind: "codex", service: environment)?.manifest["process"] as? NSDictionary
+        XCTAssertNotNil(serverBefore, "The chat's turns run on a shared Codex app-server.")
+        try restartProvider(URL(fileURLWithPath: executable))
+        let normal = try send("Continue normally.")
+        let serverAfter = try XCTUnwrap(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? NSDictionary)
+        XCTAssertNotEqual(serverAfter, serverBefore,
+                          "The send after a provider restart runs on a new app-server, which has to resume the page's thread.")
+        XCTAssertEqual(normal["threadId"] as? String, pageThread)
+        XCTAssertFalse((normal["text"] as? String ?? "").contains("<playhouse-handoff-context>"), "A working resume must not receive the page again.")
+
+        try restartProvider(URL(fileURLWithPath: executable))
+        let missing = executable + ".missing-thread"
+        try Data("Playhouse test owns this missing-thread trigger.\n".utf8).write(to: URL(fileURLWithPath: missing))
+        let recovered = try send("What happened earlier?")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing), "Codex should have been asked to resume the page's missing thread.")
+        let replacement = try activePage()
+        XCTAssertEqual(replacement["id"] as? String, pageID)
+        let replacementThread = try XCTUnwrap(replacement["providerSessionID"] as? String)
+        XCTAssertNotEqual(replacementThread, pageThread, "The page's missing thread is replaced by a new one saved on the page.")
+        XCTAssertEqual(recovered["threadId"] as? String, replacementThread)
+        let prompt = try XCTUnwrap(recovered["text"] as? String)
+        XCTAssertTrue(prompt.contains("<playhouse-handoff-context>"))
+        for earlier in ["Tell me about volcanoes.", "What about lava?", "Continue normally.", "After restart."] {
+            XCTAssertTrue(prompt.contains(earlier), "The new thread receives the page's own turn \(earlier).")
+        }
+        XCTAssertFalse(prompt.contains("Name a moon of Mars."), "An earlier page's turns never reach this page's thread.")
+        XCTAssertFalse(prompt.contains("User: What happened earlier?"), "The new prompt is not repeated inside its own context.")
+        XCTAssertTrue(prompt.hasSuffix("What happened earlier?"))
+        let replaced = try diagnosticEvents().filter {
+            $0["event"] as? String == "conversation.thread.replaced_missing" && $0["taskID"] as? String == chatID
+        }
+        XCTAssertEqual(replaced.map { [$0["provider"] as? String, $0["missingThreadID"] as? String, $0["threadID"] as? String] },
+                       [["codex", pageThread, replacementThread]])
+        XCTAssertTrue(waitUntil({ self.chatTranscriptShows("What happened earlier?", after: "Continue normally.") }, timeout: 20),
+                      "The chat shows the user's own prompt under its page's earlier turns.")
+        XCTAssertFalse(transcriptContains("<playhouse-handoff-context>"), "The chat does not show the context sent with it.")
+        attachScreenshot(named: "Codex chat page thread replaced after it went missing")
+
+        let following = try send("And after that?")
+        XCTAssertEqual(following["threadId"] as? String, replacementThread)
+        XCTAssertFalse((following["text"] as? String ?? "").contains("<playhouse-handoff-context>"), "The replacement thread already has the page.")
+        XCTAssertEqual(
+            restartChatPageTexts(pageID, environment: environment).filter { $0 != "Before restart." && $0 != "After restart." },
+            ["Tell me about volcanoes.", "What about lava?", "Continue normally.", "What happened earlier?", "And after that?"],
+            "The page keeps every turn, with the user's own prompts."
+        )
+        XCTAssertEqual(restartChatPageTexts(earlierPageID, environment: environment), ["Name a moon of Mars.", "Before restart.", "After restart."])
+
+        XCTAssertTrue(terminateAppAndWait(app))
+        launchApp(defaultParent: nil, environmentOverrides: environment)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        // The relaunched chat opens on its newest turn; earlier turns load as the reader scrolls up.
+        XCTAssertTrue(waitUntil({ self.transcriptMessage("And after that?").exists }, timeout: 20))
+        for (prompt, earlier) in [("What happened earlier?", "Continue normally."), ("And after that?", "What happened earlier?")] {
+            XCTAssertTrue(transcriptScan { self.chatTranscriptShows(prompt, after: earlier) },
+                          "\(prompt) should remain under its page after a relaunch.")
+        }
+        attachScreenshot(named: "Codex chat page keeps every turn after a relaunch")
+    }
 
     // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_anchors_jump_and_recall() throws {

@@ -61,6 +61,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         case authentication(String)
         case modelMismatch(String, String)
         case turnFailed(String)
+        /// Codex no longer has the thread, for example after its rollout was deleted.
+        case threadNotFound(String)
 
         var errorDescription: String? {
             switch self {
@@ -81,6 +83,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             case .modelMismatch(let model, let expected):
                 "Codex selected \(model) instead of \(expected). Playhouse stopped without switching models."
             case .turnFailed(let detail):
+                detail
+            case .threadNotFound(let detail):
                 detail
             }
         }

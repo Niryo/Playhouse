@@ -113,6 +113,19 @@ extension PlayhouseUITests {
         stop.arguments = ["-f", executable.path]
         try stop.run()
         stop.waitUntilExit()
+        // In the VM the runner's pkill and pgrep don't reach a shared Codex app-server the
+        // daemon started, so it is also stopped through the pid its manifest records.
+        let resolved = executable.resolvingSymlinksInPath().path
+        let servers = agentManifests().compactMap { entry -> [String: Any]? in
+            guard entry.kind == "codex", entry.manifest["resolvedExecutablePath"] as? String == resolved,
+                  let process = entry.manifest["process"] as? [String: Any], agentIsAlive(process) else { return nil }
+            return process
+        }
+        for server in servers {
+            if let pid = (server["pid"] as? NSNumber)?.int32Value { kill(pid, SIGTERM) }
+        }
+        XCTAssertTrue(waitUntil({ servers.allSatisfy { !self.agentIsAlive($0) } }, timeout: 10),
+                      "The fixture's Codex app-server should stop: \(executable.path)")
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
             let probe = Process()

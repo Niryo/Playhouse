@@ -513,6 +513,125 @@ class BridgeTestCases09:
         self.assertIn("BISCUIT-7 waited by the gate every evening. One night the boy finally came home.\n\nThe story is above.", visible)
         self.assertIn("What happened earlier?", visible)
         self.assertIn("OK.", visible)
+    # case-contract: test_codex_resume_recovers_visible_history | After a Codex turn and a provider restart, a normal Codex send resumes the saved thread without handoff context. If Codex then reports that it no longer has the thread, Playhouse starts a new Codex thread, saves its ID on the task, and sends the prior visible conversation from Playhouse's persisted transcript together with the new prompt; Codex completes the turn, the replacement is recorded in diagnostics, the next send continues on the new thread without handoff context, and fresh CLI/XPC history and the visible UI retain every turn.
+    def test_codex_resume_recovers_visible_history(self):
+        task = self.create_task("Codex resume recovery", roots=[self.primary])
+        codex = self.data_directory / "codex-fixture-resume-recovery"
+        turn_starts = Path(str(codex) + ".turn-starts")
+        reply = "Answers received: Blue / fixture-secret."
+
+        def last_turn_start(message):
+            starts = [json.loads(line) for line in turn_starts.read_text(encoding="utf-8").splitlines() if line.strip()]
+            return next(start for start in reversed(starts) if start["text"].endswith(message))
+
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="Start with Codex.")
+        original_thread = self.assert_success(self.call_cli("task", "get", task["id"])[0])["codexThreadID"]
+        self.assertTrue(original_thread)
+
+        # A working resume after a restart keeps the thread and sends no transcript.
+        self.restart_provider(codex)
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="Continue normally.")
+        normal = last_turn_start("Continue normally.")
+        self.assertEqual(normal["threadId"], original_thread)
+        self.assertEqual(normal["text"], "Continue normally.", "A working resume must not receive duplicate transcript context.")
+
+        # The test owns this fixture executable and its sidecar before arming the missing thread.
+        owner = self.data_directory / ".playhouse-codex-fixture-owner"
+        self.assertEqual(owner.read_text(encoding="utf-8"), "Playhouse test owns this Codex protocol fixture (v1).\n")
+        self.restart_provider(codex)
+        missing = Path(str(codex) + ".missing-thread")
+        missing.write_text("Playhouse test owns this missing-thread trigger.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="What happened earlier?")
+        self.assertFalse(missing.exists(), "Codex should have been asked to resume the missing thread.")
+        replacement = self.assert_success(self.call_cli("task", "get", task["id"])[0])["codexThreadID"]
+        self.assertTrue(replacement)
+        self.assertNotEqual(replacement, original_thread, "A missing thread is replaced by a new one saved on the task.")
+        recovered = last_turn_start("What happened earlier?")
+        self.assertEqual(recovered["threadId"], replacement)
+        prompt = recovered["text"]
+        self.assertIn("<playhouse-handoff-context>", prompt)
+        self.assertIn("User: Start with Codex.", prompt)
+        self.assertIn("User: Continue normally.", prompt)
+        self.assertIn(f"Codex: {reply}", prompt)
+        self.assertNotIn("User: What happened earlier?", prompt, "The new prompt is not repeated inside its own context.")
+        self.assertTrue(prompt.endswith("What happened earlier?"))
+        replaced = [
+            event for event in self.diagnostic_events()
+            if event.get("event") == "conversation.thread.replaced_missing" and event.get("taskID") == task["id"]
+        ]
+        self.assertEqual([(event["provider"], event["missingThreadID"], event["threadID"]) for event in replaced],
+                         [("codex", original_thread, replacement)])
+
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="And after that?")
+        following = last_turn_start("And after that?")
+        self.assertEqual(following["threadId"], replacement)
+        self.assertEqual(following["text"], "And after that?", "The replacement thread already has the conversation.")
+
+        history = self.assert_success(self.call_cli("conversation", "history", task["id"])[0])
+        user_texts = [message["text"] for message in history["messages"] if message["role"] == "user"]
+        for message in ("Start with Codex.", "Continue normally.", "What happened earlier?", "And after that?"):
+            self.assertIn(message, user_texts)
+        self.assertFalse(any("<playhouse-handoff-context>" in text for text in user_texts),
+                         "The transcript keeps the user's own prompt, not the context sent with it.")
+        self.assertEqual(sum(1 for message in history["messages"] if message["role"] == "assistant" and message["text"] == reply), 4)
+    # case-contract: test_codex_standalone_chat_resume_recovers_page_history | A Codex standalone chat page keeps its own thread: after a provider restart, a send on the page resumes that thread without page context. If Codex then reports that it no longer has the page's thread, Playhouse starts a new Codex thread, saves it as the page's provider session, and sends only that page's turns from Playhouse's stored chat pages as context together with the new prompt, never an earlier page's turns or the new prompt itself; the replacement is recorded in diagnostics, the next send on the page continues on the new thread without context, and the page keeps every turn in fresh CLI/XPC reads and the visible chat.
+    def test_codex_standalone_chat_resume_recovers_page_history(self):
+        executable, environment, chat_id = self.start_reattach_chat("codex-fixture-reattach-resume-recovery", provider="codex")
+
+        def active_page():
+            return self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+
+        def send(message, new_title=None):
+            self.send_filed_chat_turn(executable, environment, chat_id, message, new_title=new_title)
+            return json.loads(Path(str(executable) + ".reattach-ready").read_text(encoding="utf-8"))
+
+        send("Name a moon of Mars.")
+        earlier_page = active_page()
+        send("Tell me about volcanoes.", new_title="Volcanoes")
+        page = active_page()
+        self.assertNotEqual(page["id"], earlier_page["id"])
+        seeded = send("What about lava?")
+        page_thread = active_page()["providerSessionID"]
+        self.assertEqual(seeded["threadId"], page_thread, "The page's first turn starts the page's own thread.")
+
+        # A working resume after a restart keeps the page's thread and sends no page context.
+        self.restart_provider(executable)
+        normal = send("Continue normally.")
+        self.assertEqual(normal["threadId"], page_thread)
+        self.assertNotIn("<playhouse-handoff-context>", normal["text"], "A working resume must not receive the page again.")
+
+        self.restart_provider(executable)
+        missing = Path(str(executable) + ".missing-thread")
+        missing.write_text("Playhouse test owns this missing-thread trigger.\n", encoding="utf-8")
+        recovered = send("What happened earlier?")
+        self.assertFalse(missing.exists(), "Codex should have been asked to resume the page's missing thread.")
+        replacement = active_page()
+        self.assertEqual(replacement["id"], page["id"])
+        self.assertNotEqual(replacement["providerSessionID"], page_thread, "The page's missing thread is replaced by a new one saved on the page.")
+        self.assertEqual(recovered["threadId"], replacement["providerSessionID"])
+        prompt = recovered["text"]
+        self.assertIn("<playhouse-handoff-context>", prompt)
+        for earlier in ("Tell me about volcanoes.", "What about lava?", "Continue normally.", "After restart."):
+            self.assertIn(earlier, prompt, "The new thread receives the page's own turns.")
+        self.assertNotIn("Name a moon of Mars.", prompt, "An earlier page's turns never reach this page's thread.")
+        self.assertNotIn("User: What happened earlier?", prompt, "The new prompt is not repeated inside its own context.")
+        self.assertTrue(prompt.endswith("What happened earlier?"))
+        replaced = [
+            event for event in self.diagnostic_events()
+            if event.get("event") == "conversation.thread.replaced_missing" and event.get("taskID") == chat_id
+        ]
+        self.assertEqual([(event["provider"], event["missingThreadID"], event["threadID"]) for event in replaced],
+                         [("codex", page_thread, replacement["providerSessionID"])])
+
+        following = send("And after that?")
+        self.assertEqual(following["threadId"], replacement["providerSessionID"])
+        self.assertNotIn("<playhouse-handoff-context>", following["text"], "The replacement thread already has the page.")
+        self.assertEqual(
+            [text for text in self.chat_page_texts(page["id"], environment) if text != "Before restart." and text != "After restart."],
+            ["Tell me about volcanoes.", "What about lava?", "Continue normally.", "What happened earlier?", "And after that?"],
+            "The page keeps every turn, with the user's own prompts.",
+        )
+        self.assertEqual(self.chat_page_texts(earlier_page["id"], environment), ["Name a moon of Mars.", "Before restart.", "After restart."])
     # case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
     def test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary(self):
         task = self.create_task("Provider switch task")
