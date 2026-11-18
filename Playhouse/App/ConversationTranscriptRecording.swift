@@ -295,7 +295,7 @@ extension ConversationManager {
             onActivity: { activity in
                 guard !hidesRecoveryOutput else { return }
                 if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
-                // Claude Code's own threshold compaction, or a /compact the user or agent ran.
+                // Claude Code's own native auto-compaction, or a /compact the user or agent ran.
                 if provider == .claude, activity.isContextCompaction, activity.status == "completed", let details = activity.compaction {
                     self.recordContextCompaction(taskID: taskID, ContextCompactionEvent(
                         id: activity.id, recordedAt: .now, trigger: details.trigger,

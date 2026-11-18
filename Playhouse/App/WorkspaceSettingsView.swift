@@ -105,17 +105,14 @@ struct WorkspaceSettingsView: View {
                 }
             }
             Section("Context compaction") {
-                Toggle("Automatically compact task sessions", isOn: Binding(
+                Toggle("Playhouse compaction triggers", isOn: Binding(
                     get: { autoCompaction.enabled },
                     set: { value in saveCompaction(enabled: value) }
                 ))
                 .accessibilityIdentifier("auto-compaction-enabled-toggle")
-                Text("Claude sessions compact near prompt-cache expiry, on a cold resume, before model switches and at the threshold. Codex sessions compact before a prompt when the context reaches the threshold or the model changes; Codex does not expose the same cache-expiry signal.")
+                Text("Claude and Codex always auto-compact a full context themselves, at their own defaults. These triggers add Playhouse's compactions: Claude sessions compact near prompt-cache expiry, on a cold resume and before model switches; Codex sessions compact before model switches, as Codex does not expose the same cache-expiry signal.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                compactionField("Threshold", value: Binding(
-                    get: { autoCompaction.thresholdTokens }, set: { saveCompaction(thresholdTokens: $0) }
-                ), suffix: "tokens", id: "auto-compaction-threshold-field")
                 compactionField("Idle wait", value: Binding(
                     get: { autoCompaction.idleMinutes }, set: { saveCompaction(idleMinutes: $0) }
                 ), suffix: "minutes", id: "auto-compaction-idle-minutes-field")
@@ -233,9 +230,9 @@ struct WorkspaceSettingsView: View {
 
     @State private var compactionError: String?
 
-    private func saveCompaction(enabled: Bool? = nil, thresholdTokens: Int? = nil, idleMinutes: Int? = nil, minimumTokens: Int? = nil) {
+    private func saveCompaction(enabled: Bool? = nil, idleMinutes: Int? = nil, minimumTokens: Int? = nil) {
         do {
-            try WorkspaceSettingsManager().setContextCompaction(enabled: enabled, thresholdTokens: thresholdTokens, idleMinutes: idleMinutes, minimumTokens: minimumTokens)
+            try WorkspaceSettingsManager().setContextCompaction(enabled: enabled, idleMinutes: idleMinutes, minimumTokens: minimumTokens)
             autoCompaction = WorkspaceSettingsManager().contextCompaction
             compactionError = nil
         } catch { compactionError = error.localizedDescription }
@@ -247,8 +244,15 @@ struct WorkspaceSettingsView: View {
             compactionError = "Enter a whole number."
             return
         }
+        // Focus leaving a field the user did not change must not save the shown
+        // value, which can be stale while the field is focused and overwrite a
+        // value saved elsewhere (the CLI) in the meantime.
+        let shown = id == "auto-compaction-idle-minutes-field" ? autoCompaction.idleMinutes : autoCompaction.minimumTokens
+        guard draft != shown.formatted(.number) else {
+            autoCompaction = WorkspaceSettingsManager().contextCompaction
+            return
+        }
         switch id {
-        case "auto-compaction-threshold-field": saveCompaction(thresholdTokens: value)
         case "auto-compaction-idle-minutes-field": saveCompaction(idleMinutes: value)
         case "auto-compaction-minimum-field": saveCompaction(minimumTokens: value)
         default: break

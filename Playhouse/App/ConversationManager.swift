@@ -236,9 +236,6 @@ final class ConversationManager {
         if let mcp = clients.mcp {
             workspace.mcpBridge = mcp.bridge(roots: SkillRoot.roots(for: task))
         }
-        if task.conversationProvider == .claude, !task.isStandaloneChat {
-            workspace.claudeAutoCompactWindowTokens = settingsManager.contextCompaction.autoCompactWindowTokens
-        }
         return workspace
     }
 

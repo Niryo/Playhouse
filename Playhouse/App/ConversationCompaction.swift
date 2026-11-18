@@ -105,7 +105,7 @@ extension ConversationManager {
     }
 
     /// Codex exposes a manual app-server compaction request but no prompt-cache
-    /// expiry or post-compaction usage metadata. Its threshold/model-switch
+    /// expiry or post-compaction usage metadata. Its model-switch
     /// compaction therefore records the known pre-size and provider activity.
     func runCodexAutomaticCompaction(
         taskID: UUID, threadID: String, trigger: ContextCompactionTrigger,

@@ -82,6 +82,9 @@ class AgentInput:
 STDIN = AgentInput()
 
 
+# Where the fixture's simulated model auto-compacts on its own, as Claude Code does
+# for a 200k-token window when nothing at launch overrides it.
+FIXTURE_NATIVE_AUTO_COMPACT_TOKENS = 200000
 STORY = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
 STORY_CLOSING = "The story is above."
 INSPECTION_INTENT = "I'll inspect the workspace first."
@@ -702,6 +705,11 @@ def main():
         "bridgeServiceName": os.environ.get("PLAYHOUSE_BRIDGE_SERVICE_NAME"),
         "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
         "autoCompactWindow": os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+        # Any launch value that would turn off or shrink Claude Code's native auto-compaction.
+        "autoCompactOverrides": {
+            name: os.environ[name] for name in ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "DISABLE_AUTO_COMPACT", "DISABLE_COMPACT")
+            if name in os.environ
+        },
         # The non-built-in skills this launch would load, after bridging and overrides.
         "skills": [command["name"] for command in fixture_commands() if not command.get("builtin")],
     }
@@ -889,8 +897,11 @@ def main():
                 minutes_ago = int(match.group(2) or 0)
                 write_session_context(session_id, filled, minutes_ago)
                 turn["filledContextTokens"] = filled
-                configured_window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "0") or 0)
-                if configured_window and filled >= configured_window:
+                # Claude Code's native auto-compaction, at the fixture model's own window unless
+                # the launch shrinks it or turns it off.
+                configured_window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "0") or 0) or FIXTURE_NATIVE_AUTO_COMPACT_TOKENS
+                native_disabled = any(os.environ.get(name) for name in ("DISABLE_AUTO_COMPACT", "DISABLE_COMPACT"))
+                if not native_disabled and filled >= configured_window:
                     write_compaction_boundary(session_id, "auto", filled)
                     turn["autoCompacted"] = True
             if "compact twice mid turn" in user_text.lower():

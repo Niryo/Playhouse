@@ -324,7 +324,7 @@ def main():
     _session_state.turn_message = None
     _session_state.history_path = _AtomicHistoryPath(str(sys.argv[0]) + ".history")
     _session_state.fixture_state_directory = Path(os.environ.get("PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY", str(Path(sys.argv[0]).parent)))
-    if "-goal" in _session_state.mode:
+    if "-goal" in _session_state.mode or _session_state.mode.endswith("-native-compaction"):
         (_session_state.fixture_state_directory / f"{Path(sys.argv[0]).name}.launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
     _session_state.goal_path = _session_state.fixture_state_directory / f"{Path(sys.argv[0]).name}.goal"
     _session_state.async_mode = _session_state.mode.endswith("-async-question") or _session_state.mode.endswith("-async-question-queued")

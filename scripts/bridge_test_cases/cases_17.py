@@ -416,19 +416,23 @@ class BridgeTestCases17:
         self.assert_failure(single("--request", "0", expected_status=2), "invalid_argument")
         self.assert_failure(export("--request", "9", expected_status=3), "not_found")
         self.assert_failure(export("--format", "yaml", expected_status=2), "invalid_argument")
-    # case-contract: test_claude_auto_compaction_threshold_and_warm_idle | Claude task launches pass the configured token threshold to Claude Code, disabling automatic compaction removes the threshold environment value, and settings changes persist with invalid values rejected. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. Maintenance API token usage contributes to the task total. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Crossing 200,000 tokens emits a threshold compaction boundary visible in the conversation and Token Stats. The settings window shows and saves the enabled toggle, threshold, idle wait and minimum context, and its invalid-threshold alert leaves the saved value unchanged; negative and malformed integers are rejected without changing saved settings. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
-    def test_claude_auto_compaction_threshold_and_warm_idle(self):
+    # case-contract: test_claude_native_auto_compaction_and_warm_idle | Claude task launches never set CLAUDE_CODE_AUTO_COMPACT_WINDOW or any other value that shrinks or disables Claude Code's native auto-compaction, whether Playhouse's compaction triggers are on or off, and the settings no longer have a threshold: a threshold saved by an earlier build is ignored and settings load with their other values, the CLI rejects --threshold and saved settings stay unchanged. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. Maintenance API token usage contributes to the task total. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Claude Code's own auto-compaction at its native window emits a provider auto-compaction boundary visible in the conversation and labelled Provider auto-compaction in Token Stats. The settings window shows and saves the enabled toggle, idle wait and minimum context with no threshold field, and its invalid-value alert leaves the saved value unchanged; negative and malformed integers are rejected without changing saved settings. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
+    def test_claude_native_auto_compaction_and_warm_idle(self):
+        # Earlier builds saved a threshold; it must not break or leak into the loaded settings.
+        subprocess.run(["/usr/bin/defaults", "write", self.defaults_suite, "autoCompactionThresholdTokens", "-int", "100000"], check=True, capture_output=True)
         settings = self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"]
-        self.assertEqual(settings, {"enabled": True, "thresholdTokens": 200000, "idleMinutes": 50, "minimumTokens": 150000})
+        self.assertEqual(settings, {"enabled": True, "idleMinutes": 50, "minimumTokens": 150000})
         environment = self.install_claude_fixture("claude-fixture-auto-compaction")
         environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
         environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
         updated = self.assert_success(self.call_cli(
-            "settings", "set-auto-compaction", "--threshold", "200000", "--idle-minutes", "50", "--minimum", "150000"
+            "settings", "set-auto-compaction", "--idle-minutes", "50", "--minimum", "150000"
         )[0])
-        self.assertEqual(updated["autoCompaction"]["thresholdTokens"], 200000)
-        self.assert_failure(self.call_cli("settings", "set-auto-compaction", "--threshold", "-100000", expected_status=2)[0], "invalid_argument")
-        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"]["thresholdTokens"], 200000)
+        self.assertEqual(updated["autoCompaction"], settings)
+        rejected = self.call_cli("settings", "set-auto-compaction", "--threshold", "200000", expected_status=2)[0]
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("--threshold", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"], settings)
         task_id = self.assert_success(self.call_cli(
             "task", "create", "--title", "Warm compaction", "--prompt", "Fixture task description.",
             "--root", str(self.primary), "--provider", "claude"
@@ -437,7 +441,8 @@ class BridgeTestCases17:
         fixture = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
         history_path = Path(str(fixture) + ".history")
         history = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
-        self.assertEqual(history[-1]["autoCompactWindow"], "200000", "Claude receives the configured token threshold.")
+        self.assertIsNone(history[-1]["autoCompactWindow"], "Claude Code keeps its native auto-compact window.")
+        self.assertEqual(history[-1]["autoCompactOverrides"], {}, "Nothing at launch shrinks or disables Claude Code's native auto-compaction.")
 
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "fill context to 180000 tokens 51 minutes ago",
@@ -568,15 +573,19 @@ class BridgeTestCases17:
         self.assertFalse(background_sender.is_alive(), "The background task turn should settle after release.")
         self.assert_success(background_result["response"][0])
 
-        threshold_task = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Threshold compaction", "--prompt", "Fixture task description.",
+        native_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Native compaction", "--prompt", "Fixture task description.",
             "--root", str(self.primary), "--provider", "claude"
         )[0])["id"]
-        self.assert_success(self.call_cli("conversation", "send", threshold_task, "--message", "Hello.", extra_environment=environment)[0])
-        self.assert_success(self.call_cli("conversation", "send", threshold_task, "--message", "fill context to 210000 tokens", extra_environment=environment)[0])
-        threshold_events = self.assert_success(self.call_cli("task", "token-usage", threshold_task)[0])["contextCompactions"]
-        self.assertEqual(threshold_events[-1]["trigger"], "threshold", "Crossing the configured window emits an automatic compaction boundary.")
-        self.assertEqual((threshold_events[-1]["preTokens"], threshold_events[-1]["postTokens"]), (210000, 6000))
+        self.assert_success(self.call_cli("conversation", "send", native_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", native_task, "--message", "fill context to 210000 tokens", extra_environment=environment)[0])
+        native_events = self.assert_success(self.call_cli("task", "token-usage", native_task)[0])["contextCompactions"]
+        self.assertEqual(native_events[-1]["trigger"], "threshold", "Claude Code's native auto-compaction is recorded as the provider's own.")
+        self.assertEqual((native_events[-1]["preTokens"], native_events[-1]["postTokens"]), (210000, 6000))
+        native_rows = [item for item in self.assert_success(self.call_cli("conversation", "history", native_task, extra_environment=environment)[0])["activities"]
+                       if item.get("isContextCompaction")]
+        self.assertEqual([row["title"] for row in native_rows], ["Context compacted automatically"])
+        self.assertIn("Provider auto-compaction", native_rows[0]["detail"])
 
         self.assert_success(self.call_cli("settings", "set-auto-compaction", "--enabled", "false")[0])
         disabled = self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"]
@@ -590,6 +599,7 @@ class BridgeTestCases17:
         self.assert_success(self.call_cli("conversation", "send", disabled_task, "--message", "Hello.", extra_environment=environment)[0])
         history = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
         self.assertIsNone(history[-1]["autoCompactWindow"], "Disabled settings leave Claude's built-in auto-compaction alone.")
+        self.assertEqual(history[-1]["autoCompactOverrides"], {}, "Turning Playhouse's triggers off never turns off Claude Code's own auto-compaction.")
     # case-contract: test_claude_cold_resume_and_model_switch_compaction | A Claude session with more than the minimum context is compacted before the next real prompt after its cache has been idle for over 60 minutes, and again before a model switch. The cold-resume and model-switch triggers are persisted with context sizes, each `/compact` fixture turn precedes the real prompt, the visible maintenance rows precede their corresponding prompts, and a model switch runs `/compact` with the old model before the requested model starts. When the cache is expired and automatic compaction is disabled, the first resumed response with near-zero cache reads and a large cache write records one cache miss, visible in Token Stats. If Claude reports a compaction failure, the failed maintenance row is recorded, the event is marked unsuccessful, and the user's prompt still runs and appears in history. Failed attempts are labelled as failures in the conversation and Token Stats. Stopping during compaction prevents the submitted work from starting.
     def test_claude_cold_resume_and_model_switch_compaction(self):
         environment = self.install_claude_fixture("claude-fixture-resume-compaction")
@@ -685,7 +695,7 @@ class BridgeTestCases17:
         finally:
             hold.unlink(missing_ok=True)
             ready.unlink(missing_ok=True)
-    # case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event. A long turn that compacts twice shows each compaction where it happened: the first after the text and tool call written before it and before the summary message Claude Code continues from, the second between the messages written after the first and its own summary, never stacked after the turn's last message. Compaction rows stored without the message they follow are placed the same way, by when each compaction finished.
+    # case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A provider auto-compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event. A long turn that compacts twice shows each compaction where it happened: the first after the text and tool call written before it and before the summary message Claude Code continues from, the second between the messages written after the first and its own summary, never stacked after the turn's last message. Compaction rows stored without the message they follow are placed the same way, by when each compaction finished.
     def test_claude_compaction_shows_one_row(self):
         def compaction_rows(task_id, environment):
             history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])

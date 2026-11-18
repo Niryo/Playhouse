@@ -510,12 +510,22 @@ extension PlayhouseUITests {
         )["result"] as? [String: Any])
         XCTAssertEqual((page["request"] as? [String: Any])?["repeatedItems"] as? Int, 0)
     }
-    // case-contract: test_claude_auto_compaction_threshold_and_warm_idle | Claude task launches pass the configured token threshold to Claude Code, disabling automatic compaction removes the threshold environment value, and settings changes persist with invalid values rejected. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. Maintenance API token usage contributes to the task total. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Crossing 200,000 tokens emits a threshold compaction boundary visible in the conversation and Token Stats. The settings window shows and saves the enabled toggle, threshold, idle wait and minimum context, and its invalid-threshold alert leaves the saved value unchanged; negative and malformed integers are rejected without changing saved settings. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
-    func test_claude_auto_compaction_threshold_and_warm_idle() throws {
+    // case-contract: test_claude_native_auto_compaction_and_warm_idle | Claude task launches never set CLAUDE_CODE_AUTO_COMPACT_WINDOW or any other value that shrinks or disables Claude Code's native auto-compaction, whether Playhouse's compaction triggers are on or off, and the settings no longer have a threshold: a threshold saved by an earlier build is ignored and settings load with their other values, the CLI rejects --threshold and saved settings stay unchanged. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. Maintenance API token usage contributes to the task total. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Claude Code's own auto-compaction at its native window emits a provider auto-compaction boundary visible in the conversation and labelled Provider auto-compaction in Token Stats. The settings window shows and saves the enabled toggle, idle wait and minimum context with no threshold field, and its invalid-value alert leaves the saved value unchanged; negative and malformed integers are rejected without changing saved settings. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
+    func test_claude_native_auto_compaction_and_warm_idle() throws {
         var environment = try installClaudeFixture(named: "claude-fixture-ui-auto-compaction")
         environment["CLAUDE_CONFIG_DIR"] = dataDirectory.appendingPathComponent("claude-config").path
         environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        // Earlier builds saved a threshold; it must not break or leak into the loaded settings.
+        let legacyThreshold = Process()
+        legacyThreshold.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        legacyThreshold.arguments = ["write", preferencesSuiteName, "autoCompactionThresholdTokens", "-int", "100000"]
+        try legacyThreshold.run()
+        legacyThreshold.waitUntilExit()
+        XCTAssertEqual(legacyThreshold.terminationStatus, 0, "The earlier build's threshold should be saved before settings load.")
+        let legacySettings = try XCTUnwrap(((try runCLI(["settings", "get"])["result"] as? [String: Any])?["autoCompaction"] as? [String: Any]))
+        XCTAssertEqual(legacySettings as NSDictionary, ["enabled": true, "idleMinutes": 50, "minimumTokens": 150000] as NSDictionary,
+                       "A saved threshold from an earlier build is ignored.")
         let creation = try runCLI([
             "task", "create", "--title", "Warm compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])
@@ -524,7 +534,15 @@ extension PlayhouseUITests {
         _ = try runCLI(["conversation", "send", taskID, "--message", "Hello."], extraEnvironment: environment)
         let fixtureHistory = dataDirectory.appendingPathComponent("claude-fixture-ui-auto-compaction.history")
         let firstTurn = try XCTUnwrap(((try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistory)) as? [String: Any])?["turns"] as? [[String: Any]])?.first)
-        XCTAssertEqual(firstTurn["autoCompactWindow"] as? String, "200000")
+        XCTAssertTrue(firstTurn["autoCompactWindow"] == nil || firstTurn["autoCompactWindow"] is NSNull,
+                      "Claude Code must keep its native auto-compact window.")
+        XCTAssertEqual((firstTurn["autoCompactOverrides"] as? [String: Any])?.isEmpty, true,
+                       "Nothing at launch may shrink or disable Claude Code's native auto-compaction.")
+        let rejectedThreshold = try runCLI(["settings", "set-auto-compaction", "--threshold", "200000"], expectedStatus: 2)
+        XCTAssertEqual((rejectedThreshold["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        let savedSettings = try XCTUnwrap((try runCLI(["settings", "get"])["result"] as? [String: Any])?["autoCompaction"] as? [String: Any])
+        XCTAssertNil(savedSettings["thresholdTokens"], "The settings no longer have a threshold.")
+        XCTAssertEqual(savedSettings["idleMinutes"] as? Int, 50)
         _ = try runCLI([
             "conversation", "send", taskID, "--message", "fill context to 180000 tokens 51 minutes ago",
         ], extraEnvironment: environment)
@@ -569,26 +587,29 @@ extension PlayhouseUITests {
         app.typeKey(",", modifierFlags: .command)
         let preferences = settingsWindow
         XCTAssertTrue(preferences.waitToExist(timeout: 10))
-        for identifier in ["auto-compaction-enabled-toggle", "auto-compaction-threshold-field", "auto-compaction-idle-minutes-field", "auto-compaction-minimum-field"] {
+        for identifier in ["auto-compaction-enabled-toggle", "auto-compaction-idle-minutes-field", "auto-compaction-minimum-field"] {
             XCTAssertTrue(preferences.descendants(matching: .any).matching(identifier: identifier).firstMatch.waitToExist(timeout: 5), "Settings should show \(identifier).")
         }
-        let threshold = preferences.descendants(matching: .any).matching(identifier: "auto-compaction-threshold-field").firstMatch
-        XCTAssertEqual(threshold.value as? String, "200,000")
-        XCTAssertEqual((preferences.descendants(matching: .any).matching(identifier: "auto-compaction-enabled-toggle").firstMatch.value as? NSNumber)?.intValue, 1)
-        XCTAssertEqual(preferences.descendants(matching: .any).matching(identifier: "auto-compaction-idle-minutes-field").firstMatch.value as? String, "50")
-        XCTAssertEqual(preferences.descendants(matching: .any).matching(identifier: "auto-compaction-minimum-field").firstMatch.value as? String, "150,000")
+        XCTAssertFalse(preferences.descendants(matching: .any).matching(identifier: "auto-compaction-threshold-field").firstMatch.exists,
+                       "Settings must not offer a compaction threshold; each provider's native auto-compaction decides.")
+        let triggersToggle = preferences.descendants(matching: .any).matching(identifier: "auto-compaction-enabled-toggle").firstMatch
+        XCTAssertEqual((triggersToggle.value as? NSNumber)?.intValue, 1)
+        XCTAssertTrue(accessibleLabelOrValue(of: triggersToggle).contains("Playhouse compaction triggers")
+            || preferences.staticTexts["Playhouse compaction triggers"].exists,
+                      "The toggle should name only Playhouse's own compaction triggers.")
+        let idleMinutesField = preferences.descendants(matching: .any).matching(identifier: "auto-compaction-idle-minutes-field").firstMatch
+        XCTAssertEqual(idleMinutesField.value as? String, "50")
+        let minimumContextField = preferences.descendants(matching: .any).matching(identifier: "auto-compaction-minimum-field").firstMatch
+        XCTAssertEqual(minimumContextField.value as? String, "150,000")
+        let nativeExplanation = preferences.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@", "always auto-compact a full context themselves"
+        )).firstMatch
+        XCTAssertTrue(nativeExplanation.exists, "Settings should explain that native provider auto-compaction stays on.")
         let settingsScroll = preferences.scrollViews.firstMatch
-        XCTAssertTrue(scrollFullyIntoView(threshold, in: settingsScroll), "The default compaction threshold should be visible before its screenshot.")
-        attachScreenshot(named: "Context compaction settings and defaults")
-        attachElementScreenshot(threshold, named: "200k default compaction threshold setting")
-        threshold.click()
-        threshold.typeKey("a", modifierFlags: .command)
-        threshold.typeText("210000\r")
-        preferences.descendants(matching: .any).matching(identifier: "auto-compaction-idle-minutes-field").firstMatch.click()
-        XCTAssertTrue(waitUntil({
-            ((try? self.runCLI(["settings", "get"])["result"] as? [String: Any])?["autoCompaction"] as? [String: Any])?["thresholdTokens"] as? Int == 210000
-        }, timeout: 10), "The edited threshold should persist through the shared settings manager.")
-        try runCLI(["settings", "set-auto-compaction", "--threshold", "200000"])
+        XCTAssertTrue(scrollFullyIntoView(minimumContextField, in: settingsScroll), "The compaction settings should be visible before their screenshot.")
+        XCTAssertTrue(nativeExplanation.isHittable, "The native auto-compaction explanation should be on screen for its screenshot.")
+        attachScreenshot(named: "Context compaction settings without a threshold")
+        attachElementScreenshot(nativeExplanation, named: "Native auto-compaction stays on explanation")
         app.typeKey("w", modifierFlags: .command)
         try runCLI(["settings", "set-auto-compaction", "--enabled", "false"])
         let disabledTask = try XCTUnwrap((try runCLI([
@@ -599,33 +620,35 @@ extension PlayhouseUITests {
         let disabledAutoCompactWindow = disabledHistory.last?["autoCompactWindow"]
         XCTAssertTrue(
             disabledAutoCompactWindow == nil || disabledAutoCompactWindow is NSNull,
-            "Disabling the setting must remove Claude's threshold override."
+            "Disabling Playhouse's triggers must not set Claude's auto-compact window."
         )
+        XCTAssertEqual((disabledHistory.last?["autoCompactOverrides"] as? [String: Any])?.isEmpty, true,
+                       "Disabling Playhouse's triggers must not turn off Claude Code's native auto-compaction.")
 
         try runCLI(["settings", "set-auto-compaction", "--enabled", "true"])
-        let thresholdTask = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Threshold compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        let nativeTask = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Native compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
-        _ = try runCLI(["conversation", "send", thresholdTask, "--message", "Hello."], extraEnvironment: environment)
-        _ = try runCLI(["conversation", "send", thresholdTask, "--message", "fill context to 210000 tokens"], extraEnvironment: environment)
-        let thresholdUsage = try XCTUnwrap((try runCLI(["task", "token-usage", thresholdTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
-        XCTAssertEqual(thresholdUsage.last?["trigger"] as? String, "threshold")
-        XCTAssertEqual(thresholdUsage.last?["preTokens"] as? Int, 210000)
-        openTask(named: "Threshold compaction")
-        let thresholdRow = app.descendants(matching: .any).matching(NSPredicate(
+        _ = try runCLI(["conversation", "send", nativeTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", nativeTask, "--message", "fill context to 210000 tokens"], extraEnvironment: environment)
+        let nativeUsage = try XCTUnwrap((try runCLI(["task", "token-usage", nativeTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(nativeUsage.last?["trigger"] as? String, "threshold")
+        XCTAssertEqual(nativeUsage.last?["preTokens"] as? Int, 210000)
+        openTask(named: "Native compaction")
+        let nativeRow = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
         )).firstMatch
-        XCTAssertTrue(thresholdRow.waitToExist(timeout: 10), "Claude's auto-threshold boundary should be visible as automatic compaction.")
-        attachScreenshot(named: "Claude threshold compaction in the conversation")
-        attachElementScreenshot(thresholdRow, named: "Claude threshold compaction row")
+        XCTAssertTrue(nativeRow.waitToExist(timeout: 10), "Claude Code's native auto-compaction boundary should be visible as automatic compaction.")
+        XCTAssertTrue(nativeRow.label.contains("Provider auto-compaction"), "The row should credit the provider's own auto-compaction: \(nativeRow.label)")
+        attachScreenshot(named: "Claude native auto-compaction in the conversation")
+        attachElementScreenshot(nativeRow, named: "Claude native auto-compaction row")
         returnToBoard()
-        element("task-token-usage-counter-\(thresholdTask)").click()
-        let thresholdStat = app.staticTexts["token-stats-compaction-0"]
-        XCTAssertTrue(thresholdStat.waitToExist(timeout: 10))
-        let thresholdStatText = pluginText(thresholdStat).localizedLowercase
-        XCTAssertTrue(thresholdStatText.contains("threshold"))
-        attachScreenshot(named: "Token Stats records threshold compaction")
-        attachElementScreenshot(thresholdStat, named: "Token Stats shows threshold compaction")
+        element("task-token-usage-counter-\(nativeTask)").click()
+        let nativeStat = app.staticTexts["token-stats-compaction-0"]
+        XCTAssertTrue(nativeStat.waitToExist(timeout: 10))
+        XCTAssertTrue(pluginText(nativeStat).contains("Provider auto-compaction"), "Token Stats labels the provider's own auto-compaction.")
+        attachScreenshot(named: "Token Stats records provider auto-compaction")
+        attachElementScreenshot(nativeStat, named: "Token Stats shows provider auto-compaction")
         element("close-token-stats-button").click()
 
         app.typeKey(",", modifierFlags: .command)
@@ -646,23 +669,23 @@ extension PlayhouseUITests {
             return compaction["idleMinutes"] as? Int == 49 && compaction["minimumTokens"] as? Int == 160000 && compaction["enabled"] as? Bool == true
         }, timeout: 10), "The visible idle and minimum fields should persist through the shared settings manager.")
         try runCLI(["settings", "set-auto-compaction", "--idle-minutes", "50", "--minimum", "150000"])
-        let invalidThreshold = settings.descendants(matching: .any).matching(identifier: "auto-compaction-threshold-field").firstMatch
-        invalidThreshold.click(); invalidThreshold.typeKey("a", modifierFlags: .command); invalidThreshold.typeText("99999\r")
+        let invalidIdle = settings.descendants(matching: .any).matching(identifier: "auto-compaction-idle-minutes-field").firstMatch
+        invalidIdle.click(); invalidIdle.typeKey("a", modifierFlags: .command); invalidIdle.typeText("60\r")
         let settingsError = app.sheets.firstMatch
-        XCTAssertTrue(settingsError.waitToExist(timeout: 5), "The settings form should report a rejected threshold.")
+        XCTAssertTrue(settingsError.waitToExist(timeout: 5), "The settings form should report a rejected idle wait.")
         XCTAssertTrue(
             settingsError.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "Couldn't save")).firstMatch.exists,
             "The validation sheet should identify the failed context compaction setting."
         )
         let savedAfterRejection = try XCTUnwrap(try runCLI(["settings", "get"])["result"] as? [String: Any])
-        XCTAssertEqual((savedAfterRejection["autoCompaction"] as? [String: Any])?["thresholdTokens"] as? Int, 200000,
+        XCTAssertEqual((savedAfterRejection["autoCompaction"] as? [String: Any])?["idleMinutes"] as? Int, 50,
                        "A rejected visible value must leave persisted settings unchanged.")
         attachScreenshot(named: "Context compaction setting validation alert")
         attachElementScreenshot(settingsError, named: "Invalid context compaction setting shows a save error")
         settingsError.buttons["OK"].click()
         for (identifier, invalid, key, expected) in [
-            ("auto-compaction-threshold-field", "-100000", "thresholdTokens", 200000),
-            ("auto-compaction-threshold-field", "200000x", "thresholdTokens", 200000),
+            ("auto-compaction-minimum-field", "-100000", "minimumTokens", 150000),
+            ("auto-compaction-minimum-field", "200000x", "minimumTokens", 150000),
             ("auto-compaction-idle-minutes-field", "5.5", "idleMinutes", 50),
         ] {
             let field = settings.descendants(matching: .any).matching(identifier: identifier).firstMatch
