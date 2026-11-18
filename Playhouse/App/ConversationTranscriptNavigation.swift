@@ -308,6 +308,7 @@ extension TaskConversationView {
             hasher.combine(message.id == context.activityDisclosureAnchorID)
             hasher.combine(isResponding && message.role == .assistant && message.text.isEmpty)
             hasher.combine(compactionCount)
+            hasher.combine(turnTokenUsageShown(for: message)?.totalTokens)
             return hasher.finalize()
         }
     }
@@ -337,6 +338,9 @@ extension TaskConversationView {
         }
         transcriptEntry(message)
             .id(message.id)
+        if let usage = turnTokenUsageShown(for: message) {
+            turnTokenUsageRow(message, usage: usage)
+        }
         ForEach(context.boundariesByAnchorID[message.id] ?? []) { boundary in
             providerBoundaryRow(boundary)
         }
@@ -365,6 +369,31 @@ extension TaskConversationView {
             contextCompactionTimelineRow(activity)
         }
     }
+    /// The standalone chat shows each turn's tokens under the turn's last reply, where the
+    /// window can open Token Stats from it.
+    func turnTokenUsageShown(for message: ConversationMessage) -> ConversationTokenUsage? {
+        guard task.isStandaloneChat, showTokenStats != nil else { return nil }
+        return message.turnTokenUsage
+    }
+
+    /// A reply's small token counter, the task item's counter button, opening the chat's Token Stats.
+    func turnTokenUsageRow(_ message: ConversationMessage, usage: ConversationTokenUsage) -> some View {
+        let number = IntegerFormatStyle<Int>().grouping(.automatic)
+        let description = "This turn used \(usage.totalTokens.formatted(number)) tokens: "
+            + "\(usage.inputTokens.formatted(number)) input, \(usage.outputTokens.formatted(number)) output, "
+            + "\(usage.cacheReadTokens.formatted(number)) cache read, \(usage.cacheCreationTokens.formatted(number)) cache write"
+        return AtomStack(props: StackProps(axis: "h"), common: AtomCommon(fillWidth: true)) {
+            TokenCounterButton(
+                tokens: TaskItemModel.Tokens(
+                    compact: "\(TokenUsageHeatmap.compact(usage.totalTokens)) tokens", color: "secondary", description: description
+                ),
+                testID: "message-token-usage-\(message.id)",
+                action: { showTokenStats?(TokenStatsTarget(id: task.id, title: task.title)) }
+            )
+            AtomSpacer(props: SpacerProps(minLength: 0))
+        }
+    }
+
     func goalAchievementTimelineRow(_ entry: GoalAchievementTimelineEntry) -> some View {
         AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(testID: "goal-achievement-timeline-row", fillWidth: true, paddingY: 4)) {
             AtomIcon(props: IconProps(name: "checkmark.circle", size: 18, weight: "regular", color: "secondary"))
