@@ -70,10 +70,6 @@ The Changes panel lists every file the agent touched. Click one to open a side-b
 
 Select any part of a reply and ask a quick question about it in a side chat. The answer stays next to the selection and never derails the main conversation or the agent's context.
 
-<p align="center">
-  <img src="docs/images/side-chat.png" width="544" alt="A side chat asking why only Safari fires the change event early">
-</p>
-
 ### Switch providers seamlessly
 
 Choose Claude Code or Codex per task, and switch in the middle of a conversation. The transcript carries over, so the other agent continues exactly where the first one stopped. Models, reasoning effort, plan mode, skills, rules and MCP servers work across both.
