@@ -578,7 +578,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Codex chat page keeps every turn after a relaunch")
     }
 
-    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, at most 15 in view at a time with no scroll bar, reading older labels only as the column is scrolled up; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right without narrowing them, widening the chat sidebar by the labels' room, which pushes the board's columns right, instead of reflowing the messages' text, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, well apart, at most 10 in view at a time with no scroll bar, reading only the 10 newest labels at first and older ones, 10 at a time, only as the column is scrolled up, and shown as soon as the chat opens without waiting for the provider's model list, with the store's pages indexed by chat and age so reading the newest few never sorts the whole chat; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right without narrowing them, widening the chat sidebar by the labels' room, which pushes the board's columns right, instead of reflowing the messages' text, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_anchors_jump_and_recall() throws {
         executionTimeAllowance = 360 // It walks 45 pages: jumps, Latest, Jump to bottom, recall, a turn and a relaunch.
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-anchors")
@@ -609,6 +609,10 @@ extension PlayhouseUITests {
         }
         XCTAssertEqual(pageIDs.count, 45, "Each turn opens its own titled page.")
 
+        // A cold start's model list can take seconds; this one takes 8. The chat's pages are
+        // read without waiting for it.
+        let modelsDelay = URL(fileURLWithPath: executable.path + ".models-delay")
+        try Data().write(to: modelsDelay)
         launchApp(defaultParent: nil)
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
@@ -670,7 +674,9 @@ extension PlayhouseUITests {
         // leading edge, and the messages keep their width.
         let handle = element("chat-page-anchors-handle")
         let lock = element("chat-page-anchors-lock")
-        XCTAssertTrue(handle.waitToExist(timeout: 10), "The chat offers its pages behind a handle at the transcript's edge.")
+        XCTAssertTrue(handle.waitToExist(timeout: 4),
+                      "The chat offers its pages behind a handle at the transcript's edge as soon as it opens, while the model list is still read.")
+        try FileManager.default.removeItem(at: modelsDelay)
         XCTAssertFalse(lock.exists, "The folded handle shows no lock.")
         XCTAssertFalse(anchors.exists, "Unlocked labels stay folded until the handle is hovered.")
         XCTAssertEqual(handle.value as? String, "folded")
@@ -761,7 +767,7 @@ extension PlayhouseUITests {
 
         // The labels sit left of the transcript: newest pages only, compact, long titles cut.
         XCTAssertTrue(anchors.waitToExist(timeout: 10), "The chat shows its page labels beside the transcript.")
-        XCTAssertEqual(anchors.value as? String, "40 pages, older pages above", "Only the newest pages' labels are read at first.")
+        XCTAssertEqual(anchors.value as? String, "10 pages, older pages above", "Only the 10 newest pages' labels are read at first.")
         // The newest turn's 18 earlier replies fold into its Worked for row, leaving 126 of the 144.
         XCTAssertTrue(waitUntil({ transcriptValue().hasPrefix("Showing latest ") && transcriptValue().hasSuffix(" of 126 messages") }, timeout: 10), transcriptValue())
         XCTAssertTrue(waitUntil({ label("Harbor").exists && label(longTitle).exists }, timeout: 5), "The newest pages' labels are in view.")
@@ -769,25 +775,34 @@ extension PlayhouseUITests {
         XCTAssertEqual(label(longTitle).label, longTitle)
         XCTAssertLessThanOrEqual(anchors.frame.width, 130, "The labels stay compact.")
         XCTAssertGreaterThanOrEqual(anchors.frame.width, 100, "The labels have room for a short title.")
-        // A window tall enough that the 15 labels, not the transcript's height, bound the column.
+        // A window tall enough that the 10 labels, not the transcript's height, bound the column.
         let window = app.windows.firstMatch
         let bottomEdge = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1)).withOffset(CGVector(dx: 0, dy: -2))
         bottomEdge.press(forDuration: 0.2, thenDragTo: bottomEdge.withOffset(CGVector(dx: 0, dy: 400)))
         XCTAssertTrue(waitUntil({ scrollView.frame.height >= 452 }, timeout: 5),
-                      "The window should grow until the transcript has room for more than 15 labels; transcript height \(scrollView.frame.height).")
+                      "The window should grow until the transcript has room for more than 10 labels; transcript height \(scrollView.frame.height).")
         XCTAssertEqual(anchors.frame.midY, scrollView.frame.midY, accuracy: 4, "The labels sit halfway down the transcript.")
         let labelsInView = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-"))
             .allElementsBoundByIndex.filter { anchors.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }.count
-        XCTAssertEqual(labelsInView, 15, "Exactly the 15 newest labels are in view.")
-        XCTAssertEqual(anchors.frame.height, 390, accuracy: 3, "The column is as tall as 15 labels.")
-        XCTAssertLessThan(anchors.frame.height, scrollView.frame.height - 52 - 8, "The column stops at 15 labels with transcript height to spare.")
+        XCTAssertEqual(labelsInView, 10, "Exactly the 10 newest labels are in view.")
+        XCTAssertEqual(anchors.frame.height, 332, accuracy: 3, "The column is as tall as 10 labels.")
+        XCTAssertLessThan(anchors.frame.height, scrollView.frame.height - 52 - 8, "The column stops at 10 labels with transcript height to spare.")
         XCTAssertEqual(anchors.scrollBars.count, 0, "The labels scroll without a scroll bar.")
         XCTAssertLessThanOrEqual(label(longTitle).frame.maxX, anchors.frame.maxX + 1, "A long title is cut to the labels' width instead of running under the messages.")
         XCTAssertEqual(label(longTitle).frame.height, label("Harbor").frame.height, accuracy: 1, "A long title stays on one line, cut with an ellipsis.")
-        XCTAssertGreaterThan(label("Harbor").frame.minY - label("Glaciers").frame.maxY, 10, "Labels are set apart from each other, newest lowest.")
+        XCTAssertEqual(label("Harbor").frame.minY - label("Glaciers").frame.maxY, 20, accuracy: 1, "Labels are well apart from each other, newest lowest.")
         XCTAssertFalse(label("Topic 03").exists, "An older page has no label until the labels are scrolled up to it.")
         XCTAssertTrue(waitUntil({ currentLabelTitle() == "Harbor" }, timeout: 10), "The label of the page in view is marked; current=\(String(describing: currentLabelTitle())).")
         XCTAssertFalse(element("chat-jump-to-latest").exists)
+        XCTAssertEqual(anchors.value as? String, "10 pages, older pages above", "Growing the window reads no more labels.")
+        attachScreenshot(named: "chat-page-anchors-newest-ten")
+        attachElementScreenshot(anchors, named: "chat-page-anchors-newest-ten-closeup")
+        // Scrolling up past the oldest label read so far reads the next 10, and no more.
+        anchors.scroll(byDeltaX: 0, deltaY: 60)
+        XCTAssertTrue(waitUntil({ anchors.value as? String == "20 pages, older pages above" }, timeout: 5),
+                      "Scrolling the labels up reads 10 older ones; labels \(String(describing: anchors.value)).")
+        XCTAssertFalse(waitUntil({ anchors.value as? String != "20 pages, older pages above" }, timeout: 1),
+                      "One scroll reads one batch; labels \(String(describing: anchors.value)).")
 
         // Agent replies end where the user's messages end, which is the room the labels use.
         let question = scrollView.descendants(matching: .any)
@@ -935,7 +950,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(anchors.exists)
     }
 
-    // case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest forty labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    // case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest ten labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_labels_search() throws {
         executionTimeAllowance = 240
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-search")
@@ -952,7 +967,7 @@ extension PlayhouseUITests {
         _ = try runCLI(["settings", "clear-parent"])
         let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
 
-        // The oldest page lies beyond the newest forty the labels read at first.
+        // The oldest page lies beyond the newest ten the labels read at first.
         let topics = ["Kyoto temples"] + (1...42).map { String(format: "Topic %02d", $0) } + ["Kyoto ramen", "Harbor"]
         for title in topics {
             _ = try runCLI(["conversation", "send", chatID, "--message", "anchor-page:\(title.replacingOccurrences(of: " ", with: "-")):1"])

@@ -477,7 +477,8 @@ extension TaskConversationView {
     }
 
     func refreshChatPageStatus() {
-        guard let chatManager = try? StandaloneChatManager(dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]) else {
+        // The labels' own store, which stays open: this runs at every turn's end.
+        guard let chatManager = chatPageAnchors.chatManager() else {
             chatPagesByTurnID = [:]
             chatPageAnchors.clear()
             return

@@ -765,6 +765,10 @@ struct TaskConversationView: View {
             } else {
                 Task { try await readLatestHistoryPage() }
             }
+            // The chat's pages are a quick local read, so the labels and the transcript's page
+            // separators are ready for its first frame rather than waiting on the provider's
+            // model list below, which can take seconds on a cold start.
+            if task.isStandaloneChat { refreshChatPageStatus() }
             await withTaskCancellationHandler {
                 let reconciled = isReadOnly ? nil : try? await conversationManager.reconcileLifecycleStatusOnOpen(taskID: task.id)
                 if !isReadOnly, let request = providerPendingUserInputRequest, request.threadID == task.activeConversationID {
@@ -778,7 +782,6 @@ struct TaskConversationView: View {
                 refreshQueuedMessages()
                 await loadModels()
             }
-            if task.isStandaloneChat { refreshChatPageStatus() }
             if isNewTask {
                 await Task.yield()
                 isComposerFocused = true

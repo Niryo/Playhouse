@@ -5,8 +5,8 @@ import SwiftUI
 @MainActor
 @Observable
 final class ChatPageAnchorsModel {
-    /// Pages read at a time.
-    static let pageBatchSize = 40
+    /// Pages read at a time: as many as the column shows, so opening it reads only those.
+    static let pageBatchSize = ChatPageAnchorsLayout.visibleLabelCount
 
     /// Pages that hold messages, oldest first.
     private(set) var pages: [StandaloneChatPage] = []
@@ -24,6 +24,9 @@ final class ChatPageAnchorsModel {
     @ObservationIgnored private var searchLimit = ChatPageAnchorsModel.pageBatchSize
     /// Whether matching pages remain beyond the ones the search read.
     private(set) var hasMoreSearchResults = false
+    /// The chat store, opened once: scrolling the labels and typing in their search read it
+    /// again and again, and opening it runs its schema migration.
+    @ObservationIgnored private var openedChatManager: StandaloneChatManager?
 
     nonisolated init() {}
 
@@ -32,6 +35,7 @@ final class ChatPageAnchorsModel {
     var hasOlderShownPages: Bool { searchResults == nil ? hasOlderPages : hasMoreSearchResults }
 
     func reload(from chatManager: StandaloneChatManager) {
+        openedChatManager = chatManager
         // One page past the limit tells whether older ones remain.
         let newest = (try? chatManager.listPages(limit: limit + 1)) ?? []
         let loaded = Array(newest.prefix(limit).filter { $0.messageCount > 0 }.reversed())
@@ -48,7 +52,7 @@ final class ChatPageAnchorsModel {
     }
 
     func loadOlder() {
-        guard let chatManager = Self.chatManager() else { return }
+        guard let chatManager = chatManager() else { return }
         if searchResults != nil {
             guard hasMoreSearchResults else { return }
             searchLimit += Self.pageBatchSize
@@ -65,7 +69,7 @@ final class ChatPageAnchorsModel {
         guard text != searchText else { return }
         searchText = text
         searchLimit = Self.pageBatchSize
-        if let chatManager = Self.chatManager() {
+        if let chatManager = chatManager() {
             reloadSearch(from: chatManager)
         }
     }
@@ -87,19 +91,20 @@ final class ChatPageAnchorsModel {
     /// the pages down to it, so its label exists to be marked.
     func setCurrentPage(_ pageID: String) {
         guard currentPageID != pageID else { return }
-        if !pages.contains(where: { $0.id == pageID }), hasOlderPages, let chatManager = Self.chatManager() {
-            var attempts = 0
-            while hasOlderPages, attempts < 25, !pages.contains(where: { $0.id == pageID }) {
+        if !pages.contains(where: { $0.id == pageID }), hasOlderPages, let chatManager = chatManager() {
+            while hasOlderPages, !pages.contains(where: { $0.id == pageID }) {
                 limit += Self.pageBatchSize
                 reload(from: chatManager)
-                attempts += 1
             }
         }
         currentPageID = pageID
     }
 
-    static func chatManager() -> StandaloneChatManager? {
-        try? StandaloneChatManager(dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"])
+    /// The chat store the labels read, opened on first use.
+    func chatManager() -> StandaloneChatManager? {
+        if let openedChatManager { return openedChatManager }
+        openedChatManager = try? StandaloneChatManager(dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"])
+        return openedChatManager
     }
 }
 
@@ -113,10 +118,10 @@ enum ChatPageAnchorsLayout {
     static let transcriptPadding: CGFloat = 28
     static let transcriptMaxWidth: CGFloat = 820
 
-    /// Labels in view at a time; older ones are scrolled to.
-    static let visibleLabelCount = 15
+    /// Labels in view at a time; older ones are read as they are scrolled to.
+    static let visibleLabelCount = 10
     static let labelHeight: CGFloat = 14
-    static let labelSpacing: CGFloat = 12
+    static let labelSpacing: CGFloat = 20
     static let labelsVerticalPadding: CGFloat = 6
     /// The gap between the last label and the jump-to-bottom button below it.
     static let jumpToBottomSpacing: CGFloat = 4
@@ -175,6 +180,14 @@ extension EnvironmentValues {
     }
 }
 
+/// Where the marker above the oldest label read so far ends, in the labels' scroll view.
+private struct ChatPageAnchorsOlderEdgeKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = value ?? nextValue()
+    }
+}
+
 /// The standalone chat's page labels: a narrow column of page titles beside the transcript,
 /// well apart from each other and a few at a time; scrolling it, with no scroll bar, reaches
 /// older ones. Clicking one jumps to its page; the page the transcript shows is marked, and
@@ -187,17 +200,31 @@ struct ChatPageAnchorsView: View {
     let jumpToBottom: () -> Void
     /// Whether the search above the labels has the keyboard, which keeps unlocked labels out.
     var searchFocusChanged: (Bool) -> Void = { _ in }
+    @State private var olderEdge = OlderEdge()
+    private static let scrollSpace = "chat-page-anchors-scroll"
+
+    /// Whether the marker above the oldest label read is in view, and a count of its moves in
+    /// and out of view that cancels a pending read, kept out of SwiftUI's state.
+    final class OlderEdge {
+        var isInView = false
+        var generation = 0
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: ChatPageAnchorsLayout.labelSpacing) {
                     if model.hasOlderShownPages {
-                        // Reaching the oldest label read so far reads the ones before it.
+                        // Scrolling up to the oldest label read so far reads the ones before it.
                         Color.clear
                             .frame(height: 1)
                             .id("older-\(model.shownPages.count)")
-                            .onAppear { loadOlder(proxy) }
+                            .background(GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: ChatPageAnchorsOlderEdgeKey.self,
+                                    value: geometry.frame(in: .named(Self.scrollSpace)).maxY
+                                )
+                            })
                     }
                     ForEach(model.shownPages, id: \.id) { page in
                         ChatPageAnchorLabel(
@@ -222,6 +249,12 @@ struct ChatPageAnchorsView: View {
             }
             // `.hidden` still shows a bar when the system always shows scroll bars.
             .scrollIndicators(.never)
+            .coordinateSpace(name: Self.scrollSpace)
+            // The marker's place, not its appearing: the stack builds rows just outside the
+            // column, so the marker can appear while the reader is still at the newest labels.
+            .onPreferenceChange(ChatPageAnchorsOlderEdgeKey.self) { edge in
+                olderEdgeMoved(inView: (edge ?? 0) > 0, proxy)
+            }
             .defaultScrollAnchor(.bottom)
             .accessibilityLabel("Chat pages")
             .accessibilityValue("\(model.shownPages.count) pages\(model.hasOlderShownPages ? ", older pages above" : "")")
@@ -248,6 +281,23 @@ struct ChatPageAnchorsView: View {
         .overlay(alignment: .bottom) {
             ChatJumpToBottomButton(action: jumpToBottom)
                 .alignmentGuide(.bottom) { $0[.top] - ChatPageAnchorsLayout.jumpToBottomSpacing }
+        }
+    }
+
+    /// Reads older labels once each time the marker comes into view. A lazy stack sizes itself
+    /// over several layout passes, which can show the marker for a moment, as can the labels
+    /// read laying out before the column scrolls back to the one the reader reached; so the
+    /// marker counts as reached only while it is still in view 0.15 s later.
+    private func olderEdgeMoved(inView: Bool, _ proxy: ScrollViewProxy) {
+        let edge = olderEdge
+        guard inView != edge.isInView else { return }
+        edge.isInView = inView
+        edge.generation += 1
+        guard inView else { return }
+        let generation = edge.generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard edge.generation == generation else { return }
+            loadOlder(proxy)
         }
     }
 
