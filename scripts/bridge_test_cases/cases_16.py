@@ -495,46 +495,38 @@ class BridgeTestCases16:
         self.assertEqual(login["loginURL"], "https://example.invalid/codex-login")
         wait_for("codex", lambda state: state["loggedIn"] is True and state.get("account") == "codex-second@example.com",
                  "A Codex login should restore the account.")
-    # case-contract: test_codex_context_compaction_threshold_and_model_switch | With a configured 100,000-token threshold and 150,000-token minimum, a Codex task reporting 120,000 context tokens calls thread/compact/start before its next prompt, records one successful automatic threshold event with a labelled activity, and adds no empty assistant turn. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and waits for the matching successful terminal notification before turn/start. A failure after the initial acknowledgment is recorded as unsuccessful while the prompt still runs. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
-    def test_codex_context_compaction_threshold_and_model_switch(self):
-        environment = self.install_codex_fixture("codex-fixture-auto-threshold")
-        environment["PLAYHOUSE_E2E_CODEX_CONTEXT_TOKENS"] = "120000"
+    # case-contract: test_codex_context_compaction_native_and_model_switch | With a 150,000-token minimum, a Codex task reporting 900,000 context tokens runs its next same-model prompt without calling thread/compact/start or recording a compaction event, leaving the large context to Codex's native auto-compaction, and Playhouse passes no model_auto_compact_token_limit in its thread config. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and waits for the matching successful terminal notification before turn/start. A failure after the initial acknowledgment is recorded as unsuccessful while the prompt still runs. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
+    def test_codex_context_compaction_native_and_model_switch(self):
+        environment = self.install_codex_fixture("codex-fixture-native-compaction")
+        environment["PLAYHOUSE_E2E_CODEX_CONTEXT_TOKENS"] = "900000"
         context_tokens_file = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".context-tokens")
-        context_tokens_file.write_text("120000", encoding="utf-8")
-        self.assert_success(self.call_cli(
-            "settings", "set-auto-compaction", "--threshold", "100000", "--minimum", "150000"
-        )[0])
-        task_id = self.create_task("Codex threshold compaction", provider="codex")["id"]
+        context_tokens_file.write_text("900000", encoding="utf-8")
+        self.assert_success(self.call_cli("settings", "set-auto-compaction", "--minimum", "150000")[0])
+        task_id = self.create_task("Codex native compaction", provider="codex")["id"]
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "First Codex turn.", "--model", "gpt-6-sol",
             extra_environment=environment,
         )[0])
         self.assert_success(self.call_cli(
-            "conversation", "send", task_id, "--message", "Continue after the context threshold.", "--model", "gpt-6-sol",
+            "conversation", "send", task_id, "--message", "Continue with a large context.", "--model", "gpt-6-sol",
             extra_environment=environment,
         )[0])
         usage = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
-        threshold_events = usage["contextCompactions"]
-        self.assertEqual(len(threshold_events), 1)
-        self.assertEqual(threshold_events[0]["provider"], "codex")
-        self.assertEqual(threshold_events[0]["trigger"], "threshold")
-        self.assertEqual(threshold_events[0]["preTokens"], 120000)
-        self.assertTrue(threshold_events[0]["succeeded"])
+        self.assertEqual(usage["contextCompactions"], [], "A large Codex context with no model switch is left to Codex's native auto-compaction.")
         history_path = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".history")
         history = json.loads(history_path.read_text(encoding="utf-8"))
         methods = [event["method"] for event in history["rpcOrder"]]
-        self.assertEqual(methods, ["turn/start", "thread/compact/start", "compaction/completed", "turn/start"])
+        self.assertEqual(methods, ["turn/start", "turn/start"], "Playhouse must not compact a same-model Codex turn on context size.")
+        self.assertIn("threadStartConfig", history, "The fixture must record the thread config Playhouse sent.")
+        self.assertNotIn("auto_compact", json.dumps(history["threadStartConfig"] or {}),
+                         "The thread config must leave Codex's model_auto_compact_token_limit to the user's config or Codex's default.")
+        launch_arguments = json.loads(Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".launch-args").read_text(encoding="utf-8"))
+        self.assertFalse(any("auto_compact" in argument for argument in launch_arguments), launch_arguments)
         conversation = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
-        rows = [item for item in conversation["activities"] if item.get("isContextCompaction")]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["title"], "Context compacted automatically")
-        self.assertFalse(any(message.get("role") == "assistant" and not message.get("text", "").strip()
-                             for message in conversation["messages"]))
+        self.assertEqual([item for item in conversation["activities"] if item.get("isContextCompaction")], [])
+        self.assertIn("Continue with a large context.", [message["text"] for message in conversation["messages"]])
 
         context_tokens_file.write_text("220000", encoding="utf-8")
-        self.assert_success(self.call_cli(
-            "settings", "set-auto-compaction", "--threshold", "300000", "--minimum", "150000"
-        )[0])
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "Grow context before switching models.", "--model", "gpt-6-sol",
             extra_environment=environment,

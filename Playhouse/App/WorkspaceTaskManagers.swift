@@ -199,10 +199,10 @@ final class WorkspaceSettingsManager {
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "cpuUsageColorMax", "value": String(value)])
     }
 
-    /// Automatic context compaction defaults: on, at a 200k threshold, compacting
-    /// Claude sessions after 50 idle minutes when they hold at least 150k tokens.
-    /// Codex uses the threshold and model-switch triggers because its app-server
-    /// has no prompt-cache expiry signal.
+    /// Playhouse's own compaction triggers default on, compacting Claude sessions
+    /// after 50 idle minutes when they hold at least 150k tokens. Codex uses only
+    /// the model-switch trigger because its app-server has no prompt-cache expiry
+    /// signal. Native provider auto-compaction is never configured here.
     var contextCompaction: ContextCompactionSettings {
         let defaults = defaults
         func stored(_ key: String, _ range: ClosedRange<Int>, _ fallback: Int) -> Int {
@@ -211,7 +211,6 @@ final class WorkspaceSettingsManager {
         }
         return ContextCompactionSettings(
             enabled: defaults.object(forKey: WorkspaceSettings.autoCompactionEnabledKey) as? Bool ?? true,
-            thresholdTokens: stored(WorkspaceSettings.autoCompactionThresholdKey, ContextCompactionSettings.thresholdRange, ContextCompactionSettings.defaultThresholdTokens),
             idleMinutes: stored(WorkspaceSettings.autoCompactionIdleMinutesKey, ContextCompactionSettings.idleMinutesRange, ContextCompactionSettings.defaultIdleMinutes),
             minimumTokens: stored(WorkspaceSettings.autoCompactionMinimumKey, ContextCompactionSettings.minimumTokensRange, ContextCompactionSettings.defaultMinimumTokens)
         )
@@ -219,10 +218,9 @@ final class WorkspaceSettingsManager {
 
     /// Changes any of the compaction settings given; a value out of its range
     /// is rejected before anything is stored.
-    func setContextCompaction(enabled: Bool? = nil, thresholdTokens: Int? = nil, idleMinutes: Int? = nil, minimumTokens: Int? = nil) throws {
+    func setContextCompaction(enabled: Bool? = nil, idleMinutes: Int? = nil, minimumTokens: Int? = nil) throws {
         var fields = ["setting": "contextCompaction"]
         if let enabled { fields["enabled"] = String(enabled) }
-        if let thresholdTokens { fields["thresholdTokens"] = String(thresholdTokens) }
         if let idleMinutes { fields["idleMinutes"] = String(idleMinutes) }
         if let minimumTokens { fields["minimumTokens"] = String(minimumTokens) }
         PlayhouseDiagnostics.record("settings.write.started", fields: fields)
@@ -230,12 +228,8 @@ final class WorkspaceSettingsManager {
             PlayhouseDiagnostics.record("settings.write.failed", fields: fields.merging(["errorCode": "invalid_argument"]) { _, new in new })
             return BridgeCommandError(code: "invalid_argument", message: message)
         }
-        let threshold = ContextCompactionSettings.thresholdRange
         let idle = ContextCompactionSettings.idleMinutesRange
         let minimum = ContextCompactionSettings.minimumTokensRange
-        if let thresholdTokens, !threshold.contains(thresholdTokens) {
-            throw reject("The compaction threshold must be from \(threshold.lowerBound.formatted()) to \(threshold.upperBound.formatted()) tokens, the window Claude Code accepts.")
-        }
         if let idleMinutes, !idle.contains(idleMinutes) {
             throw reject("The idle wait must be from \(idle.lowerBound) to \(idle.upperBound) minutes, so it fires before the one-hour prompt cache expires.")
         }
@@ -243,7 +237,6 @@ final class WorkspaceSettingsManager {
             throw reject("The minimum context must be from \(minimum.lowerBound.formatted()) to \(minimum.upperBound.formatted()) tokens.")
         }
         if let enabled { defaults.set(enabled, forKey: WorkspaceSettings.autoCompactionEnabledKey) }
-        if let thresholdTokens { defaults.set(thresholdTokens, forKey: WorkspaceSettings.autoCompactionThresholdKey) }
         if let idleMinutes { defaults.set(idleMinutes, forKey: WorkspaceSettings.autoCompactionIdleMinutesKey) }
         if let minimumTokens { defaults.set(minimumTokens, forKey: WorkspaceSettings.autoCompactionMinimumKey) }
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: fields)

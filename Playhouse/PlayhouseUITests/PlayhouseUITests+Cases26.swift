@@ -155,67 +155,55 @@ extension PlayhouseUITests {
         XCTAssertEqual((try runCLI(["task", "get", failureTask])["result"] as? [String: Any])?["status"] as? String, "Waiting Response")
 
     }
-    // case-contract: test_codex_context_compaction_threshold_and_model_switch | With a configured 100,000-token threshold and 150,000-token minimum, a Codex task reporting 120,000 context tokens calls thread/compact/start before its next prompt, records one successful automatic threshold event with a labelled activity, and adds no empty assistant turn. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and waits for the matching successful terminal notification before turn/start. A failure after the initial acknowledgment is recorded as unsuccessful while the prompt still runs. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
-    func test_codex_context_compaction_threshold_and_model_switch() throws {
-        let executable = dataDirectory.appendingPathComponent("codex-fixture-ui-auto-threshold")
+    // case-contract: test_codex_context_compaction_native_and_model_switch | With a 150,000-token minimum, a Codex task reporting 900,000 context tokens runs its next same-model prompt without calling thread/compact/start or recording a compaction event, leaving the large context to Codex's native auto-compaction, and Playhouse passes no model_auto_compact_token_limit in its thread config. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and waits for the matching successful terminal notification before turn/start. A failure after the initial acknowledgment is recorded as unsuccessful while the prompt still runs. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
+    func test_codex_context_compaction_native_and_model_switch() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-ui-native-compaction")
         try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
             .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
         codexFixtureExecutable = executable.path
-        let environment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path, "PLAYHOUSE_E2E_CODEX_CONTEXT_TOKENS": "120000"]
+        let environment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path, "PLAYHOUSE_E2E_CODEX_CONTEXT_TOKENS": "900000"]
         let contextTokensFile = URL(fileURLWithPath: executable.path + ".context-tokens")
-        try Data("120000".utf8).write(to: contextTokensFile)
+        try Data("900000".utf8).write(to: contextTokensFile)
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
-        _ = try runCLI(["settings", "set-auto-compaction", "--threshold", "100000", "--minimum", "150000"])
+        _ = try runCLI(["settings", "set-auto-compaction", "--minimum", "150000"])
         let taskID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Codex threshold compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
+            "task", "create", "--title", "Codex native compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Codex threshold compaction"].waitToExist(timeout: 10))
+        XCTAssertTrue(app.buttons["Codex native compaction"].waitToExist(timeout: 10))
         _ = try runCLI(["conversation", "send", taskID, "--message", "First Codex turn.", "--model", "gpt-6-sol"], extraEnvironment: environment)
-        _ = try runCLI(["conversation", "send", taskID, "--message", "Continue after the context threshold.", "--model", "gpt-6-sol"], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Continue with a large context.", "--model", "gpt-6-sol"], extraEnvironment: environment)
         let compactions = try XCTUnwrap((try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
-        XCTAssertEqual(compactions.count, 1)
-        XCTAssertEqual(compactions.first?["provider"] as? String, "codex")
-        XCTAssertEqual(compactions.first?["trigger"] as? String, "threshold")
-        XCTAssertEqual(compactions.first?["preTokens"] as? Int, 120000)
-        let thresholdHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
-        let thresholdMessages = try XCTUnwrap(thresholdHistory["messages"] as? [[String: Any]])
-        XCTAssertFalse(thresholdMessages.contains {
-            ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-        }, "Codex compaction must not add an empty assistant message.")
-        let thresholdOrder = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
-        XCTAssertEqual((thresholdOrder?["rpcOrder"] as? [[String: String]] ?? []).map { $0["method"] ?? "" },
-                       ["turn/start", "thread/compact/start", "compaction/completed", "turn/start"],
-                       "Codex compaction must finish before the next turn starts.")
-        openTask(named: "Codex threshold compaction")
-        let row = app.descendants(matching: .any).matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
-        )).firstMatch
-        XCTAssertTrue(scrollTranscriptUntilExists(row), "The Codex threshold compaction row should be present in the conversation.")
-        XCTAssertTrue(row.isHittable, "The compaction row must be visible before its screenshot.")
-        XCTAssertTrue(row.label.contains("threshold"))
-        let thresholdPrompt = try XCTUnwrap(thresholdMessages.first {
-            $0["role"] as? String == "user" && $0["text"] as? String == "Continue after the context threshold."
+        XCTAssertEqual(compactions.count, 0, "A large Codex context with no model switch is left to Codex's native auto-compaction.")
+        let nativeOrder = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        XCTAssertEqual((nativeOrder?["rpcOrder"] as? [[String: String]] ?? []).map { $0["method"] ?? "" },
+                       ["turn/start", "turn/start"],
+                       "Playhouse must not compact a same-model Codex turn on context size.")
+        let sentThreadConfig = try XCTUnwrap(nativeOrder?["threadStartConfig"], "The fixture must record the thread config Playhouse sent.")
+        let threadConfig = try JSONSerialization.data(withJSONObject: sentThreadConfig as? [String: Any] ?? [:])
+        XCTAssertFalse(String(decoding: threadConfig, as: UTF8.self).contains("auto_compact"),
+                       "The thread config must leave Codex's model_auto_compact_token_limit to the user's config or Codex's default.")
+        let launchArgumentsFile = (codexFixtureStateDirectory ?? dataDirectory).appendingPathComponent(executable.lastPathComponent + ".launch-args")
+        let launchArguments = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: launchArgumentsFile)) as? [String])
+        XCTAssertFalse(launchArguments.contains { $0.contains("auto_compact") }, "\(launchArguments)")
+        let nativeHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertFalse((nativeHistory["activities"] as? [[String: Any]] ?? []).contains { $0["isContextCompaction"] as? Bool == true })
+        let nativeMessages = try XCTUnwrap(nativeHistory["messages"] as? [[String: Any]])
+        let nativePrompt = try XCTUnwrap(nativeMessages.first {
+            $0["role"] as? String == "user" && $0["text"] as? String == "Continue with a large context."
         })
-        let thresholdPromptRow = app.descendants(matching: .any).matching(identifier: "user-message-\(try XCTUnwrap(thresholdPrompt["id"] as? String))").firstMatch
-        XCTAssertTrue(scrollTranscriptUntilExists(thresholdPromptRow), "The Codex prompt should be visible beside its compaction row.")
-        XCTAssertTrue(row.isHittable, "The Codex compaction row must remain visible beside the prompt.")
-        XCTAssertTrue(thresholdPromptRow.isHittable, "The Codex prompt must be visible beside its compaction row.")
-        XCTAssertLessThan(row.frame.minY, thresholdPromptRow.frame.minY, "The visible Codex compaction row must precede the prompt.")
-        attachScreenshot(named: "Codex threshold compaction appears in the conversation")
-        attachElementScreenshot(row, named: "Codex automatic threshold compaction row")
+        openTask(named: "Codex native compaction")
+        let nativePromptRow = app.descendants(matching: .any).matching(identifier: "user-message-\(try XCTUnwrap(nativePrompt["id"] as? String))").firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(nativePromptRow), "The large-context Codex prompt should be visible in the conversation.")
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "context-compaction-row-"
+        )).firstMatch.exists, "No Playhouse compaction row precedes a same-model Codex prompt.")
+        attachScreenshot(named: "Codex large-context prompt runs without a Playhouse compaction")
+        attachElementScreenshot(nativePromptRow, named: "Codex large-context prompt row")
         returnToBoard()
-        element("task-token-usage-counter-\(taskID)").click()
-        let stat = app.staticTexts["token-stats-compaction-0"]
-        XCTAssertTrue(stat.waitToExist(timeout: 10))
-        XCTAssertTrue(accessibleLabelOrValue(of: stat).contains("threshold"))
-        attachScreenshot(named: "Token Stats lists Codex threshold compaction")
-        attachElementScreenshot(stat, named: "Codex threshold trigger in Token Stats")
-        element("close-token-stats-button").click()
 
         try Data("220000".utf8).write(to: contextTokensFile)
-        _ = try runCLI(["settings", "set-auto-compaction", "--threshold", "300000", "--minimum", "150000"])
         _ = try runCLI(["conversation", "send", taskID, "--message", "Grow context before switching models.", "--model", "gpt-6-sol"], extraEnvironment: environment)
         let firstHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
         let switchOrderCount = (firstHistory?["rpcOrder"] as? [[String: Any]])?.count ?? 0
@@ -227,7 +215,7 @@ extension PlayhouseUITests {
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
         let methods = (history?["rpcOrder"] as? [[String: String]] ?? []).map { $0["method"] ?? "" }
         XCTAssertEqual(Array(methods.dropFirst(switchOrderCount)), ["thread/compact/start", "compaction/completed", "turn/start"])
-        openTask(named: "Codex threshold compaction")
+        openTask(named: "Codex native compaction")
         let switchRow = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Model switch"
         )).firstMatch
@@ -261,7 +249,7 @@ extension PlayhouseUITests {
         let failureOrder = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
         XCTAssertEqual(Array(((failureOrder?["rpcOrder"] as? [[String: String]]) ?? []).map { $0["method"] ?? "" }.dropFirst(failureOrderCount)),
                        ["thread/compact/start", "turn/start"])
-        openTask(named: "Codex threshold compaction")
+        openTask(named: "Codex native compaction")
         let failureRow = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Automatic context compaction failed"
         )).firstMatch
@@ -280,7 +268,7 @@ extension PlayhouseUITests {
         XCTAssertTrue((terminalHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Continue after asynchronous failure." })
 
     }
-    // case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event. A long turn that compacts twice shows each compaction where it happened: the first after the text and tool call written before it and before the summary message Claude Code continues from, the second between the messages written after the first and its own summary, never stacked after the turn's last message. Compaction rows stored without the message they follow are placed the same way, by when each compaction finished.
+    // case-contract: test_claude_compaction_shows_one_row | A Claude compaction is one conversation row. A provider auto-compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event. A long turn that compacts twice shows each compaction where it happened: the first after the text and tool call written before it and before the summary message Claude Code continues from, the second between the messages written after the first and its own summary, never stacked after the turn's last message. Compaction rows stored without the message they follow are placed the same way, by when each compaction finished.
     func test_claude_compaction_shows_one_row() throws {
         func compactionRows(_ taskID: String, environment: [String: String] = [:]) throws -> [[String: Any]] {
             let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: environment)["result"] as? [String: Any])
@@ -426,8 +414,10 @@ extension PlayhouseUITests {
         let storedAnswerID = try XCTUnwrap(answerID)
         let storedAnswer = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-message-\(storedAnswerID)")).firstMatch
         XCTAssertTrue(storedAnswer.waitToExist(timeout: 20), "The window should reload the finished turn from history.")
+        // The turn end can reload it more than once, so count after the reloads settle.
         XCTAssertTrue(waitUntil({ visibleRows.count >= 1 }, timeout: 10), "The finished turn keeps its compaction row.")
-        XCTAssertEqual(visibleRows.count, 1, "The finished turn still shows the compaction once.")
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertTrue(waitUntil({ visibleRows.count == 1 }, timeout: 10), "The finished turn still shows the compaction once: \(visibleRows.count)")
         XCTAssertEqual(spinningRows.count, 0)
         let rows = try compactionRows(taskID, environment: environment)
         XCTAssertEqual(rows.map { $0["status"] as? String }, ["completed"], "No compaction row is left spinning: \(rows)")

@@ -36,13 +36,10 @@ struct ContextCompactionPolicyTests {
     static func main() {
         // Defaults.
         expect(settings.enabled, true, "automatic compaction defaults on")
-        expect(settings.thresholdTokens, 200_000, "threshold defaults to 200k tokens")
         expect(settings.idleMinutes, 50, "idle wait defaults to 50 minutes")
         expect(settings.minimumTokens, 150_000, "minimum defaults to 150k tokens")
-        expect(settings.autoCompactWindowTokens, 200_000, "an enabled setting passes the threshold to Claude Code")
         var off = settings
         off.enabled = false
-        expect(off.autoCompactWindowTokens, nil, "disabled leaves Claude Code's own window")
         expect(ContextCompactionSettings.idleMinutesRange.upperBound < 60, true, "the idle wait stays under the one-hour TTL")
 
         // Idle decisions: status.
@@ -83,10 +80,11 @@ struct ContextCompactionPolicyTests {
         expect(before(state(context: 180_000, idleMinutes: 5), model: "sonnet"), .modelSwitch, "switching model compacts first")
         expect(before(state(context: 100_000, idleMinutes: 5), model: "sonnet"), nil, "a small context switches model as is")
         expect(before(state(context: 180_000, idleMinutes: 5), model: "default"), nil, "the provider default is not a known switch")
-        expect(before(state(context: 220_000, idleMinutes: 5, model: "gpt-6-sol"), model: "gpt-6-sol", provider: "codex"), .threshold, "Codex compacts before the next turn after crossing the token threshold")
-        var lowerCodexThreshold = settings
-        lowerCodexThreshold.thresholdTokens = 100_000
-        expect(before(state(context: 120_000, idleMinutes: 5, model: "gpt-6-sol"), model: "gpt-6-sol", provider: "codex", settings: lowerCodexThreshold), .threshold, "a Codex threshold below the minimum still compacts when crossed")
+        for context in [220_000, 450_000, 900_000] {
+            expect(before(state(context: context, idleMinutes: 5, model: "gpt-6-sol"), model: "gpt-6-sol", provider: "codex"), nil,
+                   "Codex at \(context) tokens with no model switch is left to its native auto-compaction")
+        }
+        expect(before(state(context: 900_000, idleMinutes: 5)), nil, "a large warm Claude context is left to Claude Code's native auto-compaction")
         expect(before(state(context: 180_000, idleMinutes: 61, model: "gpt-6-luna"), model: "gpt-6-luna", provider: "codex"), nil, "Codex has no Claude prompt-cache expiry signal")
         expect(before(state(context: 180_000, idleMinutes: 5, model: "gpt-6-luna"), model: "gpt-6-sol", provider: "codex"), .modelSwitch, "Codex compacts before changing models")
         expect(before(state(context: 220_000, idleMinutes: 5, compacted: true), model: "gpt-6-sol", provider: "codex"), nil, "Codex does not repeat a compaction after the same context call")
@@ -108,7 +106,9 @@ struct ContextCompactionPolicyTests {
         expect(ContextCompactionPolicy.isCacheMiss(cacheReadTokens: 30_000, cacheWriteTokens: 600_000), true, "reading only the system prompt is still a miss")
 
         // Triggers.
-        expect(ContextCompactionTrigger.reported("auto", requested: nil), .threshold, "Claude Code's auto compaction is the threshold")
+        expect(ContextCompactionTrigger.reported("auto", requested: nil), .threshold, "Claude Code's native auto-compaction is reported")
+        expect(ContextCompactionTrigger.threshold.label, "Provider auto-compaction", "native auto-compaction is labelled as the provider's")
+        expect(ContextCompactionTrigger(rawValue: "threshold"), .threshold, "recorded native compactions keep decoding")
         expect(ContextCompactionTrigger.reported("manual", requested: nil), .manual, "a /compact nobody automated")
         expect(ContextCompactionTrigger.reported("manual", requested: .warmIdle), .warmIdle, "Playhouse's own /compact keeps its reason")
         expect(ContextCompactionDetails(trigger: .warmIdle, preTokens: 180_000, postTokens: 6_000).summary.hasPrefix("Automatic · "), true, "automatic compactions say so")

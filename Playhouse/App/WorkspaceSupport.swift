@@ -158,9 +158,10 @@ enum WorkspaceSettings {
     static func statusSoundsEnabled(in defaults: UserDefaults) -> Bool {
         defaults.object(forKey: statusSoundsEnabledKey) as? Bool ?? true
     }
-    /// Automatic context compaction settings shared by Claude and Codex task sessions.
+    /// Playhouse's own context compaction triggers, shared by Claude and Codex task
+    /// sessions. A threshold saved by earlier builds under "autoCompactionThresholdTokens"
+    /// is no longer read: each provider's native auto-compaction owns that decision.
     static let autoCompactionEnabledKey = "autoCompactionEnabled"
-    static let autoCompactionThresholdKey = "autoCompactionThresholdTokens"
     static let autoCompactionIdleMinutesKey = "autoCompactionIdleMinutes"
     static let autoCompactionMinimumKey = "autoCompactionMinimumTokens"
     /// Add Plugin mode: the window shows "Add here" placeholders at every plugin placement.
@@ -245,9 +246,6 @@ struct ConversationWorkspaceContext {
     /// sandbox, checks every tool call in a hook that runs before the user's own allow rules.
     /// MCP tools stay available on both providers, as Codex's sandbox does not cover them.
     var isReadOnly = false
-    /// The auto-compact window Claude Code is launched with, in tokens; nil
-    /// leaves Claude Code's own default. Only a task turn's own launch sets it.
-    var claudeAutoCompactWindowTokens: Int?
 
     /// One Codex thread config joining what skills and MCP servers each need.
     var codexThreadConfig: [String: Any]? {

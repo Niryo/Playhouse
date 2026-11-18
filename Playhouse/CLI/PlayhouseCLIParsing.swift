@@ -847,14 +847,14 @@ extension PlayhouseCLI {
                 }
                 return BridgeRequest(command: "settings.set-status-sounds", arguments: ["enabled": .boolean(rest[1] == "on")])
             case "set-auto-compaction":
-                let usage = "Use: playhouse settings set-auto-compaction [--enabled <true|false>] [--threshold <tokens>] [--idle-minutes <minutes>] [--minimum <tokens>]"
-                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--enabled", "--threshold", "--idle-minutes", "--minimum"])
+                let usage = "Use: playhouse settings set-auto-compaction [--enabled <true|false>] [--idle-minutes <minutes>] [--minimum <tokens>]"
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--enabled", "--idle-minutes", "--minimum"])
                 var arguments: [String: BridgeValue] = [:]
                 if let enabled = flags["--enabled"]?.last {
                     guard enabled == "true" || enabled == "false" else { throw CLIError.usage(usage) }
                     arguments["enabled"] = .boolean(enabled == "true")
                 }
-                for (flag, key) in [("--threshold", "thresholdTokens"), ("--idle-minutes", "idleMinutes"), ("--minimum", "minimumTokens")] {
+                for (flag, key) in [("--idle-minutes", "idleMinutes"), ("--minimum", "minimumTokens")] {
                     guard let text = flags[flag]?.last else { continue }
                     guard let value = Int(text) else { throw CLIError.usage(usage) }
                     arguments[key] = .integer(value)
