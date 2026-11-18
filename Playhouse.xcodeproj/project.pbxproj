@@ -93,6 +93,7 @@
 		B10000000000000000000005 /* PullRequestServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005 /* PullRequestServices.swift */; };
 		B10000000000000000000025 /* ConversationTranscriptRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000025 /* ConversationTranscriptRendering.swift */; };
 		B10000000000000000000026 /* ConversationSideChatRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000026 /* ConversationSideChatRendering.swift */; };
+		B10000000000000000007A62 /* ConversationCommentPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A62 /* ConversationCommentPopover.swift */; };
 		B10000000000000000000027 /* ConversationTranscriptNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000027 /* ConversationTranscriptNavigation.swift */; };
 		B10000000000000000007A60 /* ConversationChatPageNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A60 /* ConversationChatPageNavigation.swift */; };
 		B10000000000000000007A61 /* ChatPageAnchorsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A61 /* ChatPageAnchorsView.swift */; };
@@ -282,6 +283,7 @@
 		B20000000000000000000005 /* PullRequestServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestServices.swift; sourceTree = "<group>"; };
 		B20000000000000000000025 /* ConversationTranscriptRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptRendering.swift; sourceTree = "<group>"; };
 		B20000000000000000000026 /* ConversationSideChatRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChatRendering.swift; sourceTree = "<group>"; };
+		B20000000000000000007A62 /* ConversationCommentPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationCommentPopover.swift; sourceTree = "<group>"; };
 		B20000000000000000000027 /* ConversationTranscriptNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptNavigation.swift; sourceTree = "<group>"; };
 		B20000000000000000007A60 /* ConversationChatPageNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationChatPageNavigation.swift; sourceTree = "<group>"; };
 		B20000000000000000007A61 /* ChatPageAnchorsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPageAnchorsView.swift; sourceTree = "<group>"; };
@@ -584,6 +586,7 @@
 				B20000000000000000007A60 /* ConversationChatPageNavigation.swift */,
 				B20000000000000000007A61 /* ChatPageAnchorsView.swift */,
 				B20000000000000000000026 /* ConversationSideChatRendering.swift */,
+				B20000000000000000007A62 /* ConversationCommentPopover.swift */,
 				B20000000000000000000025 /* ConversationTranscriptRendering.swift */,
 				A20000000000000000000014 /* ConversationTranscriptStore.swift */,
 				A20000000000000000000019 /* StandaloneChatStore.swift */,
@@ -1085,6 +1088,7 @@
 				B10000000000000000007A60 /* ConversationChatPageNavigation.swift in Sources */,
 				B10000000000000000007A61 /* ChatPageAnchorsView.swift in Sources */,
 				B10000000000000000000026 /* ConversationSideChatRendering.swift in Sources */,
+				B10000000000000000007A62 /* ConversationCommentPopover.swift in Sources */,
 				B10000000000000000000025 /* ConversationTranscriptRendering.swift in Sources */,
 				B10000000000000000000023 /* WorkspaceTaskManagers.swift in Sources */,
 				B10000000000000000000022 /* ClaudeSessionSupport.swift in Sources */,

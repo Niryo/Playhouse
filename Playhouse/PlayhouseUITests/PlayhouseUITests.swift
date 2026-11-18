@@ -93,6 +93,14 @@ final class PlayhouseUITests: XCTestCase {
             ignore.click()
             return true
         }
+        // macOS may ask whether a provider fixture's Python can find devices on local networks;
+        // the prompt covers the board until answered.
+        addUIInterruptionMonitor(withDescription: "Answer the macOS local network prompt") { alert in
+            let allow = alert.buttons["Allow"]
+            guard allow.exists, alert.staticTexts.matching(NSPredicate(format: "value CONTAINS[c] 'local network' OR label CONTAINS[c] 'local network'")).firstMatch.exists else { return false }
+            allow.click()
+            return true
+        }
         dismissSystemPrivacyPrompts()
     }
 

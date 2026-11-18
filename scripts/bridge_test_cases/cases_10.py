@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases10:
-    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages, including wrapped multiline selections, shows a Side chat hint above the selected lines in place of the Add comment hint; clicking it opens the side chat bubble at the selected lines, and the bubble's Comment button adds what is typed in its composer as a comment on the selection and closes it. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and closing the bubble with Escape leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages, including wrapped multiline selections, shows a divided pill above the selected lines, Comment on the left and Side chat on the right, which opens nothing until clicked; Side chat opens the side chat bubble at the selected lines, and Comment opens a comment popover whose field, with the placeholder "Add an optional comment…", adds what is typed as a comment on the selection with its arrow or Return, closes, and never sends it to a side chat. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and closing the popover with Escape leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     def test_conversation_adds_ordered_text_annotations(self):
         task = self.create_repo_task("Conversation comments", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -120,7 +120,7 @@ class BridgeTestCases10:
             ':playhouse-annotation{index="0"}',
             [item for item in ordinary_messages(comment_only_history["messages"]) if item["role"] == "assistant"][-1]["text"],
         )
-    # case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the side chat bubble, whose Comment button can still add a new comment there.
+    # case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them, as the composer chip's Discard comments badge does. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation through the selection pill's Comment popover are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the comment popover, whose field can still add a new comment there. The comment chip's X badge (Discard comments) discards every unsent comment at once: the chip and their highlights go, the sent comment stays, and pendingCommentCount is 0 on a fresh read.
     def test_conversation_persists_unsent_comments(self):
         task = self.create_repo_task("Unsent comments", [self.primary])
         sent_prompt = "Already sent prompt."
@@ -160,8 +160,9 @@ class BridgeTestCases10:
             self.call_cli("task", "comments", task["id"], "--json", json.dumps(returned), "--append")[0]
         )
         self.assertEqual(appended["pendingCommentCount"], 3, "Appending adds only comments not already saved.")
+        # The composer chip's Discard comments badge saves an empty list the same way.
         cleared = self.assert_success(self.call_cli("task", "comments", task["id"], "--json", "[]")[0])
-        self.assertEqual(cleared["pendingCommentCount"], 0)
+        self.assertEqual(cleared["pendingCommentCount"], 0, "An empty list discards every unsent comment.")
         self.assertEqual(cleared["savedPrompt"], "A typed draft", "Clearing comments leaves the typed draft alone.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 0)
         # A send clears the saved comments the same way, after which they are no longer editable.
@@ -170,7 +171,7 @@ class BridgeTestCases10:
         )[0], "not_found")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 0,
                          "Editing a sent comment must not bring it back.")
-    # case-contract: test_side_chat_and_comment_reopen_from_highlighted_text | Clicking commented or side-chatted conversation text, without selecting any, reopens its bubble with that selection's comment and side chat. A side chat opened on a selection is saved on the task with its source range, selected text, provider conversation, model and every answered exchange; closing its bubble keeps it, its text renders purple while no comment covers it and orange once a comment does, and reopening it shows its history and continues the same forked conversation, so its next answer is saved after the earlier ones. An unsent comment opens in an editable field: saving changed text keeps the comment with the new text, and clearing it and saving deletes it, leaving the side chat and its purple text. Through CLI/XPC, conversation side-chats lists the saved side chats, a side chat's source must name a message and a non-empty range, task comments edit changes an unsent comment's text, empty text deletes it, and an unknown comment is not_found. Edits and side chats survive a fresh read and relaunching the app.
+    # case-contract: test_side_chat_and_comment_reopen_from_highlighted_text | Clicking commented or side-chatted conversation text, without selecting any, reopens what it holds: text with only a comment opens its comment popover, text with only a side chat opens its side chat bubble, and text with both shows the Comment and Side chat pill to choose between them. A side chat opened on a selection is saved on the task with its source range, selected text, provider conversation, model and every answered exchange; closing its bubble keeps it, its text renders purple while no comment covers it and orange once a comment does, and reopening it shows its history and continues the same forked conversation, so its next answer is saved after the earlier ones. A comment is added on side-chatted text by selecting it and choosing the pill's Comment. An unsent comment opens in the comment popover prefilled to edit, with a Save comment button that stays disabled until the text changes and a Discard comment button: saving changed text keeps the comment with the new text, Escape closes it unchanged, Discard deletes only that comment, leaving the side chat and its purple text, and saving it emptied deletes it. Through CLI/XPC, conversation side-chats lists the saved side chats, a side chat's source must name a message and a non-empty range, task comments edit changes an unsent comment's text, empty text deletes it (as Discard does) leaving the other comments, and an unknown comment is not_found. Edits and side chats survive a fresh read and relaunching the app.
     def test_side_chat_and_comment_reopen_from_highlighted_text(self):
         task, _, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat")
         _, history = self.history_texts(task["id"], environment)
@@ -227,8 +228,9 @@ class BridgeTestCases10:
         self.assert_failure(self.call_cli(
             "task", "comments", task["id"], "edit", "66666666-6666-6666-6666-666666666666", "--text", "Nobody", expected_status=3,
         )[0], "not_found")
+        # Saving a comment empty deletes only that comment, as the popover's Discard does.
         deleted = self.assert_success(self.call_cli("task", "comments", task["id"], "edit", other["id"], "--text", "  ")[0])
-        self.assertEqual(deleted["pendingCommentCount"], 1, "Saving a comment empty deletes it.")
+        self.assertEqual(deleted["pendingCommentCount"], 1, "Saving a comment empty deletes it and leaves the other comment.")
         # The saved list keeps the edited text: appending it back again adds nothing.
         appended = self.assert_success(self.call_cli(
             "task", "comments", task["id"], "--json", json.dumps([{**comment, "comment": "Explain it again"}]), "--append")[0])
@@ -237,6 +239,83 @@ class BridgeTestCases10:
                          "The edit and the deletion survive a fresh read.")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0]),
                          [continued["sideChat"]], "Editing comments leaves the side chat saved.")
+    # case-contract: test_side_chat_keeps_answering_after_bubble_closes | A side chat keeps answering in the background after its bubble closes. Through CLI/XPC, a first side chat message whose answer the provider holds completes once released and is saved with its exchange; closing the side chat with side-chat-close while a held follow-up is still answering does not stop it, and another message meanwhile is rejected as still answering rather than starting a second turn: once released the follow-up's answer is returned, saved after the earlier exchange and listed by conversation side-chats, and a further follow-up continues the same forked session, leaving the task's own session alone. In the app, the selected text turns purple as soon as the first question is sent; closing the bubble with Escape before the answer arrives and clicking the text reopens it with the question and Thinking, which the answer replaces once it arrives; after closing it while a held follow-up answers, going back to the board and reopening the task, clicking the text shows the answer that arrived meanwhile, and a further follow-up continues the same saved side chat.
+    def test_side_chat_keeps_answering_after_bubble_closes(self):
+        task, executable, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat-hold")
+        _, history = self.history_texts(task["id"], environment)
+        reply = next(message for message in reversed(history["messages"]) if message["role"] == "assistant" and message["text"])
+        source = {"messageID": reply["id"], "blockID": 0, "startOffset": 0, "endBlockID": 0, "endOffset": 10}
+        ready = Path(str(executable) + ".side-chat-hold-ready")
+        release = Path(str(executable) + ".side-chat-hold-release")
+
+        def held(command, while_held=lambda: None):
+            """Runs `command`, whose side chat answer the fixture holds until `while_held` has run."""
+            ready.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            process = self.start_cli(*command, extra_environment=environment)
+            try:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline and not ready.exists() and process.poll() is None:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), "The fixture should hold the side chat's answer.")
+                self.assertIsNone(process.poll(), "The side chat should still be answering while its answer is held.")
+                while_held()
+                self.assertIsNone(process.poll(), "The held side chat must keep answering.")
+                release.write_text("Release the side chat answer.\n", encoding="utf-8")
+                result, _ = self.finish_cli(process, command)
+                return self.assert_success(result)
+            finally:
+                if process.poll() is None:
+                    release.write_text("Release the side chat answer.\n", encoding="utf-8")
+                    try:
+                        process.communicate(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+
+        first_question = "Please hold-side-chat before answering."
+        opened = held([
+            "conversation", "side-chat", task["id"], "--selection", "the parser", "--source", json.dumps(source),
+            "--message", first_question,
+        ])
+        side_chat_id = opened["sideChatID"]
+        fork_session = opened["sideChat"]["threadID"]
+        self.assertTrue(opened["reply"].startswith('Side chat about "the parser"'), opened["reply"])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0]),
+                         [opened["sideChat"]], "The held first answer is saved with its exchange once released.")
+
+        follow_up = "Please hold-side-chat on the follow-up."
+
+        def close_while_answering():
+            closed = self.assert_success(self.call_cli(
+                "conversation", "side-chat-close", task["id"], side_chat_id, extra_environment=environment,
+            )[0])
+            self.assertEqual(closed, {"closed": True}, "Closing ends the live session of a side chat that is still answering.")
+            self.assert_failure(self.call_cli(
+                "conversation", "side-chat", task["id"], "--side-chat", side_chat_id, "--message", "Another one meanwhile?",
+                extra_environment=environment, expected_status=1,
+            )[0], "invalid_transition")
+
+        continued = held(
+            ["conversation", "side-chat", task["id"], "--side-chat", side_chat_id, "--message", follow_up],
+            while_held=close_while_answering,
+        )
+        self.assertEqual(continued["reply"], f"Side chat follow-up 2 on {fork_session}: {follow_up}",
+                         "Closing the side chat must not stop the answer already running.")
+        self.assertEqual([message["text"] for message in continued["sideChat"]["messages"]],
+                         [first_question, opened["reply"], follow_up, continued["reply"]])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0]),
+                         [continued["sideChat"]], "The answer that arrived after closing is saved after the earlier exchange.")
+
+        after = self.assert_success(self.call_cli(
+            "conversation", "side-chat", task["id"], "--side-chat", side_chat_id, "--message", "And after that?",
+            extra_environment=environment,
+        )[0])
+        self.assertEqual(after["reply"], f"Side chat follow-up 3 on {fork_session}: And after that?",
+                         "The next follow-up continues the same forked session.")
+        self.assertEqual(len(after["sideChat"]["messages"]), 6)
+        self.assertEqual(self.task_for(task["id"], environment)["claudeSessionID"], task["claudeSessionID"],
+                         "The background side chat leaves the task's own session alone.")
     # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     def test_claude_auto_branch_uses_generated_title_and_fallback(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"

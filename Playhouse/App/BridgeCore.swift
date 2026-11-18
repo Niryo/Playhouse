@@ -281,6 +281,9 @@ enum SideChatSessions {
         var saved: SavedSideChat
         let workspace: ConversationWorkspaceContext
         var isResponding = false
+        /// Closed while answering: the session ends once its turn does, so a message meanwhile
+        /// can't resume it and start a second turn alongside.
+        var closesWhenIdle = false
     }
 
     static var sessions: [String: Session] = [:]

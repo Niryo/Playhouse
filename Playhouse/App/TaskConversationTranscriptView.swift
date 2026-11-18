@@ -620,6 +620,20 @@ extension TaskConversationView {
                     common: AtomCommon(testID: "pending-comment-count", opacity: 0.82)
                 )
             }
+            // A badge on the chip's corner, like the one that removes an attached image.
+            .overlay(alignment: .topTrailing) {
+                Button(action: discardPendingAnnotations) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white, .black.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .nativeHelp("Discard comments")
+                .accessibilityLabel("Discard comments")
+                .accessibilityIdentifier("discard-pending-comments-button")
+                .offset(x: 6, y: -6)
+            }
         }
 
         if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
