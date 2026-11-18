@@ -387,7 +387,7 @@ class BridgeTestHelpers02:
             "plugin", "state", "--id", "pull-request-mode", "--key", task_id, "--value", value, extra_environment=extra_environment,
         )[0])
     def pull_request_mode(self, task_id):
-        """The mode the `pull-request-mode` plugin keeps for a task, or None for the default (PR)."""
+        """The mode the `pull-request-mode` plugin keeps for a task, or None for the default (Manual)."""
         state = self.assert_success(self.call_cli("plugin", "state", "--id", "pull-request-mode")[0])
         return state["state"].get(task_id)
     def write_installed_plugin(self, plugin_id, source, placement="composerActions", presentation="popover", manifest=None):

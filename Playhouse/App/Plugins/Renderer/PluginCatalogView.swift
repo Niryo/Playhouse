@@ -853,11 +853,8 @@ private struct NativeComposerDemo: View {
         model.prefix = "native-"
         model.draft = draft
         if goal { model.placeholder = "Set a goal to keep pursuing" }
-        model.modeMenu.text = goal ? "Goal" : plan ? "Plan" : nil
-        model.modeMenu.badgeIcon = goal ? "scope" : nil
-        model.modeMenu.active = goal || plan
-        model.modeMenu.label = goal ? "Goal" : "Conversation mode: \(plan ? "Plan mode" : "Code mode")"
-        model.modeMenu.items = model.modeMenu.items.map { var item = $0; item.checked = item.id == "mode:\(mode)"; return item }
+        model.plan.on = plan
+        model.goal?.on = goal
         if !plan { model.startImplementing = nil }
         model.provider.title = title
         model.provider.value = provider
@@ -881,10 +878,15 @@ private struct NativeComposerDemo: View {
             steer: { lastAction = "steer" },
             focusChange: { _ in },
             openSkills: { lastAction = "skills" },
-            modeMenu: { id in
-                mode = id == "goal" ? "goal" : String(id.dropFirst("mode:".count))
-                if id == "goal" { draft = "" }
-                lastAction = "mode \(id)"
+            attach: { lastAction = "attach" },
+            togglePlan: {
+                mode = mode == "plan" ? "default" : "plan"
+                lastAction = mode == "plan" ? "plan on" : "plan off"
+            },
+            toggleGoal: {
+                mode = mode == "goal" ? "default" : "goal"
+                if mode == "goal" { draft = "" }
+                lastAction = mode == "goal" ? "goal on" : "goal off"
             },
             startImplementing: { mode = "default"; lastAction = "start implementing" },
             showRepositoryPicker: { lastAction = "repository picker" },

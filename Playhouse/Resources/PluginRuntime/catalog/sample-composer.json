@@ -9,15 +9,9 @@
     "focusRequest": 0,
     "editorHelp": "",
     "skills": true,
-    "modeMenu": {
-      "active": false,
-      "label": "Conversation mode: Code mode",
-      "items": [
-        { "id": "goal", "title": "Goal", "checked": false, "icon": "scope", "help": "Set a goal to keep pursuing", "testID": "conversation-mode-goal" },
-        { "id": "mode:default", "title": "Code mode", "checked": true, "help": "Switch to Code mode mode", "testID": "conversation-mode-default" },
-        { "id": "mode:plan", "title": "Plan mode", "checked": false, "help": "Switch to Plan mode mode", "testID": "conversation-mode-plan" }
-      ]
-    },
+    "attach": { "disabled": false, "help": "Attach images" },
+    "plan": { "on": false, "help": "Plan before making changes" },
+    "goal": { "on": false, "help": "Set a goal to keep pursuing" },
     "startImplementing": {
       "disabled": false,
       "help": "Switch to Code mode and start implementing this plan",

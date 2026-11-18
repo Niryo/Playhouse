@@ -109,6 +109,11 @@ final class WorkspaceSettingsManager {
         set { defaults.set(newValue, forKey: WorkspaceSettings.legacyPullRequestModesImportedKey) }
     }
 
+    var existingTaskPullRequestModesPinned: Bool {
+        get { defaults.bool(forKey: WorkspaceSettings.existingTaskPullRequestModesPinnedKey) }
+        set { defaults.set(newValue, forKey: WorkspaceSettings.existingTaskPullRequestModesPinnedKey) }
+    }
+
     /// Forgets a deleted plugin's values, so one installed again under its id starts fresh.
     func clearPluginState(_ id: String) {
         var states = pluginStates

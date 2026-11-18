@@ -86,6 +86,7 @@ final class PlayhouseBridgeRuntime {
             let workspaces = WorkspaceManager(taskManager: taskManager, settingsManager: settings)
             try await workspaces.reconcileDeferredRepositoryRemovals()
             try taskManager.importLegacyPullRequestModes(into: settings)
+            try taskManager.pinPullRequestModeOfExistingTasks(into: settings)
 
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string

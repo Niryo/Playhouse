@@ -1090,6 +1090,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitForStableFrame(row), "The \(pluginRow) row should settle before it is hovered.", file: file, line: line)
         row.hover()
         let item = row.descendants(matching: .menuItem)[action]
+        // A pointer that reaches the row while crossing the rows above can leave its submenu closed; hover it afresh.
+        if !waitUntil({ item.isHittable }, timeout: 3) {
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).hover()
+            row.hover()
+        }
         XCTAssertTrue(waitUntil({ item.isHittable }, timeout: 5), "The \(pluginRow) submenu offers \(action).", file: file, line: line)
         // The submenu is still opening too; a click on its first frame can miss the item.
         XCTAssertTrue(waitForStableFrame(item), "The \(action) item should settle before it is clicked.", file: file, line: line)

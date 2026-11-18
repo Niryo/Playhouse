@@ -776,7 +776,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(failed["hasUnsentDraft"] as? Bool, true, "The prompt waits as the draft for a retry.")
         attachScreenshot(named: "A scheduled run that couldn't start waits in Blocked")
     }
-    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and in the Scheduled Tasks popover. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is cleared a later run reaches Review in PR mode. The template's last run is the latest run, and the Scheduled Tasks popover's Open Last Run closes the popover and opens that run, so going back from it returns to the board.
+    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and in the Scheduled Tasks popover. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is changed to PR a later run reaches Review in PR mode. Saving PR for the tasks saved while PR was the default (once, at a first launch since Manual became the default) leaves such a run with no mode of its own, still inheriting its schedule's, while a run whose schedule was deleted gets PR saved as its own. The template's last run is the latest run, and the Scheduled Tasks popover's Open Last Run closes the popover and opens that run, so going back from it returns to the board.
     func test_schedule_recurring_template_hidden_and_spawns_runs() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-recurring")
         launchApp(defaultParent: fixture.parent.path)
@@ -847,6 +847,18 @@ extension PlayhouseUITests {
         XCTAssertTrue(claudeFixturePrompts().contains("Tell me a story."))
         XCTAssertNil(savedMode(runID), "A run saves no mode of its own.")
         XCTAssertTrue(waitUntil({ reviewModes(runID) == ["manual"] }, timeout: 15), "The run reached Review in its schedule's Manual mode: \(reviewModes(runID))")
+        // Saving PR for the tasks saved while PR was the default leaves a run whose schedule exists
+        // inheriting its schedule's mode.
+        func pinPasses() -> Int { ((try? diagnosticEvents()) ?? []).filter { $0["event"] as? String == "plugin.pull_request_mode.pinned" }.count }
+        let pinPassesBefore = pinPasses()
+        let forget = Process()
+        forget.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        forget.arguments = ["delete", preferencesSuiteName, "existingTaskPullRequestModesPinned"]
+        try forget.run()
+        forget.waitUntilExit()
+        XCTAssertNil(savedMode(runID), "A run whose schedule exists keeps no mode of its own.")
+        XCTAssertEqual(savedMode(templateID) as? String, "manual", "A schedule's chosen mode is kept.")
+        XCTAssertTrue(waitUntil({ pinPasses() == pinPassesBefore + 1 }, timeout: 5), "Saving PR for existing tasks ran again once its flag was forgotten: \(pinPasses() - pinPassesBefore)")
         let advanced = try XCTUnwrap(scheduleDate((taskRecord(id: templateID)?["schedule"] as? [String: Any])?["scheduledAt"] as? String))
         XCTAssertEqual(advanced.timeIntervalSince(firstRun), 86400, accuracy: 3600, "A daily schedule advances by one day.")
 
@@ -862,7 +874,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: templateID)?["schedule"] as? [String: Any])?["paused"] as? Bool) == false }, timeout: 10))
         attachScreenshot(named: "Scheduled Tasks popover after pausing and resuming")
 
-        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", templateID, "--value", "null"])
+        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", templateID, "--value", #""pr""#])
         clickScheduledTaskMenuItem(taskID: templateID, item: "scheduled-task-run-now-\(templateID)", title: "Run Now")
         var nowRunID: String?
         XCTAssertTrue(waitUntil({
@@ -871,7 +883,7 @@ extension PlayhouseUITests {
             return runs.filter { $0["scheduleSourceTaskID"] as? String == templateID }.count == 2
         }, timeout: 20), "Run Now starts another run.")
         let secondRunID = try XCTUnwrap(nowRunID)
-        XCTAssertTrue(waitUntil({ reviewModes(secondRunID) == ["pr"] }, timeout: 60), "With the schedule's mode cleared, a run is in PR mode: \(reviewModes(secondRunID))")
+        XCTAssertTrue(waitUntil({ reviewModes(secondRunID) == ["pr"] }, timeout: 60), "With the schedule set to PR, a run is in PR mode: \(reviewModes(secondRunID))")
 
         closeScheduledTasksPopover()
         XCTAssertTrue(element("task-card-\(runID)").waitToExist(timeout: 10), "A run is followed on the board.")
@@ -891,6 +903,16 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The popover stays closed after the run.")
         _ = try runCLI(["schedule", "clear", templateID])
         XCTAssertTrue(element("task-card-\(templateID)").waitToExist(timeout: 10), "Clearing the schedule puts the task on the board.")
+        // A run whose schedule is gone was in PR mode while PR was the default, so it gets PR saved as its own.
+        XCTAssertEqual((try runCLI(["task", "delete", templateID])["result"] as? [String: Any])?["deleted"] as? Bool, true)
+        XCTAssertTrue(waitForDisappearance(element("task-card-\(templateID)"), timeout: 10), "The deleted schedule leaves the board.")
+        let forgetAgain = Process()
+        forgetAgain.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        forgetAgain.arguments = ["delete", preferencesSuiteName, "existingTaskPullRequestModesPinned"]
+        try forgetAgain.run()
+        forgetAgain.waitUntilExit()
+        XCTAssertEqual(savedMode(runID) as? String, "pr", "A run whose schedule was deleted gets PR saved as its own.")
+        XCTAssertTrue(waitUntil({ pinPasses() == pinPassesBefore + 2 }, timeout: 5), "Saving PR for existing tasks ran again once its flag was forgotten: \(pinPasses() - pinPassesBefore)")
     }
     // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks popover beside it, over the board, whose New Task (header, or the button in the empty popover) closes the popover and opens a task conversation with the schedule hint already open on Recurring; opening a scheduled task from it closes it too, so going back returns to the bare board. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the popover. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, the message stays in the composer as its draft and Send sends again while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove leaves the message in the composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     func test_scheduled_task_edit_and_page_management() throws {

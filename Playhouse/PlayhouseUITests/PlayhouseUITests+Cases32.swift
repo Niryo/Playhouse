@@ -646,7 +646,7 @@ extension PlayhouseUITests {
                       "The remove badge removed that worktree's chip.")
         XCTAssertTrue(worktreeChip.native.exists, "The native chips keep theirs.")
     }
-    // case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) labels the menu Conversation mode: Plan mode and shows the Start Implementing button, and Goal (Last: mode goal) labels the menu Goal and shows the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its mode and provider menus as Menu atoms, with every identifier its controls had unchanged. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
+    // case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the attach button (a Button labelled Attach files with the paperclip icon), the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the Plan button (labelled Plan mode, the lightbulb.max icon) and the Goal button (labelled Goal, the GoalIcon asset), both Off with no highlight, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The attach button runs onPress (Last: attach). The Plan button runs onPress (Last: plan on), reads On with an orange highlight and icon and shows the Start Implementing button, and pressing it again turns Plan off (Last: plan off) and hides Start Implementing; the Goal button (Last: goal on) reads On with an orange highlight and shows the goal placeholder, and turning Plan on turns Goal off and turning Goal on turns Plan off, so the two are never on together; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its provider menu as a Menu atom, with its attach, Skills, Plan, provider, model and send identifiers. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
     func test_plugin_composer_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         // A task's conversation composes its composer box from atoms: with Highlight
@@ -664,8 +664,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(outlines("Editor").firstMatch.identifier, "atom-highlight-leaf")
         XCTAssertGreaterThanOrEqual(outlines("Popover").count, 1, "The model button sits in a Popover atom.")
         XCTAssertEqual(outlines("Popover").firstMatch.identifier, "atom-highlight-container")
-        XCTAssertTrue(outlines("Menu").count >= 2, "The mode and provider menus are Menu atoms.")
-        for identifier in ["message-composer-scroll-view", "open-skills-button", "conversation-mode-menu", "conversation-provider-menu", "model-picker-menu", "send-message-button"] {
+        XCTAssertTrue(outlines("Menu").count >= 1, "The provider menu is a Menu atom.")
+        for identifier in ["message-composer-scroll-view", "composer-attach-button", "open-skills-button", "conversation-plan-button", "conversation-provider-menu", "model-picker-menu", "send-message-button"] {
             XCTAssertTrue(element(identifier).exists, "The conversation's composer keeps \(identifier).")
         }
         attachScreenshot(named: "Composer: the conversation's composer outlined as atoms")
@@ -710,7 +710,8 @@ extension PlayhouseUITests {
         let lastJS = js("js-last-action")
         let lastNative = native("native-last-action")
 
-        for identifier in ["message-composer-scroll-view", "open-skills-button", "conversation-mode-menu", "conversation-provider-menu", "model-picker-menu",
+        for identifier in ["message-composer-scroll-view", "composer-attach-button", "open-skills-button", "conversation-plan-button", "conversation-goal-button",
+                           "conversation-provider-menu", "model-picker-menu",
                            "schedule-task-button", "send-message-button"] {
             assertSameSize(identifier)
         }
@@ -749,27 +750,59 @@ extension PlayhouseUITests {
         native("native-send-message-button").click()
         XCTAssertTrue(waitUntil({ self.pluginText(lastNative) == "Last: send hi" }, timeout: 5))
 
-        // The plus menu.
+        XCTAssertEqual(js("composer-attach-button").label, "Attach files")
+        js("composer-attach-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: attach" }, timeout: 5), "The attach button ran onPress.")
+
+        // The Plan and Goal buttons toggle, and turning one on turns the other off.
         for (side, prefix, last) in [(jsSide, "", lastJS), (nativeSide, "native-", lastNative)] {
-            side.descendants(matching: .any).matching(identifier: "\(prefix)conversation-mode-menu").firstMatch.click()
-            let plan = app.menuItems["Plan mode"]
-            XCTAssertTrue(plan.waitToExist(timeout: 5), "The plus menu lists Plan mode.")
-            plan.click()
-            XCTAssertTrue(waitUntil({ self.pluginText(last) == "Last: mode mode:plan" }, timeout: 5), "Plan mode ran onMenu with its id.")
-            XCTAssertTrue(side.descendants(matching: .any).matching(identifier: "\(prefix)start-implementing-button").firstMatch.waitToExist(timeout: 5),
-                          "Plan mode shows Start Implementing.")
-            XCTAssertEqual(side.descendants(matching: .any).matching(identifier: "\(prefix)conversation-mode-menu").firstMatch.label, "Conversation mode: Plan mode",
-                           "Plan mode labels the plus menu.")
+            func control(_ identifier: String) -> XCUIElement {
+                side.descendants(matching: .any).matching(identifier: prefix + identifier).firstMatch
+            }
+            XCTAssertLessThanOrEqual(control("composer-attach-button").frame.maxX, control("open-skills-button").frame.minX, "\(prefix)The attach button leads the toolbar.")
+            XCTAssertLessThanOrEqual(control("open-skills-button").frame.maxX, control("conversation-plan-button").frame.minX, "\(prefix)Plan follows the Skills button.")
+            XCTAssertLessThanOrEqual(control("conversation-plan-button").frame.maxX, control("conversation-goal-button").frame.minX, "\(prefix)Goal follows Plan.")
+            XCTAssertEqual(control("conversation-plan-button").label, "Plan mode")
+            XCTAssertEqual(control("conversation-plan-button").value as? String, "Off", "Plan starts off.")
+            XCTAssertLessThan(orangePixelCount(in: control("conversation-plan-button").screenshot()), 5, "\(prefix)Plan has no orange highlight while off.")
+            control("conversation-plan-button").click()
+            XCTAssertTrue(waitUntil({ self.pluginText(last) == "Last: plan on" && control("conversation-plan-button").value as? String == "On" }, timeout: 5),
+                          "The Plan button turns Plan mode on.")
+            XCTAssertTrue(waitUntil({ self.orangePixelCount(in: control("conversation-plan-button").screenshot()) > 20 }, timeout: 3), "\(prefix)Plan is highlighted orange while on.")
+            XCTAssertGreaterThan(modeBackgroundTintFraction(control("conversation-plan-button")), 0.25, "\(prefix)Plan's background is tinted orange while on.")
+            XCTAssertLessThan(modeBackgroundTintFraction(control("conversation-goal-button")), 0.05, "\(prefix)Goal's background has no orange tint while off.")
+            XCTAssertTrue(control("start-implementing-button").waitToExist(timeout: 5), "Plan mode shows Start Implementing.")
+            control("conversation-plan-button").click()
+            XCTAssertTrue(waitUntil({ self.pluginText(last) == "Last: plan off" && control("conversation-plan-button").value as? String == "Off" }, timeout: 5),
+                          "Pressing Plan again turns it off.")
+            XCTAssertTrue(waitUntil({ !control("start-implementing-button").exists }, timeout: 5), "Leaving Plan mode hides Start Implementing.")
+            control("conversation-plan-button").click()
+            XCTAssertTrue(waitUntil({ control("conversation-plan-button").value as? String == "On" }, timeout: 5))
         }
         assertSameSize("start-implementing-button")
-        assertSameSize("conversation-mode-menu")
-        attachScreenshot(named: "Composer: Plan mode on both, with Start Implementing")
-        js("conversation-mode-menu").click()
-        app.menuItems["Goal"].click()
-        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: mode goal" }, timeout: 5), "Goal ran onMenu with its id.")
+        assertSameSize("conversation-plan-button")
+        attachScreenshot(named: "Composer: Plan on in both, highlighted orange, with Start Implementing")
+        attachRegionScreenshot([js("composer-attach-button"), js("conversation-goal-button")], named: "Composer: attach, Skills, Plan (on) and Goal, close up")
+        js("conversation-goal-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: goal on" && js("conversation-goal-button").value as? String == "On" }, timeout: 5),
+                      "The Goal button turns goal entry on.")
+        XCTAssertEqual(js("conversation-plan-button").value as? String, "Off", "Turning Goal on turns Plan off.")
+        XCTAssertTrue(waitUntil({ self.orangePixelCount(in: js("conversation-goal-button").screenshot()) > 20 }, timeout: 3), "Goal is highlighted orange while on.")
+        XCTAssertLessThan(orangePixelCount(in: js("conversation-plan-button").screenshot()), 5, "Plan loses its highlight when Goal turns on.")
         XCTAssertFalse(js("start-implementing-button").exists, "Leaving Plan mode hides Start Implementing.")
         XCTAssertTrue(jsSide.staticTexts["Set a goal to keep pursuing"].exists, "Goal shows its placeholder.")
-        XCTAssertEqual(js("conversation-mode-menu").label, "Goal", "Goal labels the plus menu.")
+        attachScreenshot(named: "Composer: Goal on, highlighted orange, Plan off")
+        attachRegionScreenshot([js("composer-attach-button"), js("conversation-goal-button")], named: "Composer: Goal on and Plan off, close up")
+        js("conversation-plan-button").click()
+        XCTAssertTrue(waitUntil({ js("conversation-plan-button").value as? String == "On" && js("conversation-goal-button").value as? String == "Off" }, timeout: 5),
+                      "Turning Plan on turns Goal off.")
+        js("conversation-goal-button").click()
+        XCTAssertTrue(waitUntil({ js("conversation-goal-button").value as? String == "On" }, timeout: 5))
+        js("conversation-goal-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: goal off" && js("conversation-goal-button").value as? String == "Off" }, timeout: 5),
+                      "Pressing Goal again turns it off.")
+        XCTAssertEqual(js("conversation-plan-button").value as? String, "Off")
+        XCTAssertTrue(jsSide.staticTexts["Message…"].exists, "Leaving goal entry restores the message placeholder.")
         js("conversation-provider-menu").click()
         app.menuItems["Codex"].click()
         XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: provider codex" && js("conversation-provider-menu").label == "Provider: Codex" }, timeout: 5),
@@ -1693,9 +1726,9 @@ extension PlayhouseUITests {
 
         openTask(named: "Slash task")
         XCTAssertTrue(composer.waitToExist(timeout: 10))
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
-        XCTAssertFalse(modeMenu.label.contains("Plan mode"), "The task starts outside plan mode.")
+        let planButton = element("conversation-plan-button")
+        XCTAssertTrue(planButton.waitToExist(timeout: 10))
+        XCTAssertFalse(isModeOn("conversation-plan-button"), "The task starts outside plan mode.")
         composer.click()
         composer.typeText("Draft first, then /")
         XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing / where a word starts, anywhere in the draft, opens the command menu.")
@@ -1724,7 +1757,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ slashRows() == ["plan", "plugin"] }, timeout: 5), "Typing after the / narrows the commands by prefix.")
         composer.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "Draft first, then " }, timeout: 5), "Choosing /plan removes the typed command and keeps the rest.")
-        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Plan mode") }, timeout: 5), "Choosing /plan turns plan mode on.")
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-plan-button") }, timeout: 5), "Choosing /plan turns plan mode on.")
         XCTAssertTrue(waitForDisappearance(menu))
         attachScreenshot(named: "Choosing /plan turns plan mode on and removes the command")
         clearComposer()
@@ -1922,7 +1955,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(codexGoal.value as? String, "Turn on goal mode", "An enabled /goal shows its description, not an unsupported reason.")
         codexComposer.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (codexComposer.value as? String ?? "").isEmpty }, timeout: 5), "Choosing /goal removes the typed command.")
-        XCTAssertTrue(waitUntil({ self.element("conversation-mode-menu").label.contains("Goal") }, timeout: 5), "Choosing /goal opens the goal entry.")
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5), "Choosing /goal opens the goal entry.")
         attachScreenshot(named: "Choosing /goal on a Codex task opens the goal entry")
 
         let listed = try XCTUnwrap(try runCLI(["slash-commands", "list", "--task", taskID])["result"] as? [String: Any])
@@ -2002,7 +2035,7 @@ extension PlayhouseUITests {
 
         let menu = element("slash-menu")
         let composer = element("message-composer")
-        let modeMenu = element("conversation-mode-menu")
+        let planButton = element("conversation-plan-button")
         let allCommands = ["mcp", "plan", "goal", "skill", "login", "plugin", "greet", "notes", "later", "broken"]
         func clearComposer() {
             composer.click()
@@ -2023,7 +2056,7 @@ extension PlayhouseUITests {
 
         openTask(named: "Headless task")
         XCTAssertTrue(composer.waitToExist(timeout: 10))
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
+        XCTAssertTrue(planButton.waitToExist(timeout: 10))
         XCTAssertFalse(element("plugin-entry-note-commands").exists, "A headless plugin has no button in the composer.")
         composer.click()
         composer.typeText("/")
@@ -2077,12 +2110,12 @@ extension PlayhouseUITests {
         clearComposer()
 
         // An item's button calls the press handler, which turns plan mode on.
-        XCTAssertFalse(modeMenu.label.contains("Plan mode"), "The task starts outside plan mode.")
+        XCTAssertFalse(isModeOn("conversation-plan-button"), "The task starts outside plan mode.")
         composer.typeText("/notes")
-        let planButton = element("slash-plan-note-title")
-        XCTAssertTrue(planButton.waitToExist(timeout: 10))
-        planButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
-        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Plan mode") }, timeout: 10), "The press handler's composer.setMode turns plan mode on.")
+        let notePlanButton = element("slash-plan-note-title")
+        XCTAssertTrue(notePlanButton.waitToExist(timeout: 10))
+        notePlanButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-plan-button") }, timeout: 10), "The press handler's composer.setMode turns plan mode on.")
         XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5), "Pressing removes the typed command.")
         attachScreenshot(named: "The item's button turned plan mode on through the plugin")
         clearComposer()
