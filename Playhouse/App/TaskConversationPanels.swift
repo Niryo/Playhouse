@@ -368,26 +368,11 @@ extension TaskConversationView {
                         }
                         .accessibilityIdentifier("task-title-generating")
                     } else {
-                        HStack(spacing: 6) {
-                            Text(task.title)
-                                .font(.system(size: 14, weight: .semibold))
-                                .lineLimit(1)
-                                .accessibilityIdentifier("task-view-title")
-
-                            // The task title becomes the pull request title, so it can be copied as-is.
-                            Button(action: copyTaskTitle) {
-                                Image(systemName: didCopyTaskTitle ? "checkmark" : "doc.on.doc")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .frame(width: 22, height: 22)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .nativeHelp("Copy title")
-                            .accessibilityLabel(didCopyTaskTitle ? "Title copied" : "Copy title")
-                            .accessibilityIdentifier("task-view-title-copy-button")
-                        }
+                        Text(task.title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("task-view-title")
                     }
 
                 }
@@ -417,7 +402,10 @@ extension TaskConversationView {
             Spacer(minLength: 0)
 
             if !task.isStandaloneChat {
+                // The title column takes whatever is left, so the chips (with a
+                // branch each when a repository repeats) aren't squeezed first.
                 repositoryBadges
+                    .layoutPriority(1)
             }
         }
         .padding(.horizontal, 26)
@@ -426,31 +414,21 @@ extension TaskConversationView {
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
     }
 
-    func copyTaskTitle() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(task.title, forType: .string)
-        didCopyTaskTitle = true
-        let token = UUID()
-        taskTitleCopyFeedbackToken = token
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            if taskTitleCopyFeedbackToken == token { didCopyTaskTitle = false }
-        }
-    }
-
     var repositoryBadges: some View {
         let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
         let attachedRepositoryPaths = task.repositoryWorktrees.map(\.repositoryPath)
         return RepositoryChipsView(
-            model: RepositoryChipsModel(repositoryPaths: attachedRepositoryPaths, readOnly: isReadOnly),
+            model: RepositoryChipsModel(records: task.repositoryWorktrees, readOnly: isReadOnly),
             actions: RepositoryChipsActions(
-                edit: { path in
-                    guard let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == path }) else { return }
-                    repositoryBeingEdited = repository
+                edit: { key in
+                    guard let repository = task.repositoryWorktrees.record(chipKey: key) else { return }
+                    repositoryBeingEditedKey = key
                     resetRepositoryEdits(to: repository)
                     editingRepositoryField = nil
+                    newWorktreeBranch = ""
                 },
-                remove: { path in
-                    guard let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == path }) else { return }
+                remove: { key in
+                    guard let repository = task.repositoryWorktrees.record(chipKey: key) else { return }
                     removeConversationRepository(repository)
                 },
                 add: {
@@ -459,14 +437,14 @@ extension TaskConversationView {
             ),
             isPickerPresented: $isShowingRepositoryPicker,
             editingPath: Binding(
-                get: { repositoryBeingEdited?.repositoryPath },
-                set: { if $0 == nil { repositoryBeingEdited = nil } }
+                get: { repositoryBeingEdited == nil ? nil : repositoryBeingEditedKey },
+                set: { if $0 == nil { repositoryBeingEditedKey = nil } }
             ),
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
             picker: { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) },
             settings: { chip in
-                if let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == chip.path }) {
-                    repositorySettingsPopover(repository, name: chip.name)
+                if let repository = task.repositoryWorktrees.record(chipKey: chip.id) {
+                    repositorySettingsPopover(repository, name: chip.title)
                 }
             }
         )

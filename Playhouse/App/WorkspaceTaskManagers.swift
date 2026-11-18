@@ -109,6 +109,11 @@ final class WorkspaceSettingsManager {
         set { defaults.set(newValue, forKey: WorkspaceSettings.legacyPullRequestModesImportedKey) }
     }
 
+    var existingTaskPullRequestModesPinned: Bool {
+        get { defaults.bool(forKey: WorkspaceSettings.existingTaskPullRequestModesPinnedKey) }
+        set { defaults.set(newValue, forKey: WorkspaceSettings.existingTaskPullRequestModesPinnedKey) }
+    }
+
     /// Forgets a deleted plugin's values, so one installed again under its id starts fresh.
     func clearPluginState(_ id: String) {
         var states = pluginStates
@@ -422,7 +427,7 @@ final class WorkspaceManager {
             duringActiveConversation: true
         )
         let prepared = try await taskManager.prepareRepositoryWorktrees(taskID)
-        try settingsManager.setLastSelectedRepositories(prepared.repositoryWorktrees.map(\.repositoryPath))
+        try settingsManager.setLastSelectedRepositories(Self.distinctRepositories(prepared.repositoryWorktrees))
         PlayhouseDiagnostics.record("workspace.repository.add.succeeded", fields: [
             "taskID": taskID.uuidString,
             "repositoryPath": repositoryPath,
@@ -450,7 +455,7 @@ final class WorkspaceManager {
             return BoardTaskRecord(task: taskBeforePreparation)
         }
         let record = try await taskManager.prepareRepositoryWorktrees(taskID)
-        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
+        try settingsManager.setLastSelectedRepositories(Self.distinctRepositories(record.repositoryWorktrees))
         PlayhouseDiagnostics.record("workspace.repositories.add.succeeded", fields: [
             "taskID": taskID.uuidString,
             "repositoryCount": String(record.repositoryWorktrees.count)
@@ -472,7 +477,7 @@ final class WorkspaceManager {
             duringActiveConversation: true
         )
         let record = try await taskManager.prepareRepositoryWorktrees(taskID)
-        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
+        try settingsManager.setLastSelectedRepositories(Self.distinctRepositories(record.repositoryWorktrees))
         PlayhouseDiagnostics.record("workspace.repositories.replace.succeeded", fields: [
             "taskID": taskID.uuidString,
             "repositoryCount": String(record.repositoryWorktrees.count)
@@ -481,21 +486,43 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func renewRepository(_ repositoryPath: String, on taskID: UUID) async throws -> BoardTaskRecord {
+    func renewRepository(_ selector: RepositoryWorktreeSelector, on taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        return BoardTaskRecord(task: try await taskManager.renewRepository(taskID, repositoryPath: repositoryPath))
+        return BoardTaskRecord(task: try await taskManager.renewRepository(taskID, worktree: selector))
+    }
+
+    /// Adds another worktree of a repository the task may already have; see
+    /// `BoardTaskManager.addWorktree`.
+    @discardableResult
+    func addWorktree(_ repositoryPath: String, to taskID: UUID, branch: String? = nil, branchFrom: String? = nil) async throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        let record = try await taskManager.addWorktree(
+            taskID,
+            repositoryPath: repositoryPath,
+            branch: branch,
+            branchFrom: branchFrom,
+            duringActiveConversation: true
+        )
+        try settingsManager.setLastSelectedRepositories(Self.distinctRepositories(record.repositoryWorktrees))
+        return record
     }
 
     @discardableResult
-    func removeRepository(_ repositoryPath: String, from taskID: UUID) async throws -> BoardTaskRecord {
+    func removeRepository(_ selector: RepositoryWorktreeSelector, from taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
         let record = try await taskManager.removeRepository(
             taskID,
-            repositoryPath: repositoryPath,
+            worktree: selector,
             duringActiveConversation: true
         )
-        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
+        try settingsManager.setLastSelectedRepositories(Self.distinctRepositories(record.repositoryWorktrees))
         return record
+    }
+
+    /// Each repository once, in the task's order, for the last-selected repositories.
+    static func distinctRepositories(_ records: [RepositoryWorktreeRecord]) -> [String] {
+        var seen = Set<String>()
+        return records.map(\.repositoryPath).filter { seen.insert($0).inserted }
     }
 
     func reconcileDeferredRepositoryRemovals() async throws {

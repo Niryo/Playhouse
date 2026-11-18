@@ -742,14 +742,14 @@ private struct NativeRepositoryChipsDemo: View {
     var body: some View {
         let chipsModel = chipsModel
         let pickerModel = pickerModel
-        let chipNames = chipsModel.chips.map { (path: $0.path, name: $0.name) }
+        let chipNames = chipsModel.chips.map { (path: $0.id, name: $0.name) }
         let repositoryNames = pickerModel.repositories.map { (path: $0.path, name: $0.name) }
         AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
             AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             RepositoryChipsView(model: chipsModel, actions: RepositoryChipsActions(
                 edit: { lastAction = "edit \(name($0, in: chipNames))" },
                 remove: { path in
-                    chips = chipsModel.chips.filter { $0.path != path }
+                    chips = chipsModel.chips.filter { $0.id != path }
                     lastAction = "remove \(name(path, in: chipNames))"
                 },
                 add: {
@@ -853,11 +853,8 @@ private struct NativeComposerDemo: View {
         model.prefix = "native-"
         model.draft = draft
         if goal { model.placeholder = "Set a goal to keep pursuing" }
-        model.modeMenu.text = goal ? "Goal" : plan ? "Plan" : nil
-        model.modeMenu.badgeIcon = goal ? "scope" : nil
-        model.modeMenu.active = goal || plan
-        model.modeMenu.label = goal ? "Goal" : "Conversation mode: \(plan ? "Plan mode" : "Code mode")"
-        model.modeMenu.items = model.modeMenu.items.map { var item = $0; item.checked = item.id == "mode:\(mode)"; return item }
+        model.plan.on = plan
+        model.goal?.on = goal
         if !plan { model.startImplementing = nil }
         model.provider.title = title
         model.provider.value = provider
@@ -881,10 +878,15 @@ private struct NativeComposerDemo: View {
             steer: { lastAction = "steer" },
             focusChange: { _ in },
             openSkills: { lastAction = "skills" },
-            modeMenu: { id in
-                mode = id == "goal" ? "goal" : String(id.dropFirst("mode:".count))
-                if id == "goal" { draft = "" }
-                lastAction = "mode \(id)"
+            attach: { lastAction = "attach" },
+            togglePlan: {
+                mode = mode == "plan" ? "default" : "plan"
+                lastAction = mode == "plan" ? "plan on" : "plan off"
+            },
+            toggleGoal: {
+                mode = mode == "goal" ? "default" : "goal"
+                if mode == "goal" { draft = "" }
+                lastAction = mode == "goal" ? "goal on" : "goal off"
             },
             startImplementing: { mode = "default"; lastAction = "start implementing" },
             showRepositoryPicker: { lastAction = "repository picker" },

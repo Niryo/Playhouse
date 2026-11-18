@@ -7,8 +7,10 @@
         "path": "/Users/demo/git/backend"
       },
       {
-        "name": "Playhouse",
-        "path": "/Users/demo/git/Playhouse"
+        "name": "Playhouse-second-line",
+        "path": "/Users/demo/git/Playhouse",
+        "key": "/Users/demo/worktrees/Playhouse-second-line",
+        "branch": "second-line"
       }
     ],
     "accent": "#007ACC",

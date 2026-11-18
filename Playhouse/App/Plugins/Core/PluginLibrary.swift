@@ -46,7 +46,7 @@ enum PluginPlacement: String, CaseIterable, Codable, Sendable {
         case .mainSidebar:
             "Standalone (no task): `plugin`, `app`, and `schedules` ({tasks, needsLoginItemsApproval}): `tasks` is what `schedule.list` returns (every scheduled task, one-time and recurring, soonest first; each task's `schedule` holds {kind, scheduledAt, summary, prompt, paused, lastRunTaskID, …}), kept live as schedules change; `needsLoginItemsApproval` says macOS is waiting for the user to allow Playhouse in Login Items, which scheduled runs need while the app is closed (`ui.openLoginItems` opens that setting). `ui.newTask({schedule: \"recurring\" or \"once\"})` opens a new task with its schedule picker up."
         case .conversationSidebar, .conversationToolbar:
-            "`plugin`, `app`, `task` ({id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}), `repositories` ([{repositoryPath, worktreePath, branch, isPending, awaitsPullRequest, pullRequest: {number, url, merged} or null}]), `pastPullRequests` ([{repositoryPath, number, url, merged}], from worktrees the task has removed) and `contextFolders` ([path])."
+            "`plugin`, `app`, `task` ({id, title, status, provider, isStandaloneChat, scheduleSourceTaskID}), `repositories` ([{repositoryPath, worktreePath, branch, isPending, awaitsPullRequest, pullRequest: {number, url, merged, closed, state} or null}], one per worktree; a repository may have several, each on its own branch), `pastPullRequests` ([{repositoryPath, worktreePath, branch, number, url, merged, closed, state}], from worktrees the task has removed or switched to another branch) and `contextFolders` ([path])."
         case .taskItem:
             "The same `plugin`, `app`, `task`, `repositories`, `pastPullRequests` and `contextFolders` as the conversation placements, for the card's task. The card is small: show an icon or a short label, and listen with `Playhouse.on(\"task.statusChanged\", …)` and `Playhouse.on(\"app.focus\", …)` for when to refresh what it shows."
         case .composerActions:
@@ -179,7 +179,7 @@ enum BuiltInPlugins {
     /// The board sidebar's bottom section with each agent's usage and
     /// account, from `props.agents`.
     static let agentsInfoID = "agents-info"
-    /// The board sidebar's Scheduled Tasks page, listing `props.schedules`.
+    /// The board sidebar's Scheduled Tasks popover, listing `props.schedules`.
     static let scheduledTasksID = "scheduled-tasks"
 
     static let manifests: [PluginManifest] = [
@@ -187,7 +187,7 @@ enum BuiltInPlugins {
         PluginManifest(id: pullRequestModeID, name: "Pull request mode", version: 1, icon: "arrow.triangle.branch", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: pullRequestsID, name: "Pull requests", version: 1, icon: "arrow.triangle.pull", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: agentsInfoID, name: "Agents info", version: 1, icon: "gauge.with.dots.needle.33percent", placement: PluginPlacement.mainSidebarBottom.rawValue, presentation: PluginPresentation.section.rawValue),
-        PluginManifest(id: scheduledTasksID, name: "Scheduled Tasks", version: 1, icon: "clock", placement: PluginPlacement.mainSidebar.rawValue, presentation: PluginPresentation.page.rawValue)
+        PluginManifest(id: scheduledTasksID, name: "Scheduled Tasks", version: 1, icon: "clock", placement: PluginPlacement.mainSidebar.rawValue, presentation: PluginPresentation.popover.rawValue, width: 400, height: 460)
     ]
 
     static func isBuiltIn(_ id: String) -> Bool { manifests.contains { $0.id == id } }
@@ -214,6 +214,11 @@ struct PluginTaskContext: Sendable {
         var number: Int
         var url: String
         var merged: Bool
+        /// Closed without merging.
+        var closed = false
+
+        /// "open", "merged" or "closed".
+        var state: String { merged ? "merged" : closed ? "closed" : "open" }
     }
 
     struct Repository: Sendable {
@@ -230,6 +235,8 @@ struct PluginTaskContext: Sendable {
     /// A pull request of a worktree the task has since removed.
     struct PastPullRequest: Sendable {
         var repositoryPath: String
+        var worktreePath = ""
+        var branch = ""
         var pullRequest: PullRequest
     }
 
@@ -354,6 +361,8 @@ enum PluginContext {
             props["pastPullRequests"] = .array(task.pastPullRequests.map {
                 var value = pullRequestValue($0.pullRequest).object ?? [:]
                 value["repositoryPath"] = .string($0.repositoryPath)
+                value["worktreePath"] = .string($0.worktreePath)
+                value["branch"] = .string($0.branch)
                 return .object(value)
             })
             props["contextFolders"] = .array(task.contextFolders.map(PluginValue.string))
@@ -389,7 +398,10 @@ enum PluginContext {
     }
 
     private static func pullRequestValue(_ pullRequest: PluginTaskContext.PullRequest) -> PluginValue {
-        .object(["number": .number(Double(pullRequest.number)), "url": .string(pullRequest.url), "merged": .bool(pullRequest.merged)])
+        .object([
+            "number": .number(Double(pullRequest.number)), "url": .string(pullRequest.url), "merged": .bool(pullRequest.merged),
+            "closed": .bool(pullRequest.closed), "state": .string(pullRequest.state)
+        ])
     }
 
     /// The sample task a plugin is validated with.

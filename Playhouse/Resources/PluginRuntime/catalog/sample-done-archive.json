@@ -11,7 +11,7 @@
         "id": "4F3A2C10-0000-4000-8000-000000000001",
         "title": "Fix Skills page tab row layout",
         "date": "10 November 2026",
-        "pullRequests": { "links": [{ "number": 227, "url": "https://github.com/example/playhouse/pull/227", "repository": "playhouse" }] }
+        "pullRequests": { "links": [{ "number": 227, "url": "https://github.com/example/playhouse/pull/227", "repository": "playhouse", "state": "merged" }] }
       },
       {
         "id": "4F3A2C10-0000-4000-8000-000000000002",
@@ -19,7 +19,7 @@
         "date": "10 November 2026",
         "pullRequests": {
           "create": { "title": "PR", "busy": false, "label": "PR. Create a pull request for the repository without a linked pull request", "help": "Create pull requests for repositories without a linked pull request" },
-          "links": [{ "number": 228, "url": "https://github.com/example/playhouse/pull/228", "repository": "playhouse" }]
+          "links": [{ "number": 228, "url": "https://github.com/example/playhouse/pull/228", "repository": "playhouse", "state": "merged" }]
         }
       },
       {

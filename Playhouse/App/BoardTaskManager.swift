@@ -454,9 +454,7 @@ final class BoardTaskManager {
 
     func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
         do {
-            return try requireSubject(taskID).repositoryWorktrees.contains {
-                $0.repositoryPath == record.repositoryPath && $0.worktreePath == record.worktreePath
-            }
+            return try requireSubject(taskID).repositoryWorktrees.contains { $0.isSameWorktree(as: record) }
         } catch PlayhouseManagerError.taskNotFound(_) {
             return false
         }
@@ -492,7 +490,7 @@ final class BoardTaskManager {
                 do {
                     try validateRepositoryAssignments(pending, excludingTaskID: id)
                     for item in pending {
-                        let requestedBranch = item.branch == "auto" ? nil : item.branch
+                        let requestedBranch = RepositoryWorktreeRecord.isAutomaticBranch(item.branch) ? nil : item.branch
                         let record = try await worktreeService.resolve(
                             spec: RepositoryWorktreeSpec(
                                 repositoryPath: item.repositoryPath,
@@ -503,6 +501,7 @@ final class BoardTaskManager {
                             title: branchTitle,
                             root: worktreeRoot,
                             reservedBranches: reservedBranches(repositoryPath: item.repositoryPath, excludingTaskID: id)
+                                .union(ownBranches(of: item.repositoryPath, in: task.repositoryWorktrees + resolved))
                         )
                         resolved.append(record)
                     }
@@ -620,6 +619,13 @@ final class BoardTaskManager {
         return names
     }
 
+    /// Branches this task's started worktrees of a repository already use, which another
+    /// worktree of the same repository must not reuse.
+    func ownBranches(of repositoryPath: String, in records: [RepositoryWorktreeRecord]) -> Set<String> {
+        let repository = Self.canonicalPath(repositoryPath)
+        return Set(records.filter { !$0.isPending && Self.canonicalPath($0.repositoryPath) == repository }.map(\.branch))
+    }
+
     func validateRepositoryAssignments(
         _ candidates: [RepositoryWorktreeRecord],
         excludingTaskID: UUID?
@@ -627,7 +633,7 @@ final class BoardTaskManager {
         for other in try listModels() where other.id != excludingTaskID && other.status != .done {
             for candidate in candidates {
                 let repositoryPath = Self.canonicalPath(candidate.repositoryPath)
-                if candidate.branch != "auto",
+                if !RepositoryWorktreeRecord.isAutomaticBranch(candidate.branch),
                    other.repositoryWorktrees.contains(where: {
                        Self.canonicalPath($0.repositoryPath) == repositoryPath && $0.branch == candidate.branch
                    }) {
@@ -651,13 +657,48 @@ final class BoardTaskManager {
     }
 
     func repositoryRecord(_ path: String, in task: BoardTask) throws -> RepositoryWorktreeRecord {
-        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
-        guard let record = task.repositoryWorktrees.first(where: {
-            URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == normalizedPath
-        }) else {
-            throw BridgeCommandError(code: "not_found", message: "This repository isn't attached to the task: \(normalizedPath)")
+        try repositoryRecord(.repository(path), in: task)
+    }
+
+    /// The one worktree of `task` the selector names. A repository path that matches
+    /// several worktrees is ambiguous, and the error lists the worktrees to choose from.
+    func repositoryRecord(_ selector: RepositoryWorktreeSelector, in task: BoardTask) throws -> RepositoryWorktreeRecord {
+        let standard = { (path: String) in URL(fileURLWithPath: path).standardizedFileURL.path }
+        var matches = task.repositoryWorktrees
+        if let repositoryPath = selector.repositoryPath {
+            let path = standard(repositoryPath)
+            matches = matches.filter { standard($0.repositoryPath) == path }
+            guard !matches.isEmpty else {
+                throw BridgeCommandError(code: "not_found", message: "This repository isn't attached to the task: \(path)")
+            }
         }
-        return record
+        if let worktreePath = selector.worktreePath {
+            let path = standard(worktreePath)
+            let canonical = Self.canonicalPath(worktreePath)
+            matches = matches.filter { standard($0.worktreePath) == path || Self.canonicalPath($0.worktreePath) == canonical }
+            guard !matches.isEmpty else {
+                throw BridgeCommandError(code: "not_found", message: "No worktree of this task is at: \(path)")
+            }
+        }
+        guard selector.repositoryPath != nil || selector.worktreePath != nil else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Pass --repo <path> or --worktree <path>.")
+        }
+        if let branch = selector.branch, matches.count > 1 || matches.first?.branch != branch {
+            matches = matches.filter { $0.branch == branch }
+            guard !matches.isEmpty else {
+                throw BridgeCommandError(code: "not_found", message: "No worktree of this task is on branch \(branch).")
+            }
+        }
+        guard matches.count == 1 else {
+            let choices = matches.map { "\($0.worktreePath) (branch \($0.branch)\($0.isPending ? ", not started" : ""))" }
+            // Worktrees not created yet share the repository's path; their branch tells them apart.
+            let sharesPath = Set(matches.map { standard($0.worktreePath) }).count < matches.count
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "Repository \(matches[0].repositoryPath) has \(matches.count) worktrees on this task. Pass --worktree <path>\(sharesPath ? " (and --worktree-branch <branch> for one not started)" : "") to choose one: \(choices.joined(separator: "; "))."
+            )
+        }
+        return matches[0]
     }
 
     static func normalizeRoots(_ roots: [String]) throws -> [String] {

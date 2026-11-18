@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases05:
-    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows the pull-request-mode plugin's compact mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. The mode is the plugin's own state keyed by task id, not a property of the task: a new task has no saved mode and is in PR mode, choosing PR clears the saved mode, every other choice is saved and reflected across a fresh read, and a saved value no mode knows reads as PR. When a turn completes in PR mode (including that unknown value), the plugin creates the task's pull request on the way to Review with no user click, exactly once. Choosing Merge for that task in Review is a change the plugin acts on at once: it merges the green pull request with no other command, and the task stays in Review. In Manual mode the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode another task was left in. Creating a pull request with --if-needed for an unknown task is rejected. A task saved before the mode was the plugin's keeps its old Manual, Green, or Merge choice: the bridge imports it once into the plugin's state at its next request (a mode already chosen in the plugin wins, and PR imports nothing), and its card's pill shows it.
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows the pull-request-mode plugin's compact mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. The mode is the plugin's own state keyed by task id, not a property of the task: a new task has no saved mode and is in Manual mode, choosing Manual clears the saved mode, every other choice (PR included) is saved and reflected across a fresh read, and a saved value no mode knows reads as Manual. When a turn completes in PR mode, the plugin creates the task's pull request on the way to Review with no user click, exactly once. Choosing Merge for that task in Review is a change the plugin acts on at once: it merges the green pull request with no other command, and the task stays in Review. In Manual mode, a new task's default, the task reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in Manual mode, whatever mode another task was left in. Creating a pull request with --if-needed for an unknown task is rejected. A task saved before the mode was the plugin's keeps its old Manual, Green, or Merge choice: the bridge imports it once into the plugin's state at its next request (a mode already chosen in the plugin wins, and PR imports nothing), and its card's pill shows it. In the same request, once, each task saved while PR was the default that still has no mode of its own gets PR saved as its own, so existing tasks keep opening their pull request on Review and their pill shows PR; a task created afterward still starts in Manual.
     def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
         missing, _ = self.call_cli("task", "pr", "create", str(uuid.uuid4()), "--if-needed", expected_status=3)
         self.assert_failure(missing, "not_found")
@@ -20,7 +20,7 @@ class BridgeTestCases05:
 
         task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
         self.assertNotIn("pullRequestMode", task, "The mode is the plugin's state, not a property of the task.")
-        self.assertIsNone(self.pull_request_mode(task["id"]), "A new task has no saved mode, so it is in PR mode.")
+        self.assertIsNone(self.pull_request_mode(task["id"]), "A new task has no saved mode, so it is in Manual mode.")
 
         # Tasks saved before the mode was the plugin's kept it in their own columns. Seed those real
         # SwiftData rows and forget that the import ran; the bridge imports them once, at the start of
@@ -40,27 +40,38 @@ class BridgeTestCases05:
             for title, (columns, _) in legacy_columns.items():
                 seeded = database.execute(f"UPDATE ZBOARDTASK SET {columns} WHERE ZTITLE = ?", (title,))
                 self.assertEqual(seeded.rowcount, 1, f"Seed the legacy mode columns of {title}.")
-        subprocess.run(["/usr/bin/defaults", "delete", self.defaults_suite, "legacyPullRequestModesImported"], check=False, capture_output=True)
-        self.assertFalse(self.default_exists("legacyPullRequestModesImported"))
+        # Forget, too, that the tasks saved while PR was the default had it saved as their own: a
+        # first launch since Manual became the default runs both, the import first.
+        for flag in ("legacyPullRequestModesImported", "existingTaskPullRequestModesPinned"):
+            subprocess.run(["/usr/bin/defaults", "delete", self.defaults_suite, flag], check=False, capture_output=True)
+            self.assertFalse(self.default_exists(flag))
         imported_state = self.assert_success(self.call_cli("plugin", "state", "--id", "pull-request-mode")[0])["state"]
         for title, (_, mode) in legacy_columns.items():
-            self.assertEqual(imported_state.get(legacy_ids[title]), mode, f"{title} imports as the plugin's state; a mode already chosen in the plugin wins.")
+            self.assertEqual(imported_state.get(legacy_ids[title]), mode or "pr",
+                             f"{title} imports as the plugin's state; a mode already chosen in the plugin wins, and a legacy PR task keeps PR.")
+        self.assertEqual(imported_state.get(task["id"]), "pr", "A task saved while PR was the default keeps PR as its own mode.")
         self.assertNotIn("pullRequestMode", self.assert_success(self.call_cli("task", "get", legacy_ids["Legacy PR merge"])[0]))
         self.assertTrue(self.default_exists("legacyPullRequestModesImported"), "The import is recorded so it runs once.")
+        self.assertTrue(self.default_exists("existingTaskPullRequestModesPinned"), "Keeping PR for existing tasks is recorded so it runs once.")
         imports = [event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.imported" and event.get("count") == "3"]
-        self.assertEqual(len(imports), 1, "Three legacy modes were imported, in one pass.")
-        # A later choice in the plugin is not overwritten by the old columns on later requests.
+        self.assertEqual(len(imports), 1, "Three legacy modes were imported, in one pass; PR imports nothing.")
+        pinned = [event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.pinned" and event.get("count") == "2"]
+        self.assertEqual(len(pinned), 1, "The two tasks with no mode of their own (the legacy PR task and this case's task) kept PR, in one pass.")
+        # A later choice in the plugin is not overwritten by the old columns, or by PR, on later requests.
         self.set_pull_request_mode(legacy_ids["Legacy PR merge"], None)
         self.assertIsNone(self.pull_request_mode(legacy_ids["Legacy PR merge"]))
         self.assertEqual(len([event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.imported" and event.get("count") != "0"]), 1,
                          "The import runs once.")
-        self.assertIsNone(self.pull_request_mode(self.create_task(title="Fresh after legacy import")["id"]), "A new task still starts in PR mode.")
+        self.assertEqual(len([event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.pinned" and event.get("count") != "0"]), 1,
+                         "Keeping PR for existing tasks runs once.")
+        self.assertIsNone(self.pull_request_mode(self.create_task(title="Fresh after legacy import")["id"]), "A new task starts in Manual mode.")
 
-        for mode in ("autopilot", "merge", "pr"):
+        for mode in ("autopilot", "merge", "manual"):
             self.set_pull_request_mode(task["id"], mode)
             self.assertEqual(self.pull_request_mode(task["id"]), mode, "The plugin keeps the chosen mode across a fresh CLI connection.")
-        # A saved value no mode knows falls back to PR: this task still gets its pull request on Review.
-        self.set_pull_request_mode(task["id"], "sometimes")
+        # PR is no longer the default, so choosing it is saved; this task gets its pull request on Review.
+        self.set_pull_request_mode(task["id"], "pr")
+        self.assertEqual(self.pull_request_mode(task["id"]), "pr", "The plugin keeps PR across a fresh CLI connection.")
 
         remote_root = self.data_directory / "auto-pr-remotes"
         remote_root.mkdir()
@@ -168,21 +179,31 @@ class BridgeTestCases05:
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review", "Merging leaves the task in Review.")
 
         default_task = self.create_task("Default PR mode")
-        self.assertIsNone(self.pull_request_mode(default_task["id"]), "A new task should start in PR mode.")
-        self.set_pull_request_mode(default_task["id"], "manual")
-        after_off = self.create_task("Default PR mode after switching off")
-        self.assertIsNone(self.pull_request_mode(after_off["id"]), "A new task should still start in PR mode after another task was switched to Manual.")
-        self.assertEqual(self.pull_request_mode(default_task["id"]), "manual")
+        self.assertIsNone(self.pull_request_mode(default_task["id"]), "A new task should start in Manual mode.")
+        self.set_pull_request_mode(default_task["id"], "pr")
+        after_on = self.create_task("Default PR mode after switching on")
+        self.assertIsNone(self.pull_request_mode(after_on["id"]), "A new task should still start in Manual mode after another task was switched to PR.")
+        self.assertEqual(self.pull_request_mode(default_task["id"]), "pr")
 
+        def review_modes(task_id):
+            return [event.get("mode") for event in self.diagnostic_events()
+                    if event.get("event") == "plugin.pull_request_mode.review" and event.get("taskID") == task_id]
+
+        # A new task, with no mode chosen, is in Manual mode.
         manual_task = self.create_repo_task("Manual PR toggle", [self.secondary], merge_targets={self.secondary: "main"})
-        self.set_pull_request_mode(manual_task["id"], "manual")
+        self.assertIsNone(self.pull_request_mode(manual_task["id"]))
         self.complete_fixture_turn(manual_task["id"], executable_name="codex-fixture-manual-pr")
         manual_reviewed = self.assert_success(self.call_cli("task", "get", manual_task["id"])[0])
         self.assertEqual(manual_reviewed["status"], "Review")
+        self.wait_for(lambda: review_modes(manual_task["id"]) == ["manual"], "A new task reaches Review in Manual mode.")
         self.assertIsNone(
             manual_reviewed["repositoryWorktrees"][0].get("pullRequestNumber"),
-            "With Auto PR off, reaching Review must not create a pull request by itself.",
+            "In Manual mode, the default, reaching Review must not create a pull request by itself.",
         )
+        # A saved value no mode knows reads as the default, Manual.
+        self.set_pull_request_mode(after_on["id"], "sometimes")
+        self.complete_fixture_turn(after_on["id"], executable_name="codex-fixture-unknown-pr-mode")
+        self.wait_for(lambda: review_modes(after_on["id"]) == ["manual"], "An unknown saved mode reaches Review as Manual.")
 
         manual_remote_root = self.data_directory / "manual-pr-remotes"
         manual_remote_root.mkdir()
@@ -416,15 +437,34 @@ class BridgeTestCases05:
         self.assertEqual(len(follows("poll")), polls_when_green, "A green PR isn't polled.")
         self.complete_fixture_turn(followed["id"], executable_name="codex-fixture-follow-review", extra_environment=service_environment)
         wait_for_follows("review", 2)
-        # Generous: the review pass and the next 2s poll can lag when the host is busy.
-        wait_for_follows("poll", polls_when_green + 1, timeout=30)
+
+        def review_outcomes():
+            return [event.get("action") for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.followed"
+                    and event.get("taskID") == followed["id"] and event.get("trigger") == "review"]
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and len(review_outcomes()) < 2:
+            time.sleep(0.25)
+        self.assertEqual(len(review_outcomes()), 2, "The review pass reports its outcome.")
+        if review_outcomes()[1] == "inactive":
+            # Generous: the review pass and the next 2s poll can lag when the host is busy.
+            wait_for_follows("poll", polls_when_green + 1, timeout=30)
+        else:
+            # On a busy host the turn can let go of the task before the pass reads it; the
+            # pass then finds the green PR itself, and a green PR needs no poll.
+            self.assertEqual(review_outcomes()[1], "green", "A review pass that isn't skipped finds the green PR.")
 
         # A pass the plugin started asks it again before it merges: with the mode no longer
         # Merge, it merges nothing.
         gh_state.write_text("802=unmerged\n802.checks=success\n", encoding="utf-8")
-        declined = self.assert_success(self.call_cli(
-            "task", "pr", "autopilot", followed["id"], "--merge", "--confirm-with", "pull-request-mode", extra_environment=gh_environment,
-        )[0])
+        # The plugin's own poll pass may still be running (its follow event is logged as it
+        # starts), which turns this pass away before it asks; ask again once that pass ends.
+        def merge_pass():
+            outcome = self.assert_success(self.call_cli(
+                "task", "pr", "autopilot", followed["id"], "--merge", "--confirm-with", "pull-request-mode", extra_environment=gh_environment,
+            )[0])
+            return None if outcome.get("reason") == "Autopilot is already handling this task." else outcome
+        declined = self.wait_for(merge_pass, "A merge pass should run once the plugin's pass ends.")
         self.assertEqual(declined["action"], "inactive")
         self.assertNotIn("merged\t802", (gh_directory / "create-calls").read_text(encoding="utf-8") if (gh_directory / "create-calls").exists() else "")
         # Diagnostics are written by a background flush, so the event can land after the call returns.
@@ -515,7 +555,7 @@ class BridgeTestCases05:
         self.assertEqual(merges()[-1], "merge-failed\t812\t--merge")
         idle = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], "--merge", extra_environment=gh_environment)[0])
         self.assertEqual(idle["action"], "inactive", "A refused merge does not retry.")
-    # case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, a board probe that was already running when it moved raises no alert, and `task pr status` of the Done task reports no state instead of the GitHub CLI's error.
+    # case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, a board probe that was already running when it moved raises no alert, and `task pr status` of the Done task lists only its recorded pull request, without probing, instead of the GitHub CLI's error.
     def test_review_probe_failure_alerts_only_while_in_review(self):
         task = self.create_repo_task("Review probe failure", [self.primary], materialize=True)
         self.assertEqual(task["status"], "Review")
@@ -534,8 +574,9 @@ class BridgeTestCases05:
         self.assertEqual(self.assert_success(moved)["status"], "Done")
         self.assertFalse(worktree.exists(), "Moving to Done removes the worktree a later probe would read.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Done")
-        self.assertEqual(self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)[0]), [],
-                         "A Done task whose worktree was removed has no pull request state to report.")
+        listed = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)[0])
+        self.assertEqual([(item["number"], item.get("past")) for item in listed], [(123, None)],
+                         "A Done task whose worktree was removed lists only its recorded pull request, without probing GitHub.")
     # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     def test_review_pr_conflicts_probe_and_verify(self):
         task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
@@ -553,7 +594,7 @@ class BridgeTestCases05:
         executable = directory / "gh"
         executable.write_text(
             "#!/bin/sh\n"
-            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid,statusCheckRollup ]; then\n"
+            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid,statusCheckRollup,state ]; then\n"
             "  echo 'Unexpected gh fixture command' >&2\n"
             "  exit 2\n"
             "fi\n"

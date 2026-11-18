@@ -21,13 +21,6 @@ extension TaskConversationView {
         } else {
             primary = .init(kind: "send", disabled: isSendDisabled, help: "Send message", label: "Send message", value: "", testID: "send-message-button")
         }
-        var modeItems: [ComposerModel.Item] = []
-        if provider.supportsGoals {
-            modeItems.append(.init(id: "goal", title: "Goal", checked: false, icon: "scope", help: "Set a goal to keep pursuing", testID: "conversation-mode-goal"))
-        }
-        modeItems += ConversationMode.allCases.map { mode in
-            .init(id: "mode:\(mode.rawValue)", title: mode.title, checked: conversationMode == mode, icon: nil, help: "Switch to \(mode.title) mode", testID: "conversation-mode-\(mode.rawValue)")
-        }
         return ComposerModel(
             prefix: "",
             draft: draft,
@@ -41,13 +34,11 @@ extension TaskConversationView {
                 : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
                     : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
             skills: !hasTaskSidebar,
-            modeMenu: .init(
-                text: isEnteringGoal ? "Goal" : (conversationMode == .plan ? "Plan" : nil),
-                badgeIcon: isEnteringGoal ? "scope" : nil,
-                active: isEnteringGoal || conversationMode == .plan,
-                label: isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)",
-                items: modeItems
-            ),
+            attach: .init(disabled: isReadOnly || isPreparingSubmittedMessage, help: "Attach images"),
+            plan: .init(on: conversationMode == .plan, help: conversationMode == .plan ? "Turn off Plan mode" : "Plan before making changes"),
+            goal: provider.supportsGoals
+                ? .init(on: isEnteringGoal, help: isEnteringGoal ? "Stop entering a goal" : "Set a goal to keep pursuing")
+                : nil,
             startImplementing: canShowStartImplementing ? .init(
                 disabled: workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage,
                 help: reason ?? "Switch to Code mode and start implementing this plan",
@@ -168,13 +159,16 @@ extension TaskConversationView {
             },
             selectionChange: { composerDraft.selection = $0 },
             openSkills: { openSkillsPage(focus: nil) },
-            modeMenu: { id in
-                if id == "goal" {
-                    isEnteringGoal = true
-                    draft = ""
-                } else if let mode = ConversationMode(rawValue: String(id.dropFirst("mode:".count))) {
+            attach: chooseAttachments,
+            togglePlan: {
+                if conversationMode == .plan { setConversationMode(.code) } else { enterPlanMode() }
+            },
+            toggleGoal: {
+                if isEnteringGoal {
                     isEnteringGoal = false
-                    setConversationMode(mode)
+                } else {
+                    enterGoal()
+                    draft = ""
                 }
             },
             startImplementing: startImplementingPlan,

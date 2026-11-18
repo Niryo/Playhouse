@@ -20,8 +20,11 @@ struct DoneArchiveModel: Codable, Equatable {
         struct Link: Codable, Equatable {
             var number: Int
             var url: String
-            /// The repository's folder name, the chip's help.
+            /// The repository's folder name, with the worktree's branch when the
+            /// task has several worktrees of it; the chip's help.
             var repository: String
+            /// "open", "merged" or "closed", the chip's value and the end of its help.
+            var state: String
         }
 
         var create: Create?
@@ -90,14 +93,21 @@ struct DoneArchiveModel: Codable, Equatable {
                 help: "Create pull requests for repositories without a linked pull request"
             )
         }
-        // Pull requests merged before a renewed worktree stay listed ahead of the current ones.
-        let records = task.pastRepositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }.map { ($0.pullRequestNumber, $0.pullRequestURL, $0.repositoryPath) }
-            + linked.map { ($0.pullRequestNumber, $0.pullRequestURL, $0.repositoryPath) }
+        // Pull requests merged before a renewed worktree stay listed ahead of the current
+        // ones; every worktree's pull request is listed, several per repository included.
+        let records = task.pastRepositoryWorktrees.filter(\.hasPullRequest) + linked
+        let worktreesPerRepository = Dictionary(grouping: records + task.repositoryWorktrees, by: \.repositoryPath)
+            .mapValues { Set($0.map(\.branch)).count }
         var seen = Set<String>()
-        let links: [PullRequests.Link] = records.compactMap { number, url, path in
-            guard let number, let url, seen.insert(url).inserted else { return nil }
-            return .init(number: number, url: url, repository: URL(fileURLWithPath: path).lastPathComponent)
-        }
+        let links: [PullRequests.Link] = Array(records.reversed().compactMap { record -> PullRequests.Link? in
+            guard let number = record.pullRequestNumber, let url = record.pullRequestURL, seen.insert(url).inserted else { return nil }
+            let name = URL(fileURLWithPath: record.repositoryPath).lastPathComponent
+            return .init(
+                number: number, url: url,
+                repository: (worktreesPerRepository[record.repositoryPath] ?? 0) > 1 ? "\(name) (\(record.branch))" : name,
+                state: record.pullRequestState ?? "open"
+            )
+        }.reversed())
         return PullRequests(create: create, links: links)
     }
 }
@@ -205,8 +215,9 @@ struct DoneArchivePanel: View {
     }
 
     /// The row's pull request actions, the same atoms as the task item's.
+    /// Several pull requests keep their numbers whole; the title truncates instead.
     private func pullRequestControl(_ row: DoneArchiveModel.Row, _ pullRequests: DoneArchiveModel.PullRequests) -> some View {
-        AtomStack(props: StackProps(axis: "h", spacing: 5)) {
+        AtomStack(props: StackProps(axis: "h", spacing: 5), common: AtomCommon(fixedSize: true)) {
             if let create = pullRequests.create {
                 AtomButton(
                     props: ButtonProps(style: "borderless", emphasis: 4, disabled: create.busy),
@@ -224,7 +235,7 @@ struct DoneArchivePanel: View {
                 // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
                 AtomLink(
                     props: LinkProps(url: link.url, emphasis: 5),
-                    common: AtomCommon(testID: "\(prefix)done-archive-pr-link-\(row.id)-\(link.number)", help: link.repository, minWidth: 30, minHeight: 30)
+                    common: AtomCommon(testID: "\(prefix)done-archive-pr-link-\(row.id)-\(link.number)", value: link.state, help: "\(link.repository) · \(link.state)", minWidth: 30, minHeight: 30)
                 ) {
                     AtomText(props: TextProps(text: "#\(link.number)", size: 10, weight: "semibold", design: "monospaced"))
                 }

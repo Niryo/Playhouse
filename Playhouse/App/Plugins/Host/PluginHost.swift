@@ -216,7 +216,8 @@ final class PluginConfirmations {
     }
 }
 
-/// The confirmation dialog a plugin's `ui.confirm` shows over the board.
+/// The confirmation dialog a plugin's `ui.confirm` shows over the board, or
+/// inside a popover plugin's popover.
 struct PluginConfirmationModifier: ViewModifier {
     let confirmations: PluginConfirmations
 

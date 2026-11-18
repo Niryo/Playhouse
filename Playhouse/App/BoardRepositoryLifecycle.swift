@@ -47,46 +47,42 @@ extension BoardTaskManager {
             ))
         }
 
-        var seenRepositories = Set<String>()
-        for record in records {
-            let repository = Self.canonicalPath(record.repositoryPath)
-            guard seenRepositories.insert(repository).inserted else {
-                throw BridgeCommandError(
-                    code: "invalid_argument",
-                    message: "A repository can be selected only once per task: \(record.repositoryPath)"
-                )
-            }
-        }
-
+        // A repository the task already has, or one listed twice, gets another worktree
+        // of its own (see `addWorktree`); the rest are added as pending records.
         let attachedRepositories = Set(initialTask.repositoryWorktrees.map { Self.canonicalPath($0.repositoryPath) })
-        if let duplicate = records.first(where: { attachedRepositories.contains(Self.canonicalPath($0.repositoryPath)) }) {
-            throw BridgeCommandError(
-                code: "invalid_argument",
-                message: "This repository is already attached to the task: \(duplicate.repositoryPath)"
-            )
+        var seenRepositories = Set<String>()
+        var additionalWorktrees: [RepositoryWorktreeRecord] = []
+        let newRecords = records.filter { record in
+            let repository = Self.canonicalPath(record.repositoryPath)
+            guard !attachedRepositories.contains(repository), seenRepositories.insert(repository).inserted else {
+                additionalWorktrees.append(record)
+                return false
+            }
+            return true
         }
+        let addedRepositories = seenRepositories
 
         let mutation = {
             try await self.withTaskOperationLock(id) {
-                return try await self.withRepositoryAllocationLocks(records.map(\.repositoryPath)) {
+                return try await self.withRepositoryAllocationLocks(newRecords.map(\.repositoryPath)) {
                     let task = try self.requireTask(id)
                     guard task.status != .done else {
                         throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
                     }
 
                     let currentRepositories = Set(task.repositoryWorktrees.map { Self.canonicalPath($0.repositoryPath) })
-                    if let duplicate = records.first(where: { currentRepositories.contains(Self.canonicalPath($0.repositoryPath)) }) {
+                    if let duplicate = newRecords.first(where: { currentRepositories.contains(Self.canonicalPath($0.repositoryPath)) }) {
                         throw BridgeCommandError(
-                            code: "invalid_argument",
-                            message: "This repository is already attached to the task: \(duplicate.repositoryPath)"
+                            code: "invalid_transition",
+                            message: "This repository was attached to the task while it was being added. Try again: \(duplicate.repositoryPath)"
                         )
                     }
-                    try self.validateRepositoryAssignments(records, excludingTaskID: id)
+                    try self.validateRepositoryAssignments(newRecords, excludingTaskID: id)
 
-                    let repositories = task.repositoryWorktrees + records
+                    let repositories = task.repositoryWorktrees + newRecords
                     let contextFolders = try Self.normalizeOptionalRoots(
                         task.contextFolderPaths.filter {
-                            !seenRepositories.contains(Self.canonicalPath($0))
+                            !addedRepositories.contains(Self.canonicalPath($0))
                         }
                     )
                     let roots = try Self.normalizeOptionalRoots(repositories.map { $0.isPending ? $0.repositoryPath : $0.worktreePath } + contextFolders)
@@ -96,8 +92,113 @@ extension BoardTaskManager {
                     try await self.saveTaskContext(taskID: id)
                     PlayhouseDiagnostics.record("workspace.repository.add.succeeded", fields: [
                         "taskID": id.uuidString,
-                        "repositoryCount": String(records.count),
-                        "repositoryPaths": records.map(\.repositoryPath).joined(separator: "\n")
+                        "repositoryCount": String(newRecords.count),
+                        "repositoryPaths": newRecords.map(\.repositoryPath).joined(separator: "\n")
+                    ])
+                    return BoardTaskRecord(task: task)
+                }
+            }
+        }
+        var result: BoardTaskRecord
+        if newRecords.isEmpty {
+            result = BoardTaskRecord(task: initialTask)
+        } else if duringActiveConversation {
+            result = try await mutation()
+        } else {
+            result = try await withConversationTurnReservation(id) {
+                try await mutation()
+            }
+        }
+        for record in additionalWorktrees {
+            result = try await addWorktree(
+                id,
+                repositoryPath: record.repositoryPath,
+                duringActiveConversation: duringActiveConversation
+            )
+        }
+        return result
+    }
+
+    /// Adds another worktree of a repository to the task, on its own branch, so one task
+    /// can carry several pull requests to the same repository. The worktree is created
+    /// right away on `branch` (or an auto-named branch from the task title) from
+    /// `branchFrom`; it merges into the merge target the task already uses for this
+    /// repository, or the repository's default.
+    @discardableResult
+    func addWorktree(
+        _ id: UUID,
+        repositoryPath: String,
+        branch: String? = nil,
+        branchFrom: String? = nil,
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
+        let initialTask = try requireTask(id)
+        guard initialTask.status != .done else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+        }
+        let repository = try await worktreeService.pendingRecord(
+            spec: RepositoryWorktreeSpec(repositoryPath: repositoryPath, branch: nil, branchFrom: nil)
+        ).repositoryPath
+        let sibling = initialTask.repositoryWorktrees.first {
+            Self.canonicalPath($0.repositoryPath) == Self.canonicalPath(repository)
+        }
+        let spec = RepositoryWorktreeSpec(
+            repositoryPath: repository,
+            branch: branch?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? branch : nil,
+            branchFrom: branchFrom?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? branchFrom : nil,
+            mergeTarget: sibling?.mergeTarget
+        )
+        // Validates the branch names before any lock is taken.
+        let validated = try await worktreeService.pendingRecord(spec: spec)
+        PlayhouseDiagnostics.record("workspace.repository.add_worktree.started", fields: [
+            "taskID": id.uuidString, "repositoryPath": repository, "branch": validated.branch
+        ])
+        let mutation = {
+            try await self.withTaskOperationLock(id) {
+                try await self.withRepositoryAllocationLocks([repository]) {
+                    let task = try self.requireTask(id)
+                    guard task.status != .done else {
+                        throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+                    }
+                    if let taken = task.repositoryWorktrees.first(where: {
+                        Self.canonicalPath($0.repositoryPath) == Self.canonicalPath(repository) && $0.branch == validated.branch && !RepositoryWorktreeRecord.isAutomaticBranch(validated.branch)
+                    }) {
+                        throw BridgeCommandError(
+                            code: "invalid_argument",
+                            message: "This task already has a worktree on branch '\(validated.branch)': \(taken.isPending ? taken.repositoryPath : taken.worktreePath)"
+                        )
+                    }
+                    try self.validateRepositoryAssignments([validated], excludingTaskID: id)
+                    let record = try await self.worktreeService.resolve(
+                        spec: spec,
+                        title: task.title,
+                        root: self.worktreeRoot,
+                        reservedBranches: self.reservedBranches(repositoryPath: repository, excludingTaskID: id)
+                            .union(self.ownBranches(of: repository, in: task.repositoryWorktrees))
+                    )
+                    do {
+                        if let existing = task.repositoryWorktrees.first(where: {
+                            !$0.isPending && Self.canonicalPath($0.worktreePath) == Self.canonicalPath(record.worktreePath)
+                        }) {
+                            throw BridgeCommandError(
+                                code: "invalid_argument",
+                                message: "This task already uses the worktree on branch '\(existing.branch)': \(existing.worktreePath)"
+                            )
+                        }
+                        try self.validateRepositoryAssignments([record], excludingTaskID: id)
+                        let repositories = task.repositoryWorktrees + [record]
+                        task.repositoryWorktrees = repositories
+                        task.workspaceRootPaths = try Self.normalizeOptionalRoots(
+                            repositories.map { $0.isPending ? $0.repositoryPath : $0.worktreePath } + task.contextFolderPaths
+                        )
+                        try await self.saveTaskContext(taskID: id)
+                    } catch {
+                        if record.createdByPlayhouse { try? await self.worktreeService.remove(record) }
+                        throw error
+                    }
+                    PlayhouseDiagnostics.record("workspace.repository.add_worktree.succeeded", fields: [
+                        "taskID": id.uuidString, "repositoryPath": repository,
+                        "branch": record.branch, "worktreePath": record.worktreePath
                     ])
                     return BoardTaskRecord(task: task)
                 }
@@ -131,11 +232,10 @@ extension BoardTaskManager {
             let record = try await worktreeService.pendingRecord(
                 spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil)
             )
-            let canonical = Self.canonicalPath(record.repositoryPath)
-            guard seen.insert(canonical).inserted else {
-                throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(record.repositoryPath)")
+            // Replacing keeps a repository's worktrees; listing it twice adds nothing more.
+            if seen.insert(Self.canonicalPath(record.repositoryPath)).inserted {
+                normalizedPaths.append(record.repositoryPath)
             }
-            normalizedPaths.append(record.repositoryPath)
         }
 
         let desired = Set(normalizedPaths.map(Self.canonicalPath))
@@ -152,18 +252,17 @@ extension BoardTaskManager {
         let latestTask = try requireTask(id)
         let removals = latestTask.repositoryWorktrees
             .filter { !desired.contains(Self.canonicalPath($0.repositoryPath)) }
-            .map(\.repositoryPath)
-        for path in removals {
+        for record in removals {
             do {
                 _ = try await removeRepository(
                     id,
-                    repositoryPath: path,
+                    worktree: .record(record),
                     duringActiveConversation: duringActiveConversation
                 )
             } catch {
                 throw BridgeCommandError(
                     code: "operation_failed",
-                    message: "The replacement repositories were added, but the old repository \(path) couldn't be removed. The task keeps both contexts. \(error.localizedDescription)"
+                    message: "The replacement repositories were added, but the old repository \(record.repositoryPath) couldn't be removed. The task keeps both contexts. \(error.localizedDescription)"
                 )
             }
         }
@@ -173,7 +272,7 @@ extension BoardTaskManager {
     @discardableResult
     func updateRepository(
         _ id: UUID,
-        repositoryPath: String,
+        worktree selector: RepositoryWorktreeSelector,
         branch: String,
         branchFrom: String,
         mergeTarget: String?
@@ -186,7 +285,7 @@ extension BoardTaskManager {
               !branchFrom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "Branch and merge-from values can't be empty.")
         }
-        let initialRecord = try repositoryRecord(repositoryPath, in: initialTask)
+        let initialRecord = try repositoryRecord(selector, in: initialTask)
         guard initialRecord.isPending else {
             throw BridgeCommandError(code: "invalid_transition", message: "Repository settings are locked after the task starts.")
         }
@@ -204,9 +303,22 @@ extension BoardTaskManager {
                 try await withRepositoryAllocationLocks([validated.repositoryPath]) {
                     let task = try requireTask(id)
                     guard task.status != .done,
-                          let index = task.repositoryWorktrees.firstIndex(where: { $0.repositoryPath == initialRecord.repositoryPath }),
-                          task.repositoryWorktrees[index] == initialRecord else {
+                          let index = task.repositoryWorktrees.firstIndex(where: { $0 == initialRecord }) else {
                         throw BridgeCommandError(code: "invalid_transition", message: "Repository settings changed while they were being validated. Try again.")
+                    }
+                    var validated = validated
+                    if RepositoryWorktreeRecord.isAutomaticBranch(validated.branch) {
+                        var siblings = task.repositoryWorktrees
+                        siblings.remove(at: index)
+                        validated.branch = RepositoryWorktreeRecord.automaticBranch(for: validated.repositoryPath, among: siblings)
+                    }
+                    if !RepositoryWorktreeRecord.isAutomaticBranch(validated.branch), let sibling = task.repositoryWorktrees.enumerated().first(where: {
+                        $0.offset != index && Self.canonicalPath($0.element.repositoryPath) == Self.canonicalPath(validated.repositoryPath) && $0.element.branch == validated.branch
+                    }) {
+                        throw BridgeCommandError(
+                            code: "invalid_argument",
+                            message: "Another worktree of this task already uses branch '\(validated.branch)': \(sibling.element.worktreePath)"
+                        )
                     }
                     try validateRepositoryAssignments([validated], excludingTaskID: id)
                     var repositories = task.repositoryWorktrees
@@ -222,18 +334,18 @@ extension BoardTaskManager {
     @discardableResult
     func removeRepository(
         _ id: UUID,
-        repositoryPath: String,
+        worktree selector: RepositoryWorktreeSelector,
         duringActiveConversation: Bool = false
     ) async throws -> BoardTaskRecord {
         if duringActiveConversation {
             return try await removeRepositoryWhileTurnReserved(
                 id,
-                repositoryPath: repositoryPath,
+                worktree: selector,
                 deferWorktreeRemovalUntilTurnEnds: true
             )
         }
         return try await withConversationTurnReservation(id) {
-            try await self.removeRepositoryWhileTurnReserved(id, repositoryPath: repositoryPath)
+            try await self.removeRepositoryWhileTurnReserved(id, worktree: selector)
         }
     }
 
@@ -244,13 +356,14 @@ extension BoardTaskManager {
     /// In Progress with a fresh worktree for every repository whose worktree was removed. The
     /// old worktree, when still present, is removed once the current turn ends.
     @discardableResult
-    func renewRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTask {
+    func renewRepository(_ id: UUID, worktree selector: RepositoryWorktreeSelector) async throws -> BoardTask {
         PlayhouseDiagnostics.record("workspace.repository.renew.started", fields: [
             "taskID": id.uuidString,
-            "repositoryPath": repositoryPath
+            "repositoryPath": selector.repositoryPath ?? "",
+            "worktreePath": selector.worktreePath ?? ""
         ])
         let initialTask = try requireTask(id)
-        let initialRecord = try repositoryRecord(repositoryPath, in: initialTask)
+        let initialRecord = try repositoryRecord(selector, in: initialTask)
         let wasDone = initialTask.status == .done
         if !wasDone {
             guard let number = initialRecord.pullRequestNumber else {
@@ -308,13 +421,13 @@ extension BoardTaskManager {
                 let repositories = task.repositoryWorktrees.map { record in
                     replacements.first { $0.old == record }?.fresh ?? record
                 }
-                task.pastRepositoryWorktrees += replacements.map(\.old).filter { $0.pullRequestNumber != nil }.map { record in
+                task.repositoryWorktrees = repositories
+                retirePullRequests(replacements.map(\.old).map { record in
                     var retired = record
                     // Outside Done, renewing first confirmed the pull request merged.
                     if !wasDone { retired.isPullRequestMerged = true }
                     return retired
-                }
-                task.repositoryWorktrees = repositories
+                }, on: task)
                 task.workspaceRootPaths = try Self.normalizeOptionalRoots(
                     repositories.map { $0.isPending ? $0.repositoryPath : $0.worktreePath } + task.contextFolderPaths
                 )
@@ -351,7 +464,7 @@ extension BoardTaskManager {
         if let removed = task.repositoryWorktrees.first(where: {
             !$0.isPending && !FileManager.default.fileExists(atPath: $0.worktreePath)
         }) {
-            return try await renewRepository(id, repositoryPath: removed.repositoryPath)
+            return try await renewRepository(id, worktree: .record(removed))
         }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
@@ -425,7 +538,7 @@ extension BoardTaskManager {
 
     func removeRepositoryWhileTurnReserved(
         _ id: UUID,
-        repositoryPath: String,
+        worktree selector: RepositoryWorktreeSelector,
         deferWorktreeRemovalUntilTurnEnds: Bool = false
     ) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
@@ -433,10 +546,10 @@ extension BoardTaskManager {
             guard task.status != .done else {
                 throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
             }
-            let record = try repositoryRecord(repositoryPath, in: task)
+            let record = try repositoryRecord(selector, in: task)
             let originalRepositories = task.repositoryWorktrees
             let originalRoots = task.workspaceRootPaths
-            let updatedRepositories = originalRepositories.filter { $0.repositoryPath != record.repositoryPath }
+            let updatedRepositories = originalRepositories.filter { !$0.isSameWorktree(as: record) }
             let roots = try Self.normalizeOptionalRoots(updatedRepositories.map(\.worktreePath) + task.contextFolderPaths)
             // A task with no repository roots is a valid standalone conversation.
             let shouldRemoveWorktree = record.createdByPlayhouse && !record.isPending
@@ -544,7 +657,8 @@ extension BoardTaskManager {
             }
 
             let originalRepositories = initialTask.repositoryWorktrees
-            let linkedRecords = originalRepositories.filter { $0.pullRequestNumber != nil }
+            // A closed pull request never merges; it doesn't hold the task back.
+            let linkedRecords = originalRepositories.filter { $0.pullRequestNumber != nil && !$0.isPullRequestClosed }
             if !linkedRecords.isEmpty && !allowUnmergedPullRequests && !skipMergeVerification {
                 let executable = try pullRequestService.resolveExecutable()
                 var unmerged: [RepositoryWorktreeRecord] = []
@@ -584,7 +698,7 @@ extension BoardTaskManager {
                 // Every linked pull request was confirmed merged on the way to Done.
                 task.repositoryWorktrees = task.repositoryWorktrees.map { record in
                     var record = record
-                    if record.pullRequestNumber != nil { record.isPullRequestMerged = true }
+                    if record.pullRequestNumber != nil, !record.isPullRequestClosed { record.isPullRequestMerged = true }
                     return record
                 }
             }

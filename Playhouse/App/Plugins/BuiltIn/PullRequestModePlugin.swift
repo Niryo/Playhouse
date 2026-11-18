@@ -61,11 +61,12 @@ struct PullRequestModePlugin: View {
         pendingMode = chosen
         Task {
             do {
-                // The default mode is no entry, so a task set back to PR
-                // follows its schedule again and the state stays small.
+                // The default mode is no entry, so the state stays small; a
+                // schedule's run keeps every choice, the default included, so
+                // it overrides the mode its schedule was given.
                 try await host.call("bridge", "plugin.state.set", [
                     "pluginID": .string(BuiltInPlugins.pullRequestModeID), "key": .string(taskID),
-                    "value": chosen == .pullRequest && task["scheduleSourceTaskID"]?.string == nil ? .null : .string(chosen.rawValue)
+                    "value": chosen == PullRequestMode.defaultMode && task["scheduleSourceTaskID"]?.string == nil ? .null : .string(chosen.rawValue)
                 ])
             } catch {
                 pendingMode = nil

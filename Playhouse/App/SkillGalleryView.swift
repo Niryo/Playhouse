@@ -515,7 +515,12 @@ struct SkillsPageGroupHeader: View {
                 AtomSpinner(props: SpinnerProps(size: "mini"), common: AtomCommon(testID: loadingTestID))
             }
             AtomSpacer()
-            AtomIcon(props: IconProps(name: "info.circle", size: 11, color: "tertiary"), common: AtomCommon(testID: introTestID, label: "About \(label)", help: intro))
+            // A hover hint like a skill row's: a tooltip never showed inside the list.
+            AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "bottom", width: 240, inset: 12, hover: true), onDismiss: {}) {
+                AtomIcon(props: IconProps(name: "info.circle", size: 11, color: "tertiary"), common: AtomCommon(testID: introTestID, label: "About \(label)", hint: intro))
+            } content: {
+                AtomText(props: TextProps(text: intro, size: 12, color: "secondary", wrap: true), common: AtomCommon(testID: "\(introTestID)-hint"))
+            }
         }
     }
 

@@ -3,7 +3,8 @@
 # It answers pull-request list/create calls and `gh pr view <number> --json
 # mergedAt[,mergeable,headRefOid]` from a state file (lines of
 # `<number>=<merged|unmerged|conflicting|head-mismatch>`) and logs each probe.
-# The full review probe also reports `statusCheckRollup` from an optional
+# The full review probe reports `state` CLOSED for a `<number>.closed=true` line, and
+# also `statusCheckRollup` from an optional
 # `<number>.checks=<success|failure|pending|none|rerun-success|rerun-failure|workflows|workflows-failing|statuses|untimed>` line (default success), and
 # `gh api graphql` review-thread reads answer from `<number>.threads=<count>`
 # unresolved threads (default 0), logging `threads <number>` to the call log.
@@ -13,10 +14,17 @@
 # marks the PR merged, unless a `<number>.merge=<message>` line makes it fail with
 # that message (logged as `merge-failed`). A merge not pinned with
 # `--match-head-commit <current HEAD>` is refused the same way.
+# Pull requests opened outside Playhouse are found by branch: `gh pr list --head
+# <branch> --state all` answers from a `head.<branch>=<number>` line (state OPEN,
+# MERGED when `<number>=merged`, CLOSED when `<number>.closed=true`), and `gh pr
+# view <url> --json number,url,state,headRefName` reports that PR the same way;
+# both log `detect<TAB><pwd><TAB><args>` to the detect log. `--state open` lists
+# (the create path) still answer `[]` and log to the create log.
 # Create calls return sequential fixture PR numbers. Environment:
 #   PLAYHOUSE_E2E_GH_STATE_PATH          state file (required)
 #   PLAYHOUSE_E2E_GH_CALL_LOG            append-only log of probed PR numbers (required)
 #   PLAYHOUSE_E2E_GH_CREATE_LOG          append-only log of list/create calls
+#   PLAYHOUSE_E2E_GH_DETECT_LOG          append-only log of branch and URL lookups
 #   PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER first generated PR number (default 501)
 #   PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH  optional file containing create attempt to fail
 #   PLAYHOUSE_E2E_GH_STARTED_DIRECTORY   with EXPECTED_IDS, full probes must all start
@@ -30,11 +38,45 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 : "${PLAYHOUSE_E2E_GH_STATE_PATH:=$script_directory/state}"
 : "${PLAYHOUSE_E2E_GH_CALL_LOG:=$script_directory/calls}"
 : "${PLAYHOUSE_E2E_GH_CREATE_LOG:=$script_directory/create-calls}"
+: "${PLAYHOUSE_E2E_GH_DETECT_LOG:=$script_directory/detect-calls}"
 if [ ! -f "$PLAYHOUSE_E2E_GH_STATE_PATH" ]; then
   echo 'gh fixture requires a state file (PLAYHOUSE_E2E_GH_STATE_PATH or `state` beside the script)' >&2
   exit 2
 fi
 touch "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+# One pull request opened by branch, as JSON: number, url, state, headRefName.
+detected_pull_request() {
+  number=$1
+  branch=$2
+  pr_state=OPEN
+  if [ "$(awk -F= -v number="$number" '$1 == number { print $2 }' "$PLAYHOUSE_E2E_GH_STATE_PATH")" = merged ]; then
+    pr_state=MERGED
+  elif [ "$(awk -F= -v key="$number.closed" '$1 == key { print $2 }' "$PLAYHOUSE_E2E_GH_STATE_PATH")" = true ]; then
+    pr_state=CLOSED
+  fi
+  printf '{"number":%s,"url":"https://github.com/playhouse-test/fixture/pull/%s","state":"%s","headRefName":"%s"}' "$number" "$number" "$pr_state" "$branch"
+}
+if [ "$1" = pr ] && [ "$2" = list ] && [ "$3" = --head ] && [ "$5" = --state ] && [ "$6" = all ]; then
+  printf 'detect\t%s\t%s\n' "$PWD" "$*" >> "$PLAYHOUSE_E2E_GH_DETECT_LOG"
+  number=$(awk -F= -v key="head.$4" '$1 == key { print $2 }' "$PLAYHOUSE_E2E_GH_STATE_PATH")
+  if [ -z "$number" ]; then
+    printf '[]\n'
+  else
+    printf '[%s]\n' "$(detected_pull_request "$number" "$4")"
+  fi
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = view ] && [ "$4" = --json ] && [ "$5" = number,url,state,headRefName ]; then
+  printf 'detect\t%s\t%s\n' "$PWD" "$*" >> "$PLAYHOUSE_E2E_GH_DETECT_LOG"
+  number=$(printf '%s' "$3" | sed -n 's|^https://github.com/playhouse-test/fixture/pull/\([0-9][0-9]*\)$|\1|p')
+  branch=$(awk -F= -v number="$number" 'index($1, "head.") == 1 && $2 == number { print substr($1, 6); exit }' "$PLAYHOUSE_E2E_GH_STATE_PATH")
+  if [ -z "$number" ] || [ -z "$branch" ]; then
+    echo "GraphQL: Could not resolve to a PullRequest ($3)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$(detected_pull_request "$number" "$branch")"
+  exit 0
+fi
 if [ "$1" = pr ] && [ "$2" = list ]; then
   printf 'list\t%s\t%s\n' "$PWD" "$*" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
   printf '[]\n'
@@ -112,7 +154,7 @@ if [ "$5" = mergedAt ]; then
   else
     printf '{"mergedAt":null}\n'
   fi
-elif [ "$5" = mergedAt,mergeable,headRefOid,statusCheckRollup ]; then
+elif [ "$5" = mergedAt,mergeable,headRefOid,statusCheckRollup,state ]; then
   if [ -n "${PLAYHOUSE_E2E_GH_STARTED_DIRECTORY:-}" ] && [ -n "${PLAYHOUSE_E2E_GH_EXPECTED_IDS:-}" ]; then
     touch "$PLAYHOUSE_E2E_GH_STARTED_DIRECTORY/$3"
     parallel=0
@@ -145,14 +187,16 @@ elif [ "$5" = mergedAt,mergeable,headRefOid,statusCheckRollup ]; then
     untimed) rollup='[{"__typename":"CheckRun","name":"fixture-ci","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"fixture-ci","status":"COMPLETED","conclusion":"SUCCESS"}]' ;;
     *) echo 'Unexpected gh fixture checks state' >&2; exit 2 ;;
   esac
+  pr_state=OPEN
+  if [ "$(awk -F= -v key="$3.closed" '$1 == key { print $2 }' "$PLAYHOUSE_E2E_GH_STATE_PATH")" = true ]; then pr_state=CLOSED; fi
   if [ "$state" = head-mismatch ]; then
-    printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"remote-head-not-pushed","statusCheckRollup":%s}\n' "$rollup"
+    printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"remote-head-not-pushed","statusCheckRollup":%s,"state":"%s"}\n' "$rollup" "$pr_state"
   elif [ "$state" = merged ]; then
-    printf '{"mergedAt":"2026-10-22T00:00:00Z","mergeable":"MERGEABLE","headRefOid":"%s","statusCheckRollup":%s}\n' "$head" "$rollup"
+    printf '{"mergedAt":"2026-10-22T00:00:00Z","mergeable":"MERGEABLE","headRefOid":"%s","statusCheckRollup":%s,"state":"MERGED"}\n' "$head" "$rollup"
   elif [ "$state" = conflicting ]; then
-    printf '{"mergedAt":null,"mergeable":"CONFLICTING","headRefOid":"%s","statusCheckRollup":%s}\n' "$head" "$rollup"
+    printf '{"mergedAt":null,"mergeable":"CONFLICTING","headRefOid":"%s","statusCheckRollup":%s,"state":"%s"}\n' "$head" "$rollup" "$pr_state"
   else
-    printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"%s","statusCheckRollup":%s}\n' "$head" "$rollup"
+    printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"%s","statusCheckRollup":%s,"state":"%s"}\n' "$head" "$rollup" "$pr_state"
   fi
 else
   echo 'Unexpected gh fixture field list' >&2

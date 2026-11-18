@@ -117,7 +117,7 @@ extension PlayhouseUITests {
         clickDebugHighlightNativeAtoms()
         XCTAssertTrue(waitUntil({ outlines(in: self.app).count == 0 }, timeout: 5), "Turning the item off removes every outline.")
     }
-    // case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills modal's header and skill list composed in JavaScript from atoms above the native SwiftUI header and list the Skills modal uses, built from the same atoms and sample data, each 336 points wide like the modal and opened by the Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the close button (an xmark capsule labelled Close), a header of the page's sparkles icon (labelled Skills, Rules & MCP) followed by the Skills | Rules | MCP segmented tabs, then the search field and a small New Skill button, a Jump to bar of Repo, Global and Built-in anchors with their counts below them, then one scrolling list with the Repo, Global and Built-in sections in order, each headed by a button that collapses or expands it with Built-in collapsed at first, and the hint below them; a repository section's skills share one card with hairlines between them, each a single line with only its name led by one provider icon (the Claude logo for a Claude-only skill, the Codex logo for a Codex-only skill, a green check for one both can use, none for a skill no provider can use), a Conflict or Invalid icon right of a broken skill's name, a small Fix button on a broken skill and the actions menu, with no switch or Use button: the menu starts with Use (disabled for a skill that is off or that no provider can use) and Disable, or Enable for a skill that is off, which shows grayed out, while its description, issue and location sit in a hover hint (a Popover with hover on, left of the row) and the description is also the row's accessibility hint; and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Menu, PressArea, Popover) with the Skills modal's identifiers. Clicking the JavaScript Built-in header runs its handler (Last: expand builtin) and shows its skills. Pressing the JavaScript Global anchor runs its handler (Last: jump global) and asks the list to scroll to Global (scrollTo global, a new scrollRequest on each press) while every section stays in the list, and an anchor expands a collapsed section. The menu's Use runs its handler (Last: use release-notes) without re-rendering any row, and its Disable runs onMenu (Last: toggle release-notes off), which grays the row out, disables Use and offers Enable, while the grayed-out row still responds to clicks; Enable turns it back on (Last: toggle release-notes on). Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the search's row shows 1 selected with Fix, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the anchors and the search, and the close button closes the JavaScript modal (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
+    // case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills modal's header and skill list composed in JavaScript from atoms above the native SwiftUI header and list the Skills modal uses, built from the same atoms and sample data, each 336 points wide like the modal and opened by the Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the close button (an xmark capsule labelled Close), a header of the page's sparkles icon (labelled Skills, Rules & MCP) followed by the Skills | Rules | MCP segmented tabs, then the search field and a small New Skill button, a Jump to bar of Repo, Global and Built-in anchors with their counts below them, then one scrolling list with the Repo, Global and Built-in sections in order, each headed by a button that collapses or expands it with Built-in collapsed at first and an info icon whose hover hint (a Popover with hover on, not a tooltip) explains the section, and the hint below them; a repository section's skills share one card with hairlines between them, each a single line with only its name led by one provider icon (the Claude logo for a Claude-only skill, the Codex logo for a Codex-only skill, a green check for one both can use, none for a skill no provider can use), a Conflict or Invalid icon right of a broken skill's name, a small Fix button on a broken skill and the actions menu, with no switch or Use button: the menu starts with Use (disabled for a skill that is off or that no provider can use) and Disable, or Enable for a skill that is off, which shows grayed out, while its description, issue and location sit in a hover hint (a Popover with hover on, left of the row) and the description is also the row's accessibility hint; and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Menu, PressArea, Popover) with the Skills modal's identifiers. Clicking the JavaScript Built-in header runs its handler (Last: expand builtin) and shows its skills. Pressing the JavaScript Global anchor runs its handler (Last: jump global) and asks the list to scroll to Global (scrollTo global, a new scrollRequest on each press) while every section stays in the list, and an anchor expands a collapsed section. The menu's Use runs its handler (Last: use release-notes) without re-rendering any row, and its Disable runs onMenu (Last: toggle release-notes off), which grays the row out, disables Use and offers Enable, while the grayed-out row still responds to clicks; Enable turns it back on (Last: toggle release-notes on). Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the search's row shows 1 selected with Fix, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the anchors and the search, and the close button closes the JavaScript modal (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
     func test_plugin_skills_page_renders_from_atoms_like_native() throws {
         executionTimeAllowance = 360 // It walks every section, anchor and hint of both pages.
         launchApp(defaultParent: fixture.parent.path)
@@ -288,6 +288,14 @@ extension PlayhouseUITests {
             XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "\(prefix)skill-row-simplify").firstMatch.exists, "A collapsed group hides its skills.")
         }
         XCTAssertEqual(js("skills-collapse-repo").value as? String, "Expanded")
+        // A section's info icon explains it in a hover hint once the pointer rests on it; the native
+        // header's is checked in the Skills modal itself (test_skills_catalog_lists_repo_global_and_builtin_skills).
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "skills-intro-repo-hint").firstMatch.exists, "The intro stays hidden until the pointer rests on its icon.")
+        let introHint = hint("skills-intro-repo-hint", row: js("skills-intro-repo"))
+        XCTAssertTrue(accessibleLabelOrValue(of: introHint).hasPrefix("Skills in the task's repositories"), "The hint explains the Repo section.")
+        XCTAssertGreaterThan(introHint.frame.minY, js("skills-intro-repo").frame.maxY - 1, "The hint opens below the icon.")
+        js("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
+        XCTAssertTrue(waitUntil({ !introHint.exists }, timeout: 3), "The intro closes when the pointer leaves its icon.")
         attachElementScreenshot(reveal(pair("skills-page").js), named: "The JavaScript Skills modal: tabs in the header, Built-in collapsed")
         clickAnchor(js("skills-collapse-builtin"))
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: expand builtin" && js("skill-row-simplify").exists }, timeout: 5), "Built-in's header expands it.")
@@ -488,7 +496,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: done selecting", "The native page keeps its own state.")
         attachScreenshot(named: "Skills page: the Skills button reopened the JavaScript page")
     }
-    // case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit mobile-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Website); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit backend) without re-rendering the other chip; and its remove badge removes it (Last: remove backend) while the native chips keep theirs. A chip raises no onChange, so sending it one is refused as invalid_argument.
+    // case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit mobile-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Website); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit backend) without re-rendering the other chip; and its remove badge removes it (Last: remove backend) while the native chips keep theirs. A chip for one of several worktrees of a repository (Playhouse on second-line) shows its branch in 11-point secondary text after the name, at the same size in both, and its actions name that worktree: clicking it runs Last: edit Playhouse-second-line and its remove badge removes just it (Last: remove Playhouse-second-line). A chip raises no onChange, so sending it one is refused as invalid_argument.
     func test_plugin_repository_chips_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -522,8 +530,8 @@ extension PlayhouseUITests {
         let lastAction = js("js-last-action")
         let nativeLastAction = native("native-last-action")
 
-        for identifier in ["conversation-repository-badge-backend", "remove-conversation-repository-backend", "conversation-repository-badge-Playhouse",
-                           "remove-conversation-repository-Playhouse", "add-conversation-repository-button",
+        for identifier in ["conversation-repository-badge-backend", "remove-conversation-repository-backend", "conversation-repository-badge-Playhouse-second-line",
+                           "remove-conversation-repository-Playhouse-second-line", "add-conversation-repository-button",
                            "conversation-repository-suggestion-parent", "choose-repository-suggestion-parent-button", "conversation-repository-search",
                            "conversation-repository-recent-header", "conversation-repository-list", "conversation-repository-recent-mre",
                            "conversation-repository-recent-mobile-app", "conversation-repository-recent-Website"] {
@@ -618,11 +626,27 @@ extension PlayhouseUITests {
         remove.click()
         XCTAssertTrue(waitUntil({ !js("conversation-repository-badge-backend").exists }, timeout: 5), "The remove badge removed its chip.")
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: remove backend" }, timeout: 5))
-        XCTAssertTrue(js("conversation-repository-badge-Playhouse").exists)
+        XCTAssertTrue(js("conversation-repository-badge-Playhouse-second-line").exists)
         XCTAssertTrue(native("native-conversation-repository-badge-backend").exists, "The native chips keep theirs.")
         attachScreenshot(named: "Repository chips: the JavaScript backend chip removed, native kept")
+
+        // One of several worktrees of a repository: its branch after the name, its actions naming that worktree.
+        let worktreeChip = pair("conversation-repository-badge-Playhouse-second-line")
+        for side in [worktreeChip.js, worktreeChip.native] {
+            // A button reads as its texts joined, so the branch follows the repository's name.
+            XCTAssertEqual(side.label, "Playhouse, second-line", "The worktree's chip shows its branch after the repository's name.")
+        }
+        XCTAssertEqual(worktreeChip.js.frame.height, worktreeChip.native.frame.height, accuracy: 1)
+        XCTAssertEqual(worktreeChip.js.frame.width, worktreeChip.native.frame.width, accuracy: 1, "The branch label takes the same room in both.")
+        attachElementScreenshot(worktreeChip.native, named: "Repository chips: the native worktree chip with its branch")
+        worktreeChip.js.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: edit Playhouse-second-line" }, timeout: 5), "The worktree's chip ran its onPress.")
+        js("remove-conversation-repository-Playhouse-second-line").click()
+        XCTAssertTrue(waitUntil({ !worktreeChip.js.exists && self.pluginText(lastAction) == "Last: remove Playhouse-second-line" }, timeout: 5),
+                      "The remove badge removed that worktree's chip.")
+        XCTAssertTrue(worktreeChip.native.exists, "The native chips keep theirs.")
     }
-    // case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) labels the menu Conversation mode: Plan mode and shows the Start Implementing button, and Goal (Last: mode goal) labels the menu Goal and shows the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its mode and provider menus as Menu atoms, with every identifier its controls had unchanged. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
+    // case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the attach button (a Button labelled Attach files with the paperclip icon), the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the Plan button (labelled Plan mode, the lightbulb.max icon) and the Goal button (labelled Goal, the GoalIcon asset), both Off with no highlight, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The attach button runs onPress (Last: attach). The Plan button runs onPress (Last: plan on), reads On with an orange highlight and icon and shows the Start Implementing button, and pressing it again turns Plan off (Last: plan off) and hides Start Implementing; the Goal button (Last: goal on) reads On with an orange highlight and shows the goal placeholder, and turning Plan on turns Goal off and turning Goal on turns Plan off, so the two are never on together; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its provider menu as a Menu atom, with its attach, Skills, Plan, provider, model and send identifiers. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
     func test_plugin_composer_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         // A task's conversation composes its composer box from atoms: with Highlight
@@ -640,8 +664,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(outlines("Editor").firstMatch.identifier, "atom-highlight-leaf")
         XCTAssertGreaterThanOrEqual(outlines("Popover").count, 1, "The model button sits in a Popover atom.")
         XCTAssertEqual(outlines("Popover").firstMatch.identifier, "atom-highlight-container")
-        XCTAssertTrue(outlines("Menu").count >= 2, "The mode and provider menus are Menu atoms.")
-        for identifier in ["message-composer-scroll-view", "open-skills-button", "conversation-mode-menu", "conversation-provider-menu", "model-picker-menu", "send-message-button"] {
+        XCTAssertTrue(outlines("Menu").count >= 1, "The provider menu is a Menu atom.")
+        for identifier in ["message-composer-scroll-view", "composer-attach-button", "open-skills-button", "conversation-plan-button", "conversation-provider-menu", "model-picker-menu", "send-message-button"] {
             XCTAssertTrue(element(identifier).exists, "The conversation's composer keeps \(identifier).")
         }
         attachScreenshot(named: "Composer: the conversation's composer outlined as atoms")
@@ -686,7 +710,8 @@ extension PlayhouseUITests {
         let lastJS = js("js-last-action")
         let lastNative = native("native-last-action")
 
-        for identifier in ["message-composer-scroll-view", "open-skills-button", "conversation-mode-menu", "conversation-provider-menu", "model-picker-menu",
+        for identifier in ["message-composer-scroll-view", "composer-attach-button", "open-skills-button", "conversation-plan-button", "conversation-goal-button",
+                           "conversation-provider-menu", "model-picker-menu",
                            "schedule-task-button", "send-message-button"] {
             assertSameSize(identifier)
         }
@@ -725,27 +750,59 @@ extension PlayhouseUITests {
         native("native-send-message-button").click()
         XCTAssertTrue(waitUntil({ self.pluginText(lastNative) == "Last: send hi" }, timeout: 5))
 
-        // The plus menu.
+        XCTAssertEqual(js("composer-attach-button").label, "Attach files")
+        js("composer-attach-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: attach" }, timeout: 5), "The attach button ran onPress.")
+
+        // The Plan and Goal buttons toggle, and turning one on turns the other off.
         for (side, prefix, last) in [(jsSide, "", lastJS), (nativeSide, "native-", lastNative)] {
-            side.descendants(matching: .any).matching(identifier: "\(prefix)conversation-mode-menu").firstMatch.click()
-            let plan = app.menuItems["Plan mode"]
-            XCTAssertTrue(plan.waitToExist(timeout: 5), "The plus menu lists Plan mode.")
-            plan.click()
-            XCTAssertTrue(waitUntil({ self.pluginText(last) == "Last: mode mode:plan" }, timeout: 5), "Plan mode ran onMenu with its id.")
-            XCTAssertTrue(side.descendants(matching: .any).matching(identifier: "\(prefix)start-implementing-button").firstMatch.waitToExist(timeout: 5),
-                          "Plan mode shows Start Implementing.")
-            XCTAssertEqual(side.descendants(matching: .any).matching(identifier: "\(prefix)conversation-mode-menu").firstMatch.label, "Conversation mode: Plan mode",
-                           "Plan mode labels the plus menu.")
+            func control(_ identifier: String) -> XCUIElement {
+                side.descendants(matching: .any).matching(identifier: prefix + identifier).firstMatch
+            }
+            XCTAssertLessThanOrEqual(control("composer-attach-button").frame.maxX, control("open-skills-button").frame.minX, "\(prefix)The attach button leads the toolbar.")
+            XCTAssertLessThanOrEqual(control("open-skills-button").frame.maxX, control("conversation-plan-button").frame.minX, "\(prefix)Plan follows the Skills button.")
+            XCTAssertLessThanOrEqual(control("conversation-plan-button").frame.maxX, control("conversation-goal-button").frame.minX, "\(prefix)Goal follows Plan.")
+            XCTAssertEqual(control("conversation-plan-button").label, "Plan mode")
+            XCTAssertEqual(control("conversation-plan-button").value as? String, "Off", "Plan starts off.")
+            XCTAssertLessThan(orangePixelCount(in: control("conversation-plan-button").screenshot()), 5, "\(prefix)Plan has no orange highlight while off.")
+            control("conversation-plan-button").click()
+            XCTAssertTrue(waitUntil({ self.pluginText(last) == "Last: plan on" && control("conversation-plan-button").value as? String == "On" }, timeout: 5),
+                          "The Plan button turns Plan mode on.")
+            XCTAssertTrue(waitUntil({ self.orangePixelCount(in: control("conversation-plan-button").screenshot()) > 20 }, timeout: 3), "\(prefix)Plan is highlighted orange while on.")
+            XCTAssertGreaterThan(modeBackgroundTintFraction(control("conversation-plan-button")), 0.25, "\(prefix)Plan's background is tinted orange while on.")
+            XCTAssertLessThan(modeBackgroundTintFraction(control("conversation-goal-button")), 0.05, "\(prefix)Goal's background has no orange tint while off.")
+            XCTAssertTrue(control("start-implementing-button").waitToExist(timeout: 5), "Plan mode shows Start Implementing.")
+            control("conversation-plan-button").click()
+            XCTAssertTrue(waitUntil({ self.pluginText(last) == "Last: plan off" && control("conversation-plan-button").value as? String == "Off" }, timeout: 5),
+                          "Pressing Plan again turns it off.")
+            XCTAssertTrue(waitUntil({ !control("start-implementing-button").exists }, timeout: 5), "Leaving Plan mode hides Start Implementing.")
+            control("conversation-plan-button").click()
+            XCTAssertTrue(waitUntil({ control("conversation-plan-button").value as? String == "On" }, timeout: 5))
         }
         assertSameSize("start-implementing-button")
-        assertSameSize("conversation-mode-menu")
-        attachScreenshot(named: "Composer: Plan mode on both, with Start Implementing")
-        js("conversation-mode-menu").click()
-        app.menuItems["Goal"].click()
-        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: mode goal" }, timeout: 5), "Goal ran onMenu with its id.")
+        assertSameSize("conversation-plan-button")
+        attachScreenshot(named: "Composer: Plan on in both, highlighted orange, with Start Implementing")
+        attachRegionScreenshot([js("composer-attach-button"), js("conversation-goal-button")], named: "Composer: attach, Skills, Plan (on) and Goal, close up")
+        js("conversation-goal-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: goal on" && js("conversation-goal-button").value as? String == "On" }, timeout: 5),
+                      "The Goal button turns goal entry on.")
+        XCTAssertEqual(js("conversation-plan-button").value as? String, "Off", "Turning Goal on turns Plan off.")
+        XCTAssertTrue(waitUntil({ self.orangePixelCount(in: js("conversation-goal-button").screenshot()) > 20 }, timeout: 3), "Goal is highlighted orange while on.")
+        XCTAssertLessThan(orangePixelCount(in: js("conversation-plan-button").screenshot()), 5, "Plan loses its highlight when Goal turns on.")
         XCTAssertFalse(js("start-implementing-button").exists, "Leaving Plan mode hides Start Implementing.")
         XCTAssertTrue(jsSide.staticTexts["Set a goal to keep pursuing"].exists, "Goal shows its placeholder.")
-        XCTAssertEqual(js("conversation-mode-menu").label, "Goal", "Goal labels the plus menu.")
+        attachScreenshot(named: "Composer: Goal on, highlighted orange, Plan off")
+        attachRegionScreenshot([js("composer-attach-button"), js("conversation-goal-button")], named: "Composer: Goal on and Plan off, close up")
+        js("conversation-plan-button").click()
+        XCTAssertTrue(waitUntil({ js("conversation-plan-button").value as? String == "On" && js("conversation-goal-button").value as? String == "Off" }, timeout: 5),
+                      "Turning Plan on turns Goal off.")
+        js("conversation-goal-button").click()
+        XCTAssertTrue(waitUntil({ js("conversation-goal-button").value as? String == "On" }, timeout: 5))
+        js("conversation-goal-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: goal off" && js("conversation-goal-button").value as? String == "Off" }, timeout: 5),
+                      "Pressing Goal again turns it off.")
+        XCTAssertEqual(js("conversation-plan-button").value as? String, "Off")
+        XCTAssertTrue(jsSide.staticTexts["Message…"].exists, "Leaving goal entry restores the message placeholder.")
         js("conversation-provider-menu").click()
         app.menuItems["Codex"].click()
         XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: provider codex" && js("conversation-provider-menu").label == "Provider: Codex" }, timeout: 5),
@@ -1550,7 +1607,7 @@ extension PlayhouseUITests {
         }
         Playhouse.render(h(Page));
         """
-    // case-contract: test_plugin_main_sidebar_schedules_context_and_new_task | A plugin at the board's mainSidebar placement gets `props.schedules`: `tasks`, the scheduled tasks exactly as `schedule list` returns them (soonest first, each with its schedule's kind and paused state), and `needsLoginItemsApproval`; with no schedules the list is empty, and a conversation sidebar plugin gets no schedules. ui.newTask (with schedule "recurring", "once" or none) and ui.openLoginItems are host calls only the board answers: a conversation sidebar plugin is refused as unavailable, and any other schedule is invalid_argument. The board's Scheduled Tasks button and page are the built-in scheduled-tasks plugin, which can't be rendered headlessly (invalid_argument). In the window, a mainSidebar page plugin lists the schedules and follows them live as one is paused, and its ui.newTask opens a new task with the schedule picker up; disabling the built-in Scheduled Tasks removes its sidebar button, and enabling it brings back the button, which opens the Scheduled Tasks page.
+    // case-contract: test_plugin_main_sidebar_schedules_context_and_new_task | A plugin at the board's mainSidebar placement gets `props.schedules`: `tasks`, the scheduled tasks exactly as `schedule list` returns them (soonest first, each with its schedule's kind and paused state), and `needsLoginItemsApproval`; with no schedules the list is empty, and a conversation sidebar plugin gets no schedules. ui.newTask (with schedule "recurring", "once" or none) and ui.openLoginItems are host calls only the board answers: a conversation sidebar plugin is refused as unavailable, and any other schedule is invalid_argument. The board's Scheduled Tasks button and popover are the built-in scheduled-tasks popover plugin, which can't be rendered headlessly (invalid_argument). In the window, a mainSidebar page plugin lists the schedules and follows them live as one is paused, and its ui.newTask opens a new task with the schedule picker up; disabling the built-in Scheduled Tasks removes its sidebar button, and enabling it brings back the button, which opens the Scheduled Tasks popover.
     func test_plugin_main_sidebar_schedules_context_and_new_task() throws {
         try writeInstalledPlugin("schedules-probe", source: Self.schedulesPageSource, placement: "mainSidebar", presentation: "page", name: "Schedules Probe", icon: "calendar")
         launchApp(defaultParent: fixture.parent.path)
@@ -1613,12 +1670,10 @@ extension PlayhouseUITests {
         attachElementScreenshot(element(withAccessibilityLabel: "Kanban sidebar"), named: "The board's sidebar with Scheduled Tasks disabled")
         _ = try runCLI(["plugin", "enable", "--id", "scheduled-tasks"])
         XCTAssertTrue(scheduledEntry.waitToExist(timeout: 10), "Enabling it brings the button back.")
-        scheduledEntry.click()
-        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10), "The button opens the Scheduled Tasks page.")
-        XCTAssertTrue(element("scheduled-task-row-\(onceID)").waitToExist(timeout: 10), "The page lists the one-time schedule.")
-        XCTAssertTrue(element("scheduled-task-row-\(dailyID)").exists, "The page lists the recurring schedule.")
-        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The page finishes sliding in.")
-        attachScreenshot(named: "The built-in Scheduled Tasks page, enabled again")
+        openScheduledTasksPopover()
+        XCTAssertTrue(element("scheduled-task-row-\(onceID)").waitToExist(timeout: 10), "The popover lists the one-time schedule.")
+        XCTAssertTrue(element("scheduled-task-row-\(dailyID)").exists, "The popover lists the recurring schedule.")
+        attachScreenshot(named: "The built-in Scheduled Tasks popover, enabled again")
     }
 }
 
@@ -1670,9 +1725,9 @@ extension PlayhouseUITests {
 
         openTask(named: "Slash task")
         XCTAssertTrue(composer.waitToExist(timeout: 10))
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
-        XCTAssertFalse(modeMenu.label.contains("Plan mode"), "The task starts outside plan mode.")
+        let planButton = element("conversation-plan-button")
+        XCTAssertTrue(planButton.waitToExist(timeout: 10))
+        XCTAssertFalse(isModeOn("conversation-plan-button"), "The task starts outside plan mode.")
         composer.click()
         composer.typeText("Draft first, then /")
         XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing / where a word starts, anywhere in the draft, opens the command menu.")
@@ -1700,7 +1755,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ slashRows() == ["plan", "plugin"] }, timeout: 5), "Typing after the / narrows the commands by prefix.")
         composer.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "Draft first, then " }, timeout: 5), "Choosing /plan removes the typed command and keeps the rest.")
-        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Plan mode") }, timeout: 5), "Choosing /plan turns plan mode on.")
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-plan-button") }, timeout: 5), "Choosing /plan turns plan mode on.")
         XCTAssertTrue(waitForDisappearance(menu))
         attachScreenshot(named: "Choosing /plan turns plan mode on and removes the command")
         clearComposer()
@@ -1884,7 +1939,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(codexGoal.value as? String, "Turn on goal mode", "An enabled /goal shows its description, not an unsupported reason.")
         codexComposer.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (codexComposer.value as? String ?? "").isEmpty }, timeout: 5), "Choosing /goal removes the typed command.")
-        XCTAssertTrue(waitUntil({ self.element("conversation-mode-menu").label.contains("Goal") }, timeout: 5), "Choosing /goal opens the goal entry.")
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5), "Choosing /goal opens the goal entry.")
         attachScreenshot(named: "Choosing /goal on a Codex task opens the goal entry")
 
         let listed = try XCTUnwrap(try runCLI(["slash-commands", "list", "--task", taskID])["result"] as? [String: Any])

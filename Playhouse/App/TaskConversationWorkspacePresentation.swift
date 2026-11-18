@@ -246,6 +246,9 @@ extension TaskConversationView {
                 repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", repository: repository)
                 repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", repository: repository)
                 repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", repository: repository)
+                if let number = repository.pullRequestNumber {
+                    repositoryPullRequestRow(repository, number: number)
+                }
             }
             if !repository.isPending {
                 Text("Settings are locked after the task starts.")
@@ -253,6 +256,36 @@ extension TaskConversationView {
                     .foregroundStyle(.secondary)
                     .allowsHitTesting(false)
                     .accessibilityIdentifier("conversation-repository-settings-locked")
+            }
+            if !isReadOnly {
+                Divider()
+                // Another worktree of this repository, on its own branch, for a separate pull request.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Another worktree")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .allowsHitTesting(false)
+                    HStack(spacing: 8) {
+                        TextField("Branch (auto)", text: $newWorktreeBranch)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("conversation-repository-new-worktree-branch")
+                            .onSubmit { addConversationWorktree(repository) }
+                        Button {
+                            addConversationWorktree(repository)
+                        } label: {
+                            if isAddingWorktree {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Text("Add worktree")
+                            }
+                        }
+                        .disabled(isAddingWorktree)
+                        .buttonHoverPointer()
+                        .nativeHelp("Add another worktree of \(name) on its own branch")
+                        .accessibilityLabel("Add worktree")
+                        .accessibilityIdentifier("conversation-repository-add-worktree-button")
+                    }
+                }
             }
         }
         .font(.system(size: 13))

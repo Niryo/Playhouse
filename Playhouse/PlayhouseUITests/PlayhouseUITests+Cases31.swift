@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_plugin_done_archive_renders_from_atoms_like_native | The Plugin Catalog's Done Archive page shows the board's Done archive composed in JavaScript from atoms above the native SwiftUI archive the board presents, built from the same atoms and sample model, each opened by the board header's archive button (the bordered Button atom with the archivebox icon, labelled Done tasks) into a 340-point SidePanel over the trailing edge of a 560 by 460 point stand-in for the board, open at first. Both show the Done tasks title and its close button, the search field with its Search tasks and conversations placeholder, and a list of five rows, each a button opening its task with the done checkmark, its title and its date, beside its pull request actions: a #227 link, a PR button beside a #228 link, a PRs button, a disabled busy PR button showing a spinner, and nothing for a task without repositories, each at the same size in both and with the board archive's identifiers (done-archive-task, done-archive-create-pr, done-archive-pr-link, done-archive-search, and done-archive-list valued 5 tasks loaded). The JavaScript tree uses only atoms (SidePanel, Stack, Text, Icon, Button, Link, Spinner, Spacer, Divider, TextField, Scroll), its search a plain TextField on a rounded Stack. The list's end is in view, so its onEndReached runs on both sides (End reached). Typing in the JavaScript search runs onChange (Last: search followed by the text), narrows the rows to the matching title and shows the clear button, which clears the search and brings every row back; a search that matches nothing shows No matching tasks instead of the list. A PR button runs its handler with its task (Last: create pr followed by the title), a row runs open (Last: open followed by the title) and slides the panel away, the archive button opens it again (Last: toggle open), and the close button closes it (Last: close), while the native archive keeps its own state. The list raises no onPress, so pressing it is refused as invalid_argument.
+    // case-contract: test_plugin_done_archive_renders_from_atoms_like_native | The Plugin Catalog's Done Archive page shows the board's Done archive composed in JavaScript from atoms above the native SwiftUI archive the board presents, built from the same atoms and sample model, each opened by the board header's archive button (the bordered Button atom with the archivebox icon, labelled Done tasks) into a 340-point SidePanel over the trailing edge of a 560 by 460 point stand-in for the board, open at first. Both show the Done tasks title and its close button, the search field with its Search tasks and conversations placeholder, and a list of five rows, each a button opening its task with the done checkmark, its title and its date, beside its pull request actions: a #227 link valued merged (its PR's state, which also ends its help), a PR button beside a #228 link, a PRs button, a disabled busy PR button showing a spinner, and nothing for a task without repositories, each at the same size in both and with the board archive's identifiers (done-archive-task, done-archive-create-pr, done-archive-pr-link, done-archive-search, and done-archive-list valued 5 tasks loaded). The JavaScript tree uses only atoms (SidePanel, Stack, Text, Icon, Button, Link, Spinner, Spacer, Divider, TextField, Scroll), its search a plain TextField on a rounded Stack. The list's end is in view, so its onEndReached runs on both sides (End reached). Typing in the JavaScript search runs onChange (Last: search followed by the text), narrows the rows to the matching title and shows the clear button, which clears the search and brings every row back; a search that matches nothing shows No matching tasks instead of the list. A PR button runs its handler with its task (Last: create pr followed by the title), a row runs open (Last: open followed by the title) and slides the panel away, the archive button opens it again (Last: toggle open), and the close button closes it (Last: close), while the native archive keeps its own state. The list raises no onPress, so pressing it is refused as invalid_argument.
     func test_plugin_done_archive_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -68,6 +68,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(js("done-archive-search").placeholderValue, "Search tasks and conversations")
         XCTAssertEqual(js("done-archive-list").value as? String, "5 tasks loaded")
         XCTAssertEqual(native("native-done-archive-list").value as? String, "5 tasks loaded")
+        XCTAssertEqual(js("done-archive-pr-link-\(ids[0])-227").value as? String, "merged", "A PR link's value is its PR's state.")
+        XCTAssertEqual(native("native-done-archive-pr-link-\(ids[0])-227").value as? String, "merged")
         // A row's button may expose its texts as children or join them into its own label.
         func shows(_ row: XCUIElement, _ text: String) -> Bool {
             row.staticTexts[text].exists || accessibleLabelOrValue(of: row).contains(text)
@@ -329,10 +331,12 @@ extension PlayhouseUITests {
         XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, terminal.frame.minX + 1, "The toolbar placeholder sits beside the Terminal button.")
         XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, element("open-skills-button").frame.minX + 1, "It sits before the Skills button too.")
         XCTAssertLessThan(abs(toolbarPlaceholder.frame.midY - terminal.frame.midY), 4, "It shares the Terminal button's row.")
-        // A task keeps its Skills button in the sidebar, so the composer's toolbar starts with the placeholder.
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertLessThanOrEqual(composerPlaceholder.frame.maxX, modeMenu.frame.minX + 1, "The composer placeholder leads the composer's toolbar, before the mode menu.")
-        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - modeMenu.frame.midY), 4, "It shares the mode menu's row.")
+        // A task keeps its Skills button in the sidebar, so the composer's toolbar puts the
+        // placeholder right after its attach button.
+        let planButton = element("conversation-plan-button")
+        XCTAssertLessThanOrEqual(element("composer-attach-button").frame.maxX, composerPlaceholder.frame.minX + 1, "The composer placeholder follows the attach button.")
+        XCTAssertLessThanOrEqual(composerPlaceholder.frame.maxX, planButton.frame.minX + 1, "The composer placeholder sits before the Plan button.")
+        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - planButton.frame.midY), 4, "It shares the Plan button's row.")
         XCTAssertGreaterThan(sidebarPlaceholder.frame.minY, element("hide-task-sidebar-button").frame.maxY, "The sidebar placeholder is a section below the header.")
         XCTAssertLessThan(sidebarPlaceholder.frame.maxY, terminal.frame.minY, "It sits above the command row.")
         let changesTitle = element("workspace-changes-title")
@@ -1281,7 +1285,7 @@ extension PlayhouseUITests {
         for _ in 0..<4 { composer.typeKey(.leftArrow, modifierFlags: [.shift]) }
         let composerEntry = element("plugin-entry-context-composer")
         XCTAssertTrue(composerEntry.waitToExist(timeout: 5))
-        XCTAssertLessThanOrEqual(composerEntry.frame.maxX, element("conversation-mode-menu").frame.minX + 1, "Its button leads the composer's toolbar.")
+        XCTAssertLessThanOrEqual(composerEntry.frame.maxX, element("conversation-plan-button").frame.minX + 1, "Its button sits before the Plan button in the composer's toolbar.")
         XCTAssertEqual(abs(element("open-skills-button").frame.midY - element("toggle-terminal-button").frame.midY), 0, accuracy: 2, "A task's only Skills button is the sidebar's, beside the terminal button.")
         composerEntry.click()
         let popover = app.popovers.descendants(matching: .any)["plugin-surface-context-composer"]

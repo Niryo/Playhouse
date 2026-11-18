@@ -173,7 +173,7 @@ extension PlayhouseUITests {
         XCTAssertEqual((underLimit?["unviewed"] as? [[String: Any]])?.count, 1000)
         attachScreenshot(named: "At the limit the files are listed again")
     }
-    // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Hovering the panel's left border shows the left-right resize cursor, and dragging it resizes the panel against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
     func test_task_terminal_opens_shell_in_task_worktree() throws {
         let repository = runDirectory.appendingPathComponent("terminal-repository", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -332,6 +332,9 @@ extension PlayhouseUITests {
         let handle = element("terminal-resize-handle")
         XCTAssertTrue(handle.waitToExist(timeout: 5))
         XCTAssertEqual(handle.frame.midX, panel.frame.minX, accuracy: 6, "The resize handle is the panel's left border.")
+        app.activate()
+        restPointer(on: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+        XCTAssertTrue(waitUntil({ self.systemCursorIsColumnResize() }, timeout: 3), "Hovering the terminal's border should show the resize cursor: \(systemCursorDescription())")
         let widthBefore = panel.frame.width
         let conversationBeforeResize = conversation.frame
         handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
@@ -773,7 +776,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(failed["hasUnsentDraft"] as? Bool, true, "The prompt waits as the draft for a retry.")
         attachScreenshot(named: "A scheduled run that couldn't start waits in Blocked")
     }
-    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is cleared a later run reaches Review in PR mode. The template's last run is the latest run, and the Scheduled Tasks page's Open Last Run closes the page and opens that run, so going back from it returns to the board.
+    // case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and in the Scheduled Tasks popover. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task. A run saves no pull request mode of its own: it takes the one the pull-request-mode plugin keeps for its schedule (a Manual schedule's run reaches Review in Manual mode), and once that is changed to PR a later run reaches Review in PR mode. Saving PR for the tasks saved while PR was the default (once, at a first launch since Manual became the default) leaves such a run with no mode of its own, still inheriting its schedule's, while a run whose schedule was deleted gets PR saved as its own. The template's last run is the latest run, and the Scheduled Tasks popover's Open Last Run closes the popover and opens that run, so going back from it returns to the board.
     func test_schedule_recurring_template_hidden_and_spawns_runs() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-recurring")
         launchApp(defaultParent: fixture.parent.path)
@@ -810,15 +813,16 @@ extension PlayhouseUITests {
             code: "invalid_argument"
         )
 
-        element("plugin-entry-scheduled-tasks").click()
-        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10), "The sidebar button opens the Scheduled Tasks page.")
-        // The page slides in over the board; clicks before it settles land on the board.
-        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should finish sliding in.")
+        openScheduledTasksPopover()
+        let surface = element("plugin-surface-scheduled-tasks")
+        XCTAssertEqual(surface.frame.width, 400, accuracy: 30, "Scheduled Tasks is a popover, not a page over the board.")
+        XCTAssertTrue(element("board-title").isHittable, "The board stays in view behind the popover.")
         let row = element("scheduled-task-row-\(templateID)")
         XCTAssertTrue(row.waitToExist(timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("scheduled-task-title-\(templateID)")), "Daily standup")
         XCTAssertTrue(accessibleLabelOrValue(of: element("scheduled-task-summary-\(templateID)")).hasPrefix("Every day at 09:00"))
-        attachScreenshot(named: "Scheduled Tasks page lists the recurring task")
+        attachScreenshot(named: "Scheduled Tasks popover lists the recurring task")
+        attachElementScreenshot(surface, named: "Scheduled Tasks popover detail")
 
         let template = try XCTUnwrap(taskRecord(id: templateID)?["schedule"] as? [String: Any])
         let firstRun = try XCTUnwrap(scheduleDate(template["scheduledAt"] as? String))
@@ -843,6 +847,18 @@ extension PlayhouseUITests {
         XCTAssertTrue(claudeFixturePrompts().contains("Tell me a story."))
         XCTAssertNil(savedMode(runID), "A run saves no mode of its own.")
         XCTAssertTrue(waitUntil({ reviewModes(runID) == ["manual"] }, timeout: 15), "The run reached Review in its schedule's Manual mode: \(reviewModes(runID))")
+        // Saving PR for the tasks saved while PR was the default leaves a run whose schedule exists
+        // inheriting its schedule's mode.
+        func pinPasses() -> Int { ((try? diagnosticEvents()) ?? []).filter { $0["event"] as? String == "plugin.pull_request_mode.pinned" }.count }
+        let pinPassesBefore = pinPasses()
+        let forget = Process()
+        forget.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        forget.arguments = ["delete", preferencesSuiteName, "existingTaskPullRequestModesPinned"]
+        try forget.run()
+        forget.waitUntilExit()
+        XCTAssertNil(savedMode(runID), "A run whose schedule exists keeps no mode of its own.")
+        XCTAssertEqual(savedMode(templateID) as? String, "manual", "A schedule's chosen mode is kept.")
+        XCTAssertTrue(waitUntil({ pinPasses() == pinPassesBefore + 1 }, timeout: 5), "Saving PR for existing tasks ran again once its flag was forgotten: \(pinPasses() - pinPassesBefore)")
         let advanced = try XCTUnwrap(scheduleDate((taskRecord(id: templateID)?["schedule"] as? [String: Any])?["scheduledAt"] as? String))
         XCTAssertEqual(advanced.timeIntervalSince(firstRun), 86400, accuracy: 3600, "A daily schedule advances by one day.")
 
@@ -856,9 +872,9 @@ extension PlayhouseUITests {
         XCTAssertEqual((quiet["fired"] as? [Any])?.count, 0, "A paused schedule doesn't fire.")
         active.click()
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: templateID)?["schedule"] as? [String: Any])?["paused"] as? Bool) == false }, timeout: 10))
-        attachScreenshot(named: "Scheduled Tasks page after pausing and resuming")
+        attachScreenshot(named: "Scheduled Tasks popover after pausing and resuming")
 
-        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", templateID, "--value", "null"])
+        _ = try runCLI(["plugin", "state", "--id", "pull-request-mode", "--key", templateID, "--value", #""pr""#])
         clickScheduledTaskMenuItem(taskID: templateID, item: "scheduled-task-run-now-\(templateID)", title: "Run Now")
         var nowRunID: String?
         XCTAssertTrue(waitUntil({
@@ -867,45 +883,51 @@ extension PlayhouseUITests {
             return runs.filter { $0["scheduleSourceTaskID"] as? String == templateID }.count == 2
         }, timeout: 20), "Run Now starts another run.")
         let secondRunID = try XCTUnwrap(nowRunID)
-        XCTAssertTrue(waitUntil({ reviewModes(secondRunID) == ["pr"] }, timeout: 60), "With the schedule's mode cleared, a run is in PR mode: \(reviewModes(secondRunID))")
+        XCTAssertTrue(waitUntil({ reviewModes(secondRunID) == ["pr"] }, timeout: 60), "With the schedule set to PR, a run is in PR mode: \(reviewModes(secondRunID))")
 
-        element("scheduled-tasks-back-button").click()
-        XCTAssertTrue(waitForDisappearance(element("plugin-surface-scheduled-tasks"), timeout: 5))
+        closeScheduledTasksPopover()
         XCTAssertTrue(element("task-card-\(runID)").waitToExist(timeout: 10), "A run is followed on the board.")
         attachScreenshot(named: "Recurring runs appear on the board as ordinary tasks")
 
-        // Open Last Run closes the page for the run, an ordinary task.
+        // Open Last Run closes the popover for the run, an ordinary task.
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: templateID)?["schedule"] as? [String: Any])?["lastRunTaskID"] as? String) == secondRunID }, timeout: 10))
-        element("plugin-entry-scheduled-tasks").click()
-        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10))
-        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should finish sliding in.")
+        openScheduledTasksPopover()
         clickScheduledTaskMenuItem(taskID: templateID, item: "scheduled-task-last-run-\(templateID)", title: "Open Last Run")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Daily standup" }, timeout: 15), "Open Last Run opens the run.")
         XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "The run's conversation is open.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The popover closed for the run.")
         attachScreenshot(named: "Open Last Run opens the schedule's latest run")
         element("back-to-board-button").click()
         XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the run.")
         XCTAssertTrue(element("task-card-\(secondRunID)").waitToExist(timeout: 10), "Going back from the run returns to the board.")
-        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The page closed for the run.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The popover stays closed after the run.")
         _ = try runCLI(["schedule", "clear", templateID])
         XCTAssertTrue(element("task-card-\(templateID)").waitToExist(timeout: 10), "Clearing the schedule puts the task on the board.")
+        // A run whose schedule is gone was in PR mode while PR was the default, so it gets PR saved as its own.
+        XCTAssertEqual((try runCLI(["task", "delete", templateID])["result"] as? [String: Any])?["deleted"] as? Bool, true)
+        XCTAssertTrue(waitForDisappearance(element("task-card-\(templateID)"), timeout: 10), "The deleted schedule leaves the board.")
+        let forgetAgain = Process()
+        forgetAgain.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        forgetAgain.arguments = ["delete", preferencesSuiteName, "existingTaskPullRequestModesPinned"]
+        try forgetAgain.run()
+        forgetAgain.waitUntilExit()
+        XCTAssertEqual(savedMode(runID) as? String, "pr", "A run whose schedule was deleted gets PR saved as its own.")
+        XCTAssertTrue(waitUntil({ pinPasses() == pinPassesBefore + 2 }, timeout: 5), "Saving PR for existing tasks ran again once its flag was forgotten: \(pinPasses() - pinPassesBefore)")
     }
-    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, the message stays in the composer as its draft and Send sends again while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove leaves the message in the composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks popover beside it, over the board, whose New Task (header, or the button in the empty popover) closes the popover and opens a task conversation with the schedule hint already open on Recurring; opening a scheduled task from it closes it too, so going back returns to the bare board. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the popover. Done in the hint of a task that is already scheduled once saves the moved time at once, without Send, keeping its prompt, Backlog state and Send's schedule mode, starting no turn, and the hint reopens on that time; schedule set without --prompt likewise moves a scheduled task while keeping its prompt and mode, and still rejects a task with no schedule with invalid_argument. Remove in the hint clears a saved schedule as well, turning the clock off and keeping the prompt in the composer, and schedule set rejects --mode, --model or --image without --prompt with invalid_argument. An existing conversation's scheduled message is moved the same way, keeping its prompt, the composer draft and the task's Review state; after it is scheduled, and after the conversation is reopened, the message stays in the composer as its draft and Send sends again while the clock stays on and the hint shows the saved time. Clearing an existing conversation's scheduled message sends nothing; in the hint, Remove leaves the message in the composer, and a composer draft already there is kept. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     func test_scheduled_task_edit_and_page_management() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-edit")
         launchApp(defaultParent: fixture.parent.path)
-        element("plugin-entry-scheduled-tasks").click()
-        XCTAssertTrue(element("plugin-surface-scheduled-tasks").waitToExist(timeout: 10))
-        // The page slides in over the board; clicks before it settles land on the board.
-        XCTAssertTrue(waitForStableFrame(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should finish sliding in.")
-        XCTAssertTrue(element("scheduled-tasks-empty").exists, "An empty page says so plainly.")
-        XCTAssertTrue(element("scheduled-tasks-empty-new-task-button").exists, "The empty page offers New Task.")
-        attachScreenshot(named: "Scheduled Tasks page with no schedules")
+        openScheduledTasksPopover()
+        XCTAssertTrue(element("scheduled-tasks-empty").exists, "An empty popover says so plainly.")
+        XCTAssertTrue(element("scheduled-tasks-empty-new-task-button").exists, "The empty popover offers New Task.")
+        attachScreenshot(named: "Scheduled Tasks popover with no schedules")
 
         // The empty-state button and the header button both open the same conversation with the hint on Recurring.
         element("scheduled-tasks-empty-new-task-button").click()
         XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The empty-state New Task opens the conversation with the schedule hint open.")
         XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The empty-state New Task starts on Recurring.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "New Task closes the popover.")
         attachScreenshot(named: "Empty-state New Task opens the schedule hint")
         closeScheduleHintAndReturnToPage()
 
@@ -913,7 +935,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "New Task opens the conversation with the schedule hint open.")
         let title = element("schedule-title-field")
         XCTAssertTrue(title.waitToExist(timeout: 5), "The hint starts on Recurring.")
-        attachScreenshot(named: "New Task from the page opens with the schedule hint")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "The header New Task closes the popover.")
+        attachScreenshot(named: "New Task from the popover opens with the schedule hint")
         title.click()
         title.typeText("Morning summary")
         element("schedule-done-button").click()
@@ -923,8 +946,10 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ send.label == "Schedule task" }, timeout: 5))
         send.click()
 
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "Scheduling the new task returns to the board.")
+        openScheduledTasksPopover()
         let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "scheduled-task-row-")).firstMatch
-        XCTAssertTrue(row.waitToExist(timeout: 10), "Scheduling from the page returns to the page with the new row.")
+        XCTAssertTrue(row.waitToExist(timeout: 10), "The reopened popover lists the new schedule.")
         let listed = try XCTUnwrap((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
         XCTAssertEqual(listed.count, 1)
         let taskID = try XCTUnwrap(listed.first?["id"] as? String)
@@ -936,6 +961,7 @@ extension PlayhouseUITests {
         element("scheduled-task-open-\(taskID)").click()
         let composer = element("message-composer")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "Summarize the week." }, timeout: 10), "Editing shows the confirmed prompt.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "Opening a schedule closes the popover.")
         XCTAssertEqual(element("schedule-task-button").value as? String, "On")
         XCTAssertEqual(send.label, "Schedule task", "Send stays in schedule mode while editing.")
         attachScreenshot(named: "Editing a scheduled task keeps Send in schedule mode")
@@ -963,8 +989,11 @@ extension PlayhouseUITests {
         XCTAssertEqual(recurrence["minute"] as? Int, 15)
         XCTAssertNil(edited["claudeSessionID"] as? String)
         XCTAssertNil(edited["codexThreadID"] as? String, "Editing a schedule starts no turn.")
+        if element("back-to-board-button").exists { element("back-to-board-button").click() }
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
+        openScheduledTasksPopover()
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("scheduled-task-title-\(taskID)")) == "Weekday summary" }, timeout: 10))
-        attachScreenshot(named: "Scheduled Tasks page after editing the title and repeat")
+        attachScreenshot(named: "Scheduled Tasks popover after editing the title and repeat")
 
         assertCLIError(
             try runCLI(["conversation", "send", taskID, "--message", "Run the template."], expectedStatus: 1, extraEnvironment: environment),
@@ -973,21 +1002,24 @@ extension PlayhouseUITests {
         XCTAssertEqual(claudeFixturePrompts(), [], "A recurring template never runs itself.")
 
         clickScheduledTaskMenuItem(taskID: taskID, item: "scheduled-task-delete-\(taskID)", title: "Delete…")
-        // The built-in plugin asks with the board's `ui.confirm` dialog.
+        // The built-in plugin asks with `ui.confirm`, shown inside the popover.
         let confirm = element("plugin-confirm-button")
-        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Delete asks with the board's confirmation dialog.")
+        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Delete asks with the plugin confirmation dialog.")
+        XCTAssertTrue(element("plugin-surface-scheduled-tasks").exists, "The popover stays open while Delete asks.")
+        attachScreenshot(named: "Delete asks inside the Scheduled Tasks popover")
         confirm.click()
         XCTAssertTrue(waitForDisappearance(element("scheduled-task-row-\(taskID)"), timeout: 10), "Deleting removes the row.")
+        XCTAssertTrue(element("plugin-surface-scheduled-tasks").exists, "The popover stays open through the confirmation dialog.")
         XCTAssertEqual(((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count, 0)
         XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 5))
-        attachScreenshot(named: "Scheduled Tasks page after deleting the schedule")
+        attachScreenshot(named: "Scheduled Tasks popover after deleting the schedule")
         element("scheduled-tasks-empty-new-task-button").click()
-        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The empty-state New Task still opens the schedule hint on an empty page.")
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The empty-state New Task still opens the schedule hint on an empty popover.")
         XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The empty-state New Task starts on Recurring after a deletion too.")
-        attachScreenshot(named: "Empty page New Task after deleting the schedule")
+        attachScreenshot(named: "Empty popover New Task after deleting the schedule")
         closeScheduleHintAndReturnToPage()
         element("scheduled-new-task-button").click()
-        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The header New Task still opens the schedule hint on an empty page.")
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The header New Task still opens the schedule hint on an empty popover.")
         XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The header New Task starts on Recurring after a deletion too.")
         attachScreenshot(named: "Header New Task after deleting the schedule opens the schedule hint")
         closeScheduleHintAndReturnToPage()
@@ -1000,7 +1032,7 @@ extension PlayhouseUITests {
         // A mid-month date, so stepping a date field in the hint can't wrap to an earlier time.
         _ = try runCLI(["schedule", "set", onceID, "--prompt", "Tell me a story.", "--once", scheduleISO(stepSafeScheduleDate())])
         let onceRow = element("scheduled-task-open-\(onceID)")
-        XCTAssertTrue(onceRow.waitToExist(timeout: 10), "The page lists the new one-time schedule.")
+        XCTAssertTrue(onceRow.waitToExist(timeout: 10), "The popover lists the new one-time schedule.")
         onceRow.click()
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "Tell me a story." }, timeout: 10))
         // Done on an already scheduled task saves the edited time at once, without Send.
@@ -1049,7 +1081,6 @@ extension PlayhouseUITests {
         _ = try runCLI(["schedule", "set", onceID, "--prompt", "Send a scheduled follow-up.", "--once", scheduleISO(stepSafeScheduleDate())])
         let followUpAt = try XCTUnwrap(scheduledAt(taskID: onceID))
         element("back-to-board-button").click()
-        if element("scheduled-tasks-back-button").waitToExist(timeout: 3) { element("scheduled-tasks-back-button").click() }
         XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: "Sent by hand")
         XCTAssertTrue(waitUntil({ send.exists && send.label == "Send message" }, timeout: 10), "A reopened conversation with a scheduled message still sends.")
@@ -1093,7 +1124,6 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: onceID)?["savedPrompt"] as? String) == "A typed draft to keep." }, timeout: 10), "Remove keeps a typed draft as the saved draft.")
         XCTAssertEqual(claudeFixturePrompts().count, sent, "Cancelling a scheduled message sends nothing.")
         element("back-to-board-button").click()
-        if element("scheduled-tasks-back-button").waitToExist(timeout: 3) { element("scheduled-tasks-back-button").click() }
         XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: "Sent by hand")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "A typed draft to keep." }, timeout: 10), "The kept draft is still there after reopening.")
@@ -1107,9 +1137,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(cleared["savedPrompt"] as? String, "Keep this prompt.", "Clearing a schedule keeps its prompt as the draft.")
         XCTAssertEqual(cleared["hasUnsentDraft"] as? Bool, true)
         if element("back-to-board-button").exists { element("back-to-board-button").click() }
-        // A task opened from the Scheduled Tasks page returns to that page, which covers the board.
-        if element("scheduled-tasks-back-button").waitToExist(timeout: 3) { element("scheduled-tasks-back-button").click() }
-        XCTAssertTrue(waitForDisappearance(element("plugin-surface-scheduled-tasks")), "The Scheduled Tasks page should close before opening another task.")
+        XCTAssertFalse(element("plugin-surface-scheduled-tasks").exists, "A task opened from the Scheduled Tasks popover returns to the bare board.")
         XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The board should show before opening the cleared-schedule task.")
         openTask(named: "Cleared schedule")
         XCTAssertTrue(waitUntil({

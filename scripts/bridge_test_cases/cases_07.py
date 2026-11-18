@@ -590,8 +590,8 @@ class BridgeTestCases07:
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["title"], "Renamed through XPC")
-    # case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
-    def test_task_title_copy_button_copies_persisted_title(self):
+    # case-contract: test_task_title_is_selectable_and_matches_persisted_title | The conversation title has no copy button and its text is selectable: selecting and copying it places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename, and fresh CLI/XPC reads report the same title.
+    def test_task_title_is_selectable_and_matches_persisted_title(self):
         task_id = self.create_task()["id"]
         title = "Café & tea: ready ✓"
         response, _ = self.call_cli("task", "rename", task_id, "--title", title)
@@ -713,13 +713,11 @@ class BridgeTestCases07:
         self.assertTrue(added["mergeTarget"])
         self.assertEqual(updated["workspaceRoots"], [added["worktreePath"]])
         self.assertEqual(updated["contextFolders"], [])
-        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary, expected_status=2)
-        self.assert_failure(duplicate, "invalid_argument")
         invalid, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.custom, expected_status=1)
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
-    # case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
+    # case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, adding an attached repository again gives it another worktree on its own branch, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit. Both buttons sit clear of the list's overlay scroller and each shows a hover highlight while the pointer is on it.
     def test_conversation_repository_picker_add_and_replace_buttons(self):
         # The catalog exercises the same Overlay atom used by the native picker.
         # Pointer tracking itself is presentation state, checked by the paired UI case.
@@ -729,8 +727,12 @@ class BridgeTestCases07:
         scroll = self.plugin_node(tree, "conversation-repository-list")
         row = next(node for node in scroll["children"] if row_button in node["children"])
         self.assertTrue(row["props"]["revealOnHover"])
+        # Inset past the list's overlay scroller, so it never covers the buttons.
+        self.assertLessEqual(row["props"]["offsetX"], -16)
         for action in ("add", "replace"):
-            self.assertIsNotNone(self.plugin_node(row, f"conversation-repository-recent-mre-{action}"))
+            button = self.plugin_node(row, f"conversation-repository-recent-mre-{action}")
+            self.assertIsNotNone(button)
+            self.assertEqual(button["props"].get("emphasis"), 4, f"The {action} button should show the hover highlight.")
 
         task = self.create_task("Picker add and replace", [self.primary])
         task_id = task["id"]
@@ -739,8 +741,11 @@ class BridgeTestCases07:
         response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary)
         added = self.assert_success(response)
         self.assertEqual([item["repositoryPath"] for item in added["repositoryWorktrees"]], [str(self.primary), str(self.secondary)])
-        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary, expected_status=2)
-        self.assert_failure(duplicate, "invalid_argument")
+        # Adding an attached repository again gives it another worktree on its own branch.
+        response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary)
+        again = self.assert_success(response)["repositoryWorktrees"]
+        self.assertEqual([item["repositoryPath"] for item in again], [str(self.primary), str(self.secondary), str(self.secondary)])
+        self.assertNotEqual(again[1]["branch"], again[2]["branch"])
         response, _ = self.call_cli("task", "repository", "replace", task_id, "--repo", self.primary)
         replaced = self.assert_success(response)
         self.assertEqual([item["repositoryPath"] for item in replaced["repositoryWorktrees"]], [str(self.primary)])

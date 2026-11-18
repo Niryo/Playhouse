@@ -72,7 +72,7 @@ struct TaskConversationView: View {
     var initialDraft: String? = nil
     /// Shows another task's conversation, sending it the prompt once it opens.
     var onOpenTask: (UUID, String) -> Void = { _, _ in }
-    /// Opens with the schedule hint showing, set to this kind (the Scheduled Tasks page's New Task).
+    /// Opens with the schedule hint showing, set to this kind (the Scheduled Tasks popover's New Task).
     var presentScheduleOnAppear: TaskScheduleKind? = nil
     let onBack: () -> Void
 
@@ -149,8 +149,6 @@ struct TaskConversationView: View {
     @State var isComposerEditing = false
     @State var selectedChatImage: NSImage?
     @State var isGeneratingTitle = false
-    @State var didCopyTaskTitle = false
-    @State var taskTitleCopyFeedbackToken = UUID()
     @State var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
     /// The message at the top of the transcript's viewport, as last reported.
     @State var topTranscriptRowID: String?
@@ -340,7 +338,16 @@ struct TaskConversationView: View {
     @State var didOverrideRepositoryDefault = false
     @State var suggestedRepositories: [URL] = []
     @State var expandedRepositoryPath: String?
-    @State var repositoryBeingEdited: RepositoryWorktreeRecord?
+    /// The chip whose settings popover is open, by its chip key: unlike the record, the key
+    /// stays the same while a pending worktree's branch is edited.
+    @State var repositoryBeingEditedKey: String?
+    var repositoryBeingEdited: RepositoryWorktreeRecord? {
+        get { repositoryBeingEditedKey.flatMap { task.repositoryWorktrees.record(chipKey: $0) } }
+        nonmutating set { repositoryBeingEditedKey = newValue.flatMap { task.repositoryWorktrees.chipKey(of: $0) } }
+    }
+    /// The chip settings' Add worktree branch field; empty names the branch from the task title.
+    @State var newWorktreeBranch = ""
+    @State var isAddingWorktree = false
     @State var editedBranch = ""
     @State var editedBranchFrom = ""
     @State var editedMergeTarget = ""

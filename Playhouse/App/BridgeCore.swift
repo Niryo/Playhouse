@@ -564,7 +564,9 @@ extension PluginTaskContext {
             },
             contextFolders: task.contextFolderPaths,
             pastPullRequests: ((task as? BoardTask)?.pastRepositoryWorktrees ?? []).compactMap { record in
-                Self.pullRequest(record).map { .init(repositoryPath: record.repositoryPath, pullRequest: $0) }
+                Self.pullRequest(record).map {
+                    .init(repositoryPath: record.repositoryPath, worktreePath: record.worktreePath, branch: record.branch, pullRequest: $0)
+                }
             },
             scheduleSourceTaskID: (task as? BoardTask)?.scheduleSourceTaskID?.uuidString
         )
@@ -572,7 +574,7 @@ extension PluginTaskContext {
 
     private static func pullRequest(_ record: RepositoryWorktreeRecord) -> PullRequest? {
         guard let number = record.pullRequestNumber, let url = record.pullRequestURL else { return nil }
-        return PullRequest(number: number, url: url, merged: record.isPullRequestMerged)
+        return PullRequest(number: number, url: url, merged: record.isPullRequestMerged, closed: record.isPullRequestClosed && !record.isPullRequestMerged)
     }
 }
 

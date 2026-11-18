@@ -15,11 +15,24 @@ enum GitHubPullRequestManager {
         let mergedAt: String?
     }
 
+    /// A pull request as `gh pr list --state all` or `gh pr view <url>` reports it.
+    struct PullRequestDetails: Decodable, Sendable {
+        let number: Int
+        let url: String
+        /// OPEN, MERGED or CLOSED.
+        let state: String
+        let headRefName: String?
+
+        var isMerged: Bool { state.uppercased() == "MERGED" }
+        var isClosed: Bool { state.uppercased() == "CLOSED" }
+    }
+
     private struct PullRequestReviewResponse: Decodable {
         let mergedAt: String?
         let mergeable: String?
         let headRefOid: String?
         let statusCheckRollup: [CheckRollupItem]?
+        let state: String?
     }
 
     /// One entry of `statusCheckRollup`: a check run (`status`/`conclusion`) or a
@@ -77,7 +90,7 @@ enum GitHubPullRequestManager {
         guard let number = record.pullRequestNumber else {
             throw BridgeCommandError(code: "invalid_transition", message: "This repository has no linked pull request.")
         }
-        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt,mergeable,headRefOid,statusCheckRollup"], directory: record.worktreePath)
+        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt,mergeable,headRefOid,statusCheckRollup,state"], directory: record.worktreePath)
         let response = try JSONDecoder().decode(PullRequestReviewResponse.self, from: Data(result.utf8))
         let localHead: String?
         var localHeadCommittedAt: Date?
@@ -100,11 +113,13 @@ enum GitHubPullRequestManager {
             ? try unresolvedReviewThreadCount(record, number: number, executable: executable)
             : nil
         return PullRequestReviewState(
-            repositoryPath: record.repositoryPath, number: number,
+            repositoryPath: record.repositoryPath, worktreePath: record.worktreePath, branch: record.branch,
+            url: record.pullRequestURL, number: number,
             merged: response.mergedAt != nil, mergeable: response.mergeable ?? "UNKNOWN",
             headRefOid: response.headRefOid, localHeadOid: localHead,
             checks: checks.state, failingChecks: checks.failing,
-            unresolvedReviewThreads: unresolvedThreads
+            unresolvedReviewThreads: unresolvedThreads,
+            closed: response.state == "CLOSED"
         )
     }
 
@@ -198,6 +213,22 @@ enum GitHubPullRequestManager {
         return pullRequest
     }
 
+    /// The pull request GitHub has for `branch` in any state: an open one first, then a
+    /// merged one, then the most recent closed one. Nil when the branch has none.
+    static func find(branch: String, record: RepositoryWorktreeRecord, executable: String) throws -> PullRequestDetails? {
+        let result = try run(executable, ["pr", "list", "--head", branch, "--state", "all", "--json", "number,url,state,headRefName", "--limit", "20"], directory: record.worktreePath)
+        let pullRequests = try JSONDecoder().decode([PullRequestDetails].self, from: Data(result.utf8))
+        return pullRequests.first { $0.state.uppercased() == "OPEN" }
+            ?? pullRequests.first(where: \.isMerged)
+            ?? pullRequests.first
+    }
+
+    /// The pull request at `url`, read in the worktree's repository.
+    static func view(url: String, record: RepositoryWorktreeRecord, executable: String) throws -> PullRequestDetails {
+        let result = try run(executable, ["pr", "view", url, "--json", "number,url,state,headRefName"], directory: record.worktreePath)
+        return try JSONDecoder().decode(PullRequestDetails.self, from: Data(result.utf8))
+    }
+
     static func create(_ record: RepositoryWorktreeRecord, title: String, body: String, executable: String) throws -> PullRequest {
         var arguments = ["pr", "create", "--title", title, "--body", body, "--head", record.branch]
         if let mergeTarget = configuredMergeTarget(for: record) {
@@ -289,13 +320,20 @@ enum PullRequestChecksState: String, Codable, Sendable {
 
 /// The colour a linked PR number shows on its task card.
 enum PullRequestHealth: String, Codable, Sendable {
-    case green, red, pending, merged
+    case green, red, pending, merged, closed
 }
 
 struct PullRequestReviewState: Codable, Sendable {
     let repositoryPath: String
+    /// The worktree whose pull request this is; a task may hold several worktrees
+    /// of one repository, each with its own pull request.
+    let worktreePath: String
+    let branch: String
+    let url: String?
     let number: Int
     let merged: Bool
+    /// Closed without merging on GitHub; nothing is left to review or merge.
+    let closed: Bool
     let mergeable: String
     let headRefOid: String?
     let localHeadOid: String?
@@ -306,18 +344,26 @@ struct PullRequestReviewState: Codable, Sendable {
     /// Nil unless the probe asked for review threads (autopilot tasks only).
     let unresolvedReviewThreads: Int?
     let health: PullRequestHealth
+    /// Set on a status read's full listing (`task pr status`) for a pull request of a
+    /// worktree the task retired (renew); such entries are read from the task's
+    /// records, not probed, and nothing acts on them.
+    var past: Bool? = nil
 
     var requiresConflictResolution: Bool {
         hasConflicts || (!merged && mergeable == "MERGEABLE" && headRefOid != nil && headRefOid != localHeadOid)
     }
 
     init(
-        repositoryPath: String, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?,
-        checks: PullRequestChecksState = .none, failingChecks: [String] = [], unresolvedReviewThreads: Int? = nil
+        repositoryPath: String, worktreePath: String, branch: String, url: String?, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?,
+        checks: PullRequestChecksState = .none, failingChecks: [String] = [], unresolvedReviewThreads: Int? = nil, closed: Bool = false
     ) {
         self.repositoryPath = repositoryPath
+        self.worktreePath = worktreePath
+        self.branch = branch
+        self.url = url
         self.number = number
         self.merged = merged
+        self.closed = closed && !merged
         self.mergeable = mergeable
         self.headRefOid = headRefOid
         self.localHeadOid = localHeadOid
@@ -325,6 +371,7 @@ struct PullRequestReviewState: Codable, Sendable {
         self.failingChecks = failingChecks
         self.unresolvedReviewThreads = unresolvedReviewThreads
         if merged { health = .merged }
+        else if self.closed { health = .closed }
         else if checks == .failure || mergeable == "CONFLICTING" { health = .red }
         else if checks == .pending { health = .pending }
         else { health = .green }
@@ -402,6 +449,20 @@ struct PlayhousePullRequestService {
         await recordStarted("create", executable: executable)
         return try await PlayhouseBackgroundOperation.run {
             try GitHubPullRequestManager.create(record, title: title, body: body, executable: executable)
+        }
+    }
+
+    func find(branch: String, record: RepositoryWorktreeRecord, executable: String) async throws -> GitHubPullRequestManager.PullRequestDetails? {
+        await recordStarted("find", executable: executable)
+        return try await PlayhouseBackgroundOperation.run {
+            try GitHubPullRequestManager.find(branch: branch, record: record, executable: executable)
+        }
+    }
+
+    func view(url: String, record: RepositoryWorktreeRecord, executable: String) async throws -> GitHubPullRequestManager.PullRequestDetails {
+        await recordStarted("view", executable: executable)
+        return try await PlayhouseBackgroundOperation.run {
+            try GitHubPullRequestManager.view(url: url, record: record, executable: executable)
         }
     }
 
