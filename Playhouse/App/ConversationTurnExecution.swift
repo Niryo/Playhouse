@@ -306,11 +306,12 @@ extension ConversationManager {
             let segment = try await prepareSegment(task: try tasks.conversationSubject(taskID))
             try ConversationTurnLaunch.checkStop(taskID)
             // A standalone chat page is its own context, so its recovery transcript is that page
-            // alone; task conversations still hand off their whole visible history.
+            // alone, rebuilding the session that already held it; task conversations still hand
+            // off their whole visible history.
             let standaloneChatPage = task.isStandaloneChat ? standaloneChatActivePage(taskID: taskID) : nil
             let sessionRecoveryContext: String?
             if let standaloneChatPage {
-                sessionRecoveryContext = standaloneChatPageContext(taskID: taskID, pageIDs: [standaloneChatPage.id])
+                sessionRecoveryContext = standaloneChatPageContext(headerPageID: nil, fullPageIDs: [standaloneChatPage.id])
             } else if provider == .claude {
                 sessionRecoveryContext = ConversationHandoff.context(for: .claude, messages: Self.withoutNudgeTurns(try await history(taskID: taskID).messages))
             } else {
@@ -340,14 +341,15 @@ extension ConversationManager {
             // across pages; the task pointer follows the active page's session.
             let pageSessionID = standaloneChatPage?.conversationID(forProvider: provider.rawValue)
             // A fresh page session has none of the page's own turns yet (the turn that opened the
-            // page ran in the previous page's session), so seed it with that page's transcript.
-            var standaloneChatSeedPageIDs: [String] = []
-            if let standaloneChatPage, pageSessionID == nil { standaloneChatSeedPageIDs.append(standaloneChatPage.id) }
-            // Annotations can reference an earlier page; that page travels with this turn only.
-            standaloneChatSeedPageIDs += contextPageIDs.filter { !standaloneChatSeedPageIDs.contains($0) && $0 != standaloneChatPage?.id }
+            // page ran in the previous page's session, or another provider ran it). The user's
+            // message may well start yet another topic, so it gets only the page metadata header
+            // and loads the page itself when the message continues it.
+            let standaloneChatHeaderPageID = pageSessionID == nil ? standaloneChatPage?.id : nil
+            // Annotations can reference an earlier page; that page travels whole with this turn only.
+            let standaloneChatFullPageIDs = contextPageIDs.filter { $0 != standaloneChatPage?.id }
             let standaloneChatSeedContext = standaloneChatPage == nil && contextPageIDs.isEmpty
                 ? nil
-                : standaloneChatPageContext(taskID: taskID, pageIDs: standaloneChatSeedPageIDs)
+                : standaloneChatPageContext(headerPageID: standaloneChatHeaderPageID, fullPageIDs: standaloneChatFullPageIDs)
             if let standaloneChatPage, pageSessionID == nil {
                 threadID = try await client.startThread(
                     workspace: workspace,

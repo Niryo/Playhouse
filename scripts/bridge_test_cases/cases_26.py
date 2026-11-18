@@ -261,3 +261,44 @@ class BridgeTestCases26:
         self.assertEqual(self.assert_success(self.call_cli("task", "move", task["id"], "Done", extra_environment=gh_environment)[0])["status"], "Done")
         done, _ = self.call_cli(*link, "https://github.com/playhouse-test/fixture/pull/621", expected_status=1, extra_environment=gh_environment)
         self.assert_failure(done, "invalid_transition")
+    # case-contract: test_transcript_rows_stay_with_older_messages | A provider divider and a goal achievement stay right after the message they were recorded after. A long Claude history whose switch from Codex sits on its older page, with a switch to Claude and back that sent nothing stored on the same message, has one Codex-to-Claude divider after the last Codex message in complete and paged CLI/XPC history, the empty switch pair dropped, and the newest page leaves that message out; another turn leaves the divider where it was. Opened on its newest page, the visible transcript draws neither that divider nor a goal achievement recorded after the last Codex message, at the bottom or anywhere after a newer message, and they stay hidden after a new message is sent from the composer; a goal achievement recorded after the latest turn's folded commentary follows that turn's question, above its answer, not the newest message. Scrolling up loads the older page and shows the one divider, then that goal achievement, right after the last Codex message and before the next question, with no Switched to Codex divider. The placement is Playhouse-owned and the same for both providers, so one switch from Codex to Claude covers the case.
+    def test_transcript_rows_stay_with_older_messages(self):
+        claude = self.install_provider_fixture("claude", "claude-fixture-row-anchors")
+        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        task_id = self.create_task("Rows with older messages", roots=[self.primary])["id"]
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-row-anchors", message="Start with Codex.")
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=fixtures)[0])
+        self.seed_long_history(task_id, switch_after_turn=10, latest_commentary=True)
+        anchor = "item_long_history_assistant_10"
+
+        def boundaries(history):
+            return [(boundary["provider"], boundary["afterMessageID"]) for boundary in history["providerBoundaries"]]
+
+        full = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        ids = [message["id"] for message in full["messages"]]
+        self.assertEqual(boundaries(full), [("claude", anchor)], "The undone switch pair leaves no dividers of its own.")
+        self.assertEqual(full["messages"][ids.index(anchor)]["provider"], "codex")
+        self.assertEqual(full["messages"][ids.index(anchor) + 1]["text"], "Long history user 11.")
+        self.assertEqual(full["messages"][ids.index(anchor) + 1]["provider"], "claude")
+        commentary = full["messages"][ids.index("item_long_history_commentary_60")]
+        self.assertEqual((commentary["role"], commentary["phase"]), ("assistant", "commentary"))
+
+        newest = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+        self.assertEqual(newest["earlierMessageCount"], len(ids) - 80)
+        self.assertNotIn(anchor, [message["id"] for message in newest["messages"]], "The divider's message sits on the older page.")
+        self.assertEqual(boundaries(newest), [("claude", anchor)], "The newest page names the divider's message, not its own last one.")
+
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Tell me a very short dog story.", extra_environment=fixtures)[0])
+        after = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        self.assertTrue(ordinary_messages(after["messages"])[-1]["text"].startswith("BISCUIT-7"), after["messages"][-1])
+        self.assertEqual(boundaries(after), [("claude", anchor)], "A new turn leaves the divider after the message it follows.")
+        newest_after = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+        self.assertNotIn(anchor, [message["id"] for message in newest_after["messages"]])
+        self.assertEqual(boundaries(newest_after), [("claude", anchor)])
+        older = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--before", newest_after["messages"][0]["id"]
+        )[0])
+        older_ids = [message["id"] for message in older["messages"]]
+        self.assertIn(anchor, older_ids, "Loading the older page brings the divider's message.")
+        self.assertEqual(older["messages"][older_ids.index(anchor) + 1]["text"], "Long history user 11.")
+        self.assertEqual(boundaries(older), [("claude", anchor)])
