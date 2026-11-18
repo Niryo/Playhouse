@@ -496,7 +496,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: done selecting", "The native page keeps its own state.")
         attachScreenshot(named: "Skills page: the Skills button reopened the JavaScript page")
     }
-    // case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit wix-one-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Viband); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit infragod) without re-rendering the other chip; and its remove badge removes it (Last: remove infragod) while the native chips keep theirs. A chip for one of several worktrees of a repository (Playhouse on second-line) shows its branch in 11-point secondary text after the name, at the same size in both, and its actions name that worktree: clicking it runs Last: edit Playhouse-second-line and its remove badge removes just it (Last: remove Playhouse-second-line). A chip raises no onChange, so sending it one is refused as invalid_argument.
+    // case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit mobile-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Website); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit backend) without re-rendering the other chip; and its remove badge removes it (Last: remove backend) while the native chips keep theirs. A chip for one of several worktrees of a repository (Playhouse on second-line) shows its branch in 11-point secondary text after the name, at the same size in both, and its actions name that worktree: clicking it runs Last: edit Playhouse-second-line and its remove badge removes just it (Last: remove Playhouse-second-line). A chip raises no onChange, so sending it one is refused as invalid_argument.
     func test_plugin_repository_chips_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -530,11 +530,11 @@ extension PlayhouseUITests {
         let lastAction = js("js-last-action")
         let nativeLastAction = native("native-last-action")
 
-        for identifier in ["conversation-repository-badge-infragod", "remove-conversation-repository-infragod", "conversation-repository-badge-Playhouse-second-line",
+        for identifier in ["conversation-repository-badge-backend", "remove-conversation-repository-backend", "conversation-repository-badge-Playhouse-second-line",
                            "remove-conversation-repository-Playhouse-second-line", "add-conversation-repository-button",
                            "conversation-repository-suggestion-parent", "choose-repository-suggestion-parent-button", "conversation-repository-search",
                            "conversation-repository-recent-header", "conversation-repository-list", "conversation-repository-recent-mre",
-                           "conversation-repository-recent-wix-one-app", "conversation-repository-recent-Viband"] {
+                           "conversation-repository-recent-mobile-app", "conversation-repository-recent-Website"] {
             assertSameSize(identifier)
         }
         // The picker is the panel's only child, so the two share one accessibility element: the panel's.
@@ -543,31 +543,31 @@ extension PlayhouseUITests {
         XCTAssertEqual(jsPicker.frame.size, nativePicker.frame.size, "The picker is the same size in both.")
         XCTAssertEqual(jsPicker.frame.width, 304, accuracy: 1, "The picker is 304 points wide: a 280-point column inside 12 points of padding.")
         // The chip and its remove badge, as the header's own chips are checked.
-        let chip = js("conversation-repository-badge-infragod")
-        let remove = js("remove-conversation-repository-infragod")
+        let chip = js("conversation-repository-badge-backend")
+        let remove = js("remove-conversation-repository-backend")
         XCTAssertGreaterThanOrEqual(chip.frame.height, 28, "A chip is prominent.")
         XCTAssertEqual(remove.frame.width, 20, accuracy: 1, "The remove badge is a 20-point circle.")
         XCTAssertEqual(remove.frame.height, 20, accuracy: 1)
         XCTAssertGreaterThan(remove.frame.midX, chip.frame.midX, "The remove badge sits on the chip's trailing corner.")
         XCTAssertLessThan(remove.frame.midY, chip.frame.midY, "The remove badge sits on the chip's top corner.")
-        XCTAssertEqual(remove.label, "Remove infragod")
+        XCTAssertEqual(remove.label, "Remove backend")
         let add = pair("add-conversation-repository-button")
         XCTAssertEqual(add.js.frame.width, 28, accuracy: 1, "The + button is a 28-point circle.")
         XCTAssertEqual(add.js.frame.height, 28, accuracy: 1)
         XCTAssertEqual(add.js.label, "Add repository")
         XCTAssertEqual(add.native.label, "Add repository")
         XCTAssertEqual(pluginText(js("conversation-repository-suggestion-parent")), "Suggestions from /Users/demo/git")
-        XCTAssertEqual(js("conversation-repository-search").placeholderValue, "infragod, Playhouse ↵", "The search shows the saved repositories.")
+        XCTAssertEqual(js("conversation-repository-search").placeholderValue, "backend, Playhouse ↵", "The search shows the saved repositories.")
         XCTAssertEqual(pair("conversation-repository-list").js.frame.height, 180, accuracy: 1, "Five rows would be 210 points; the list stops at 180.")
         XCTAssertEqual(pair("conversation-repository-list").js.frame.width, 280, accuracy: 1)
         // A row is one button whose label joins its name and the path under it.
-        for row in [js("conversation-repository-recent-wix-one-app"), native("native-conversation-repository-recent-wix-one-app")] {
-            XCTAssertEqual(row.label, "wix-one-app, /Users/demo/git/wix-one-app", "A row shows its path under its name.")
+        for row in [js("conversation-repository-recent-mobile-app"), native("native-conversation-repository-recent-mobile-app")] {
+            XCTAssertEqual(row.label, "mobile-app, /Users/demo/git/mobile-app", "A row shows its path under its name.")
         }
         attachScreenshot(named: "Repository chips: JavaScript beside native, the picker on Recent")
         // Five rows don't fit in 180 points: the last is below the fold until the list scrolls.
-        for (list, last) in [(js("conversation-repository-list"), js("conversation-repository-recent-zmk-config")),
-                             (native("native-conversation-repository-list"), native("native-conversation-repository-recent-zmk-config"))] {
+        for (list, last) in [(js("conversation-repository-list"), js("conversation-repository-recent-dotfiles")),
+                             (native("native-conversation-repository-list"), native("native-conversation-repository-recent-dotfiles"))] {
             XCTAssertTrue(last.waitToExist(timeout: 5))
             XCTAssertGreaterThan(last.frame.maxY, list.frame.maxY + 1, "The last row starts below the list's bottom edge.")
             list.scroll(byDeltaX: 0, deltaY: -200)
@@ -591,9 +591,9 @@ extension PlayhouseUITests {
         search.typeKey(.upArrow, modifierFlags: [])
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: up" }, timeout: 5), "Up ran onArrow.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).contains("update") }, timeout: 5), "Moving the highlight updated the rows' panels: \(pluginText(commit))")
-        attachScreenshot(named: "Repository chips: the JavaScript highlight moved to wix-one-app")
+        attachScreenshot(named: "Repository chips: the JavaScript highlight moved to mobile-app")
         search.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: submit wix-one-app" }, timeout: 5), "Return added the highlighted row.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: submit mobile-app" }, timeout: 5), "Return added the highlighted row.")
         XCTAssertTrue(waitUntil({ !jsPicker.exists }, timeout: 5), "Adding closed the JavaScript picker.")
         XCTAssertTrue(nativePicker.exists, "The native picker stays open.")
         // The native highlight never moved: its Return adds the first row.
@@ -611,9 +611,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !jsPicker.exists && self.pluginText(lastAction) == "Last: close picker" }, timeout: 5),
                       "The + button hid the picker.")
         js("add-conversation-repository-button").click()
-        XCTAssertTrue(js("conversation-repository-recent-Viband").waitToExist(timeout: 5))
-        js("conversation-repository-recent-Viband").click()
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: select Viband" }, timeout: 5), "Clicking a row ran its onPress.")
+        XCTAssertTrue(js("conversation-repository-recent-Website").waitToExist(timeout: 5))
+        js("conversation-repository-recent-Website").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: select Website" }, timeout: 5), "Clicking a row ran its onPress.")
         js("add-conversation-repository-button").click()
         XCTAssertTrue(js("choose-repository-suggestion-parent-button").waitToExist(timeout: 5))
         js("choose-repository-suggestion-parent-button").click()
@@ -621,14 +621,14 @@ extension PlayhouseUITests {
 
         // A chip opens its settings; its remove badge removes it.
         chip.click()
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: edit infragod" }, timeout: 5), "Clicking a chip ran its onPress.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: edit backend" }, timeout: 5), "Clicking a chip ran its onPress.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).contains(": text → node ") }, timeout: 5), "Clicking a chip re-rendered no chip: \(pluginText(commit))")
         remove.click()
-        XCTAssertTrue(waitUntil({ !js("conversation-repository-badge-infragod").exists }, timeout: 5), "The remove badge removed its chip.")
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: remove infragod" }, timeout: 5))
+        XCTAssertTrue(waitUntil({ !js("conversation-repository-badge-backend").exists }, timeout: 5), "The remove badge removed its chip.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: remove backend" }, timeout: 5))
         XCTAssertTrue(js("conversation-repository-badge-Playhouse-second-line").exists)
-        XCTAssertTrue(native("native-conversation-repository-badge-infragod").exists, "The native chips keep theirs.")
-        attachScreenshot(named: "Repository chips: the JavaScript infragod chip removed, native kept")
+        XCTAssertTrue(native("native-conversation-repository-badge-backend").exists, "The native chips keep theirs.")
+        attachScreenshot(named: "Repository chips: the JavaScript backend chip removed, native kept")
 
         // One of several worktrees of a repository: its branch after the name, its actions naming that worktree.
         let worktreeChip = pair("conversation-repository-badge-Playhouse-second-line")
@@ -1678,11 +1678,12 @@ extension PlayhouseUITests {
 }
 
 extension PlayhouseUITests {
-    // case-contract: test_slash_commands_menu_lists_commands_and_items | Typing / where a word starts anywhere in the composer opens a command menu listing /mcp, /plan, /goal, /skill, /login and /plugin in that order, narrowed to the commands whose name starts with what follows the /. On a Claude task /goal can't be chosen and says goal mode isn't supported by Claude, while on a Codex task it can. Choosing /plan turns plan mode on and choosing /goal on a Codex task opens the goal entry, each removing the typed command from the draft. The command menu shares the mention menu's look: the same floating panel, as wide as the mention menu, with the same section headers and highlighted-row surface. Typing a command with its own list in full lists its items, narrowed by text after a space: /mcp lists the MCP servers the composer can mention, and asked with sign-in status marks each server with the agents that need a sign-in to it (shown as a Sign in button per agent on its row); /skill lists the mentionable skills, editable ones with a working gear and built-in ones with a disabled gear; choosing either mentions it as @handle in place of the command. /login lists both agents, the task's own first, and choosing one starts that agent's sign-in. /plugin lists Create Plugin first, which turns on Add Plugin mode, then the user's own plugins (never built-in ones), disabled ones marked so, each with edit, which opens the plugin's editor conversation, delete, which asks first, and a settings gear that stays disabled until plugins have settings. In the window an MCP server's gear opens the MCP page with that server's editor, its Sign in button opens the MCP page filtered to it and starts that agent's sign-in, and every choice removes the typed command. Listing without a task is a usage error and for an unknown task is not_found.
+    // case-contract: test_slash_commands_menu_lists_commands_and_items | The composer's / commands come from the built-in Built-in Commands headless plugin, which reads everything it shows through bridge commands and acts through ui calls. Typing / where a word starts anywhere in the composer opens a command menu listing /mcp, /plan, /goal, /skill, /login and /plugin in that order, narrowed to the commands whose name starts with what follows the /. On a Claude task /goal can't be chosen and says goal mode isn't supported by Claude, while on a Codex task it can. Choosing /plan turns plan mode on and choosing /goal on a Codex task opens the goal entry, each removing the typed command from the draft. The command menu shares the mention menu's look: the same floating panel, as wide as the mention menu, with the same section headers and highlighted-row surface. Typing a command with its own list in full lists its items, narrowed by text after a space: /mcp lists the MCP servers the composer can mention, and asked with sign-in status marks each server with the agents that need a sign-in to it (shown as a Sign in button per agent on its row); /skill lists the mentionable skills, editable ones with a working gear and built-in ones with a disabled gear; choosing either mentions it as @handle in place of the command. /login lists both agents, the task's own first, and choosing one starts that agent's sign-in, opening the link Codex's sign-in returns. /plugin lists Create Plugin first, which turns on Add Plugin mode, then the user's own plugins (never built-in ones), disabled ones marked so, each with edit, which opens the plugin's editor conversation, delete, which asks first, and a settings gear that stays disabled until plugins have settings. In the window an MCP server's gear opens the MCP page with that server's editor, its Sign in button opens the MCP page filtered to it and starts that agent's sign-in, and every choice removes the typed command. slash-commands run runs a command, chooses one of its items or presses an item's button the same way the window does and reports the plugin's host calls. Disabling the Built-in Commands plugin removes its commands from the menu and from slash-commands, and enabling it restores them. Listing without a task is a usage error and for an unknown task is not_found; running without a command, with an item for a command without a list, without an item for a command with a list, or with a button but no item is a usage error, and an unknown command, item or button is not_found.
     func test_slash_commands_menu_lists_commands_and_items() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let codexPath = try XCTUnwrap(codexFixtureExecutable)
-        let codexSidecars = [".mcp-status", ".mcp-login"].map { URL(fileURLWithPath: codexPath + $0) }
+        let codexAccount = URL(fileURLWithPath: codexPath + ".account")
+        let codexSidecars = [".mcp-status", ".mcp-login", ".account"].map { URL(fileURLWithPath: codexPath + $0) }
         codexSidecars.forEach { try? FileManager.default.removeItem(at: $0) }
         addTeardownBlock { codexSidecars.forEach { try? FileManager.default.removeItem(at: $0) } }
         let repository = try makeSkillRepository("slash-repo", skills: [
@@ -1749,7 +1750,8 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Typing / lists the commands; goal mode isn't supported by Claude")
         attachElementScreenshot(menu, named: "Command menu with /goal disabled on Claude")
         clickRow(goal)
-        XCTAssertEqual(composer.value as? String, "Draft first, then /", "A disabled command does nothing when clicked.")
+        XCTAssertFalse(waitUntil({ (composer.value as? String) != "Draft first, then /" }, timeout: 2), "A disabled command does nothing when clicked.")
+        XCTAssertTrue(menu.exists, "and the menu stays open.")
 
         composer.typeText("pl")
         XCTAssertTrue(waitUntil({ slashRows() == ["plan", "plugin"] }, timeout: 5), "Typing after the / narrows the commands by prefix.")
@@ -1777,10 +1779,10 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("slash-item-mcp-slash-docs").waitToExist(timeout: 10), "Typing /mcp lists the MCP servers.")
         XCTAssertTrue(element("slash-item-mcp-slash-remote").exists)
         XCTAssertEqual(accessibleLabelOrValue(of: element("slash-menu-title")), "MCP servers")
-        let claudeSignIn = element("slash-signin-mcp-slash-remote-claude")
+        let claudeSignIn = element("slash-signin-claude-mcp-slash-remote")
         XCTAssertTrue(claudeSignIn.waitToExist(timeout: 30), "A server Claude needs a sign-in to shows a Sign in button for Claude.")
-        XCTAssertTrue(element("slash-signin-mcp-slash-remote-codex").exists, "and one for Codex, on the same row.")
-        XCTAssertFalse(element("slash-signin-mcp-slash-docs-claude").exists, "A server that needs no sign-in has no button.")
+        XCTAssertTrue(element("slash-signin-codex-mcp-slash-remote").exists, "and one for Codex, on the same row.")
+        XCTAssertFalse(element("slash-signin-claude-mcp-slash-docs").exists, "A server that needs no sign-in has no button.")
         XCTAssertTrue(element("slash-gear-mcp-slash-docs").isEnabled, "Every server has a gear.")
         attachScreenshot(named: "/mcp lists servers, with Sign in buttons and gears")
         attachElementScreenshot(menu, named: "/mcp list with sign-in buttons")
@@ -1806,7 +1808,7 @@ extension PlayhouseUITests {
         // Sign in opens the MCP page on that server and starts that agent's sign-in.
         composer.click()
         composer.typeText("/mcp")
-        let signIn = element("slash-signin-mcp-slash-remote-claude")
+        let signIn = element("slash-signin-claude-mcp-slash-remote")
         XCTAssertTrue(signIn.waitToExist(timeout: 30))
         clickRow(signIn)
         XCTAssertTrue(element("mcp-page").waitToExist(timeout: 10), "Sign in opens the MCP page.")
@@ -1932,6 +1934,20 @@ extension PlayhouseUITests {
         codexComposer.typeKey("a", modifierFlags: .command)
         codexComposer.typeKey(.delete, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (codexComposer.value as? String ?? "").isEmpty }, timeout: 5))
+
+        // On a Codex task, /login lists Codex first; choosing it runs Codex's sign-in, which returns a link to open.
+        try JSONSerialization.data(withJSONObject: ["loggedIn": false, "email": NSNull(), "used": [0, 0]]).write(to: codexAccount)
+        codexComposer.typeText("/login")
+        let codexLogin = element("slash-item-login-codex")
+        XCTAssertTrue(codexLogin.waitToExist(timeout: 10))
+        XCTAssertLessThan(codexLogin.frame.minY, element("slash-item-login-claude").frame.minY, "The Codex task's own agent comes first.")
+        attachElementScreenshot(menu, named: "/login on a Codex task lists Codex first")
+        clickRow(codexLogin)
+        XCTAssertTrue(waitUntil({ (codexComposer.value as? String ?? "").isEmpty }, timeout: 5), "Choosing Codex removes the typed command.")
+        XCTAssertTrue(waitUntil({ ((try? String(contentsOf: codexAccount, encoding: .utf8)) ?? "").contains("codex-second@example.com") }, timeout: 20),
+                      "Choosing Codex runs Codex's sign-in.")
+        XCTAssertFalse(element("codex-chat-error").exists, "Opening the sign-in link succeeds.")
+
         codexComposer.typeText("/go")
         let codexGoal = element("slash-command-goal")
         XCTAssertTrue(codexGoal.waitToExist(timeout: 10))
@@ -1944,9 +1960,213 @@ extension PlayhouseUITests {
 
         let listed = try XCTUnwrap(try runCLI(["slash-commands", "list", "--task", taskID])["result"] as? [String: Any])
         let commands = try XCTUnwrap(listed["commands"] as? [[String: Any]])
-        XCTAssertEqual(commands.compactMap { $0["command"] as? String }, ["mcp", "plan", "goal", "skill", "login", "plugin"])
-        XCTAssertEqual(commands.first { $0["command"] as? String == "goal" }?["enabled"] as? Bool, false)
+        XCTAssertEqual(commands.compactMap { $0["name"] as? String }, ["mcp", "plan", "goal", "skill", "login", "plugin"])
+        XCTAssertEqual(Set(commands.compactMap { $0["pluginID"] as? String }), ["built-in-commands"], "Every command is the Built-in Commands plugin's.")
+        XCTAssertEqual(commands.first { $0["name"] as? String == "goal" }?["enabled"] as? Bool, false)
+        let planRun = try XCTUnwrap(try runCLI(["slash-commands", "run", "--task", taskID, "--command", "plan"])["result"] as? [String: Any])
+        let planCalls = try XCTUnwrap(planRun["hostCalls"] as? [[String: Any]])
+        XCTAssertEqual(planCalls.compactMap { $0["name"] as? String }, ["composer.setMode"], "/plan is one host call that turns plan mode on.")
+        assertCLIError(try runCLI(["slash-commands", "run", "--task", taskID, "--command", "goal"], expectedStatus: 1), code: "unavailable")
+
+        // Disabling the Built-in Commands plugin takes its commands out of the composer.
+        _ = try runCLI(["plugin", "disable", "--id", "built-in-commands"])
+        openTask(named: "Slash task")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        clearComposer()
+        composer.typeText("/")
+        XCTAssertFalse(menu.waitToExist(timeout: 3), "With no plugin's commands, / opens no menu.")
+        clearComposer()
+        _ = try runCLI(["plugin", "enable", "--id", "built-in-commands"])
+        composer.typeText("/")
+        XCTAssertTrue(menu.waitToExist(timeout: 10), "Enabled again, its commands are back.")
+        XCTAssertEqual(slashRows(), ["mcp", "plan", "goal", "skill", "login", "plugin"])
         assertCLIError(try runCLI(["slash-commands", "list"], expectedStatus: 2), code: "invalid_argument")
         assertCLIError(try runCLI(["slash-commands", "list", "--task", UUID().uuidString], expectedStatus: 3), code: "not_found")
+    }
+
+    // case-contract: test_headless_plugin_exposes_slash_commands | An installed plugin whose presentation is headless and whose placement is composerActions has no button or surface, only the / commands its manifest's commands declare and its script registers with Playhouse.commands.register. They are listed after the built-in commands with the plugin's id, its icon for a command without one, and the composer and slash-commands run them alike with the composer's context: a command without a list runs at once and the text it returns replaces the typed command; a command with a list shows the items its list handler builds from bridge commands, narrowed by the typed filter, which also matches an item's keywords, choosing an item inserts the text its choose handler returns, and an item's button calls the press handler, whose host calls are reported; a command whose available handler says it can't run is listed disabled with its reason and can't be run. A command whose handler throws fails with its message, which the window shows under the composer after removing the typed command, and a plugin whose available handler fails lists its commands disabled with the error as the reason. A disabled plugin's commands aren't offered. A headless plugin without commands or at another placement, a command named like a built-in one, and a declared command its script never registers each make the plugin invalid, and an invalid plugin offers no commands.
+    func test_headless_plugin_exposes_slash_commands() throws {
+        let source = #"""
+        Playhouse.commands.register("greet", {
+          run: function () { return { text: "Hello from " + Playhouse.props.task.title + " " }; }
+        });
+        Playhouse.commands.register("notes", {
+          list: function () {
+            return Playhouse.bridge("task.get", { taskID: Playhouse.props.task.id }).then(function (task) {
+              return {
+                title: "Notes", empty: "No notes", noMatch: "No note matches",
+                items: [
+                  { id: "note-title", title: "Task title", detail: task.title, icon: "note.text", keywords: ["heading"],
+                    buttons: [{ id: "plan", label: "Plan it", help: "Plan from this note", icon: "list.bullet" }], data: { text: task.title } },
+                  { id: "note-plain", title: "Plain note", detail: "No buttons", data: { text: "plain" } }
+                ]
+              };
+            });
+          },
+          choose: function (request) { return { text: "Note: " + request.item.data.text + " " }; },
+          press: function () { return Playhouse.ui.composer.setMode("plan").then(function () { return {}; }); }
+        });
+        Playhouse.commands.register("later", {
+          available: function () { return { enabled: false, reason: "Not yet" }; },
+          run: function () { return { text: "never" }; }
+        });
+        Playhouse.commands.register("broken", {
+          run: function () { throw new Error("Broken on purpose"); }
+        });
+        """#
+        let commands: [[String: Any]] = [
+            ["name": "greet", "detail": "Greets the task", "icon": "hand.wave"],
+            ["name": "notes", "detail": "Lists the task's notes", "list": true],
+            ["name": "later", "detail": "Not ready"],
+            ["name": "broken", "detail": "Always fails"],
+        ]
+        try writeInstalledPlugin("note-commands", source: source, presentation: "headless", commands: commands)
+        launchApp(defaultParent: fixture.parent.path)
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Headless task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        func pluginRecords() throws -> [String: [String: Any]] {
+            let plugins = (try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]] ?? []
+            return Dictionary(uniqueKeysWithValues: plugins.compactMap { plugin in (plugin["id"] as? String).map { ($0, plugin) } })
+        }
+        let record = try XCTUnwrap(try pluginRecords()["note-commands"])
+        XCTAssertEqual(record["presentation"] as? String, "headless")
+        XCTAssertEqual(record["valid"] as? Bool, true, "\(record["errors"] ?? "")")
+
+        let menu = element("slash-menu")
+        let composer = element("message-composer")
+        let planButton = element("conversation-plan-button")
+        let allCommands = ["mcp", "plan", "goal", "skill", "login", "plugin", "greet", "notes", "later", "broken"]
+        func clearComposer() {
+            composer.click()
+            composer.typeKey("a", modifierFlags: .command)
+            composer.typeKey(.delete, modifierFlags: [])
+            XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5))
+        }
+        func slashRows() -> [String] {
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "slash-command-")).allElementsBoundByIndex
+                .filter { $0.exists }.sorted { $0.frame.minY < $1.frame.minY }
+                .map { String($0.identifier.dropFirst("slash-command-".count)) }
+        }
+        /// A real click at the row's center: XCUITest reports rows of the floating menu as not hittable.
+        func clickRow(_ row: XCUIElement) {
+            XCTAssertTrue(row.waitToExist(timeout: 10), "\(row) shows.")
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        }
+
+        openTask(named: "Headless task")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        XCTAssertTrue(planButton.waitToExist(timeout: 10))
+        XCTAssertFalse(element("plugin-entry-note-commands").exists, "A headless plugin has no button in the composer.")
+        composer.click()
+        composer.typeText("/")
+        XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing / opens the command menu.")
+        XCTAssertTrue(waitUntil({ slashRows() == allCommands }, timeout: 10), "The plugin's commands follow the built-in ones: \(slashRows())")
+        let later = element("slash-command-later")
+        XCTAssertFalse(later.isEnabled, "The available handler disables /later.")
+        XCTAssertEqual(later.value as? String, "Not yet", "The row shows the reason.")
+        attachScreenshot(named: "A headless plugin's commands follow the built-in ones")
+        attachElementScreenshot(menu, named: "The command menu with /greet, /notes and a disabled /later")
+        clickRow(later)
+        XCTAssertFalse(waitUntil({ (composer.value as? String) != "/" }, timeout: 2), "A disabled command does nothing when clicked.")
+        XCTAssertTrue(menu.exists, "and the menu stays open.")
+
+        // A command without a list runs at once; its text replaces the command.
+        composer.typeText("g")
+        XCTAssertTrue(waitUntil({ slashRows() == ["goal", "greet"] }, timeout: 5), "Typing narrows the commands by prefix.")
+        clickRow(element("slash-command-greet"))
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Hello from Headless task " }, timeout: 10),
+                      "/greet's text replaces the command: \(composer.value as? String ?? "")")
+        XCTAssertTrue(waitForDisappearance(menu))
+        clearComposer()
+
+        // A handler that throws shows its message under the composer and removes the typed command.
+        composer.typeText("Keep /bro")
+        clickRow(element("slash-command-broken"))
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Keep " }, timeout: 10), "The failed command is removed: \(composer.value as? String ?? "")")
+        let failure = element("codex-chat-error")
+        XCTAssertTrue(failure.waitToExist(timeout: 10), "The failure shows under the composer.")
+        XCTAssertTrue(accessibleLabelOrValue(of: failure).contains("Broken on purpose"), accessibleLabelOrValue(of: failure))
+        attachScreenshot(named: "A failing command shows its error under the composer")
+        clearComposer()
+
+        // A command with a list shows the items its list handler builds through task.get.
+        composer.typeText("/notes")
+        let titleNote = element("slash-item-note-title")
+        XCTAssertTrue(titleNote.waitToExist(timeout: 10), "Typing /notes lists its items.")
+        XCTAssertTrue(element("slash-item-note-plain").exists)
+        XCTAssertEqual(accessibleLabelOrValue(of: element("slash-menu-title")), "Notes")
+        XCTAssertEqual(titleNote.value as? String, "Headless task", "The item's detail is the task title the plugin read.")
+        XCTAssertTrue(element("slash-plan-note-title").exists, "The item has its button.")
+        XCTAssertFalse(element("slash-plan-note-plain").exists, "An item without buttons has none.")
+        attachScreenshot(named: "/notes lists the items the plugin built from task.get")
+        attachElementScreenshot(menu, named: "/notes list with an item button")
+        composer.typeText(" heading")
+        XCTAssertTrue(waitForDisappearance(element("slash-item-note-plain")), "The filter matches the item's keywords.")
+        clickRow(titleNote)
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Note: Headless task " }, timeout: 10),
+                      "Choosing an item inserts its choose text: \(composer.value as? String ?? "")")
+        XCTAssertTrue(waitForDisappearance(menu))
+        clearComposer()
+
+        // An item's button calls the press handler, which turns plan mode on.
+        XCTAssertFalse(isModeOn("conversation-plan-button"), "The task starts outside plan mode.")
+        composer.typeText("/notes")
+        let notePlanButton = element("slash-plan-note-title")
+        XCTAssertTrue(notePlanButton.waitToExist(timeout: 10))
+        notePlanButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-plan-button") }, timeout: 10), "The press handler's composer.setMode turns plan mode on.")
+        XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5), "Pressing removes the typed command.")
+        attachScreenshot(named: "The item's button turned plan mode on through the plugin")
+        clearComposer()
+
+        // A disabled plugin's commands aren't offered.
+        _ = try runCLI(["plugin", "disable", "--id", "note-commands"])
+        composer.typeText("/")
+        XCTAssertTrue(waitUntil({ slashRows() == Array(allCommands.prefix(6)) }, timeout: 10), "Disabling the plugin removes its commands: \(slashRows())")
+        clearComposer()
+        _ = try runCLI(["plugin", "enable", "--id", "note-commands"])
+        composer.typeText("/")
+        XCTAssertTrue(waitUntil({ slashRows() == allCommands }, timeout: 10), "Enabling it restores them: \(slashRows())")
+        clearComposer()
+
+        // Invalid headless plugins and commands.
+        try writeInstalledPlugin("no-commands", source: "var x = 1;", presentation: "headless")
+        try writeInstalledPlugin("headless-board", source: source, placement: "mainSidebar", presentation: "headless", commands: commands)
+        try writeInstalledPlugin("plan-again", source: "Playhouse.commands.register('plan', { run: function () { return {}; } });",
+                                 presentation: "headless", commands: [["name": "plan", "detail": "Another plan"]])
+        try writeInstalledPlugin("never-registered", source: "var x = 1;", presentation: "headless", commands: [["name": "ghost", "detail": "Never registered"]])
+        // A plugin whose available handler fails lists its commands disabled with the error.
+        try writeInstalledPlugin("flaky-commands", source: """
+            Playhouse.commands.register("flaky", {
+              available: function () { throw new Error("Can't tell yet"); },
+              run: function () { return { text: "never" }; }
+            });
+            """, presentation: "headless", commands: [["name": "flaky", "detail": "Can't tell"]])
+        // Refreshing bumps the plugins revision, so the window reads the new folders too.
+        _ = try runCLI(["plugin", "refresh"])
+        let records = try pluginRecords()
+        let expectedErrors = [
+            "no-commands": "needs at least one command",
+            "headless-board": "its placement must be \"composerActions\"",
+            "plan-again": "/plan is a built-in command.",
+            "never-registered": "never calls Playhouse.commands.register(\"ghost\"",
+        ]
+        for (pluginID, error) in expectedErrors {
+            let errors = records[pluginID]?["errors"] as? [String] ?? []
+            XCTAssertEqual(records[pluginID]?["valid"] as? Bool, false, pluginID)
+            XCTAssertTrue(errors.contains { $0.contains(error) }, "\(pluginID): \(errors)")
+        }
+        XCTAssertEqual(records["flaky-commands"]?["valid"] as? Bool, true)
+        composer.typeText("/")
+        let flaky = element("slash-command-flaky")
+        XCTAssertTrue(flaky.waitToExist(timeout: 10), "The window read the refreshed plugins.")
+        XCTAssertFalse(flaky.isEnabled, "A failing available handler disables the plugin's commands.")
+        XCTAssertTrue((flaky.value as? String ?? "").contains("Can't tell yet"), "The row shows the error: \(flaky.value as? String ?? "")")
+        let refreshedCommands = Array(allCommands.prefix(6)) + ["flaky"] + Array(allCommands.dropFirst(6))
+        XCTAssertEqual(slashRows(), refreshedCommands, "Invalid plugins offer no commands.")
+        attachElementScreenshot(menu, named: "A failing available handler lists /flaky disabled with its error")
+        let entries = (try runCLI(["slash-commands", "list", "--task", taskID])["result"] as? [String: Any])?["commands"] as? [[String: Any]] ?? []
+        XCTAssertEqual(entries.first { $0["name"] as? String == "plan" }?["pluginID"] as? String, "built-in-commands", "/plan stays the built-in one.")
     }
 }

@@ -367,8 +367,57 @@
       };
     }
 
+    // `/` commands (the manifest's "commands"): each name's handlers, which the
+    // host runs with __playhouseRunCommand(token, name, phase, request) in a
+    // fresh runtime, and whose result (or error) it hears through
+    // __native.commandResult. "available" with no name runs every command's.
+    var commands = {};
+    function registerCommand(name, handlers) {
+      commands[String(name)] = handlers || {};
+    }
+    global.__playhouseCommandNames = function () { return Object.keys(commands); };
+    global.__playhouseRunCommand = function (token, name, phase, request) {
+      function settle(ok, value) {
+        if (ok) {
+          __native.commandResult(token, true, value === undefined ? null : value);
+        } else {
+          __native.commandResult(token, false, {
+            code: (value && value.code) || "script_error",
+            message: (value && value.message) || String(value)
+          });
+        }
+      }
+      function call(handlers, phaseName) {
+        var handler = handlers[phaseName];
+        if (typeof handler !== "function") return Promise.resolve(null);
+        return new Promise(function (resolve) { resolve(handler(request || {})); });
+      }
+      var result;
+      if (phase === "available") {
+        var names = Object.keys(commands);
+        result = Promise.all(names.map(function (each) { return call(commands[each], "available"); })).then(function (values) {
+          var map = {};
+          names.forEach(function (each, index) { if (values[index] !== null && values[index] !== undefined) map[each] = values[index]; });
+          return map;
+        });
+      } else if (!commands[name]) {
+        result = Promise.reject({ code: "not_found", message: "The plugin never registered the command /" + name + "." });
+      } else if (typeof commands[name][phase] !== "function") {
+        result = phase === "list" || phase === "run"
+          ? Promise.reject({ code: "not_found", message: "/" + name + " has no " + phase + " handler." })
+          : Promise.resolve(null);
+      } else {
+        result = call(commands[name], phase);
+      }
+      result.then(function (value) { settle(true, value); }, function (error) { settle(false, error); });
+    };
+
     var Playhouse = {
       props: global.__playhouseProps || {},
+      // Registers the handlers of a `/` command the manifest declares:
+      // {available, list, run, choose, press}, each given one request object
+      // and returning a value or a promise of one.
+      commands: { register: registerCommand },
       // Listens for an app event; returns a function that stops listening.
       on: on,
       throttle: throttle,
@@ -407,7 +456,7 @@
         // Opens an http(s) link in the default browser.
         openURL: function (url) { return hostCall("ui", "openURL", { url: String(url) }); },
         // Asks the user to confirm ({title, message, confirm, destructive}); resolves true when they do.
-        // Only on the board.
+        // On the board and in the composer's commands.
         confirm: function (options) {
           options = options || {};
           return hostCall("ui", "confirm", {
@@ -426,8 +475,15 @@
           setDraft: function (text) { return hostCall("ui", "composer.setDraft", { text: String(text) }); },
           insertText: function (text) { return hostCall("ui", "composer.insertText", { text: String(text) }); },
           replaceSelection: function (text) { return hostCall("ui", "composer.replaceSelection", { text: String(text) }); },
-          focus: function () { return hostCall("ui", "composer.focus", {}); }
-        }
+          focus: function () { return hostCall("ui", "composer.focus", {}); },
+          // Turns on the composer's "plan" or "goal" mode.
+          setMode: function (mode) { return hostCall("ui", "composer.setMode", { mode: String(mode) }); }
+        },
+        // Opens the Skills page: {skillID}, {mcpServerID}, or {signIn: {name, provider}} to
+        // sign a provider in to an MCP server. In the conversation.
+        openSkills: function (focus) { return hostCall("ui", "openSkills", focus || {}); },
+        // Opens a plugin's editor. In the conversation.
+        editPlugin: function (pluginID) { return hostCall("ui", "editPlugin", { pluginID: String(pluginID) }); }
       }
     };
     global.React = React;

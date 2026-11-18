@@ -54,9 +54,11 @@ struct SideChatBubble: View {
 
     /// The bubble opens compact and grows as the chat does: wider once it has messages, taller
     /// with each one, until `maxTranscriptHeight`, after which the chat scrolls.
-    static let compactWidth: CGFloat = 442
-    static let width: CGFloat = 572
-    static let maxTranscriptHeight: CGFloat = 340
+    static let compactWidth: CGFloat = 480
+    static let width: CGFloat = 660
+    static let maxTranscriptHeight: CGFloat = 440
+    /// The size of the chat's messages.
+    static let bodyFontSize: CGFloat = 14
 
     private struct TranscriptHeightKey: PreferenceKey {
         static let defaultValue: CGFloat = 0
@@ -93,7 +95,7 @@ struct SideChatBubble: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 Label("Side chat", systemImage: "bubble.left.and.text.bubble.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button {
@@ -117,7 +119,7 @@ struct SideChatBubble: View {
                     .fill(Color.orange.opacity(0.8))
                     .frame(width: 3)
                 Text(verbatim: selectedText)
-                    .font(.system(size: 12))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                     .truncationMode(.tail)
@@ -140,7 +142,7 @@ struct SideChatBubble: View {
                         if streamingText.isEmpty {
                             HStack(spacing: 6) {
                                 ProgressView().controlSize(.small)
-                                Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
+                                Text("Thinking…").font(.system(size: 13)).foregroundStyle(.secondary)
                             }
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("side-chat-responding")
@@ -151,14 +153,16 @@ struct SideChatBubble: View {
                     }
                     if let errorMessage = run?.errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 12))
+                            .font(.system(size: 13))
                             .foregroundStyle(.orange)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .accessibilityIdentifier("side-chat-error")
                     }
                     Color.clear.frame(height: 1).id("side-chat-bottom")
                 }
-                .padding(.horizontal, 2)
+                .padding(.leading, 2)
+                // The overlay scroller floats over the content's trailing edge; keep the text clear of it.
+                .padding(.trailing, HoverRevealScrollers.scrollerWidth)
                 .hoverRevealScrollers()
                 .background(GeometryReader { geometry in
                     Color.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
@@ -178,7 +182,7 @@ struct SideChatBubble: View {
             HStack {
                 Spacer(minLength: 40)
                 Text(verbatim: message.text)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Self.bodyFontSize))
                     .textSelection(.enabled)
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 11))
@@ -200,7 +204,7 @@ struct SideChatBubble: View {
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(text)
         return Text(markdown)
-            .font(.system(size: 12.5))
+            .font(.system(size: Self.bodyFontSize))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)

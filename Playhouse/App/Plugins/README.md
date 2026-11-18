@@ -20,7 +20,7 @@ archive exist only as native SwiftUI built from the same atoms
 
 | Path | What it is |
 | --- | --- |
-| `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`). Also compiled into the bridge daemon. |
+| `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`), `PluginCommands` (the `/` commands a plugin exposes: their manifest, the handlers' results, `JavaScriptCommandHandler` and the daemon's `PluginHeadlessHost`). Also compiled into the bridge daemon. |
 | `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom name to a builder that decodes the node's props. |
 | `Renderer/` | `PluginSurface` (runs one script and renders its tree) and the Plugin Catalog window. |
 | `Host/` | Installed plugins in the app: `PluginRegistry` (the plugins `plugin list` reports), `PluginSlot` (a placement's entry buttons and Add Plugin mode's "Add here" placeholder), `PluginInlineSlot` (a placement's inline plugins, rendered in place), `PluginHost` (the host calls, answered the same way for script and built-in plugins), `PluginSurfaceView` (a mounted script plugin with live props), its popover, modal, sidebar, page and inline presentations, and the mode's banner. |
@@ -348,6 +348,8 @@ the new props, and deleting a plugin forgets them. `presentation` is one of:
   hidden to its narrow rail, `sidebar.collapsed` is true and the plugin should
   show at most a compact count there. On a task card, keep it to an icon or a
   short label.
+- `headless`: only at `composerActions`. The plugin has no button and no
+  surface, only the `/` commands its manifest declares (see "Slash commands").
 
 Each presentation but `inline` and `section` starts with the app's standard modal header (the plugin's
 icon and name, `plugin-surface-title`, and its close button,
@@ -369,17 +371,73 @@ Installed plugins also get host calls. Each returns a Promise:
 | `Playhouse.ui.close()` | Closes the surface |
 | `Playhouse.ui.openTask(taskID)` | Opens a task; a page plugin stays open behind it, so closing the task returns to the page |
 | `Playhouse.ui.composer.setDraft(text)`, `.insertText(text)`, `.replaceSelection(text)`, `.focus()` | Edit the composer at the conversation placements; elsewhere they reject |
+| `Playhouse.ui.composer.setMode(mode)` | Turns on the composer's `"plan"` mode or opens its `"goal"` entry (a read-only conversation rejects with `unavailable`); any other mode is `invalid_argument` |
+| `Playhouse.ui.openSkills(focus)` | Opens the Skills page in the conversation: `{skillID}` on that skill's editor, `{mcpServerID}` on that MCP server's editor, or `{signIn: {name, provider}}` filtered to the server with that agent's sign-in started; `{}` opens it unfocused |
+| `Playhouse.ui.editPlugin(pluginID)` | Opens the plugin's editor conversation, as its Edit item in the Plugins menu does |
 | `Playhouse.ui.openDiff(entry)` | Opens the window's diff view for an entry of `task.changes.list` (`{repository, path, group, …}`) at the conversation placements |
 | `Playhouse.ui.refreshWorkspace()` | Tells the window the task's folders changed: it bumps `workspace.revision` for every sidebar plugin and refreshes an open diff. The window also bumps it whenever its file watcher sees a change, while an inline sidebar plugin is shown |
 | `Playhouse.ui.moveTask(taskID, status)` | Moves a task to a board column the way dragging its card does, including the window's own checks and alerts |
 | `Playhouse.ui.resolveConflicts(taskID)` | Starts the task's pull request conflict resolution turn |
 | `Playhouse.ui.alert(title, message)` | Shows an alert over the window, for a failure the user should see |
-| `Playhouse.ui.confirm({title, message, confirm, destructive})` | Asks the user with the board's dialog (`PluginConfirmationModifier`), shown inside the popover for a popover plugin so it stays open, and resolves true when they confirm, false when they cancel; `plugin render` resolves null without asking |
+| `Playhouse.ui.confirm({title, message, confirm, destructive})` | Asks the user with the board's dialog (`PluginConfirmationModifier`), shown inside the popover for a popover plugin so it stays open (in the composer, an alert over the window), and resolves true when they confirm, false when they cancel; `plugin render` resolves null without asking, and `slash-commands run` resolves its `--confirm` |
 | `Playhouse.ui.openURL(url)` | Opens an `http` or `https` link in the browser (a test build opens nothing) |
 | `Playhouse.ui.newTask({schedule})` | Opens a new task on the board; with `schedule` `"recurring"` or `"once"` its schedule picker is already up |
 | `Playhouse.ui.openLoginItems()` | Opens Login Items in System Settings, where the user allows scheduled runs |
 
-`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, a composer call from the board's sidebar or a task card is `unavailable`, an `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`, a `moveTask`, `resolveConflicts` or `alert` call from anywhere but a task card is `unavailable`, a `confirm`, `newTask` or `openLoginItems` call from anywhere but the board (its sidebar, the sidebar's bottom or a task card) is `unavailable`, a `newTask` call whose `schedule` is neither null, `"once"` nor `"recurring"` is `invalid_argument`, and an `openURL` call whose `url` is not an `http` or `https` URL with a host is `invalid_argument`.
+`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, a composer call from the board's sidebar or a task card is `unavailable`, an `openDiff` or `refreshWorkspace` call from the board's sidebar is `unavailable`, a `moveTask`, `resolveConflicts` or `alert` call from anywhere but a task card is `unavailable`, a `confirm` call from anywhere but the board (its sidebar, the sidebar's bottom or a task card) or the composer is `unavailable`, a `newTask` or `openLoginItems` call from anywhere but the board is `unavailable`, an `openSkills` or `editPlugin` call from the board is `unavailable`, an `editPlugin` call without a `pluginID` or a `composer.setMode` call whose mode is neither `"plan"` nor `"goal"` is `invalid_argument`, a `newTask` call whose `schedule` is neither null, `"once"` nor `"recurring"` is `invalid_argument`, and an `openURL` call whose `url` is not an `http` or `https` URL with a host is `invalid_argument`.
+
+### Slash commands
+
+Any plugin can expose `/` commands, which the composer's command menu lists
+when the user types `/` where a word starts. A `headless` plugin (placement
+`composerActions`) is one that exposes only commands. The manifest declares
+them, so the menu lists them without running the plugin:
+
+```json
+{ "id": "notes", "name": "Notes", "icon": "note.text",
+  "placement": "composerActions", "presentation": "headless",
+  "commands": [
+    { "name": "greet", "detail": "Greets the task", "icon": "hand.wave" },
+    { "name": "notes", "detail": "Lists the task's notes", "list": true }
+  ] }
+```
+
+A `name` is lowercase words joined by hyphens, can't be declared twice or take
+a built-in command's name, and needs a `detail` (the row's second line); `icon`
+defaults to the plugin's. A headless plugin without commands is invalid, as is
+a declared command the script never registers. The script registers each
+command's handlers with `Playhouse.commands.register(name, {available, list,
+run, choose, press})`; each gets one request object and returns a value or a
+promise of one:
+
+| Handler | Request | Returns |
+| --- | --- | --- |
+| `available` | `{}` | Optional. `true`, `false` or `{enabled, reason}`: a disabled command is listed greyed out with `reason` in place of its detail, and can't run |
+| `run` | `{filter}` | For a command without `list`: run as soon as it is chosen. `{text}` replaces the typed command in the draft; nothing removes it |
+| `list` | `{filter, complete}` | For a command with `list`: `{title, items, pending, empty, noMatch}`, the menu shown once the command is typed in full. Each item is `{id, title, detail, icon, help, keywords, buttons, data}`; the host filters items by what is typed after the command and a space (title, detail and keywords). A list with `pending` (such as `"Checking sign-in…"`) shows it beside the title while the host asks again with `complete` true for the slower details |
+| `choose` | `{item, filter}` | An item chosen: `{text}` as for `run` |
+| `press` | `{item, button}` | One of the item's `buttons` (`{id, label, help, icon, text, style: "icon" or "bordered", disabled, destructive}`) pressed: `{text}` as for `run` |
+
+Each handler runs in a fresh runtime of the script (`JavaScriptCommandHandler`
+in `Core/PluginCommands.swift`) with the composer placement's props, and its
+`Playhouse.bridge`, `Playhouse.ui` and `fetch` calls are answered and refused
+as a mounted composer plugin's are. A rejected promise shows its message under
+the composer and removes the typed command.
+
+`SlashCommandManager` (`App/SlashCommandCatalog.swift`) runs them the same way
+for the window, whose `PluginHost` answers the calls, and for the bridge
+daemon's `slash.list` and `slash.run` (the CLI's `slash-commands list --task
+<id> [--query <text>] [--complete]` and `slash-commands run --task <id>
+--command <name> [--item <id> [--button <id>]] [--confirm]`). The daemon's
+`PluginHeadlessHost` sends bridge calls to its own runtime and records `ui`
+calls without acting on them; `slash-commands run` reports the command's
+calls (listing its items, then running it) in `hostCalls`. The manager also
+refuses, for both, a disabled command (`unavailable`), a command with a list run
+without an item or one without a list given an item (`invalid_argument`), an
+unknown item or button (`not_found`) and a disabled button (`unavailable`). A
+plugin whose `available` handler fails has its commands listed disabled, with
+the error as the reason. Commands come from the active plugins, the built-in ones first and
+then the installed ones by id; a disabled or invalid plugin offers none.
 
 ### Events and throttling
 
@@ -441,6 +499,7 @@ and an installed plugin's folder can't take a built-in's id.
 | `pull-requests` (`BuiltIn/PullRequestsPlugin.swift`) | `taskItem` | `inline` | The task card's pull request controls: the create button, the links coloured by health, the merged check (which moves the task to Done with `ui.moveTask`, passing `pullRequestsMerged` so the move trusts the merge its probe just saw instead of asking GitHub again; the window honors that only from a built-in plugin, since the move records the pull requests merged) and the resolve-conflicts button (`ui.resolveConflicts`). It probes `task.pr.status` with `shared` (a short cache with in-flight dedupe, so cards and windows share one GitHub read) on focus and when its task moves, through `PluginThrottle`, and raises a failed probe with `ui.alert` while the task is in Review |
 | `changes` (`BuiltIn/ChangesPlugin.swift`) | `conversationSidebar` | `inline` | The Changes section: lists the task's Git changes with `task.changes.list`, reloads on `workspace.revision`, opens diffs with `ui.openDiff`, marks files with `task.changes.mark-viewed`, `mark-unviewed` and `mark-all-viewed`, and shows the pending count on the sidebar's rail. Disabling it hides the section and stops the window's file watching. Whether the section is collapsed is its plugin state, `state.collapsed` |
 | `agents-info` (`BuiltIn/AgentsInfoPlugin.swift`) | `mainSidebarBottom` | `section` | The board's Agents info section: each installed agent's account and usage windows from `props.agents.usage`. It reads the usage again once per launch (`usage.get` with `refresh` on `app.launched`), signs in with `usage.login` and `ui.openURL`, and switches accounts with `usage.switch-account`, asking first with `ui.confirm` when that provider has running tasks (`props.agents.runningTasks`). With no agent CLI installed it renders nothing, so its section hides. Its collapsed state moved from `WorkspaceSettings.agentsInfoSectionCollapsedKey` into its plugin state, carried over once |
+| `built-in-commands` (`Services/BuiltInCommandsPlugin.swift`) | `composerActions` | `headless` | The composer's `/mcp`, `/plan`, `/goal`, `/skill`, `/login` and `/plugin`, as Swift command handlers. `available` reads `conversation.provider.get` and disables `/goal` for an agent without goal mode; `/plan` and `/goal` call `ui.composer.setMode`. `/mcp` and `/skill` list the composer's mentions (`mentions.list`, with `mcp.status` for the sign-ins once asked with `complete`, and `skills.list` for which skills can be edited), choosing one mentions it, and their buttons call `ui.openSkills`. `/login` starts `usage.login` and opens its link with `ui.openURL`. `/plugin` lists Create Plugin (`plugin.mode`) and the installed plugins from `plugin.list`, with edit (`ui.editPlugin`) and delete (`ui.confirm`, then `plugin.delete`). Disabling it removes those commands |
 | `scheduled-tasks` (`BuiltIn/ScheduledTasksPlugin.swift`) | `mainSidebar` | `popover` | The board's Scheduled Tasks popover, anchored to its sidebar button (400×460): recurring and one-time sections from `props.schedules.tasks`. It pauses and resumes with `schedule.pause` and `schedule.resume`, runs with `schedule.run-now`, deletes with `task.delete` after `ui.confirm`, opens a schedule's task or its last run with `ui.openTask` (a popover closes when its plugin opens a task or a new task), starts a recurring task with `ui.newTask`, and shows the Login Items notice from `props.schedules.needsLoginItemsApproval` with `ui.openLoginItems`. Disabling it removes the sidebar entry; schedules still run |
 
 ### Network

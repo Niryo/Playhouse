@@ -669,37 +669,37 @@ class BridgeTestCases21:
         self.plugin_node(reopened["tree"], "skill-row-release-notes")
         self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The Skills button opened it again.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-search:onPress", expected_status=2)[0], "invalid_argument")
-    # case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit wix-one-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Viband); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit infragod) without re-rendering the other chip; and its remove badge removes it (Last: remove infragod) while the native chips keep theirs. A chip for one of several worktrees of a repository (Playhouse on second-line) shows its branch in 11-point secondary text after the name, at the same size in both, and its actions name that worktree: clicking it runs Last: edit Playhouse-second-line and its remove badge removes just it (Last: remove Playhouse-second-line). A chip raises no onChange, so sending it one is refused as invalid_argument.
+    # case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit mobile-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Website); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit backend) without re-rendering the other chip; and its remove badge removes it (Last: remove backend) while the native chips keep theirs. A chip for one of several worktrees of a repository (Playhouse on second-line) shows its branch in 11-point secondary text after the name, at the same size in both, and its actions name that worktree: clicking it runs Last: edit Playhouse-second-line and its remove badge removes just it (Last: remove Playhouse-second-line). A chip raises no onChange, so sending it one is refused as invalid_argument.
     def test_plugin_repository_chips_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips")[0])
         self.assertEqual(rendered["errors"], [])
         tree = rendered["tree"]
         # The same identifiers the task header's native chips and picker give their atoms.
-        for test_id in ["conversation-repository-badge-infragod", "remove-conversation-repository-infragod", "conversation-repository-badge-Playhouse-second-line",
+        for test_id in ["conversation-repository-badge-backend", "remove-conversation-repository-backend", "conversation-repository-badge-Playhouse-second-line",
                         "remove-conversation-repository-Playhouse-second-line", "add-conversation-repository-button", "conversation-repository-picker",
                         "conversation-repository-suggestion-parent", "choose-repository-suggestion-parent-button", "conversation-repository-search",
                         "conversation-repository-recent-header", "conversation-repository-list", "conversation-repository-recent-mre",
-                        "conversation-repository-recent-wix-one-app", "conversation-repository-recent-zmk-config"]:
+                        "conversation-repository-recent-mobile-app", "conversation-repository-recent-dotfiles"]:
             self.plugin_node(tree, test_id)
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
         self.assertEqual(types, {"Overlay", "Panel", "Stack", "Text", "Icon", "Button", "Spacer", "TextField", "Scroll"}, "The chips and the picker are atoms only.")
 
         # A chip: a capsule button with the branch icon and the name, its remove badge over its top trailing corner.
-        chip = self.plugin_node(tree, "conversation-repository-badge-infragod")
+        chip = self.plugin_node(tree, "conversation-repository-badge-backend")
         overlay = next(node for node in self.plugin_nodes(tree) if node["type"] == "Overlay" and chip in node["children"])
         self.assertEqual((overlay["props"]["align"], overlay["props"]["offsetX"], overlay["props"]["offsetY"]), ("topTrailing", 6, -6))
         self.assertEqual([child["props"].get("testID") for child in overlay["children"]],
-                         ["conversation-repository-badge-infragod", "remove-conversation-repository-infragod"], "The chip, then its badge over it.")
+                         ["conversation-repository-badge-backend", "remove-conversation-repository-backend"], "The chip, then its badge over it.")
         self.assertEqual((chip["type"], chip["events"], chip["props"]["help"], chip["props"]["disabled"]),
-                         ("Button", ["onPress"], "Edit repository settings for infragod", False))
+                         ("Button", ["onPress"], "Edit repository settings for backend", False))
         capsule = chip["children"][0]
         self.assertEqual((capsule["type"], capsule["props"]["capsule"], capsule["props"]["fillOpacity"], capsule["props"]["stroke"], capsule["props"]["strokeOpacity"]),
                          ("Panel", True, 0.08, "primary", 0.14))
         label = capsule["children"][0]["children"]
         self.assertEqual((label[0]["props"]["name"], label[0]["props"]["color"]), ("arrow.triangle.branch", "#007ACC"), "The workspace accent.")
-        self.assertEqual((self.plugin_text(label[1]), label[1]["props"]["size"], label[1]["props"]["weight"]), ("infragod", 13, "semibold"))
-        remove = self.plugin_node(tree, "remove-conversation-repository-infragod")
-        self.assertEqual((remove["props"]["label"], remove["props"]["help"]), ("Remove infragod", "Remove infragod from this task"))
+        self.assertEqual((self.plugin_text(label[1]), label[1]["props"]["size"], label[1]["props"]["weight"]), ("backend", 13, "semibold"))
+        remove = self.plugin_node(tree, "remove-conversation-repository-backend")
+        self.assertEqual((remove["props"]["label"], remove["props"]["help"]), ("Remove backend", "Remove backend from this task"))
         badge = remove["children"][0]
         self.assertEqual((badge["props"]["capsule"], badge["props"]["width"], badge["props"]["height"], badge["props"]["fill"]), (True, 20, 20, "panel"))
         self.assertEqual(badge["children"][0]["props"]["name"], "xmark")
@@ -714,12 +714,12 @@ class BridgeTestCases21:
         self.assertEqual((change["props"]["style"], change["props"]["disabled"], self.plugin_text(change["children"][0])), ("automatic", False, "Change…"))
         search = self.plugin_node(tree, "conversation-repository-search")
         self.assertEqual((search["props"]["text"], search["props"]["placeholder"], sorted(search["events"])),
-                         ("", "infragod, Playhouse ↵", ["onArrow", "onChange", "onSubmit"]))
+                         ("", "backend, Playhouse ↵", ["onArrow", "onChange", "onSubmit"]))
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "conversation-repository-recent-header")), "Recent")
         scroll = self.plugin_node(tree, "conversation-repository-list")
         self.assertEqual((scroll["props"]["width"], scroll["props"]["height"], scroll["props"]["lazy"]), (280, 180, True), "Five rows would be 210 points; the list stops at 180.")
-        zmk = self.plugin_node(tree, "conversation-repository-recent-zmk-config")
-        self.assertTrue(any(row["type"] == "Overlay" and zmk in row["children"] for row in scroll["children"]), "The rows past 180 points stay in the scrolling list.")
+        dotfiles_row = self.plugin_node(tree, "conversation-repository-recent-dotfiles")
+        self.assertTrue(any(row["type"] == "Overlay" and dotfiles_row in row["children"] for row in scroll["children"]), "The rows past 180 points stay in the scrolling list.")
         self.assertEqual(len(scroll["children"]), 5)
         def row_fill(tree, name):
             return self.plugin_node(tree, f"conversation-repository-recent-{name}")["children"][0]["props"]["fillOpacity"]
@@ -735,7 +735,7 @@ class BridgeTestCases21:
         self.assertEqual([self.plugin_text(text) for text in self.plugin_nodes(first) if text["type"] == "Text"], ["mre", "/Users/demo/git/mre"])
         reserved = [node for node in self.plugin_nodes(first) if node["type"] == "Spacer"]
         self.assertEqual([node["props"]["minLength"] for node in reserved], [64], "The row text leaves room for the hover buttons.")
-        self.assertEqual((row_fill(tree, "mre"), row_fill(tree, "wix-one-app")), (0.16, 0), "The first row is highlighted.")
+        self.assertEqual((row_fill(tree, "mre"), row_fill(tree, "mobile-app")), (0.16, 0), "The first row is highlighted.")
 
         searched = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onChange:pla")[0])
         self.assertEqual(self.plugin_node(searched["tree"], "conversation-repository-search")["props"]["text"], "pla", "onChange received the search text.")
@@ -745,7 +745,7 @@ class BridgeTestCases21:
             "plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onArrow:down",
             "--event", "conversation-repository-search:onArrow:down", "--event", "conversation-repository-search:onArrow:up")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(moved["tree"], "js-last-action")), "Last: up")
-        self.assertEqual((row_fill(moved["tree"], "mre"), row_fill(moved["tree"], "wix-one-app"), row_fill(moved["tree"], "Viband")), (0, 0.16, 0),
+        self.assertEqual((row_fill(moved["tree"], "mre"), row_fill(moved["tree"], "mobile-app"), row_fill(moved["tree"], "Website")), (0, 0.16, 0),
                          "Down, Down, Up highlights the second row.")
         down = next(commit for commit in moved["commits"] if commit["step"] == "conversation-repository-search:onArrow")
         self.assertEqual(sorted(down["ops"]), ["text", "update", "update"], "Moving the highlight updates only two rows' panels and the readout.")
@@ -754,7 +754,7 @@ class BridgeTestCases21:
             "plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onArrow:down",
             "--event", "conversation-repository-search:onSubmit")[0])
         test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(submitted["tree"])}
-        self.assertEqual(self.plugin_text(self.plugin_node(submitted["tree"], "js-last-action")), "Last: submit wix-one-app", "Return adds the highlighted row.")
+        self.assertEqual(self.plugin_text(self.plugin_node(submitted["tree"], "js-last-action")), "Last: submit mobile-app", "Return adds the highlighted row.")
         self.assertNotIn("conversation-repository-picker", test_ids, "Adding closes the picker.")
         reopened = self.assert_success(self.call_cli(
             "plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onSubmit",
@@ -765,21 +765,21 @@ class BridgeTestCases21:
         self.assertNotIn("conversation-repository-picker", {node.get("props", {}).get("testID") for node in self.plugin_nodes(hidden["tree"])})
         self.assertEqual(self.plugin_text(self.plugin_node(hidden["tree"], "js-last-action")), "Last: close picker")
 
-        selected = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-recent-Viband:onPress")[0])
-        self.assertEqual(self.plugin_text(self.plugin_node(selected["tree"], "js-last-action")), "Last: select Viband")
+        selected = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-recent-Website:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(selected["tree"], "js-last-action")), "Last: select Website")
         chosen = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "choose-repository-suggestion-parent-button:onPress")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "js-last-action")), "Last: choose folder")
 
-        edited = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-badge-infragod:onPress")[0])
+        edited = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-badge-backend:onPress")[0])
         last_action = self.plugin_node(edited["tree"], "js-last-action")
-        self.assertEqual(self.plugin_text(last_action), "Last: edit infragod")
+        self.assertEqual(self.plugin_text(last_action), "Last: edit backend")
         self.assertEqual((edited["commits"][-1]["ops"], edited["commits"][-1]["touchedNodes"]), (["text"], [last_action["children"][1]["id"]]),
                          "Opening a chip's settings re-renders no chip.")
-        removed = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "remove-conversation-repository-infragod:onPress")[0])
+        removed = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "remove-conversation-repository-backend:onPress")[0])
         test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(removed["tree"])}
-        self.assertNotIn("conversation-repository-badge-infragod", test_ids, "The remove badge removed its chip.")
+        self.assertNotIn("conversation-repository-badge-backend", test_ids, "The remove badge removed its chip.")
         self.assertIn("conversation-repository-badge-Playhouse-second-line", test_ids)
-        self.assertEqual(self.plugin_text(self.plugin_node(removed["tree"], "js-last-action")), "Last: remove infragod")
+        self.assertEqual(self.plugin_text(self.plugin_node(removed["tree"], "js-last-action")), "Last: remove backend")
         # One of several worktrees of a repository: its branch after the name, its actions naming that worktree.
         worktree_chip = self.plugin_node(tree, "conversation-repository-badge-Playhouse-second-line")
         texts = [node for node in self.plugin_nodes(worktree_chip) if node["type"] == "Text"]
@@ -791,9 +791,9 @@ class BridgeTestCases21:
         removed_worktree = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "remove-conversation-repository-Playhouse-second-line:onPress")[0])
         test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(removed_worktree["tree"])}
         self.assertNotIn("conversation-repository-badge-Playhouse-second-line", test_ids, "The remove badge removed that worktree's chip.")
-        self.assertIn("conversation-repository-badge-infragod", test_ids)
+        self.assertIn("conversation-repository-badge-backend", test_ids)
         self.assertEqual(self.plugin_text(self.plugin_node(removed_worktree["tree"], "js-last-action")), "Last: remove Playhouse-second-line")
-        self.assert_failure(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-badge-infragod:onChange", expected_status=2)[0],
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-badge-backend:onChange", expected_status=2)[0],
                             "invalid_argument")
     # case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the attach button (a Button labelled Attach files with the paperclip icon), the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the Plan button (labelled Plan mode, the lightbulb.max icon) and the Goal button (labelled Goal, the GoalIcon asset), both Off with no highlight, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The attach button runs onPress (Last: attach). The Plan button runs onPress (Last: plan on), reads On with an orange highlight and icon and shows the Start Implementing button, and pressing it again turns Plan off (Last: plan off) and hides Start Implementing; the Goal button (Last: goal on) reads On with an orange highlight and shows the goal placeholder, and turning Plan on turns Goal off and turning Goal on turns Plan off, so the two are never on together; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its provider menu as a Menu atom, with its attach, Skills, Plan, provider, model and send identifiers. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
     def test_plugin_composer_renders_from_atoms_like_native(self):

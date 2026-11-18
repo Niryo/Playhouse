@@ -674,13 +674,21 @@ extension TaskConversationView {
                 }
                 .onChange(of: typedSlash?.location) { _, location in
                     if location != dismissedSlashLocation { dismissedSlashLocation = nil }
+                    // Each new `/` reads the commands again, so they follow the plugins and the task's agent.
+                    if location != nil { Task { await loadSlashEntries() } }
                 }
                 .onChange(of: activeSlash?.query) { _, _ in slashSelection = 0 }
-                .onChange(of: activeSlashCommand) { _, command in
+                .onChange(of: activeSlashCommand?.name) { _, name in
                     // Each opening reads the list again, so it shows the latest servers, skills and plugins.
-                    if let command { Task { await loadSlashItems(command) } }
+                    if name != nil, let command = activeSlashCommand { Task { await loadSlashItems(command) } }
                 }
-                .task(id: task.id) { await loadMentions() }
+                .onChange(of: pluginRegistry.plugins) { _, _ in
+                    if slashEntries != nil { Task { await loadSlashEntries() } }
+                }
+                .task(id: task.id) {
+                    await loadMentions()
+                    await loadSlashEntries()
+                }
                 .onChange(of: draft) { _, newValue in scheduleDraftAutosave(newValue) }
         }
         .padding(.horizontal, 28)

@@ -82,6 +82,10 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
     /// plugin's name, at the bottom of the board's sidebar: the only
     /// presentation of `PluginPlacement.mainSidebarBottom`, and only there.
     case section
+    /// No surface at all: the plugin only exposes `/` commands in the
+    /// composer (its manifest's `commands`), whose menus the host draws.
+    /// Its placement is always `PluginPlacement.composerActions`.
+    case headless
 
     var title: String {
         switch self {
@@ -91,6 +95,7 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
         case .page: "Page"
         case .inline: "Inline"
         case .section: "Collapsible section"
+        case .headless: "Headless (slash commands only)"
         }
     }
 
@@ -99,6 +104,9 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
 
     /// Why a plugin can't open this way at `placement`, or nil when it can.
     func placementError(_ placement: PluginPlacement) -> String? {
+        if self == .headless, placement != .composerActions {
+            return "A headless plugin's commands run in the composer; its placement must be \"\(PluginPlacement.composerActions.rawValue)\", not \"\(placement.rawValue)\"."
+        }
         if self == .inline, !Self.inlinePlacements.contains(placement) { return Self.inlinePlacementError(placement) }
         if self == .section, placement != .mainSidebarBottom {
             return "A section plugin can't sit at the \(placement.title) placement; only at the \(PluginPlacement.mainSidebarBottom.title)."
@@ -132,6 +140,10 @@ struct PluginManifest: Codable, Equatable, Sendable {
     /// The surface's size in points; each presentation has a default.
     var width: Double?
     var height: Double?
+    /// The `/` commands the plugin exposes in the composer, which its script
+    /// registers with `Playhouse.commands.register`. Any plugin may declare
+    /// them; a headless plugin has nothing else.
+    var commands: [PluginCommandManifest]? = nil
 }
 
 /// One plugin folder as `plugin list` reports it.
@@ -156,9 +168,28 @@ struct PluginRecord: Codable, Equatable, Sendable, Identifiable {
     var enabled = true
     /// The plugin's own saved values (`plugin.state.set`), its `Playhouse.props.state`.
     var state: [String: PluginValue] = [:]
+    /// The manifest's `/` commands.
+    var commands: [PluginCommandManifest] = []
 
     /// Mounted in the window: valid and not disabled.
     var isActive: Bool { valid && enabled }
+
+    /// Has an entry button or an in-place surface; a headless plugin only has commands.
+    var hasSurface: Bool { presentation != PluginPresentation.headless.rawValue }
+
+    /// The same plugin at another placement: its commands run in the
+    /// composer's context, whatever surface it has elsewhere.
+    func at(_ placement: PluginPlacement) -> PluginRecord {
+        var record = PluginRecord(
+            id: id, name: name, version: version, icon: icon, placement: placement.rawValue, presentation: presentation,
+            width: width, height: height, folder: folder, entryPath: entryPath, valid: valid, errors: errors
+        )
+        record.builtIn = builtIn
+        record.enabled = enabled
+        record.state = state
+        record.commands = commands
+        return record
+    }
 }
 
 /// The plugins compiled into the app. Each is declared with the same manifest
@@ -181,13 +212,32 @@ enum BuiltInPlugins {
     static let agentsInfoID = "agents-info"
     /// The board sidebar's Scheduled Tasks popover, listing `props.schedules`.
     static let scheduledTasksID = "scheduled-tasks"
+    /// The composer's built-in `/` commands, a headless plugin whose Swift
+    /// handlers (`BuiltInCommandsPlugin`) use only the host calls a script has.
+    static let builtInCommandsID = "built-in-commands"
+
+    static let builtInCommands: [PluginCommandManifest] = [
+        PluginCommandManifest(name: "mcp", detail: "Mention an MCP server, manage it, or sign in to it", icon: "server.rack", list: true),
+        PluginCommandManifest(name: "plan", detail: "Turn on plan mode", icon: "list.bullet.clipboard"),
+        PluginCommandManifest(name: "goal", detail: "Turn on goal mode", icon: "scope"),
+        PluginCommandManifest(name: "skill", detail: "Mention a skill or open its editor", icon: "sparkles", list: true),
+        PluginCommandManifest(name: "login", detail: "Sign in to an agent", icon: "person.crop.circle", list: true),
+        PluginCommandManifest(name: "plugin", detail: "Create a plugin or manage yours", icon: "puzzlepiece.extension", list: true)
+    ]
+
+    /// Names an installed plugin's command can't take.
+    static var commandNames: Set<String> { Set(manifests.flatMap { $0.commands ?? [] }.map(\.name)) }
 
     static let manifests: [PluginManifest] = [
         PluginManifest(id: changesID, name: "Changes", version: 1, icon: "plusminus", placement: PluginPlacement.conversationSidebar.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: pullRequestModeID, name: "Pull request mode", version: 1, icon: "arrow.triangle.branch", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: pullRequestsID, name: "Pull requests", version: 1, icon: "arrow.triangle.pull", placement: PluginPlacement.taskItem.rawValue, presentation: PluginPresentation.inline.rawValue),
         PluginManifest(id: agentsInfoID, name: "Agents info", version: 1, icon: "gauge.with.dots.needle.33percent", placement: PluginPlacement.mainSidebarBottom.rawValue, presentation: PluginPresentation.section.rawValue),
-        PluginManifest(id: scheduledTasksID, name: "Scheduled Tasks", version: 1, icon: "clock", placement: PluginPlacement.mainSidebar.rawValue, presentation: PluginPresentation.popover.rawValue, width: 400, height: 460)
+        PluginManifest(id: scheduledTasksID, name: "Scheduled Tasks", version: 1, icon: "clock", placement: PluginPlacement.mainSidebar.rawValue, presentation: PluginPresentation.popover.rawValue, width: 400, height: 460),
+        PluginManifest(
+            id: builtInCommandsID, name: "Built-in Commands", version: 1, icon: "command", placement: PluginPlacement.composerActions.rawValue,
+            presentation: PluginPresentation.headless.rawValue, commands: builtInCommands
+        )
     ]
 
     static func isBuiltIn(_ id: String) -> Bool { manifests.contains { $0.id == id } }
@@ -202,6 +252,7 @@ enum BuiltInPlugins {
             )
             record.builtIn = true
             record.enabled = !disabled.contains(manifest.id)
+            record.commands = manifest.commands ?? []
             return record
         }
     }
@@ -629,6 +680,7 @@ struct PluginLibrary: Sendable {
                 errors.append("Unknown presentation \"\(manifest.presentation)\". Presentations: \(PluginPresentation.allCases.map(\.rawValue).joined(separator: ", ")).")
             }
             if BuiltInPlugins.isBuiltIn(folderID) { errors.append("\"\(folderID)\" is a built-in plugin's id.") }
+            errors += Self.commandErrors(manifest.commands ?? [], presentation: PluginPresentation(rawValue: manifest.presentation))
         }
         let entry = folder.appendingPathComponent(manifest.entry ?? Self.defaultEntry)
         let entryInside = entry.standardizedFileURL.path.hasPrefix(folder.standardizedFileURL.path + "/")
@@ -643,6 +695,7 @@ struct PluginLibrary: Sendable {
             width: manifest.width, height: manifest.height,
             folder: folder.path, entryPath: entry.path, valid: errors.isEmpty, errors: errors
         )
+        record.commands = manifest.commands ?? []
         if validate, errors.isEmpty {
             let renderErrors = self.renderErrors(record)
             if !renderErrors.isEmpty {
@@ -651,6 +704,7 @@ struct PluginLibrary: Sendable {
                     presentation: record.presentation, width: record.width, height: record.height,
                     folder: record.folder, entryPath: record.entryPath, valid: false, errors: renderErrors
                 )
+                record.commands = manifest.commands ?? []
             }
         }
         return record
@@ -674,7 +728,10 @@ struct PluginLibrary: Sendable {
                 runtime.answerHostCall(call.id, result: .failure(PluginHostError(code: "unavailable", message: "Host calls are not answered while a plugin is validated.")))
             }
             runtime.runDueTimers()
-            return runtime.errors
+            // Every declared command needs its handlers registered.
+            let registered = Set(runtime.registeredCommands())
+            let missing = record.commands.map(\.name).filter { !registered.contains($0) }
+            return runtime.errors + missing.map { "The command /\($0) is declared but its script never calls Playhouse.commands.register(\"\($0)\", …)." }
         } catch {
             return [error.localizedDescription]
         }
@@ -694,7 +751,7 @@ struct PluginLibrary: Sendable {
 /// What a host refuses from a plugin, the same in the window and in
 /// `plugin render`, so the headless check matches what the user sees.
 enum PluginHostRules {
-    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "openURL", "confirm", "newTask", "openLoginItems", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus"]
+    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "openURL", "confirm", "newTask", "openLoginItems", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus", "composer.setMode", "openSkills", "editPlugin"]
 
     /// Nil when the host should answer `call`. `placement` is nil for a plugin
     /// rendered from a file or a catalog page, which may call anything.
@@ -715,9 +772,19 @@ enum PluginHostRules {
             if ["moveTask", "resolveConflicts", "alert"].contains(name), let placement, placement != .taskItem {
                 return PluginHostError(code: "unavailable", message: "Only a task card's plugin can call ui.\(name), not one at the \(placement.title) placement.")
             }
-            // Only the board window asks the user to confirm.
-            if name == "confirm", let placement, !placement.isOnBoard {
-                return PluginHostError(code: "unavailable", message: "Only a plugin on the board can call ui.confirm, not one at the \(placement.title) placement.")
+            // The board window and the composer's commands ask the user to confirm.
+            if name == "confirm", let placement, !placement.isOnBoard, placement != .composerActions {
+                return PluginHostError(code: "unavailable", message: "Only a plugin on the board or in the composer can call ui.confirm, not one at the \(placement.title) placement.")
+            }
+            // The conversation window opens the Skills page and the plugin editor.
+            if ["openSkills", "editPlugin"].contains(name), let placement, !placement.hasTask || placement == .taskItem {
+                return PluginHostError(code: "unavailable", message: "Only a plugin in the conversation can call ui.\(name), not one at the \(placement.title) placement.")
+            }
+            if name == "composer.setMode", !["plan", "goal"].contains(arguments.object?["mode"]?.string ?? "") {
+                return PluginHostError(code: "invalid_argument", message: "composer.setMode's mode is \"plan\" or \"goal\".")
+            }
+            if name == "editPlugin", (arguments.object?["pluginID"]?.string ?? "").isEmpty {
+                return PluginHostError(code: "invalid_argument", message: "editPlugin needs a pluginID.")
             }
             // Only the board opens a new task or the Login Items setting.
             if ["newTask", "openLoginItems"].contains(name), let placement, !placement.isOnBoard {
