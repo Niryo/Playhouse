@@ -7,11 +7,26 @@ final class BridgeClient {
     /// daemon itself, lock-guarded against a concurrent caller doing the same,
     /// if nothing is listening yet — the daemon then runs on its own, exiting
     /// once idle, independent of this CLI invocation's lifetime.
-    func send(_ request: BridgeRequest, onEvent: @escaping (BridgeEvent) -> Void) throws -> BridgeResponse {
+    /// The daemon this CLI talks to: its app's own, unless the environment names another.
+    static func endpoint() -> (serviceName: String, socketPath: String) {
         let serviceName = ProcessInfo.processInfo.environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"]
-            ?? BridgeContract.serviceName(forApplication: Self.applicationIdentifier() ?? "")
+            ?? BridgeContract.serviceName(forApplication: applicationIdentifier() ?? "")
         let socketPath = ProcessInfo.processInfo.environment["PLAYHOUSE_BRIDGE_SOCKET_PATH"]
             ?? BridgeContract.socketURL(forServiceName: serviceName).path
+        return (serviceName, socketPath)
+    }
+
+    func send(_ request: BridgeRequest, onEvent: @escaping (BridgeEvent) -> Void) throws -> BridgeResponse {
+        // A daemon that is shutting down refuses the request without running it.
+        let retryDeadline = Date().addingTimeInterval(30)
+        while true {
+            let response = try sendOnce(request, onEvent: onEvent)
+            if !BridgeDaemonLauncher.shouldRetry(response, until: retryDeadline) { return response }
+        }
+    }
+
+    private func sendOnce(_ request: BridgeRequest, onEvent: @escaping (BridgeEvent) -> Void) throws -> BridgeResponse {
+        let (serviceName, socketPath) = Self.endpoint()
 
         let connection: BridgeSocketConnection
         do {
@@ -69,7 +84,7 @@ final class BridgeClient {
     /// `Bundle.main` already resolves to the same app bundle (and the same
     /// `Info.plist`) the GUI process itself has — no separate identity lookup
     /// or sibling-bundle walk needed.
-    private static func applicationIdentifier() -> String? {
+    static func applicationIdentifier() -> String? {
         Bundle.main.infoDictionary?["PlayhouseApplicationBundleIdentifier"] as? String ?? Bundle.main.bundleIdentifier
     }
 }
@@ -119,6 +134,10 @@ extension BridgeRequest {
         }
         if let fixtureExecutable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] {
             configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
+        }
+        // Test overrides for the release feed; the daemon honors them only in a test bundle.
+        for (name, argument) in BridgeContract.updateOverrideArguments {
+            if let value = environment[name], !value.isEmpty { configuredRequest.arguments[argument] = .string(value) }
         }
         // The daemon is started by launchd and never sees the caller's environment,
         // so a caller's own Claude config directory travels with the request, as

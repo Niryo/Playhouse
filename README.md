@@ -2,6 +2,16 @@
 
 Playhouse is a native macOS task board for coordinating work across agents. The MVP provides a Kanban board, task creation, drag-and-drop status changes, and local persistence.
 
+## Install a release
+
+Releases are Apple Silicon builds published to GitHub. Install the latest into `/Applications` with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Niryo/Playhouse/master/scripts/install-release.sh | bash
+```
+
+Installed releases check for updates once a day and show an Update button in the window's title bar. Releases are signed with a self-signed certificate and are not notarized. If you download the zip in a browser instead, allow it once in System Settings → Privacy & Security → Open Anyway. Maintainers publish releases with `scripts/release.sh`; see [docs/release-system.md](docs/release-system.md).
+
 ## Run the app
 
 Open `Playhouse.xcodeproj` in Xcode and run the `Playhouse` scheme. The app targets macOS 14 and later.

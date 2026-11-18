@@ -4,6 +4,9 @@ import Foundation
 
 enum BridgeContract {
     static let currentVersion = 1
+    /// The answer of a daemon that is shutting down, given without running the
+    /// request; the caller sends it again once that daemon has gone.
+    static let daemonExitingCode = "daemon_exiting"
     static let serviceName = "com.playhouse.app.bridge"
 
     /// The login-session variables work runs with: what the XPC service this
@@ -33,6 +36,16 @@ enum BridgeContract {
         return false
         #endif
     }
+
+    /// Environment variables a test sets to point the release system at a local
+    /// feed, release listing, key and install location, each sent as the named request argument.
+    /// Only a test bundle's daemon honors them (see `UpdateManager`).
+    static let updateOverrideArguments: [(String, String)] = [
+        ("PLAYHOUSE_E2E_UPDATE_FEED_URL", "__updateFeedURL"),
+        ("PLAYHOUSE_E2E_UPDATE_API_URL", "__updateReleaseAPIURL"),
+        ("PLAYHOUSE_E2E_UPDATE_PUBLIC_KEY", "__updatePublicKey"),
+        ("PLAYHOUSE_E2E_UPDATE_TARGET_APP", "__updateTargetApp"),
+    ]
 
     /// The caller's environment names this request's `environment` field should
     /// carry in addition to `sessionEnvironmentNames`: in a test bundle only, its
@@ -102,6 +115,13 @@ enum BridgeValue: Codable, Equatable {
         // A CLI argument arrives as text; JSON transports may also widen it.
         case .decimal(let value): Int(exactly: value.rounded())
         case .string(let value): Int(value.trimmingCharacters(in: .whitespaces))
+        default: nil
+        }
+    }
+    var double: Double? {
+        switch self {
+        case .decimal(let value): value
+        case .integer(let value): Double(value)
         default: nil
         }
     }

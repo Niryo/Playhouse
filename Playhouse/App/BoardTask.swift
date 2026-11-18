@@ -183,6 +183,9 @@ final class BoardTask {
     /// True while `savedPrompt` and the draft images are the user's unsent composer draft,
     /// rather than the last prompt that was sent.
     var hasUnsentDraft: Bool = false
+    /// When the composer last saved the unsent draft. Nil for a draft nobody typed, such as
+    /// a task's description that hasn't been sent.
+    var draftEditedAt: Date?
     var workspaceRootPathsData: Data?
     var repositoryWorktreesData: Data?
     /// Repository worktree records retired by `task repository renew` after their pull

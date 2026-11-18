@@ -10,6 +10,18 @@ enum PlayhouseCLI {
             return
         }
 
+        do {
+            if let local = try runLocally(arguments) {
+                printResponse(local)
+                if !local.ok { exit(exitStatus(for: local.error?.code)) }
+                return
+            }
+        } catch {
+            let invalid = BridgeRequest(command: "invalid")
+            printResponse(.failure(invalid, code: "invalid_argument", message: error.localizedDescription))
+            exit(2)
+        }
+
         let request: BridgeRequest
         do {
             request = try parse(arguments)
@@ -40,6 +52,93 @@ enum PlayhouseCLI {
             )
             printResponse(unavailable)
             exit(69)
+        }
+    }
+
+    /// Commands this CLI answers itself, without the daemon: its own version, the
+    /// installer (which stops the daemon), and the daemon's lifecycle, which must
+    /// not start a daemon just to ask about it.
+    private static func runLocally(_ args: [String]) throws -> BridgeResponse? {
+        let group = args.first ?? ""
+        let operation = args.dropFirst().first ?? ""
+        let tail = Array(args.dropFirst(2))
+        switch (group, operation) {
+        case ("version", _):
+            guard args.count == 1 else { throw CLIError.usage("Use: playhouse version") }
+            let request = BridgeRequest(command: "version")
+            let info = Bundle.main.infoDictionary ?? [:]
+            return .success(request, result: .object([
+                "version": .string(info["CFBundleShortVersionString"] as? String ?? ""),
+                "build": .string(info["CFBundleVersion"] as? String ?? ""),
+                "commit": .string(info["PlayhouseGitCommit"] as? String ?? ""),
+                "channel": .string(PlayhouseRelease.channel(of: info)),
+                "bundleIdentifier": .string(Bundle.main.bundleIdentifier ?? ""),
+                "bundlePath": .string(Bundle.main.bundleURL.path)
+            ]))
+        case ("update", "apply"):
+            let usage = "Use: playhouse update apply --staged <app> --target <app> --state-dir <path> [--service-name <name>] [--socket-path <path>] [--relaunch-env <NAME=value>...]"
+            let flags = try parseFlags(tail, valueFlags: ["--staged", "--target", "--state-dir", "--service-name", "--socket-path", "--relaunch-env"])
+            guard let staged = flags["--staged"]?.first, let target = flags["--target"]?.first, let stateDirectory = flags["--state-dir"]?.first else {
+                throw CLIError.usage(usage)
+            }
+            var options = ReleaseInstaller.Options(
+                staged: URL(fileURLWithPath: staged, isDirectory: true),
+                target: URL(fileURLWithPath: target, isDirectory: true),
+                stateDirectory: URL(fileURLWithPath: stateDirectory, isDirectory: true)
+            )
+            options.serviceName = flags["--service-name"]?.first
+            options.socketPath = flags["--socket-path"]?.first
+            for assignment in flags["--relaunch-env"] ?? [] {
+                guard let separator = assignment.firstIndex(of: "="), separator != assignment.startIndex else { throw CLIError.usage(usage) }
+                options.relaunchEnvironment[String(assignment[..<separator])] = String(assignment[assignment.index(after: separator)...])
+            }
+            let request = BridgeRequest(command: "update.apply")
+            let record = ReleaseInstaller(options: options).run()
+            let result = (try? BridgeValue.encoding(record)) ?? .null
+            return record.status == "installed"
+                ? .success(request, result: result)
+                : .failure(request, code: record.status == "rolledBack" ? "update_rolled_back" : "update_failed", message: record.message ?? record.status)
+        case ("update", "verify-bundle"):
+            let flags = try parseFlags(tail, valueFlags: ["--bundle", "--replacing", "--version"])
+            guard let bundle = flags["--bundle"]?.first else {
+                throw CLIError.usage("Use: playhouse update verify-bundle --bundle <app> [--replacing <installed app>] [--version <x.y.z>]")
+            }
+            let request = BridgeRequest(command: "update.verify-bundle")
+            let candidate = URL(fileURLWithPath: bundle, isDirectory: true)
+            do {
+                let summary = try ReleaseBundleVerifier.verify(
+                    candidate: candidate,
+                    replacing: flags["--replacing"]?.first.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? candidate,
+                    expectedVersion: flags["--version"]?.first
+                )
+                return .success(request, result: .object([
+                    "bundleIdentifier": .string(summary.bundleIdentifier),
+                    "version": .string(summary.version),
+                    "build": .string(summary.build),
+                    "certificateSHA256": (try ReleaseBundleVerifier.leafCertificate(ofValidBundle: candidate)).map(BridgeValue.string) ?? .null
+                ]))
+            } catch let error as ReleaseVerificationError {
+                return .failure(request, code: error.code, message: error.message)
+            }
+        case ("daemon", "info"), ("daemon", "shutdown"):
+            guard tail.isEmpty else { throw CLIError.usage("Use: playhouse daemon info|shutdown") }
+            let request = BridgeRequest(command: "daemon.\(operation)")
+            let (_, socketPath) = BridgeClient.endpoint()
+            guard let connection = try? BridgeSocketConnection.connect(to: socketPath) else {
+                return .success(request, result: .object(["running": .boolean(false)]))
+            }
+            defer { connection.close() }
+            let response = try BridgeDaemonLauncher.request(request, over: connection)
+            guard response.ok, var result = response.result?.object else { return response }
+            if operation == "shutdown", let processID = result["processID"]?.int {
+                BridgeDaemonLauncher.waitForExit(pid_t(processID), timeout: BridgeDaemonLauncher.daemonExitTimeout)
+            }
+            result["running"] = .boolean(operation == "info")
+            return .success(request, result: .object(result))
+        case ("daemon", _):
+            throw CLIError.usage("Use: playhouse daemon info|shutdown")
+        default:
+            return nil
         }
     }
 
@@ -690,6 +789,26 @@ enum PlayhouseCLI {
             default:
                 throw CLIError.usage("Unknown schedule operation '\(operation)'.")
             }
+        case "update":
+            let usage = "Use: playhouse update status|check [--automatic true]|download|cancel|install [--when-idle true]|set-auto-check <on|off>|launched|dismiss-notice"
+            guard let operation = rest.first else { throw CLIError.usage(usage) }
+            let tail = Array(rest.dropFirst())
+            switch operation {
+            case "status", "download", "cancel", "launched", "dismiss-notice":
+                guard tail.isEmpty else { throw CLIError.usage(usage) }
+                return BridgeRequest(command: "update.\(operation)")
+            case "check":
+                let flags = try parseFlags(tail, valueFlags: ["--automatic"])
+                return BridgeRequest(command: "update.check", arguments: ["automatic": .boolean(flags["--automatic"]?.first == "true")])
+            case "install":
+                let flags = try parseFlags(tail, valueFlags: ["--when-idle"])
+                return BridgeRequest(command: "update.install", arguments: ["whenIdle": .boolean(flags["--when-idle"]?.first == "true")])
+            case "set-auto-check":
+                guard tail.count == 1, tail[0] == "on" || tail[0] == "off" else { throw CLIError.usage(usage) }
+                return BridgeRequest(command: "update.set-auto-check", arguments: ["enabled": .boolean(tail[0] == "on")])
+            default:
+                throw CLIError.usage(usage)
+            }
         case "settings":
             guard let operation = rest.first else { throw CLIError.usage("Missing settings operation.") }
             switch operation {
@@ -1064,6 +1183,11 @@ enum PlayhouseCLI {
       playhouse mcp status [--task <task-id>] [--provider <claude|codex>]
       playhouse mcp authenticate --provider <claude|codex> --name <server-name> [--task <task-id>]
       playhouse mcp authenticate-wait --provider <claude|codex> --name <server-name> [--task <task-id>]
+      playhouse version
+      playhouse update status|check [--automatic true]|download|cancel|install [--when-idle true]|set-auto-check <on|off>|launched|dismiss-notice
+      playhouse update verify-bundle --bundle <app> [--replacing <installed app>] [--version <x.y.z>]
+      playhouse update apply --staged <app> --target <app> --state-dir <path> [--service-name <name>] [--socket-path <path>] [--relaunch-env <NAME=value>...]   (run by the daemon to install)
+      playhouse daemon info|shutdown
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

@@ -232,6 +232,7 @@ final class BridgeSocketListener {
 /// that race to start it can't produce two daemons.
 enum BridgeDaemonLauncher {
     static func connect(socketPath: String, serviceName: String, daemonExecutablePath: String?) throws -> BridgeSocketConnection {
+        retireStaleDaemonIfNeeded(socketPath: socketPath, daemonExecutablePath: daemonExecutablePath)
         if let connection = try? BridgeSocketConnection.connect(to: socketPath) {
             return connection
         }
@@ -250,6 +251,76 @@ enum BridgeDaemonLauncher {
     }
 
     private static let spawnLock = NSLock()
+    private static let helloLock = NSLock()
+    private static var greetedSockets = Set<String>()
+
+    /// Once per process and socket, asks the daemon listening there whether it
+    /// still runs the daemon executable this caller ships beside. After an update
+    /// replaced the app bundle, a daemon started from the old bundle keeps
+    /// serving at the same path with the old code; it answers `stale` and exits,
+    /// and the caller starts the new one. A daemon run from a different copy of
+    /// the app is never asked to leave, so two copies never take turns.
+    private static func retireStaleDaemonIfNeeded(socketPath: String, daemonExecutablePath: String?) {
+        guard let daemonExecutablePath, let expected = BridgeDaemonIdentity(executablePath: daemonExecutablePath) else { return }
+        helloLock.lock()
+        defer { helloLock.unlock() }
+        guard !greetedSockets.contains(socketPath) else { return }
+        greetedSockets.insert(socketPath)
+        guard let connection = try? BridgeSocketConnection.connect(to: socketPath) else { return }
+        let response = try? request(
+            BridgeRequest(command: "daemon.hello", arguments: ["expected": (try? BridgeValue.encoding(expected)) ?? .null]),
+            over: connection
+        )
+        connection.close()
+        guard let result = response?.result?.object, result["stale"]?.bool == true,
+              let processID = result["processID"]?.int, processID > 0 else { return }
+        waitForExit(pid_t(processID), timeout: daemonExitTimeout)
+    }
+
+    /// Whether `response` is an exiting daemon's refusal, after waiting a moment
+    /// so the caller's next connect reaches the daemon that follows it. Gives up
+    /// at `deadline`, after which the caller reports the refusal.
+    static func shouldRetry(_ response: BridgeResponse, until deadline: Date) -> Bool {
+        guard response.error?.code == BridgeContract.daemonExitingCode, Date() < deadline else { return false }
+        Thread.sleep(forTimeInterval: 0.1)
+        return true
+    }
+
+    /// How long to let a stopping daemon finish: it drains open requests for up
+    /// to two seconds and hands its agents to the daemon that follows it.
+    static let daemonExitTimeout: TimeInterval = 20
+
+    /// Waits for a process to exit, then terminates it if it still runs.
+    /// Returns whether it exited by itself within `timeout`.
+    @discardableResult
+    static func waitForExit(_ processID: pid_t, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(processID, 0) != 0 { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        kill(processID, SIGTERM)
+        let killDeadline = Date().addingTimeInterval(3)
+        while Date() < killDeadline {
+            if kill(processID, 0) != 0 { return false }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        kill(processID, SIGKILL)
+        return false
+    }
+
+    /// Sends one request over an open connection and reads its final response,
+    /// ignoring events. Used for the daemon's own lifecycle commands.
+    static func request(_ request: BridgeRequest, over connection: BridgeSocketConnection, timeout: Double = 15) throws -> BridgeResponse {
+        connection.setReceiveTimeout(seconds: timeout)
+        try connection.write(BridgeFraming.frame(request))
+        var buffer = Data()
+        while true {
+            for message in try connection.readMessages(as: BridgeWireMessage.self, buffer: &buffer) {
+                if case .response(let response) = message { return response }
+            }
+        }
+    }
 
     /// Lock-guarded so two callers racing to start the daemon for the same
     /// socket path don't both spawn one; the loser simply finds the winner's
@@ -314,5 +385,43 @@ enum BridgeDaemonLauncher {
             }
             Thread.sleep(forTimeInterval: 0.02)
         }
+    }
+}
+
+/// Which daemon executable file a daemon process runs: its resolved path plus the
+/// file's identity on disk. Replacing the app bundle keeps the path and changes
+/// the identity, which is how a caller tells a daemon left over from the previous
+/// version from its own.
+struct BridgeDaemonIdentity: Codable, Equatable {
+    var path: String
+    var device: Int
+    var inode: Int
+    var modified: Double
+    var size: Int
+
+    init?(executablePath: String) {
+        guard let resolved = realpath(executablePath, nil) else { return nil }
+        defer { free(resolved) }
+        var info = stat()
+        guard stat(resolved, &info) == 0 else { return nil }
+        path = String(cString: resolved)
+        device = Int(info.st_dev)
+        inode = Int(info.st_ino)
+        modified = Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1_000_000_000
+        size = Int(info.st_size)
+    }
+
+    /// The executable of the running process.
+    static func currentProcess() -> BridgeDaemonIdentity? {
+        var size = UInt32(MAXPATHLEN)
+        var buffer = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&buffer, &size) == 0 else { return nil }
+        return BridgeDaemonIdentity(executablePath: String(cString: buffer))
+    }
+
+    /// True when `other` names this same path but a different file: this one
+    /// was replaced on disk after `other`'s process started.
+    func isReplacement(of other: BridgeDaemonIdentity) -> Bool {
+        path == other.path && self != other
     }
 }

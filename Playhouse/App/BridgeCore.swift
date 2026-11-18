@@ -1860,6 +1860,20 @@ final class BoardTaskManager {
         return try await operation()
     }
 
+    /// How long after the last edit an unsent draft counts as being written.
+    static let draftWritingInterval: TimeInterval = 10 * 60
+
+    /// Tasks and chats whose unsent message is being written: the composer saved it in the last
+    /// few minutes. A draft left longer, or a task's description that hasn't been sent, is saved
+    /// and survives a restart, so it doesn't count.
+    func unsentDraftCount() throws -> Int {
+        let since = Date().addingTimeInterval(-Self.draftWritingInterval)
+        let tasks = try modelContext.fetch(FetchDescriptor<BoardTask>(predicate: #Predicate { $0.hasUnsentDraft }))
+        let chats = try modelContext.fetch(FetchDescriptor<StandaloneChat>(predicate: #Predicate { $0.hasUnsentDraft }))
+        return tasks.filter { ($0.draftEditedAt ?? .distantPast) > since }.count
+            + chats.filter { ($0.draftEditedAt ?? .distantPast) > since }.count
+    }
+
     /// Board tasks. Recurring schedule templates are not board tasks, so they're left out;
     /// `scheduledTasks()` lists them.
     func list(status: TaskStatus? = nil) throws -> [BoardTaskRecord] {
@@ -2008,6 +2022,7 @@ final class BoardTaskManager {
                 chat.savedPrompt = task.savedPrompt
                 chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
                 chat.hasUnsentDraft = task.hasUnsentDraft
+                chat.draftEditedAt = task.draftEditedAt
                 chat.draftImageDataURLsData = task.draftImageDataURLsData
                 chat.conversationActivityDurationsData = task.conversationActivityDurationsData
                 chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
@@ -3893,6 +3908,7 @@ final class BoardTaskManager {
             task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
             task.draftImageDataURLs = imageDataURLs
             task.hasUnsentDraft = task.savedPrompt != nil || !imageDataURLs.isEmpty
+            task.draftEditedAt = task.hasUnsentDraft ? Date() : nil
             try await saveTaskContext(taskID: id)
             PlayhouseDiagnostics.record("task.draft.write.succeeded", fields: [
                 "taskID": id.uuidString,
@@ -9407,6 +9423,34 @@ final class PlayhouseBridgeRuntime {
                     "bridgeVersion": .integer(BridgeContract.currentVersion),
                     "processID": .integer(Int(ProcessInfo.processInfo.processIdentifier))
                 ])
+            case "update.status", "update.check", "update.download", "update.cancel", "update.install", "update.set-auto-check", "update.launched", "update.dismiss-notice":
+                let updates = UpdateManager(request: request, storeDirectory: storeDirectory, runtimeScope: dataDirectory, preferences: preferences) {
+                    (try? taskManager.unsentDraftCount()) ?? 0
+                }
+                defer { updates.resumeWaitingInstall() }
+                switch request.command {
+                case "update.check":
+                    result = try Self.value(await updates.check(automatic: request.arguments["automatic"]?.bool == true))
+                case "update.download":
+                    result = try Self.value(await updates.download { fraction in
+                        eventHandler(BridgeEvent(requestID: request.id, type: "update_progress", payload: .object(["progress": .decimal(fraction)])))
+                    })
+                case "update.cancel":
+                    result = try Self.value(updates.cancelDownload())
+                case "update.install":
+                    result = .object(try updates.install(whenIdle: request.arguments["whenIdle"]?.bool == true))
+                case "update.set-auto-check":
+                    guard let enabled = request.arguments["enabled"]?.bool else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "Give enabled as true or false.")
+                    }
+                    result = try Self.value(updates.setAutoCheck(enabled))
+                case "update.launched":
+                    result = try Self.value(updates.markLaunched())
+                case "update.dismiss-notice":
+                    result = try Self.value(updates.dismissNotice())
+                default:
+                    result = try Self.value(updates.status())
+                }
             case "board.list", "task.list":
                 result = try Self.value(["tasks": taskManager.list()])
             case "archive.search":
@@ -10317,6 +10361,14 @@ final class PlayhouseBridgeRuntime {
             ) { _, new in new })
             await PlayhouseDiagnostics.endBatch()
             return response
+        } catch let error as ReleaseVerificationError {
+            PlayhouseDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
+                "errorCode": error.code,
+                "errorDescription": error.message,
+                "durationMilliseconds": Self.elapsedMilliseconds(since: requestStartedAt)
+            ]) { _, new in new })
+            await PlayhouseDiagnostics.endBatch()
+            return .failure(request, code: error.code, message: error.message)
         } catch let error as BridgeCommandError {
             PlayhouseDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
                 "errorCode": error.code,

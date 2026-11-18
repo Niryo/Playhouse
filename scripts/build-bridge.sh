@@ -103,8 +103,11 @@ shared_sources=(
   "${repository_root}/Playhouse/App/CodexConfigTOML.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"
   "${repository_root}/Playhouse/App/TaskSchedule.swift"
+  "${repository_root}/Playhouse/App/UpdateManager.swift"
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
+  "${repository_root}/Playhouse/Bridge/UpdateCore.swift"
+  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"
   "${plugin_core_sources[@]}"
 )
 
@@ -168,6 +171,7 @@ xcrun --sdk macosx swiftc \
   -framework SwiftData \
   -framework Combine \
   -framework JavaScriptCore \
+  -framework Security \
   -I "${grdb_module}" \
   -I "${repository_root}/Vendor/GRDB.swift/Sources/GRDBSQLite" \
   -L "${grdb_module}" \
@@ -183,8 +187,11 @@ xcrun --sdk macosx swiftc \
   -O \
   ${debug_flags[@]+"${debug_flags[@]}"} \
   -framework Foundation \
+  -framework Security \
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift" \
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift" \
+  "${repository_root}/Playhouse/Bridge/UpdateCore.swift" \
+  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift" \
   "${repository_root}/Playhouse/CLI/BridgeClient.swift" \
   "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift" \
   -o "${cli_executable}"

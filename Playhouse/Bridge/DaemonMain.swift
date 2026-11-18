@@ -84,6 +84,48 @@ final class DaemonLifecycle: @unchecked Sendable {
         daemonLog("idle, exiting")
         exit(0)
     }
+
+    /// Set once a shutdown began: new requests are turned away from then on.
+    var isStopping: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopping
+    }
+    private var stopping = false
+    /// Set once a shutdown hands its agents over: a request those agents still
+    /// answer is left to the next daemon, so its caller sees the connection
+    /// drop rather than a failure from this one.
+    var isAbandoningRequests: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return abandoning
+    }
+    private var abandoning = false
+
+    /// Leaves on request. New requests are answered `daemon_exiting` from now
+    /// on, so their callers wait for this daemon to go and start the next one,
+    /// rather than reaching a daemon that drops them, or starting a second
+    /// daemon while this one still hands its agents over. Quick requests on open
+    /// connections get a moment to be answered; a turn's streaming connection
+    /// stays open, so this doesn't wait for it to close.
+    func shutDown() {
+        lock.lock()
+        stopping = true
+        lock.unlock()
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            lock.lock()
+            let open = openConnections
+            lock.unlock()
+            if open == 0 { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        lock.lock()
+        abandoning = true
+        lock.unlock()
+        beforeIdleExit?()
+        exit(0)
+    }
 }
 
 @main
@@ -117,10 +159,22 @@ enum PlayhouseBridgeDaemonMain {
     }
 
     static func main() {
+        // The updater's health check: the daemon starts and knows its version.
+        if CommandLine.arguments.dropFirst().first == "--version" {
+            let info = Bundle.main.infoDictionary ?? [:]
+            let version = BridgeValue.object([
+                "version": .string(info["CFBundleShortVersionString"] as? String ?? ""),
+                "build": .string(info["CFBundleVersion"] as? String ?? ""),
+            ])
+            if let data = try? BridgeFraming.encoder.encode(version) { print(String(decoding: data, as: UTF8.self)) }
+            exit(0)
+        }
         // A client that disconnects mid-turn, or a provider child that exits,
         // must surface as a write error, not kill every other conversation.
         signal(SIGPIPE, SIG_IGN)
         reduceToSessionEnvironment()
+        _ = launchedIdentity
+        _ = launchedVersion
         let environment = ProcessInfo.processInfo.environment
         // Same override the CLI already honors today (`PLAYHOUSE_BRIDGE_SERVICE_NAME`),
         // so existing per-test isolation keeps working unchanged. Otherwise, since
@@ -213,6 +267,18 @@ enum PlayhouseBridgeDaemonMain {
             return
         }
 
+        if lifecycle.isStopping {
+            daemonLog("refused \(request.command): exiting")
+            let response = BridgeResponse.failure(request, code: BridgeContract.daemonExitingCode, message: "The Playhouse bridge daemon is exiting.")
+            if let framed = try? BridgeFraming.frame(BridgeWireMessage.response(response)) { try? connection.write(framed) }
+            return
+        }
+
+        if request.command.hasPrefix("daemon.") {
+            handleDaemonCommand(request, over: connection, lifecycle: lifecycle)
+            return
+        }
+
         lifecycle.requestStarted()
         defer { lifecycle.requestFinished() }
 
@@ -242,9 +308,64 @@ enum PlayhouseBridgeDaemonMain {
         }
         semaphore.wait()
 
+        // Requests still running when the daemon exits fail only because it is
+        // going away; the peer reconnects instead of reading that failure.
         guard let response = responseBox.response,
+              !(lifecycle.isAbandoningRequests && !response.ok),
               let framed = try? BridgeFraming.frame(BridgeWireMessage.response(response)) else { return }
         try? connection.write(framed)
+    }
+
+    /// The executable this daemon started from, read at launch: an update that
+    /// replaces the bundle afterwards changes the file at that path, not this.
+    static let launchedIdentity = BridgeDaemonIdentity.currentProcess()
+    /// Read at startup: an update swaps the bundle under a running daemon, and
+    /// it must keep reporting the version it runs.
+    static let launchedVersion: (version: String, build: String) = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return (info["CFBundleShortVersionString"] as? String ?? "", info["CFBundleVersion"] as? String ?? "")
+    }()
+
+    /// The daemon's own lifecycle commands, answered without opening any store.
+    /// `daemon.hello` comes from a caller's launcher (see `BridgeDaemonLauncher`);
+    /// `daemon.shutdown` from the updater before it replaces the bundle.
+    private static func handleDaemonCommand(_ request: BridgeRequest, over connection: BridgeSocketConnection, lifecycle: DaemonLifecycle) {
+        let processID = BridgeValue.integer(Int(ProcessInfo.processInfo.processIdentifier))
+        var leaving = false
+        let response: BridgeResponse
+        switch request.command {
+        case "daemon.hello":
+            let expected = try? request.arguments["expected"]?.decoded(BridgeDaemonIdentity.self)
+            if let expected, let launchedIdentity, expected.isReplacement(of: launchedIdentity) {
+                leaving = true
+                daemonLog("the daemon executable at \(expected.path) was replaced; exiting for the new one")
+            }
+            response = .success(request, result: .object(["stale": .boolean(leaving), "processID": processID]))
+        case "daemon.info":
+            response = .success(request, result: .object([
+                "processID": processID,
+                "executablePath": launchedIdentity.map { .string($0.path) } ?? .null,
+                "bridgeVersion": .integer(BridgeContract.currentVersion),
+                "appVersion": .string(launchedVersion.version),
+                "appBuild": .string(launchedVersion.build),
+                "replacedOnDisk": .boolean(launchedIdentity.map { launched in
+                    BridgeDaemonIdentity(executablePath: launched.path).map { $0 != launched } ?? true
+                } ?? false)
+            ]))
+        case "daemon.shutdown":
+            leaving = true
+            daemonLog("shutdown requested")
+            response = .success(request, result: .object(["processID": processID]))
+        default:
+            response = .failure(request, code: "invalid_command", message: "Unknown daemon command \(request.command).")
+        }
+        if let framed = try? BridgeFraming.frame(BridgeWireMessage.response(response)) {
+            try? connection.write(framed)
+        }
+        guard leaving else { return }
+        // Agents with work outlive the daemon as on an idle exit; the next daemon
+        // reattaches them. Exits from its own thread so this reply gets out first.
+        Thread.detachNewThread { lifecycle.shutDown() }
     }
 
     /// A plain reference box to hand a value out of the `@MainActor` task above

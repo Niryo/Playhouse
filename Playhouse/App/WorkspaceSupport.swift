@@ -1804,6 +1804,8 @@ struct FlowLayout: Layout {
 }
 
 struct WorkspaceSettingsView: View {
+    /// Sections the app adds; the daemon compiles this view without them.
+    var appSections: () -> AnyView = { AnyView(EmptyView()) }
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
     @State private var appearance = WorkspaceSettings.preferencesStore.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
     @State private var tokenUsageColorMax = WorkspaceSettingsManager().tokenUsageColorMax
@@ -1924,6 +1926,7 @@ struct WorkspaceSettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
+            appSections()
         }
         .task {
             while !Task.isCancelled {
