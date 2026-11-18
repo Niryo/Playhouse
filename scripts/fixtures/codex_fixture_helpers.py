@@ -1,5 +1,7 @@
 """Protocol and response helpers for the Codex app-server fixture."""
 
+import collections
+
 def markdown_plan_deltas(runtime):
     """The plan in four deltas that end inside a paragraph, inside a list item that follows that
     paragraph, and inside the fenced code block, so the streamed reply grows across each kind."""
@@ -17,15 +19,20 @@ def echoed_outcome_answer(runtime, user_message):
 
 
 def own_user_text(runtime, message):
-    """The user's own words, without Playhouse's hidden context envelope.
+    """The user's own words, without Playhouse's hidden context envelopes.
 
-    Standalone chat seeds a page's first turn with that page's transcript, so a sentinel
-    repeated by an earlier assistant answer must not re-trigger a scenario branch here.
+    Standalone chat seeds a page's first turn with that page's transcript, and a comment
+    quotes the answer text it was made on, so a sentinel repeated by an earlier assistant
+    answer must not re-trigger a scenario branch here.
     """
     text = message or ""
     close = "</playhouse-handoff-context>"
     if text.startswith("<playhouse-handoff-context>") and close in text:
-        return text.split(close, 1)[1].strip()
+        text = text.split(close, 1)[1].strip()
+    start, close = "<playhouse-comment-context>", "</playhouse-comment-context>"
+    if start in text and close in text.split(start, 1)[1]:
+        before, rest = text.split(start, 1)
+        text = (before + rest.split(close, 1)[1]).strip()
     return text
 
 
@@ -211,10 +218,91 @@ def handle_side_chat(runtime, message, history_path):
     return True
 
 
+def _streamed_key(item):
+    content = item.get("text") or item.get("command")
+    return {key for key in (item.get("id"), (item.get("type"), str(content)) if content else None) if key}
+
+
+def _unstreamed_turn_items(runtime, thread_id, turn_id):
+    """The items this turn's thread history holds that the scenario never streamed.
+
+    Real Codex streams every item of a turn before `turn/completed`, and Playhouse
+    records a transcript only from those events, so a scenario that wrote an item
+    only into its history file still streams it here."""
+    import codex_fixture_history
+    state = getattr(runtime, "SESSION_STATE", None)
+    if state is None or getattr(runtime, "_synthesizing_turn_items", False):
+        return []
+    if turn_id in getattr(runtime, "SELF_CONTAINED_TURNS", set()):
+        runtime.SELF_CONTAINED_TURNS.discard(turn_id)
+        return []
+    saved = dict(vars(state))
+    captured = []
+    original_write = runtime.write
+    runtime._synthesizing_turn_items = True
+    runtime.write = captured.append
+    try:
+        codex_fixture_history.list_items(runtime, state, {"id": "fixture-turn-items", "params": {"threadId": thread_id}})
+    except Exception:
+        captured = []
+    finally:
+        runtime.write = original_write
+        runtime._synthesizing_turn_items = False
+        vars(state).clear()
+        vars(state).update(saved)
+    entries = ((captured[0].get("result") or {}).get("data") or []) if captured else []
+    streamed = runtime.STREAMED_TURN_ITEMS.setdefault(turn_id, set())
+    # Scenarios reuse one turn ID across turns: the entries an earlier turn under the same
+    # ID already completed with belong to that turn, not this one.
+    earlier = runtime.COMPLETED_TURN_ENTRIES.get(turn_id, collections.Counter())
+    current = collections.Counter(
+        runtime.json.dumps(entry, sort_keys=True) for entry in entries if entry.get("turnId") == turn_id
+    )
+    runtime.COMPLETED_TURN_ENTRIES[turn_id] = current
+    unseen = current - earlier
+    items = []
+    for entry in entries:
+        item = entry.get("item") or {}
+        # A `thread/compact/start` compaction belongs to its own compaction turn; the
+        # history only files it beside the next user turn.
+        if entry.get("turnId") != turn_id or item.get("type") in (None, "userMessage", "contextCompaction"):
+            continue
+        encoded = runtime.json.dumps(entry, sort_keys=True)
+        if unseen[encoded] <= 0:
+            continue
+        unseen[encoded] -= 1
+        keys = _streamed_key(item)
+        if keys & streamed:
+            continue
+        streamed |= keys
+        items.append(item)
+    # The turn ended; a later turn that reuses its ID streams its own items.
+    runtime.STREAMED_TURN_ITEMS[turn_id] = set()
+    return items
+
+
 def write(runtime, value):
+    if not hasattr(runtime, "STREAMED_TURN_ITEMS"):
+        runtime.STREAMED_TURN_ITEMS = {}
+        runtime.COMPLETED_TURN_ENTRIES = {}
+    if isinstance(value, dict) and value.get("method") == "turn/started":
+        runtime.STREAMED_TURN_ITEMS[((value.get("params") or {}).get("turn") or {}).get("id")] = set()
+    if isinstance(value, dict) and value.get("method") in ("item/started", "item/completed"):
+        params = value.get("params") or {}
+        item = params.get("item") or {}
+        if value["method"] == "item/completed" or item.get("type") != "agentMessage":
+            runtime.STREAMED_TURN_ITEMS.setdefault(params.get("turnId"), set()).update(_streamed_key(item))
     if (isinstance(value, dict) and value.get("method") == "turn/completed"
             and "usage" not in value.get("params", {})):
         params = value["params"]
+        turn_id = (params.get("turn") or {}).get("id")
+        replayed = _unstreamed_turn_items(runtime, params.get("threadId"), turn_id)
+        # An interrupted or failed turn ends with what it already streamed.
+        if (params.get("turn") or {}).get("status", "completed") != "completed":
+            replayed = []
+        for item in replayed:
+            runtime.sys.stdout.write(runtime.json.dumps({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                "threadId": params.get("threadId"), "turnId": turn_id, "item": item}}, separators=(",", ":")) + "\n")
         for notification in runtime.call_usage_notifications(params.get("threadId"), (params.get("turn") or {}).get("id")):
             runtime.sys.stdout.write(runtime.json.dumps(notification, separators=(",", ":")) + "\n")
         runtime.sys.stdout.flush()

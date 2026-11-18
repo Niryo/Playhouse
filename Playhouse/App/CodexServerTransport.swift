@@ -245,7 +245,10 @@ extension CodexAppServerClient {
         ]))
     }
 
-    func readMessages(threadID: String) async throws -> ConversationHistory {
+    /// A thread's messages and activities. Consecutive agent messages of one turn are joined
+    /// into one entry for display unless `joinsAgentMessages` is false, as a backfill needs
+    /// each message on its own to tell which ones a turn already streamed.
+    func readMessages(threadID: String, joinsAgentMessages: Bool = true) async throws -> ConversationHistory {
         var messages: [ConversationMessage] = []
         var latestTurnItems: [[String: Any]] = []
         var compactionHistory: [(item: [String: Any], turnID: String?, order: Int)] = []
@@ -348,7 +351,8 @@ extension CodexAppServerClient {
             }
             if var message = Self.chatMessage(from: entry) {
                 message.timelineOrder = historyItemOrder
-                if message.role == .assistant,
+                if joinsAgentMessages,
+                   message.role == .assistant,
                    message.asyncQuestions == nil,
                    let turnID = entry["turnId"] as? String,
                    turnID == lastAssistantTurnID,

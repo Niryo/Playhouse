@@ -199,7 +199,8 @@ class StdinLines:
 
 def main():
     _session_state = SimpleNamespace()
-    global THREAD_ID, TURN_ID
+    global THREAD_ID, TURN_ID, SESSION_STATE
+    SESSION_STATE = _session_state
     if "-cpu-attribution" in os.path.basename(sys.argv[0]):
         return run_cpu_attribution_server()
     if "-reattach" in os.path.basename(sys.argv[0]):

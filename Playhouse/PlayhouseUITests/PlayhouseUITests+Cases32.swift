@@ -838,7 +838,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Composer: the schedule popover")
     }
 
-    // case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images live in the provider thread, an earlier image is deferred the same way and read back from the thread. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
+    // case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images Playhouse stores the same way, an earlier image is deferred the same way and read back from the store. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
     func test_conversation_history_defers_earlier_images() throws {
         let claude = dataDirectory.appendingPathComponent("claude-fixture-deferred-images")
         try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claude)
@@ -937,7 +937,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(Dictionary(uniqueKeysWithValues: read.map { ($0["id"] as? String ?? "", $0["turnID"] as? String) }),
                        [firstID: firstMessage["turnID"] as? String, secondID: secondMessage["turnID"] as? String])
         let imagesRead = try XCTUnwrap(try reads("conversation.images.read", taskID: taskID).last)
-        XCTAssertEqual(["requestedMessageCount", "returnedMessageCount", "readProviderThread"].map { imagesRead[$0] as? String }, ["3", "2", "false"])
+        XCTAssertEqual(["requestedMessageCount", "returnedMessageCount"].map { imagesRead[$0] as? String }, ["3", "2"])
         XCTAssertEqual(try images([taskID, "--message", imageless, "--message", "no-such-message"]).count, 0)
         assertCLIError(try runCLI(["conversation", "images", taskID], expectedStatus: 2), code: "invalid_argument")
         assertCLIError(try runCLI(["conversation", "images", UUID().uuidString, "--message", firstID], expectedStatus: 3), code: "not_found")
@@ -951,7 +951,7 @@ extension PlayhouseUITests {
         let resumed = try result(["conversation", "history", taskID])
         XCTAssertEqual(imageMessages(resumed) as NSArray, [firstMessage, secondMessage] as NSArray, "Plain history still carries every image after deferred reads.")
 
-        // Codex keeps a user's images in its thread, so a deferred one is read back from there.
+        // A Codex user's images are stored by Playhouse too, so a deferred one is read back from the store.
         let codexTask = try XCTUnwrap(try result([
             "task", "create", "--title", "Codex deferred images", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
         ])["id"] as? String)
@@ -965,11 +965,14 @@ extension PlayhouseUITests {
             XCTAssertEqual(codexImages.map { $0["id"] as? String }, [codexImageID])
             XCTAssertEqual(codexImages.first.map(imageURLs), codexImageMessages.first.map(imageURLs))
             let read = try XCTUnwrap(try reads("conversation.images.read", taskID: codexTask).last)
-            return ["returnedMessageCount", "readProviderThread"].map { read[$0] as? String }
+            return ["returnedMessageCount"].map { read[$0] as? String }
         }
         XCTAssertEqual(imageStates(try result(["conversation", "history", codexTask, "--defer-images"])), ["\(codexImageID):0:true"],
                        "A Codex thread's earlier image is deferred too.")
-        XCTAssertEqual(try codexImageRead(), ["1", "true"], "A Codex image is read from its thread.")
+        XCTAssertEqual(try codexImageRead(), ["1"], "A Codex image is read from Playhouse's store.")
+        let storedCodexImages = try conversationRows("SELECT image_data_urls FROM conversation_messages WHERE task_id = '\(codexTask.uppercased())' AND id = '\(codexImageID)'")
+        XCTAssertEqual(storedCodexImages.count, 1, "A Codex user image is stored with its message.")
+        XCTAssertNotNil(storedCodexImages.first?[0])
 
         // The app defers images itself: opening the conversation reads none of the earlier ones.
         let latestQuestionID = try XCTUnwrap(messages(third).last {
@@ -1015,7 +1018,6 @@ extension PlayhouseUITests {
         let loaded = imageReadsSinceOpen()
         XCTAssertEqual(loaded.compactMap { Int($0["returnedMessageCount"] as? String ?? "") }.reduce(0, +), 2,
                        "Each earlier image is read once, when its message comes into view.")
-        XCTAssertTrue(loaded.allSatisfy { $0["readProviderThread"] as? String == "false" })
 
         // A turn sent from the composer brings back history with the images deferred again; the loaded ones stay.
         let historyReadsBeforeSend = try reads("conversation.history.read", taskID: taskID).count

@@ -128,6 +128,41 @@ extension PlayhouseUITests {
         XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
         app.activate()
     }
+    /// Stops this case's own fixture provider (its path is unique to the case) so the next send
+    /// relaunches it and resumes the thread, as after a provider restart. Mirrors the CLI suite's
+    /// `restart_provider`.
+    func restartProvider(_ executable: URL) throws {
+        let stop = Process()
+        stop.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        stop.arguments = ["-f", executable.path]
+        try stop.run()
+        stop.waitUntilExit()
+        // In the VM the runner's pkill and pgrep don't reach a shared Codex app-server the
+        // daemon started, so it is also stopped through the pid its manifest records.
+        let resolved = executable.resolvingSymlinksInPath().path
+        let servers = agentManifests().compactMap { entry -> [String: Any]? in
+            guard entry.kind == "codex", entry.manifest["resolvedExecutablePath"] as? String == resolved,
+                  let process = entry.manifest["process"] as? [String: Any], agentIsAlive(process) else { return nil }
+            return process
+        }
+        for server in servers {
+            if let pid = (server["pid"] as? NSNumber)?.int32Value { kill(pid, SIGTERM) }
+        }
+        XCTAssertTrue(waitUntil({ servers.allSatisfy { !self.agentIsAlive($0) } }, timeout: 10),
+                      "The fixture's Codex app-server should stop: \(executable.path)")
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            let probe = Process()
+            probe.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            probe.arguments = ["-f", executable.path]
+            probe.standardOutput = FileHandle.nullDevice
+            try probe.run()
+            probe.waitUntilExit()
+            if probe.terminationStatus != 0 { return }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTFail("The fixture provider did not stop: \(executable.path)")
+    }
     func relaunchApp() {
         XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the resume-path relaunch.")
         launchAppWithOpen()
@@ -896,6 +931,88 @@ extension PlayhouseUITests {
             sqlite3_bind_text(statement, 2, payload, -1, transient)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw NSError(domain: "PlayhouseUITests", code: 4, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+            }
+        }
+    }
+    /// Replaces the task's stored turns with 60 settled question-and-answer turns in its newest
+    /// provider segment, as earlier sessions would have recorded them. Playhouse keeps the
+    /// transcript itself, so a long history is written into its store rather than read from a
+    /// provider. Mirrors the CLI suite's `seed_long_history`; quit the app before calling it.
+    func seedLongHistory(_ taskID: String, sentPrompt: Bool = false, midHistoryCommand: Bool = false, tallLatestAnswer: Bool = false) throws {
+        let key = taskID.uppercased()
+        let segments = try XCTUnwrap(try conversationState(key)?["segments"] as? [[String: Any]])
+        let segment = try XCTUnwrap(segments.last)
+        let segmentID = try XCTUnwrap(segment["id"] as? String)
+        let provider = try XCTUnwrap(segment["provider"] as? String)
+        var turns: [(id: String, messages: [(id: String, role: String, text: String)], activities: [[String: Any]])] = []
+        if sentPrompt {
+            // The sent prompt is the first stored user message, outside the newest history page.
+            turns.append(("turn_sent_prompt", [("item_sent_prompt", "user", "Create a long history.")], []))
+        }
+        for index in 1...60 {
+            let number = String(format: "%02d", index)
+            var answer = "Long history assistant \(number)."
+            if index == 60 && tallLatestAnswer {
+                // A newest answer taller than the transcript viewport, so a conversation opened
+                // on its question differs visibly from one opened at its end.
+                answer = ([answer] + (1...30).map { String(format: "Long history closing paragraph %02d.", $0) }).joined(separator: "\n\n")
+            }
+            var activities: [[String: Any]] = []
+            if index == 21 && midHistoryCommand {
+                // A mid-history call whose output runs past the clipped lines, so the UI can
+                // expand it and check it stays expanded after its row is rendered lazily again.
+                activities.append([
+                    "id": "item_long_history_command_21", "tool": "Bash", "title": "Running ls fixture-history",
+                    "input": "ls fixture-history", "detail": "ls fixture-history", "summary": "in /tmp/playhouse-fixture", "status": "completed",
+                    "durationMs": 5, "isContextCompaction": false, "afterMessageID": "item_long_history_user_21",
+                    "output": (1...6).map { "history-file-\($0).txt\n" }.joined(),
+                ])
+            }
+            turns.append(("turn_long_history_\(index)", [
+                ("item_long_history_user_\(index)", "user", "Long history user \(number)."),
+                ("item_long_history_assistant_\(index)", "assistant", answer),
+            ], activities))
+        }
+        try withConversationDatabase { database in
+            func run(_ sql: String, _ values: [Any]) throws {
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw NSError(domain: "PlayhouseUITests", code: 7, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+                }
+                defer { sqlite3_finalize(statement) }
+                let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                for (offset, value) in values.enumerated() {
+                    if let number = value as? Int {
+                        sqlite3_bind_int64(statement, Int32(offset + 1), Int64(number))
+                    } else {
+                        sqlite3_bind_text(statement, Int32(offset + 1), "\(value)", -1, transient)
+                    }
+                }
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw NSError(domain: "PlayhouseUITests", code: 8, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+                }
+            }
+            func json(_ object: [String: Any]) throws -> String {
+                String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            }
+            for table in ["conversation_turns", "conversation_messages", "conversation_activities"] {
+                try run("DELETE FROM \(table) WHERE task_id = ?", [key])
+            }
+            for (offset, turn) in turns.enumerated() {
+                try run("INSERT INTO conversation_turns (task_id, id, segment_id, seq) VALUES (?, ?, ?, ?)", [key, turn.id, segmentID, offset + 1])
+                for (position, message) in turn.messages.enumerated() {
+                    var payload: [String: Any] = ["id": message.id, "role": message.role, "text": message.text, "turnID": turn.id,
+                                                  "imageDataURLs": [String](), "provider": provider]
+                    if message.role == "assistant" { payload["phase"] = "final_answer" }
+                    try run("INSERT INTO conversation_messages (task_id, turn_id, id, position, payload) VALUES (?, ?, ?, ?, ?)",
+                            [key, turn.id, message.id, position, try json(payload)])
+                }
+                for (position, activity) in turn.activities.enumerated() {
+                    var payload = activity
+                    payload["turnID"] = turn.id
+                    try run("INSERT INTO conversation_activities (task_id, turn_id, id, position, payload) VALUES (?, ?, ?, ?, ?)",
+                            [key, turn.id, try XCTUnwrap(activity["id"] as? String), position, try json(payload)])
+                }
             }
         }
     }

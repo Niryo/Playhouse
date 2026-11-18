@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation.
+    // case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, is recorded in Playhouse's store when published, so it follows the turn's prompt and precedes the answer that arrives later and the next turn in ordered history, as for Claude, and remains visible after reopening the conversation.
     func test_codex_agent_image_published_during_active_turn() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
@@ -65,7 +65,9 @@ extension PlayhouseUITests {
         let imageIndex = try XCTUnwrap(messages.firstIndex { $0["id"] as? String == imageID })
         let answerIndex = try XCTUnwrap(messages.firstIndex { $0["text"] as? String == "Answers received: Blue / fixture-secret." })
         let followupIndex = try XCTUnwrap(messages.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == followupText })
-        XCTAssertGreaterThan(imageIndex, answerIndex, "The image should follow the native response in its Codex turn.")
+        let promptIndex = try XCTUnwrap(messages.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Please publish-image-during-active-turn." })
+        XCTAssertGreaterThan(imageIndex, promptIndex, "The image should follow the prompt of the turn it was published in.")
+        XCTAssertLessThan(imageIndex, answerIndex, "Playhouse records the image when it is published, before the answer that arrives later.")
         XCTAssertEqual(publishedTurnID, messages[answerIndex]["turnID"] as? String, "The published image should share the active Codex response's turn ID.")
         XCTAssertEqual(messages[imageIndex]["turnID"] as? String, publishedTurnID, "History should preserve the published image's turn ID.")
         XCTAssertLessThan(imageIndex, followupIndex, "The image should remain before the next Codex turn.")
@@ -81,7 +83,7 @@ extension PlayhouseUITests {
             executableName: "claude-fixture-follow-active-turn", activityID: "toolu_follow_active_step"
         )
     }
-    // case-contract: test_codex_turn_progress_reaches_other_windows_mid_turn | While a Codex app-server fixture turn started by another caller is still running, its commentary and tool activity raise the task's conversation revision in the daemon's runtime snapshot, a held turn with no visible output yet leaves that revision unchanged, and mid-turn history, read from Codex's native thread while the turn holds, already returns the prompt, the commentary, and the in-progress tool activity before any final answer. A conversation reopened after its send, and so no longer reading that turn's stream, shows the commentary and the running tool row while the turn is still held, then the final answer once it settles; the revision rises again when the turn ends. With a non-default model selected, those mid-turn history reads use the thread the running turn already loaded and never send thread/resume with history's default model.
+    // case-contract: test_codex_turn_progress_reaches_other_windows_mid_turn | While a Codex app-server fixture turn started by another caller is still running, its commentary and tool activity raise the task's conversation revision in the daemon's runtime snapshot, a held turn with no visible output yet leaves that revision unchanged, and mid-turn history, read from Playhouse's own transcript store while the turn holds, already returns the prompt, the commentary, and the in-progress tool activity before any final answer. A conversation reopened after its send, and so no longer reading that turn's stream, shows the commentary and the running tool row while the turn is still held, then the final answer once it settles; the revision rises again when the turn ends. With a non-default model selected, those mid-turn history reads never send thread/resume, since history comes from Playhouse's store.
     func test_codex_turn_progress_reaches_other_windows_mid_turn() throws {
         try assertTurnProgressReachesReopenedConversation(
             provider: "codex", fixtureSource: "codex-fixture-ui",
@@ -279,7 +281,7 @@ extension PlayhouseUITests {
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows in the live turn and in history reloaded from Playhouse's store. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -477,9 +479,8 @@ extension PlayhouseUITests {
             + " " + reloadedLegacyDynamicRow.label + " " + rowText("item_fixture_dynamic_legacy")
         XCTAssertFalse(reloadedToolRows.contains("RAW_ARGUMENT_SECRET"))
         XCTAssertFalse(reloadedToolRows.contains("RAW_RESULT_SECRET"))
-        XCTAssertTrue(transcriptMessage("A later turn starts.").exists, "The fixture history must include a subsequent turn after these tool calls.")
     }
-    // case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering.
+    // case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives a fresh history reload from Playhouse's transcript store with correct prompt/response ordering.
     func test_conversation_shows_context_compaction() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-context-compaction").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -533,7 +534,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation, whose turns Playhouse holds in its own store, immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window: when its sent turn streams sixty replies, each stored as its own message in order, it keeps the newest 40 of those 61 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -556,18 +557,24 @@ extension PlayhouseUITests {
         let latest = element("assistant-message-item_long_history_assistant_60")
         let latestQuestion = element("user-message-item_long_history_user_60")
         let oldest = element("user-message-item_long_history_user_1")
-        // A conversation that was empty when it opened establishes no window,
-        // so the messages it receives while it stays open keep the newest
-        // batch rendered rather than collapsing to the turn being answered.
+        // A conversation that was empty when it opened establishes no window, so the sent
+        // turn's sixty replies keep the newest batch rendered rather than collapsing to the
+        // turn being answered.
         let liveScrollView = element("conversation-scroll-view")
         XCTAssertTrue(waitUntil({
-            liveScrollView.value as? String == "Showing latest 40 of 120 messages"
+            liveScrollView.value as? String == "Showing latest 40 of 61 messages"
         }, timeout: 20), "A live session should keep the newest batch rendered, not collapse to the latest turn.")
+        XCTAssertTrue(transcriptMessage("Live long history reply 60.").waitToExist(timeout: 10), "The newest live reply is rendered.")
+        attachScreenshot(named: "long-history-0-live-newest-batch")
         XCTAssertTrue(waitUntil({
-            !self.element("codex-working-duration").exists
-        }, timeout: 20), "The streamed long history should settle before the conversation is reopened.")
-        element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The completed long history should return to the board before reopening.")
+            !self.element("codex-working-duration").exists && self.noTurnIsRunning()
+        }, timeout: 20), "The sent turn should settle before earlier history is seeded.")
+        // Earlier sessions' turns are already in Playhouse's own store; the provider holds none of them.
+        let seededTaskID = try taskID(named: "Long conversation history")
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before its stored history is seeded.")
+        try seedLongHistory(seededTaskID, tallLatestAnswer: true)
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
         openTask(named: "Long conversation history")
         let scrollView = element("conversation-scroll-view")
         XCTAssertTrue(waitUntil({

@@ -266,7 +266,11 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
 
     static func from(item: [String: Any], lifecycle: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, startedAt: Date? = nil, measuredDurationMs: Int? = nil) -> ConversationActivity? {
         guard let id = item["id"] as? String, let type = item["type"] as? String else { return nil }
-        let status = lifecycle ?? (item["status"] as? String ?? "inProgress")
+        let itemStatus = item["status"] as? String
+        // A completed item keeps the outcome it reports (failed, declined), which the
+        // transcript stores as the item's final status.
+        let status = lifecycle == "completed" && itemStatus.map({ !["inProgress", "completed"].contains($0) }) == true
+            ? itemStatus! : lifecycle ?? itemStatus ?? "inProgress"
         switch type {
         case "contextCompaction":
             // The installed app-server schema currently supplies only id/type.

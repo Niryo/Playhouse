@@ -1125,7 +1125,7 @@ class BridgeTestCases22:
         self.assertEqual(cancelled["savedPrompt"], "An unrelated draft.", "Clearing a scheduled message keeps the composer draft already there.")
         self.assertEqual(len(self.fixture_user_prompts(executable)), sent, "Clearing a scheduled message sends nothing.")
 
-    # case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images live in the provider thread, an earlier image is deferred the same way and read back from the thread. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
+    # case-contract: test_conversation_history_defers_earlier_images | A reader that asks history to defer images (--defer-images, as the app does) gets image data only for the newest turn the user started: earlier messages with images come back marked imagesDeferred with no image data, on the newest page, on an earlier --before page, where every image waits, and in the history a send returns, while plain history stays complete and never carries the mark, and the mark is never stored. conversation images returns the exact stored images of the named messages and nothing for a message without images; in a Codex conversation, whose user images Playhouse stores the same way, an earlier image is deferred the same way and read back from the store. Naming no message fails with invalid_argument and an unknown task fails with not_found. Reopening the conversation in the visible UI reads no image data until the reader scrolls up: each earlier image then loads when its message comes into view and is shown, and a turn sent afterwards from the composer keeps the loaded images without reading them again.
     def test_conversation_history_defers_earlier_images(self):
         claude = self.data_directory / "claude-fixture-deferred-images"
         copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
@@ -1214,7 +1214,7 @@ class BridgeTestCases22:
         self.assertEqual({entry["id"]: entry.get("turnID") for entry in images},
                          {first_message["id"]: first_message.get("turnID"), second_message["id"]: second_message.get("turnID")})
         images_read = reads("conversation.images.read")[-1]
-        self.assertEqual((images_read["requestedMessageCount"], images_read["returnedMessageCount"], images_read["readProviderThread"]), ("3", "2", "false"))
+        self.assertEqual((images_read["requestedMessageCount"], images_read["returnedMessageCount"]), ("3", "2"))
         self.assertEqual(self.assert_success(self.call_cli(
             "conversation", "images", task_id, "--message", imageless["id"], "--message", "no-such-message", extra_environment=fixtures
         )[0]), [])
@@ -1237,7 +1237,7 @@ class BridgeTestCases22:
         resumed = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=fixtures)[0])
         self.assertEqual(image_messages(resumed), [first_message, second_message], "Plain history still carries every image after deferred reads.")
 
-        # Codex keeps a user's images in its thread, so a deferred one is read back from there.
+        # A Codex user's images are stored by Playhouse too, so a deferred one is read back from the store.
         codex_task = self.create_task("Codex deferred images", roots=[self.primary], provider="codex")["id"]
         self.assert_success(self.call_cli("conversation", "send", codex_task, "--image", first_image, extra_environment=fixtures)[0])
         self.assert_success(self.call_cli(
@@ -1256,9 +1256,13 @@ class BridgeTestCases22:
                              [(codex_image_message["id"], codex_image_message["imageDataURLs"])])
             read = [entry for entry in self.diagnostic_events()
                     if entry.get("event") == "conversation.images.read" and entry.get("taskID") == codex_key][-1]
-            return read["returnedMessageCount"], read["readProviderThread"]
+            return read["returnedMessageCount"]
 
         codex_deferred = self.assert_success(self.call_cli("conversation", "history", codex_task, "--defer-images", extra_environment=fixtures)[0])
         self.assertEqual([(message["id"], message["imageDataURLs"], message.get("imagesDeferred")) for message in image_messages(codex_deferred)],
                          [(codex_image_message["id"], [], True)], "A Codex thread's earlier image is deferred too.")
-        self.assertEqual(codex_image_read(), ("1", "true"), "A Codex image is read from its thread.")
+        self.assertEqual(codex_image_read(), "1", "A Codex image is read from Playhouse's store.")
+        with sqlite3.connect(self.conversation_database(), timeout=30) as connection:
+            stored = connection.execute("SELECT image_data_urls FROM conversation_messages WHERE task_id = ? AND id = ?",
+                                        (codex_key, codex_image_message["id"])).fetchone()
+        self.assertEqual(json.loads(stored[0]), codex_image_message["imageDataURLs"], "A Codex user image is stored with its message.")

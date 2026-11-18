@@ -139,7 +139,8 @@ def run_reattach_server(runtime):
     `.reattach-close-turn` runs the turn's real `chat page close-turn` without ending the turn
     (a new page titled by the marker's text, or `--continues true` when it is empty), logging
     the command's result to `.reattach-close-turn-output`. `.reattach-ready` holds the running
-    turn's thread, turn and prompt text. Every reply a client sends to a server request is
+    turn's thread, turn and prompt text. `.missing-thread` makes the next resume fail as for a
+    thread Codex no longer has. Every reply a client sends to a server request is
     logged to `.reattach-replies`, steers to `.reattach-steers`."""
     base = str(runtime.sys.argv[0])
     threads_path = runtime.Path(f"{base}.reattach-threads")
@@ -217,6 +218,13 @@ def run_reattach_server(runtime):
         elif method == "model/list":
             reply({"data": [{"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
                              "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]}]})
+        elif method == "thread/resume" and runtime.Path(f"{base}.missing-thread").is_file():
+            # A one-shot marker: Codex has lost the thread and answers as the real app-server does.
+            runtime.Path(f"{base}.missing-thread").unlink(missing_ok=True)
+            threads.pop(params.get("threadId"), None)
+            save_threads()
+            runtime.write({"jsonrpc": "2.0", "id": message["id"], "error": {
+                "code": -32600, "message": f"thread not found: {params.get('threadId')}"}})
         elif method in ("thread/start", "thread/resume"):
             thread_id = params.get("threadId") or str(runtime.uuid.uuid4())
             thread = threads.setdefault(thread_id, {"items": [], "turns": []})
@@ -338,7 +346,16 @@ def run_reattach_server(runtime):
             release = runtime.Path(f"{base}.reattach-release")
             if release.exists() and "reporting" not in turn:
                 release.unlink()
-                emit_message(thread_id, turn["turn"], f"item_{turn['turn']}_after", "After restart.")
+                text = "After restart."
+                leak = runtime.Path(f"{base}.reattach-leak-outcome")
+                if leak.exists():
+                    # The model also echoes its outcome command as answer text, which Playhouse
+                    # removes wherever it records the answer from.
+                    leak.unlink()
+                    instructions = threads[thread_id].get("instructions") or ""
+                    line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), "")
+                    text += "\n\n`" + line.replace("<completed|waiting-response|blocked>", "waiting-response") + "`"
+                emit_message(thread_id, turn["turn"], f"item_{turn['turn']}_after", text)
                 turn["reporting"] = report_outcome(thread_id)
                 if turn["reporting"] is None:
                     complete(thread_id)

@@ -4,8 +4,7 @@ extension PlayhouseBridgeRuntime {
     func bridgeOverviewOperation(
         _ request: BridgeRequest,
         taskManager: BoardTaskManager,
-        settings: WorkspaceSettingsManager,
-        callerCodexHome: String?
+        settings: WorkspaceSettingsManager
     ) async throws -> BridgeValue {
         switch request.command {
         case "status":
@@ -22,10 +21,7 @@ extension PlayhouseBridgeRuntime {
                 clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient()),
                 settingsManager: settings
             )
-            return try Self.value(await conversations.searchArchive(
-                query: request.requiredString("query"),
-                codexHomePath: request.arguments["codexHome"]?.string ?? callerCodexHome
-            ))
+            return try Self.value(await conversations.searchArchive(query: request.requiredString("query")))
         default:
             throw BridgeCommandError(code: "unsupported_command", message: "Unsupported overview command: \(request.command).")
         }

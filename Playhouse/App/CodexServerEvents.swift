@@ -44,6 +44,7 @@ extension CodexAppServerClient {
             context?.turnID = turnID
             if context == nil {
                 contextlessTurnIDs[threadID] = turnID
+                contextlessTurnEntries[threadID] = []
             } else if activeThreadID == threadID {
                 activeTurnID = turnID
             }
@@ -63,7 +64,15 @@ extension CodexAppServerClient {
                 goalTurnRevision += 1
                 noteGoalEvent()
             }
-            guard let context, let item = params["item"] as? [String: Any] else { return }
+            // Buffered whether or not a recorder is registered yet, so one registered mid-turn
+            // still records the whole turn when it ends.
+            if context == nil, method == "item/completed",
+               let threadID = params["threadId"] as? String, let turnID = params["turnId"] as? String,
+               contextlessTurnIDs[threadID] == turnID,
+               let item = params["item"] as? [String: Any] {
+                contextlessTurnEntries[threadID, default: []].append(["turnId": turnID, "item": item])
+            }
+            guard let context, var item = params["item"] as? [String: Any] else { return }
             if let id = item["id"] as? String,
                let type = item["type"] as? String,
                ["userMessage", "agentMessage", "plan"].contains(type) {
@@ -116,6 +125,12 @@ extension CodexAppServerClient {
             } else {
                 measuredDuration = nil
             }
+            // A subagent's terminal event may omit the path and model its start reported.
+            if item["type"] as? String == "subAgentActivity", let started = context.activities[activityID] {
+                if item["agentPath"] == nil, let path = started.agentPath { item["agentPath"] = path }
+                if item["model"] == nil, let model = started.model { item["model"] = model }
+                if item["reasoningEffort"] == nil, let effort = started.reasoningEffort { item["reasoningEffort"] = effort }
+            }
             guard let activity = ConversationActivity.from(
                 item: item,
                 lifecycle: method == "item/completed" ? "completed" : "inProgress",
@@ -124,6 +139,7 @@ extension CodexAppServerClient {
                 measuredDurationMs: measuredDuration
             ) else { return }
             if method == "item/completed" {
+                if let diff = ConversationTurnDiff.fromFileChangeItems([item]) { context.onDiff(diff) }
                 if let durationMs = activity.durationMs { context.durations[activity.id] = durationMs }
                 context.startedAtUptime.removeValue(forKey: activityID)
                 context.startedAtDate.removeValue(forKey: activityID)
@@ -213,6 +229,14 @@ extension CodexAppServerClient {
                 ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
             }
             if isContextlessTurn {
+                PlayhouseDiagnostics.record("codex.contextless_turn.ended", fields: diagnosticFields([
+                    "threadID": threadID,
+                    "turnID": turnID,
+                    "hasRecorder": contextlessTurnRecorders[threadID] == nil ? "false" : "true",
+                    "itemCount": String(contextlessTurnEntries[threadID]?.count ?? 0),
+                ]))
+                contextlessTurnRecorders[threadID]?(turnID, contextlessTurnEntries[threadID] ?? [])
+                contextlessTurnEntries.removeValue(forKey: threadID)
                 contextlessTurnIDs.removeValue(forKey: threadID)
                 isTurnActive = turnContexts.values.contains { $0.turnID != nil } || !contextlessTurnIDs.isEmpty
                 Self.processActiveThreadIDs.remove(threadID)

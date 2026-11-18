@@ -7,6 +7,20 @@ import codex_fixture_turn_scenarios as _scenarios
 
 
 def handle_message(runtime, _session_state, message):
+    # Every request method, in order, so a test can tell which app-server reads a
+    # Playhouse action made (a conversation must reopen without reading the thread).
+    if "method" in message and "id" in message:
+        with open(str(runtime.sys.argv[0]) + ".methods", "a", encoding="utf-8") as log:
+            log.write(message["method"] + "\n")
+    # Each turn's thread and prompt text, so a test can tell which thread a send ran on
+    # and what context it carried.
+    if message.get("method") == "turn/start":
+        params = message.get("params", {})
+        with open(str(runtime.sys.argv[0]) + ".turn-starts", "a", encoding="utf-8") as log:
+            log.write(runtime.json.dumps({
+                "threadId": params.get("threadId"),
+                "text": "\n".join(item.get("text", "") for item in params.get("input", []) if item.get("type") == "text"),
+            }) + "\n")
 
 
 

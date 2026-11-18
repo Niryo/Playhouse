@@ -597,10 +597,6 @@ extension PlayhouseUITests {
     func test_task_creation_rejects_invalid_title_roots_and_missing_folder() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
-        // This fixture is shared by the whole run; an earlier case's history would answer for this one's turn.
-        for suffix in [".history", ".assessment.history"] {
-            try? FileManager.default.removeItem(atPath: try XCTUnwrap(codexFixtureExecutable) + suffix)
-        }
         launchApp(defaultParent: nil)
         openNewTaskConversation()
         let standaloneTaskID = try taskID(named: "Untitled task")

@@ -129,6 +129,28 @@ def success(runtime, _session_state, message):
             runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                 "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID, "item": _session_state.item,
             }})
+    if _session_state.mode.endswith("-long-history-success") and _session_state.turn_message == "Create a long history.":
+        # Sixty replies in one turn, so a conversation that was empty when it opened
+        # receives more messages than the newest batch it keeps rendered.
+        for index in range(1, 61):
+            runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID, "item": {
+                    "id": f"item_live_long_history_{index}", "type": "agentMessage", "phase": "final_answer",
+                    "text": f"Live long history reply {index:02d}.",
+                },
+            }})
+        # These replies are the whole turn, and it reports its outcome, so no default
+        # answer or status nudge follows them.
+        runtime.SELF_CONTAINED_TURNS = getattr(runtime, "SELF_CONTAINED_TURNS", set()) | {runtime.TURN_ID}
+        saved = _session_state.serial_history()
+        instructions = saved.get("threadStartDeveloperInstructions") or ((saved.get("threadResumeDeveloperInstructions") or [None])[-1]) or ""
+        outcome_line = next((line.strip() for line in instructions.splitlines()
+                             if line.strip().startswith("'") and " task outcome " in line), None)
+        if outcome_line:
+            completed = runtime.subprocess.run(runtime.shlex.split(outcome_line.replace("<completed|waiting-response|blocked>", "completed")),
+                                               capture_output=True, text=True, timeout=60)
+            if completed.returncode != 0:
+                raise RuntimeError(f"Fixture task outcome command failed: {completed.stderr.strip()}")
     runtime.write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
         "threadId": runtime.THREAD_ID,
         "turn": {"id": runtime.TURN_ID, "status": "completed"},

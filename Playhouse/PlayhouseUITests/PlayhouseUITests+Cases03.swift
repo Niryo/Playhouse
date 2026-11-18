@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI and the visible archive search the task's stored transcript, matching both the user's prompts and the assistant's replies case-insensitively; the visible archive loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture().merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -187,17 +187,6 @@ extension PlayhouseUITests {
         )
         XCTAssertEqual(try XCTUnwrap((try runCLI(["task", "move", titleMatchID, "Done"])["result"] as? [String: Any])?["status"] as? String), "Done")
 
-        let threadID = try XCTUnwrap(taskRecord(id: taskID)?["codexThreadID"] as? String)
-        let sessions = dataDirectory.appendingPathComponent("codex-home/sessions/2026/10/22", isDirectory: true)
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        let sessionFile = sessions.appendingPathComponent("rollout-2026-10-22T00-00-00-\(threadID).jsonl")
-        let sessionLines: [[String: Any]] = [
-            ["type": "response_item", "payload": ["type": "message", "role": "user", "content": [["type": "input_text", "text": "LOCAL-SESSION-ONLY-input-token"]]]],
-            ["type": "response_item", "payload": ["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "LOCAL-SESSION-ONLY-output-token"]]]]
-        ]
-        let sessionData = try sessionLines.map { try JSONSerialization.data(withJSONObject: $0) + Data([0x0A]) }.reduce(into: Data()) { $0.append($1) }
-        try sessionData.write(to: sessionFile, options: .atomic)
-
         let archiveButton = element("done-archive-button")
         archiveButton.click()
         let archiveResult = element("done-archive-task-\(taskID)")
@@ -229,11 +218,11 @@ extension PlayhouseUITests {
         let titleMatchResult = element("done-archive-task-\(titleMatchID)")
         XCTAssertTrue(titleMatchResult.waitToExist(timeout: 10), "A title match should appear in the archive search results.")
         element("clear-archive-search-button").click()
-        archiveSearch.typeText("local-session-only-output-TOKEN")
-        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching assistant output_text should show its conversation match and filter out unrelated title matches.")
+        archiveSearch.typeText("answers RECEIVED: blue")
+        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching the assistant's stored reply should show its conversation match and filter out unrelated title matches.")
         element("clear-archive-search-button").click()
-        archiveSearch.typeText("local-session-only-input-TOKEN")
-        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching user input_text should show its conversation match and filter out unrelated title matches.")
+        archiveSearch.typeText("FIRST time CONTRIBUTORS tomorrow")
+        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching the user's stored prompt should show its conversation match and filter out unrelated title matches.")
         element("clear-archive-search-button").click()
         archiveSearch.typeText(currentTitle)
         XCTAssertTrue(archiveResult.waitToExist(timeout: 10))

@@ -244,7 +244,7 @@ class BridgeTestCases13:
             extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(aliases_fixture)},
         )[0])["models"]
         self.assertEqual(aliases_only, [], "Claude aliases should not be exposed without a concrete versioned choice.")
-    # case-contract: test_codex_message_timestamps | Codex records a timestamp when a message event arrives and restores it after reload when provider history omits a time. A provider-supplied timestamp takes precedence over the locally observed time.
+    # case-contract: test_codex_message_timestamps | Playhouse stores each Codex message with the time it recorded it, and fresh CLI/XPC reads and app restarts show that same stored time. A timestamp in the provider's own thread history has no effect, because history is read only from Playhouse's store.
     def test_codex_message_timestamps(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-timestamps-unique-turns-success"
@@ -254,16 +254,21 @@ class BridgeTestCases13:
             "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
         environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         task_id = self.create_task(title="Codex message timestamps")["id"]
+        before = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check message time.", extra_environment=environment)[0])
+        after = datetime.datetime.now(datetime.timezone.utc)
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
-        message = next(m for m in history["messages"] if m["id"] == "item_assistant_fixture_1")
-        self.assertIsNotNone(message.get("createdAt"))
-        self.assertIn("item_assistant_fixture_1", self.conversation_state(task_id)["messageTimestamps"])
+        reply = [m for m in history["messages"] if m["role"] == "assistant"][-1]
+        prompt = next(m for m in history["messages"] if m["role"] == "user")
+        for message in (prompt, reply):
+            recorded = datetime.datetime.fromisoformat(message["createdAt"].replace("Z", "+00:00"))
+            self.assertTrue(before <= recorded <= after, f"{message['role']} time {recorded} is when Playhouse stored it.")
+        # The provider's own thread history now carries a different time; history never reads it.
         Path(str(executable) + ".provider-timestamp").touch()
-        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
-        message = next(m for m in history["messages"] if m["id"] == "item_assistant_fixture_1")
-        self.assertEqual(message["createdAt"], "2026-10-26T12:34:00Z")
-    # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its locally recorded timestamp after history reload, while a legacy history item without a known time has no timestamp label.
+        fresh = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertEqual({m["id"]: m["createdAt"] for m in fresh["messages"]}, {m["id"]: m["createdAt"] for m in history["messages"]})
+        self.assertNotIn("2026-10-26T12:34:00Z", [m["createdAt"] for m in fresh["messages"]])
+    # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then sends a Luna turn; each stored reply stays attributed to the model its own turn ran on, and both replies show their stored timestamps after an app reload.
     def test_conversation_effort_dispatches_to_codex(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-effort-unique-turns-success"
@@ -298,22 +303,15 @@ class BridgeTestCases13:
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
                           "Sending a turn must not silently fall back to the default model.")
-        transcript = self.conversation_state(task_id)
-        for segment in transcript["segments"]:
-            segment["codexTurnIDs"] = []
-            segment.pop("codexTurnModelIDs", None)
-        transcript.pop("messageTimestamps", None)  # Simulate a transcript from before local timestamps.
-        self.write_conversation_state(task_id, transcript)
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check the next model.", "--model", "gpt-6-luna", extra_environment=environment)[0])
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
         assistants = [message for message in ordinary_messages(history["messages"]) if message["role"] == "assistant"]
         self.assertGreaterEqual(len(assistants), 2)
-        self.assertIsNone(assistants[0].get("modelID"), "Legacy replies without stored model attribution must remain provider-only.")
-        self.assertIsNone(assistants[0].get("createdAt"), "Legacy provider history without a timestamp must stay timestamp-free.")
+        self.assertEqual(assistants[0]["modelID"], "gpt-6-sol", "Each stored reply keeps the model its own turn ran on.")
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
-        self.assertIsNotNone(assistants[-1].get("createdAt"), "Locally observed time survives a history reload.")
-    # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation. A second Codex conversation that never chose a model keeps the model its own turn ran on, in CLI/XPC reads and in the reopened composer’s picker, after the provider-wide remembered selection moves to another model.
+        self.assertTrue(all(message.get("createdAt") for message in assistants), "Every stored reply keeps the time Playhouse recorded it.")
+    # case-contract: test_codex_history_keeps_loaded_thread_model | After a Codex turn on a non-default model (Sol) ends, loading history never resumes the Codex thread, with Sol still selected or after the selection moves to another non-default model (Mini), and the stored reply stays attributed to Sol. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation. A second Codex conversation that never chose a model keeps the model its own turn ran on, in CLI/XPC reads and in the reopened composer’s picker, after the provider-wide remembered selection moves to another model.
     def test_codex_history_keeps_loaded_thread_model(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-kept-model-unique-turns-success"
@@ -329,22 +327,19 @@ class BridgeTestCases13:
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "Run on Sol.", "--model", "gpt-6-sol", extra_environment=environment
         )[0])
-        # The turn just ended and the selected model is still Sol: history reuses the
-        # loaded thread instead of resuming it with the hardcoded default (Luna).
+        # History is read from Playhouse's store, so reading it never resumes the Codex thread,
+        # whether or not the selected model matches the one Codex holds the thread on.
         kept_model.write_text("gpt-6-sol\n", encoding="utf-8")
+        resumes_before = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8")).get("threadResumeKeptModels", [])
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
         self.assertTrue(any(message["role"] == "assistant" for message in history["messages"]))
-        self.assertTrue(kept_model.is_file(), "History must not resume a thread already loaded with the task's model.")
-        # The selection moves to Mini (neither Sol nor the default) while Codex still
-        # holds the thread on Sol: history resumes with Mini, Codex keeps Sol, and the
-        # read still succeeds.
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-mini")[0])
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
-        self.assertFalse(kept_model.exists(), "History must have resumed the thread and read Codex's reported model.")
+        self.assertTrue(any(message["role"] == "assistant" and message.get("modelID") == "gpt-6-sol" for message in history["messages"]),
+                        "The stored reply keeps the model its turn ran on after the selection moves.")
+        self.assertTrue(kept_model.is_file(), "Reading history must not resume the Codex thread.")
         recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        self.assertEqual(recorded["threadResumeKeptModels"][-1], {"requested": "gpt-6-mini", "reported": "gpt-6-sol"},
-                         "History resumes with the task's selected model, not the hardcoded default.")
-        self.assertTrue(any(message["role"] == "assistant" for message in history["messages"]))
+        self.assertEqual(recorded.get("threadResumeKeptModels", []), resumes_before, "Reading history must not resume the Codex thread.")
         # The thread still reports Sol, but the next turn must switch to the
         # model the conversation selected instead of rejecting the send.
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
@@ -483,7 +478,7 @@ class BridgeTestCases13:
         fallback_task, _ = self.call_cli("task", "get", failure_task_id)
         self.assertEqual(self.assert_success(fallback_task)["title"], failure_objective,
                          "A failed first-Goal title generation should use the deterministic objective fallback.")
-    # case-contract: test_codex_window_and_cli_share_one_app_server | A window and the CLI use one Codex app-server per Codex home. Every Codex request against one data folder (sends on two tasks, Goal set/get/pause/clear, history and usage refreshes, from the CLI and, in the UI, from an open window as well) runs on the same recorded server process, which listens on the shared unix socket with features.goals=true and the caller's CODEX_HOME and is the one live Codex manifest; it keeps running after every CLI Goal call, including a rejected blank objective, and a CLI call that spells the same CODEX_HOME differently reuses it. A send on the second task while the first task's Goal is active leaves that Goal active. The work turn Codex runs for the Goal is active and interruptible whether the window or the CLI set it; a history read during it, even with another model selected, never resumes the thread, and once pausing the Goal ends the turn, history resumes the thread with the selected model. A usage read the server never answers times out without stopping the server and keeps the last known Codex account, and the next refresh reads it again. In the UI, the window sets a Goal and follows the turn Codex starts for it, which stays active and interruptible while the CLI sends on the second task and ends when the window pauses the Goal; a Goal the CLI sets appears in the open window without reopening the task, the window's pause and clear reach the CLI's Goal reads, and the Agents info block shows the Codex account read through that server.
+    # case-contract: test_codex_window_and_cli_share_one_app_server | A window and the CLI use one Codex app-server per Codex home. Every Codex request against one data folder (sends on two tasks, Goal set/get/pause/clear, history and usage refreshes, from the CLI and, in the UI, from an open window as well) runs on the same recorded server process, which listens on the shared unix socket with features.goals=true and the caller's CODEX_HOME and is the one live Codex manifest; it keeps running after every CLI Goal call, including a rejected blank objective, and a CLI call that spells the same CODEX_HOME differently reuses it. A send on the second task while the first task's Goal is active leaves that Goal active. The work turn Codex runs for the Goal is active and interruptible whether the window or the CLI set it; a history read, during it or after pausing the Goal ends it, and even with another model selected, never resumes the thread, because history is read from Playhouse's store. The Goal's work turn, which no send streamed, is recorded once from its streamed items when it ends and shows in history and the open window, without Playhouse ever reading Codex's thread. A usage read the server never answers times out without stopping the server and keeps the last known Codex account, and the next refresh reads it again. In the UI, the window sets a Goal and follows the turn Codex starts for it, which stays active and interruptible while the CLI sends on the second task and ends when the window pauses the Goal; a Goal the CLI sets appears in the open window without reopening the task, the window's pause and clear reach the CLI's Goal reads, and the Agents info block shows the Codex account read through that server.
     def test_codex_window_and_cli_share_one_app_server(self):
         name = "codex-fixture-single-server-goal-success"
         state = self.data_directory / "single-server-fixture-state"
@@ -555,9 +550,16 @@ class BridgeTestCases13:
         self.assert_failure(blank, "invalid_argument")
         assert_one_live_server("After a rejected CLI Goal set", pid)
 
+        self.wait_for(lambda: f"Goal work: {objective}" in self.history_texts(task_id, env)[0],
+                      "The Goal's work turn, which no send streamed, is recorded from its streamed items when it ends.")
         texts, _ = self.history_texts(task_id, env)
         self.assertIn("Hello from the CLI.", texts)
-        self.assertEqual(thread_resumes()[-1]["model"], "gpt-6-sol", "Once the turn ends, history resumes the thread with the selected model.")
+        self.assertEqual(texts.count(f"Goal work: {objective}"), 1, texts)
+        self.assertEqual(thread_resumes()[resumed_before:], [], "History is read from Playhouse's store, so it never resumes the thread, even once the turn ends.")
+        requested = Path(env["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".methods").read_text(encoding="utf-8").split()
+        self.assertIn("thread/goal/set", requested, "The method log saw this case's Goal requests.")
+        for method in ("thread/read", "thread/turns/list", "thread/items/list"):
+            self.assertNotIn(method, requested, "Recording the Goal turn never reads Codex's thread.")
 
         def codex_usage(environment):
             providers = self.assert_success(self.call_cli("usage", "get", "--refresh", timeout=20, extra_environment=environment)[0])["providers"]
@@ -622,7 +624,7 @@ class BridgeTestCases13:
         self.assertEqual([server["pid"] for server in running], [live[0]["process"]["pid"]], "One app-server runs on the Codex home.")
         texts, _ = self.history_texts(task_id, environment)
         self.assertIn("After the upgrade.", texts)
-    # case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, applies both tasks' state atomically, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
+    # case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, applies both tasks' state atomically, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state, and the recovery prompt and response are stored and shown as sent and survive reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
     def test_pending_question_repair_restores_thread_owner(self):
         target = self.create_task("Repair original question", roots=[self.primary])["id"]
         source = self.create_task("Repair misplaced question", roots=[self.secondary])["id"]
@@ -675,9 +677,14 @@ class BridgeTestCases13:
         reopened, _ = self.call_cli("conversation", "history", target, extra_environment=env)
         history = self.assert_success(reopened)
         self.assertIsNone(history.get("pendingUserInputRequest"))
-        self.assertTrue(any(item["text"] == "[Response to private answer hidden]" for item in history["messages"]))
-        self.assertNotIn("fixture-secret", json.dumps(history))
-        self.assertNotIn("Continue this conversation by applying", json.dumps(history))
+        self.assertTrue(any(
+            item["role"] == "assistant" and item["text"] == "Recovered answer: Green; private token fixture-secret was applied."
+            for item in history["messages"]
+        ), "The recovery response is stored as Codex sent it.")
+        self.assertTrue(any(
+            item["role"] == "user" and item["text"].startswith("Continue this conversation by applying") and "Answer: fixture-secret" in item["text"]
+            for item in history["messages"]
+        ), "The prompt that carried the answers is stored as sent.")
         # Destination published and answered before a crashed repair cleared source.
         self.write_conversation_state(source, misplaced_state)
         retry, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source, expected_status=1)

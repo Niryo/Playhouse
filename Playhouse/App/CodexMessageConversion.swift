@@ -107,6 +107,11 @@ extension CodexAppServerClient {
         if isMissedSteerTurn {
             return ClientError.staleTurn(message)
         }
+        // Codex reports a thread whose rollout is gone this way when asked to resume it.
+        if method == "thread/resume" &&
+            (normalized.contains("no rollout found") || normalized.contains("thread not found") || normalized.contains("no thread with id")) {
+            return ClientError.threadNotFound(message)
+        }
         if normalized.contains("unauthorized") || normalized.contains("authentication") ||
             normalized.contains("not logged in") || normalized.contains("sign in") ||
             normalized.contains("401") {
