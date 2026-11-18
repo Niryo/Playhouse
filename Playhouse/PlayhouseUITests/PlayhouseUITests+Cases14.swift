@@ -705,10 +705,14 @@ extension PlayhouseUITests {
                       "The bubble should keep growing with each exchange (\(afterFirstAnswer) then \(opened.bubble.frame)).")
         // More exchanges than fit: the chat stops at its maximum height and scrolls.
         let transcript = element("side-chat-transcript")
-        for index in stride(from: 7, through: 11, by: 2) {
-            _ = sendSideChatMessage("Another point, number \(index)?", answerIndex: index, containing: "Side chat follow-up")
-        }
-        XCTAssertTrue(waitUntil({ (430...442).contains(transcript.frame.height) }, timeout: 5),
+        // Exchanges until the transcript reaches its maximum height: a chat just short of it
+        // would still grow by a few points with the next one.
+        var answerIndex = 7
+        repeat {
+            _ = sendSideChatMessage("Another point, number \(answerIndex)?", answerIndex: answerIndex, containing: "Side chat follow-up")
+            answerIndex += 2
+        } while answerIndex <= 15 && !waitUntil({ (438...442).contains(transcript.frame.height) }, timeout: 2)
+        XCTAssertTrue(waitUntil({ (438...442).contains(transcript.frame.height) }, timeout: 5),
                       "A long side chat should reach the transcript's maximum height (\(transcript.frame)).")
         // The bubble animates its growth, so it reaches the transcript's range before it settles.
         XCTAssertTrue(waitForStableFrame(opened.bubble), "The side chat bubble should settle at its maximum height (\(opened.bubble.frame)).")
@@ -721,7 +725,7 @@ extension PlayhouseUITests {
             XCTAssertLessThanOrEqual(message.frame.maxX, transcript.frame.maxX - scrollerWidth + 1,
                                      "\(identifier) should stay clear of the scroller (message \(message.frame), transcript \(transcript.frame)).")
         }
-        let lastAnswer = sendSideChatMessage("One more point?", answerIndex: 13, containing: "Side chat follow-up")
+        let lastAnswer = sendSideChatMessage("One more point?", answerIndex: answerIndex, containing: "Side chat follow-up")
         XCTAssertEqual(opened.bubble.frame.height, capped.height, accuracy: 2, "At its maximum the bubble stops growing.")
         XCTAssertTrue(waitUntil({ transcript.frame.contains(CGPoint(x: lastAnswer.frame.midX, y: lastAnswer.frame.maxY - 2)) }, timeout: 5),
                       "The newest answer should be scrolled into view (answer \(lastAnswer.frame), transcript \(transcript.frame)).")
