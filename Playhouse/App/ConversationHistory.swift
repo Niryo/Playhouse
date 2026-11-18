@@ -28,10 +28,13 @@ extension ConversationManager {
         attachCodexThread(taskID: taskID, onActionRequest: onActionRequest)
         var source = "composed"
         var history: ConversationHistory
+        // The turn of the first message after a page, which runs on past it when the page's last message shares it.
+        var turnIDAfterPage: String?
         if readsForward {
             history = try composedHistory(taskID: taskID)
             let start = try forwardWindowStart(taskID: taskID, in: history.messages, after: afterMessageID, chatPageID: chatPageID)
             let end = messageLimit.map { min(history.messages.count, start + $0) } ?? history.messages.count
+            turnIDAfterPage = end < history.messages.count ? history.messages[end].turnID : nil
             history.earlierMessageCount = start
             history.laterMessageCount = history.messages.count - end
             history.messages = Array(history.messages[start..<end])
@@ -41,13 +44,14 @@ extension ConversationManager {
             source = "composed-forward"
         } else if let messageLimit,
            let page = try storedTranscriptPage(taskID: taskID, messageLimit: messageLimit, beforeMessageID: beforeMessageID) {
-            history = page
+            (history, turnIDAfterPage) = page
             source = "stored-page"
         } else {
             history = try composedHistory(taskID: taskID)
             if messageLimit != nil || beforeMessageID != nil {
                 let end = try Self.pageEnd(of: history.messages, before: beforeMessageID)
                 let start = messageLimit.map { max(0, end - $0) } ?? 0
+                turnIDAfterPage = end < history.messages.count ? history.messages[end].turnID : nil
                 history.earlierMessageCount = start
                 history.laterMessageCount = history.messages.count - end
                 history.messages = Array(history.messages[start..<end])
@@ -56,6 +60,9 @@ extension ConversationManager {
                 )
             }
         }
+        history.messages = Self.attachingTurnTokenUsage(
+            history.messages, rows: (try? transcripts.readState(taskID))?.tokenUsage ?? [], turnIDAfterPage: turnIDAfterPage
+        )
         var hydratedImageMessages = 0
         var deferredImageMessages = 0
         if includesImageData {
@@ -162,8 +169,11 @@ extension ConversationManager {
     /// It applies wherever composing the whole transcript would order these
     /// messages by stored position alone: no positioned elements and turns whose
     /// segments never move backward. Otherwise returns nil and the caller
-    /// composes the whole history and slices it.
-    func storedTranscriptPage(taskID: UUID, messageLimit: Int, beforeMessageID: String?) throws -> ConversationHistory? {
+    /// composes the whole history and slices it. Also returns the turn of the first
+    /// message after the page, nil when the page runs to the newest message.
+    func storedTranscriptPage(
+        taskID: UUID, messageLimit: Int, beforeMessageID: String?
+    ) throws -> (history: ConversationHistory, turnIDAfterPage: String?)? {
         let store = try transcripts
         let state = try store.readState(taskID)
         let outline = try store.outline(taskID)
@@ -192,12 +202,14 @@ extension ConversationManager {
         var covered: [String] = []
         var offset = 0
         var firstCoveredOffset = 0
+        var turnIDAfterPage: String?
         for turn in visibleTurns {
             let range = offset..<(offset + turn.messageIDs.count)
             if range.overlaps(start..<end) {
                 if covered.isEmpty { firstCoveredOffset = offset }
                 covered.append(turn.id)
             }
+            if range.contains(end) { turnIDAfterPage = turn.id }
             offset = range.upperBound
         }
         // The latest turn is the latest one the user started; status nudges after it only add their work.
@@ -221,7 +233,7 @@ extension ConversationManager {
         }
         let earlierTurnIDs = visibleTurns.prefix(max(latestIndex, 0)).map(\.id)
         let pageMessageIDs = Set(pageMessages.map(\.id))
-        return ConversationHistory(
+        return (ConversationHistory(
             messages: Array(pageMessages),
             activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []) + nudgeWork,
             timelineActivities: ConversationActivity.visibleTimelineActivities(
@@ -233,7 +245,7 @@ extension ConversationManager {
             providerBoundaries: Self.providerBoundaries(segments: state.segments, turns: visibleTurns),
             earlierMessageCount: start,
             laterMessageCount: messageIDs.count - end
-        )
+        ), turnIDAfterPage)
     }
 
     func composedHistory(taskID: UUID) throws -> ConversationHistory {
@@ -508,6 +520,31 @@ extension ConversationManager {
         )
         history.timelineActivities = timelineActivities
         return history
+    }
+
+    /// Marks each turn's last reply with what the turn cost, so the reply can show its
+    /// turn's tokens: providers report usage once per turn, never per message. A turn that
+    /// runs past the end of the page (`turnIDAfterPage`, the turn of the first message after
+    /// it) has its last reply on a later page, so none of its messages here is marked.
+    static func attachingTurnTokenUsage(
+        _ messages: [ConversationMessage], rows: [ConversationTranscript.TurnTokenUsage], turnIDAfterPage: String?
+    ) -> [ConversationMessage] {
+        let usageByTurn = Dictionary(rows.map { ($0.id, $0.usage) }, uniquingKeysWith: +)
+        var lastReplyByTurn: [String: String] = [:]
+        // A background agent's report is drawn as the agent's row, not as a reply.
+        for message in messages where message.role == .assistant && message.phase != "subagent_report" {
+            if let turnID = message.turnID { lastReplyByTurn[turnID] = message.id }
+        }
+        let unfinishedTurnID = turnIDAfterPage.flatMap { $0 == messages.last?.turnID ? $0 : nil }
+        return messages.map { message in
+            var message = message
+            message.turnTokenUsage = message.turnID.flatMap { turnID in
+                guard turnID != unfinishedTurnID, lastReplyByTurn[turnID] == message.id,
+                      let usage = usageByTurn[turnID], !usage.isEmpty else { return nil }
+                return usage
+            }
+            return message
+        }
     }
 
     /// Reads a subagent's work without resuming or changing its turn.

@@ -2171,4 +2171,88 @@ extension PlayhouseUITests {
         let entries = (try runCLI(["slash-commands", "list", "--task", taskID])["result"] as? [String: Any])?["commands"] as? [[String: Any]] ?? []
         XCTAssertEqual(entries.first { $0["name"] as? String == "plan" }?["pluginID"] as? String, "built-in-commands", "/plan stays the built-in one.")
     }
+    // case-contract: test_standalone_chat_reply_shows_turn_token_usage | A standalone chat shows what each turn cost under the turn's last reply. Providers report usage once per turn, so a history read marks only the last assistant reply of each turn with that turn's recorded usage (input, output, cache read and cache write exactly as the turn's Token Stats row), leaving the user's message and earlier commentary unmarked, and an empty chat has nothing marked. A second turn that replies twice (Claude Code's no-visible-output notice between its answer and a later reply) marks only its last reply, with its own row, while the first reply keeps the first turn's. A history page that ends inside a turn marks none of that turn's messages, because its last reply is on a later page, while an earlier turn whose reply is in the page stays marked, including a reply that ends the page when the next page starts another turn. In the chat, the marked reply shows a small token counter (1.6K tokens) directly beneath it, whose tooltip names the turn's total and its four buckets, while prompts and a turn's earlier replies show none, and clicking it opens the window's usual Token Stats modal for the chat with the turn rows, which Done closes. Usage is attributed to Playhouse's local turn on the shared recording path for both Claude and Codex, so one representative provider (Claude) covers the case.
+    func test_standalone_chat_reply_shows_turn_token_usage() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-chat-token-usage")
+        let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        let counters = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message-token-usage-"))
+        XCTAssertEqual(counters.count, 0, "An empty chat has no reply to show tokens under.")
+
+        // The fixture's close-turn-first chat turn answers once; its Saturn turn answers, gets Claude
+        // Code's no-visible-output notice, and replies again, so that turn has two replies.
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        func send(_ prompt: String) {
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({
+                self.fixtureTurnCount(URL(fileURLWithPath: executable), containing: prompt) > 0 && self.noTurnIsRunning()
+            }, timeout: 30), "The chat turn \(prompt) should finish.")
+        }
+        func assistantMessageID(_ text: String) throws -> String {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", chatID])["result"] as? [String: Any])
+            let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+            return try XCTUnwrap(messages.first { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == text }?["id"] as? String)
+        }
+        // A counter sits directly beneath its reply: below the reply's bubble and above whatever follows.
+        func assertCounter(_ counter: XCUIElement, under replyID: String) {
+            let reply = element("assistant-message-\(replyID)")
+            XCTAssertTrue(reply.exists, "The marked reply is on screen.")
+            XCTAssertGreaterThanOrEqual(counter.frame.minY, reply.frame.maxY - 2, "The counter sits under its reply.")
+            XCTAssertLessThan(counter.frame.minY - reply.frame.maxY, 30, "The counter sits right under its reply.")
+        }
+        func markedReplies() throws -> [(id: String, turnID: String, usage: [String: Int])] {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", chatID])["result"] as? [String: Any])
+            return try XCTUnwrap(history["messages"] as? [[String: Any]]).compactMap { message in
+                guard let usage = message["turnTokenUsage"] as? [String: Int], let id = message["id"] as? String,
+                      let turnID = message["turnID"] as? String else { return nil }
+                return (id, turnID, usage)
+            }
+        }
+        // Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py: 1,000 + 200 + 300 + 100.
+        let description = "This turn used 1,600 tokens: 1,000 input, 200 output, 300 cache read, 100 cache write"
+
+        send("Name the largest moon of Jupiter.")
+        let first = try XCTUnwrap(try markedReplies().first, "History marks the turn's last reply.")
+        XCTAssertEqual(first.usage, ["inputTokens": 1_000, "outputTokens": 200, "cacheReadTokens": 300, "cacheCreationTokens": 100])
+        let firstCounter = element("message-token-usage-\(first.id)")
+        XCTAssertTrue(firstCounter.waitToExist(timeout: 15), "The reply shows its turn's tokens beneath it.")
+        XCTAssertEqual(firstCounter.label, description, "The counter's label names the turn's total and its buckets.")
+        // A macOS button folds its text into its own label, so the visible text is read off the screen.
+        XCTAssertTrue(waitUntil({ self.screenTextContains("1.6K tokens") }, timeout: 5), "The counter reads the turn's compact total.")
+        XCTAssertEqual(counters.count, 1, "Only the turn's last reply shows tokens; the prompt shows none.")
+        assertCounter(firstCounter, under: first.id)
+
+        send("Name the largest moon of Saturn.")
+        let marked = try markedReplies()
+        XCTAssertEqual(marked.count, 2, "Each turn marks its own last reply.")
+        XCTAssertNotEqual(marked[0].turnID, marked[1].turnID)
+        let secondCounter = element("message-token-usage-\(marked[1].id)")
+        XCTAssertTrue(secondCounter.waitToExist(timeout: 15), "The second reply shows its own turn's tokens.")
+        XCTAssertTrue(waitUntil({ counters.count == 2 }, timeout: 10), "Each reply keeps its own counter.")
+        XCTAssertEqual(marked[1].id, try assistantMessageID("I already answered above."), "The turn's last reply carries its tokens.")
+        let earlierReplyID = try assistantMessageID("Titan is the largest moon of Saturn.")
+        XCTAssertFalse(element("message-token-usage-\(earlierReplyID)").exists, "The turn's earlier reply shows no counter.")
+        assertCounter(firstCounter, under: first.id)
+        assertCounter(secondCounter, under: marked[1].id)
+        attachScreenshot(named: "Standalone chat replies show their turn's tokens")
+        attachRegionScreenshot([element("assistant-message-\(marked[1].id)"), secondCounter], named: "A reply's small token counter beneath it")
+
+        secondCounter.click()
+        XCTAssertTrue(element("token-stats").waitToExist(timeout: 10), "Clicking the counter opens Token Stats.")
+        assertText("token-stats-total", equals: "3,200")
+        for turnID in marked.map(\.turnID) {
+            XCTAssertTrue(element("token-stats-turn-\(turnID)").waitToExist(timeout: 5), "Token Stats lists the chat's turn \(turnID).")
+        }
+        attachScreenshot(named: "The reply's counter opens the chat's Token Stats")
+        element("close-token-stats-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("token-stats").exists }, timeout: 5), "Done closes Token Stats.")
+    }
 }
