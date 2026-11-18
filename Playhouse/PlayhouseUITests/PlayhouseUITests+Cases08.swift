@@ -328,7 +328,8 @@ extension PlayhouseUITests {
         let orphanedPreference = "playhouse.codex.goal-generation.\(UUID().uuidString)"
         try PropertyListSerialization.data(fromPropertyList: [orphanedPreference: "plan"], format: .binary, options: 0)
             .write(to: isolatedPreferencesFile)
-        launchApp(defaultParent: fixture.parent.path)
+        // The started task's reads look up its branch's pull request; keep that on the gh fixture.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: try makeGitHubStateFixture(expectedNumbers: []))
 
         let pendingTitle = "Pending delete"
         _ = try runCLI(["task", "create", "--title", pendingTitle, "--prompt", "Pending delete description.", "--repo", fixture.secondary.path])
@@ -349,11 +350,7 @@ extension PlayhouseUITests {
         let keptPreference = "conversationMode.\(keptID.uppercased())"
         for title in [pendingTitle, keptTitle] {
             openTask(named: title)
-            let modeMenu = element("conversation-mode-menu")
-            XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
-            modeMenu.click()
-            app.menuItems["Plan mode"].click()
-            XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+            setPlanMode(true)
             element("back-to-board-button").click()
         }
         XCTAssertTrue(waitUntil({

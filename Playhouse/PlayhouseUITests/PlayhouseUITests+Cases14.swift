@@ -294,10 +294,9 @@ extension PlayhouseUITests {
         }
         XCTAssertGreaterThan(orangePixelCount(in: userView.screenshot()), 5,
                              "Adding a second comment should preserve the first orange comment highlight.")
-        let commentModeMenu = element("conversation-mode-menu")
-        commentModeMenu.click()
-        app.menuItems["conversation-mode-goal"].click()
-        XCTAssertTrue(commentModeMenu.label.contains("Goal"), "The composer should enter Goal mode before sending pending comments.")
+        element("conversation-goal-button").click()
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5),
+                      "The composer should enter Goal mode before sending pending comments.")
         let composer = app.textViews["message-composer"]
         XCTAssertTrue(composer.waitToExist(timeout: 5))
         composer.click()
@@ -305,7 +304,7 @@ extension PlayhouseUITests {
         XCTAssertTrue((composer.value as? String ?? "").contains("Keep this freeform follow-up."),
                       "The freeform follow-up should be present in the editable composer before sending.")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ !self.element("conversation-mode-menu").label.contains("Goal") }, timeout: 5),
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-goal-button") }, timeout: 5),
                       "Sending pending comments should exit temporary Goal-entry mode.")
         let goalQueryResponse = try runCLI(["conversation", "goal", taskID, "get"])
         XCTAssertEqual(goalQueryResponse["ok"] as? Bool, true, "The Goal query should succeed: \(goalQueryResponse)")
@@ -600,7 +599,7 @@ extension PlayhouseUITests {
                              "Reopening should restore the cross-paragraph highlight on its last paragraph.")
         attachScreenshot(named: "Restored comment spanning two reply paragraphs")
     }
-    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or mode menu. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
+    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
     func test_side_chat_forks_claude_conversation_read_only() throws {
         _ = try installClaudeFixture(named: "claude-fixture-side-chat")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
@@ -634,8 +633,10 @@ extension PlayhouseUITests {
         XCTAssertTrue(bubbleElements.matching(identifier: "side-chat-send-button").firstMatch.exists)
         XCTAssertFalse(bubbleElements.matching(identifier: "open-skills-button").firstMatch.exists,
                        "The side chat composer has no Skills button.")
-        XCTAssertFalse(bubbleElements.matching(identifier: "conversation-mode-menu").firstMatch.exists,
-                       "The side chat composer has no mode menu.")
+        for identifier in ["conversation-plan-button", "conversation-goal-button", "composer-attach-button"] {
+            XCTAssertFalse(bubbleElements.matching(identifier: identifier).firstMatch.exists,
+                           "The side chat composer has no Plan, Goal or attach button (\(identifier)).")
+        }
         XCTAssertFalse(element("side-chat-send-button").isEnabled, "An empty side chat message can't be sent.")
         attachScreenshot(named: "Side chat bubble opened on the selected reply")
 

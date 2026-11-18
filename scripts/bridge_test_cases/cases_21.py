@@ -795,13 +795,14 @@ class BridgeTestCases21:
         self.assertEqual(self.plugin_text(self.plugin_node(removed_worktree["tree"], "js-last-action")), "Last: remove Playhouse-second-line")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-badge-infragod:onChange", expected_status=2)[0],
                             "invalid_argument")
-    # case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) labels the menu Conversation mode: Plan mode and shows the Start Implementing button, and Goal (Last: mode goal) labels the menu Goal and shows the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its mode and provider menus as Menu atoms, with every identifier its controls had unchanged. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
+    # case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the attach button (a Button labelled Attach files with the paperclip icon), the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the Plan button (labelled Plan mode, the lightbulb.max icon) and the Goal button (labelled Goal, the GoalIcon asset), both Off with no highlight, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The attach button runs onPress (Last: attach). The Plan button runs onPress (Last: plan on), reads On with an orange highlight and icon and shows the Start Implementing button, and pressing it again turns Plan off (Last: plan off) and hides Start Implementing; the Goal button (Last: goal on) reads On with an orange highlight and shows the goal placeholder, and turning Plan on turns Goal off and turning Goal on turns Plan off, so the two are never on together; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its provider menu as a Menu atom, with its attach, Skills, Plan, provider, model and send identifiers. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
     def test_plugin_composer_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer")[0])
         self.assertEqual(rendered["errors"], [])
         tree = rendered["tree"]
         # The same identifiers the conversation's composer gives its controls.
-        for test_id in ["message-composer-scroll-view", "open-skills-button", "conversation-mode-menu", "conversation-provider-menu", "model-picker-menu",
+        for test_id in ["message-composer-scroll-view", "composer-attach-button", "open-skills-button", "conversation-plan-button", "conversation-goal-button",
+                        "conversation-provider-menu", "model-picker-menu",
                         "model-picker-popover", "schedule-task-button", "schedule-popover", "send-message-button", "js-last-action"]:
             self.plugin_node(tree, test_id)
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
@@ -817,9 +818,22 @@ class BridgeTestCases21:
         self.assertEqual((opener["type"], opener["events"], opener["props"].get("style"), opener["props"]["label"], opener["props"]["help"]),
                          ("Button", ["onPress"], None, "Skills", "Skills"))
         self.assertEqual((opener["children"][0]["type"], opener["children"][0]["props"]["name"]), ("Icon", "sparkles"))
-        mode = self.plugin_node(tree, "conversation-mode-menu")["props"]
-        self.assertEqual((mode["icon"], mode["color"], mode["label"], [item["id"] for item in mode["items"][0]], [item["checked"] for item in mode["items"][0]]),
-                         ("plus", "secondary", "Conversation mode: Code mode", ["goal", "mode:default", "mode:plan"], [False, True, False]))
+        attach = self.plugin_node(tree, "composer-attach-button")
+        self.assertEqual((attach["type"], attach["events"], attach["props"]["label"], attach["props"].get("disabled")), ("Button", ["onPress"], "Attach files", False))
+        self.assertEqual(attach["children"][0]["children"][0]["props"]["name"], "paperclip")
+
+        def mode_toggle(tree, test_id):
+            button = self.plugin_node(tree, test_id)
+            highlight = button["children"][0]
+            icon = highlight["children"][0]["props"]
+            return (button["props"]["label"], button["props"]["value"], highlight["props"]["fill"], highlight["props"]["fillOpacity"], icon.get("name") or icon.get("asset"), icon["color"])
+
+        self.assertEqual(mode_toggle(tree, "conversation-plan-button"), ("Plan mode", "Off", "orange", 0, "lightbulb.max", "secondary"))
+        self.assertEqual(mode_toggle(tree, "conversation-goal-button"), ("Goal", "Off", "orange", 0, "GoalIcon", "secondary"))
+        toolbar_ids = [node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)]
+        self.assertLess(toolbar_ids.index("composer-attach-button"), toolbar_ids.index("open-skills-button"), "The attach button leads the toolbar.")
+        self.assertLess(toolbar_ids.index("open-skills-button"), toolbar_ids.index("conversation-plan-button"))
+        self.assertLess(toolbar_ids.index("conversation-plan-button"), toolbar_ids.index("conversation-goal-button"))
         provider = self.plugin_node(tree, "conversation-provider-menu")["props"]
         self.assertEqual((provider["text"], provider["value"], provider["indicator"], provider["disabled"]), ("Claude", "claude", True, False))
         model = self.plugin_node(tree, "model-picker-menu")["props"]
@@ -846,19 +860,42 @@ class BridgeTestCases21:
         steered = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onSteerSubmit")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(steered["tree"], "js-last-action")), "Last: steer", "Command-Return runs onSteerSubmit.")
 
-        # The plus menu: Plan mode and Goal.
-        plan = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-mode-menu:onMenu:mode:plan")[0])
-        self.assertEqual(self.plugin_text(self.plugin_node(plan["tree"], "js-last-action")), "Last: mode mode:plan")
-        mode = self.plugin_node(plan["tree"], "conversation-mode-menu")["props"]
-        self.assertEqual((mode["text"], mode["color"], mode["label"], [item["checked"] for item in mode["items"][0]]),
-                         ("Plan", "accent", "Conversation mode: Plan mode", [False, False, True]))
-        start = self.plugin_node(plan["tree"], "start-implementing-button")
+        attached = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "composer-attach-button:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(attached["tree"], "js-last-action")), "Last: attach")
+
+        # The Plan and Goal buttons: each toggles, and turning one on turns the other off.
+        def render(*events):
+            arguments = ["plugin", "render", "--page", "Composer"]
+            for event in events:
+                arguments += ["--event", event]
+            return self.assert_success(self.call_cli(*arguments)[0])["tree"]
+
+        plan = render("conversation-plan-button:onPress")
+        self.assertEqual(self.plugin_text(self.plugin_node(plan, "js-last-action")), "Last: plan on")
+        self.assertEqual(mode_toggle(plan, "conversation-plan-button"), ("Plan mode", "On", "orange", 0.18, "lightbulb.max", "orange"), "Plan shows its orange highlight.")
+        self.assertEqual(mode_toggle(plan, "conversation-goal-button")[1], "Off")
+        start = self.plugin_node(plan, "start-implementing-button")
         self.assertEqual((start["events"], start["props"]["value"], start["children"][0]["props"]["fill"]), (["onPress"], "Available", "accent"))
-        goal = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-mode-menu:onMenu:goal")[0])
-        mode = self.plugin_node(goal["tree"], "conversation-mode-menu")["props"]
-        self.assertEqual((mode["text"], mode["badgeIcon"], mode["label"]), ("Goal", "scope", "Goal"), "Goal labels the plus menu.")
-        self.assertEqual(self.plugin_node(goal["tree"], "message-composer-scroll-view")["props"]["placeholder"], "Set a goal to keep pursuing")
-        self.assertFalse(self.plugin_node(goal["tree"], "send-message-button")["props"]["disabled"], "A goal can be sent without a draft.")
+        plan_off = render("conversation-plan-button:onPress", "conversation-plan-button:onPress")
+        self.assertEqual(self.plugin_text(self.plugin_node(plan_off, "js-last-action")), "Last: plan off")
+        self.assertEqual(mode_toggle(plan_off, "conversation-plan-button"), ("Plan mode", "Off", "orange", 0, "lightbulb.max", "secondary"), "Pressing Plan again turns it off.")
+        self.assertNotIn("start-implementing-button", {node.get("props", {}).get("testID") for node in self.plugin_nodes(plan_off)})
+
+        goal = render("message-composer-scroll-view:onChange:draft", "conversation-plan-button:onPress", "conversation-goal-button:onPress")
+        self.assertEqual(self.plugin_text(self.plugin_node(goal, "js-last-action")), "Last: goal on")
+        self.assertEqual(mode_toggle(goal, "conversation-goal-button"), ("Goal", "On", "orange", 0.18, "GoalIcon", "orange"), "Goal shows its orange highlight.")
+        self.assertEqual(mode_toggle(goal, "conversation-plan-button")[1], "Off", "Turning Goal on turns Plan off.")
+        self.assertNotIn("start-implementing-button", {node.get("props", {}).get("testID") for node in self.plugin_nodes(goal)})
+        self.assertEqual(self.plugin_node(goal, "message-composer-scroll-view")["props"]["placeholder"], "Set a goal to keep pursuing")
+        self.assertEqual(self.plugin_node(goal, "message-composer-scroll-view")["props"]["text"], "", "Entering a goal clears the draft.")
+        self.assertFalse(self.plugin_node(goal, "send-message-button")["props"]["disabled"], "A goal can be sent without a draft.")
+        back_to_plan = render("conversation-goal-button:onPress", "conversation-plan-button:onPress")
+        self.assertEqual((mode_toggle(back_to_plan, "conversation-plan-button")[1], mode_toggle(back_to_plan, "conversation-goal-button")[1]), ("On", "Off"),
+                         "Turning Plan on turns Goal off.")
+        goal_off = render("conversation-goal-button:onPress", "conversation-goal-button:onPress")
+        self.assertEqual(self.plugin_text(self.plugin_node(goal_off, "js-last-action")), "Last: goal off")
+        self.assertEqual((mode_toggle(goal_off, "conversation-goal-button")[1], mode_toggle(goal_off, "conversation-plan-button")[1]), ("Off", "Off"))
+        self.assertEqual(self.plugin_node(goal_off, "message-composer-scroll-view")["props"]["placeholder"], "Message…")
         codex = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-provider-menu:onMenu:codex")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(codex["tree"], "js-last-action")), "Last: provider codex")
         self.assertEqual(self.plugin_node(codex["tree"], "conversation-provider-menu")["props"]["text"], "Codex")

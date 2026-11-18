@@ -396,13 +396,7 @@ extension PlayhouseUITests {
             "Reopening the first conversation should restore its independent model choice.")
         attachElementScreenshot(originalConversationPicker, named: "Reopening restores the first conversation's model")
 
-        let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
-        modeMenu.click()
-        let planMode = app.menuItems["Plan mode"]
-        XCTAssertTrue(planMode.waitToExist(timeout: 5))
-        planMode.click()
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        setPlanMode(true)
 
         let composer = element("message-composer")
         composer.click()
@@ -410,7 +404,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("slash-command-plan").waitToExist(timeout: 5), "Typing /plan offers the command.")
         composer.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 5), "Choosing /plan removes the typed command.")
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Choosing /plan should switch modes without sending a message.")
+        XCTAssertTrue(isModeOn("conversation-plan-button"), "Choosing /plan should switch modes without sending a message.")
 
         assertCLIError(
             try runCLI(
