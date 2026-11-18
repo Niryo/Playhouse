@@ -214,7 +214,7 @@ extension PlayhouseUITests {
             "task", "create", "--title", "Active linked PR UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
         ])["result"] as? [String: Any])
         let activeTaskID = try XCTUnwrap(activeCreated["id"] as? String)
-        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        // Manual, the default, kept explicit: this case drives the manual PR path.
         try setPullRequestMode("manual", taskID: activeTaskID)
         openTask(named: "Active linked PR UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
@@ -337,7 +337,7 @@ extension PlayhouseUITests {
                 "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
             ])["result"] as? [String: Any])
             let taskID = try XCTUnwrap(created["id"] as? String)
-            // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+            // Manual, the default, kept explicit: this case drives the manual PR path.
             try setPullRequestMode("manual", taskID: taskID)
             openTask(named: title)
             try completeCurrentTaskWithFixtureAnswers(taskTitle: title)

@@ -4,21 +4,42 @@ import SwiftData
 extension BoardTaskManager {
     /// Carries each task's pull request mode, which the task kept before the
     /// `pull-request-mode` plugin owned it, into the plugin's state, once. A
-    /// task created since reads as the default mode (`BoardTask.init`), so it
-    /// is skipped wherever it was created; the bridge runs this at the start of
-    /// every request.
+    /// task created since reads as PR (`BoardTask.init`), which imports
+    /// nothing, so it is skipped wherever it was created; a task saved while PR
+    /// was the default gets it from `pinPullRequestModeOfExistingTasks`, which
+    /// runs right after. The bridge runs both at the start of every request.
     func importLegacyPullRequestModes(into settings: WorkspaceSettingsManager) throws {
         guard !settings.legacyPullRequestModesImported else { return }
         let state = settings.pluginState(BuiltInPlugins.pullRequestModeID)
         var imported = 0
         for task in try modelContext.fetch(FetchDescriptor<BoardTask>()) {
             let mode = task.legacyPullRequestMode
-            guard mode != PullRequestMode.defaultMode, state[task.id.uuidString] == nil else { continue }
+            guard mode != .pullRequest, state[task.id.uuidString] == nil else { continue }
             settings.setPluginState(BuiltInPlugins.pullRequestModeID, key: task.id.uuidString, value: .string(mode.rawValue))
             imported += 1
         }
         settings.legacyPullRequestModesImported = true
         PlayhouseDiagnostics.record("plugin.pull_request_mode.imported", fields: ["count": String(imported)])
+    }
+
+    /// PR was the default mode before Manual, so a task saved then with no mode
+    /// of its own opened its pull request on Review. Saves PR for each such
+    /// task, once, so only tasks created since get the Manual default. A
+    /// schedule's run whose schedule still exists is left to inherit the mode
+    /// its schedule now keeps.
+    func pinPullRequestModeOfExistingTasks(into settings: WorkspaceSettingsManager) throws {
+        guard !settings.existingTaskPullRequestModesPinned else { return }
+        let state = settings.pluginState(BuiltInPlugins.pullRequestModeID)
+        let tasks = try modelContext.fetch(FetchDescriptor<BoardTask>())
+        let taskIDs = Set(tasks.map(\.id))
+        var pinned = 0
+        for task in tasks where state[task.id.uuidString] == nil {
+            if let source = task.scheduleSourceTaskID, taskIDs.contains(source) { continue }
+            settings.setPluginState(BuiltInPlugins.pullRequestModeID, key: task.id.uuidString, value: .string(PullRequestMode.pullRequest.rawValue))
+            pinned += 1
+        }
+        settings.existingTaskPullRequestModesPinned = true
+        PlayhouseDiagnostics.record("plugin.pull_request_mode.pinned", fields: ["count": String(pinned)])
     }
 
     /// Autopilot gives up after this many fix turns that never got the PRs green,
