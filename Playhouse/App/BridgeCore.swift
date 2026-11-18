@@ -498,7 +498,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let schedule: TaskScheduleRecord?
     /// The recurring schedule that started this task, if any.
     let scheduleSourceTaskID: UUID?
-    /// The plugin placement an Add Plugin mode task builds for, if any.
+    /// The plugin placement a plugin editor builds for, if any.
     var pluginPlacement: String?
     let authoredPluginID: String?
     /// The name and presentation a plugin editor was set up with; the empty conversation shows them.
@@ -511,8 +511,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         let boardTask = task as? BoardTask
         schedule = boardTask.flatMap(TaskScheduleRecord.init(task:))
         scheduleSourceTaskID = boardTask?.scheduleSourceTaskID
-        pluginPlacement = boardTask?.pluginPlacement ?? (task as? StandaloneChat)?.pluginPlacement
-        authoredPluginID = boardTask?.authoredPluginID ?? (task as? StandaloneChat)?.authoredPluginID
+        pluginPlacement = (task as? StandaloneChat)?.pluginPlacement
+        authoredPluginID = (task as? StandaloneChat)?.authoredPluginID
         pluginAuthoringName = (task as? StandaloneChat)?.pluginAuthoringName
         pluginAuthoringPresentation = (task as? StandaloneChat)?.pluginAuthoringPresentation
         id = task.id
@@ -655,6 +655,9 @@ enum ConversationTurnEvents {
     private static var watchers: [UUID: [UUID: AsyncStream<ConversationUpdate>.Continuation]] = [:]
 
     static func isActive(_ taskID: UUID) -> Bool { activeTurns[taskID, default: 0] > 0 }
+
+    /// Every task with a turn running in this process, whichever provider runs it.
+    static var activeTaskIDs: [UUID] { Array(activeTurns.keys) }
 
     /// Turns can nest (a reminder continuation inside a send), so watchers stay until the
     /// outermost one ends.

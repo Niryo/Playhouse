@@ -663,7 +663,6 @@ final class PlayhouseBridgeRuntime {
                     do { try library.prepareDraft(id: id) }
                     catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
                     if let existing = try taskManager.pluginConversations().first(where: { $0.authoredPluginID == id }) {
-                        _ = try await taskManager.migrateLegacyPluginConversation(existing.id)
                         return try taskManager.setPluginDraftContext(existing.id, folder: library.draftLibrary.directory.path)
                     }
                     let plugin: PluginRecord

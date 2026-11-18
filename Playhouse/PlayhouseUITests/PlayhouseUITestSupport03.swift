@@ -434,18 +434,6 @@ extension PlayhouseUITests {
         XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task record should be seeded: \(seedText)")
         XCTAssertTrue(seedText.contains("Seeded linked PR #\(number)"), seedText)
     }
-    func seedLegacyPluginTask(taskID: String, pluginID: String) throws {
-        let process = Process()
-        process.executableURL = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
-        process.arguments = [dataDirectory.path, taskID, "--legacy-plugin", pluginID, pluginsFolder.path]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
-        try process.run()
-        process.waitUntilExit()
-        let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, 0, text)
-    }
     func clearTaskProviderSession(taskID: String) throws {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled SwiftData fixture seeder should be executable.")

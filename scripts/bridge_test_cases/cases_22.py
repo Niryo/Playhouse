@@ -306,30 +306,6 @@ class BridgeTestCases22:
         self.assertNotIn("Plugin authoring", plain["arguments"][plain["arguments"].index("--append-system-prompt") + 1])
         self.assertNotIn("playhouse-plugin", plain["skills"])
 
-        legacy = self.create_task("New plugin: Legacy", roots=[], provider="claude")
-        self.assert_success(self.call_cli("conversation", "send", legacy["id"], "--message", "Remember the legacy conversation.", extra_environment=environment)[0])
-        self.assert_success(self.call_cli("task", "draft", legacy["id"], "--text", "Legacy draft")[0])
-        legacy_before = self.assert_success(self.call_cli("task", "get", legacy["id"])[0])
-        self.write_installed_plugin("legacy-editor", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
-        self.seed_legacy_plugin_task(legacy["id"], "legacy-editor")
-        migrated = self.assert_success(self.call_cli("plugin", "edit", "--id", "legacy-editor")[0])["task"]
-        self.assertEqual(migrated["id"], legacy["id"])
-        self.assertEqual(migrated["savedPrompt"], "Legacy draft")
-        self.assertEqual(migrated["claudeSessionID"], legacy_before["claudeSessionID"])
-        self.assert_success(self.call_cli("conversation", "send", migrated["id"], "--message", "Continue migrated editor.", extra_environment=environment)[0])
-        migrated_turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == "Continue migrated editor.")
-        migrated_instructions = migrated_turn["arguments"][migrated_turn["arguments"].index("--append-system-prompt") + 1]
-        self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), migrated_instructions)
-        self.assertNotIn(legacy["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
-        texts, _ = self.history_texts(legacy["id"], environment)
-        self.assertTrue(any("Remember the legacy conversation" in text for text in texts))
-        legacy_delete = self.create_task("New plugin: Delete legacy", roots=[], provider="claude")
-        self.write_installed_plugin("legacy-delete", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
-        self.seed_legacy_plugin_task(legacy_delete["id"], "legacy-delete")
-        self.assert_success(self.call_cli("plugin", "delete", "--id", "legacy-delete")[0])
-        self.assertNotIn(legacy_delete["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
-        self.assertNotIn("legacy-delete", [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]])
-
     # case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
     def test_plugin_authoring_codex_instructions_resume(self):
         # Codex: the instructions ride the thread and the skill an extra root plus a structured input.
@@ -374,18 +350,6 @@ class BridgeTestCases22:
         self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertEqual(reopened_codex["codexThreadID"], self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]["codexThreadID"])
 
-        legacy_codex = self.create_task("New plugin: Codex legacy", roots=[], provider="codex")
-        codex_env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
-        self.assert_success(self.call_cli("conversation", "send", legacy_codex["id"], "--message", "Before migration.", "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=codex_env)[0])
-        self.write_installed_plugin("legacy-codex", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
-        self.seed_legacy_plugin_task(legacy_codex["id"], "legacy-codex")
-        migrated_codex = self.assert_success(self.call_cli("plugin", "edit", "--id", "legacy-codex")[0])["task"]
-        self.restart_provider(executable)
-        self.assert_success(self.call_cli("conversation", "send", migrated_codex["id"], "--message", "After migration.", "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=codex_env)[0])
-        codex_history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
-        self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), codex_history["threadResumeDeveloperInstructions"][-1])
-        self.assertIn("legacy-codex", codex_history["threadResumeDeveloperInstructions"][-1])
-
     # case-contract: test_plugin_editor_reattaches_after_daemon_restart | A plugin editor follows a running Claude turn after a daemon restart, restores its answer once alongside the preview, and settles without a task outcome nudge. Claude represents the shared reattachment settlement used by both providers.
     def test_plugin_editor_reattaches_after_daemon_restart(self):
         executable = self.install_provider_fixture("claude", "claude-fixture-reattach-plugin")
@@ -400,6 +364,68 @@ class BridgeTestCases22:
         texts, _ = self.history_texts(created["id"], environment)
         self.assertEqual(texts.count("After restart."), 1)
         self.assertTrue(marker.exists(), "No task outcome nudge was sent.")
+    # case-contract: test_plugin_edit_opens_editor_mid_turn | Edit on a plugin whose editor conversation has a turn running opens that conversation at once: while the editor's Claude turn has streamed its first answer and still holds its turn, the editor that sent it shows the turn running, `conversation runtime` lists the editor's task ID in activeTaskIDs (and drops it once the turn ends), and `plugin edit --id` returns within seconds with the same editor ID and the turn keeps running, and in the window the plugin submenu's Edit…, from the board and again with the editor already open, shows the editor with its preview and the running turn's pause button without closing it, and the output the turn streams next appears live in the reopened editor, as it does for `conversation watch` on the editor. Once the turn finishes its reply follows in the same conversation; `plugin sessions` lists the editor, `plugin discard --id` resets the saved plugin's draft and keeps its editor, and deleting the plugin removes its editor from `plugin sessions`. Opening an editor is Playhouse-owned and provider neutral, so Claude represents both providers.
+    def test_plugin_edit_opens_editor_mid_turn(self):
+        environment = self.install_claude_fixture("claude-fixture-plugin-editor-hold")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.write_installed_plugin("busy-editor", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
+        editor = self.assert_success(self.call_cli("plugin", "edit", "--id", "busy-editor")[0])["task"]
+        self.assertEqual((editor["authoredPluginID"], editor["conversationProvider"]), ("busy-editor", "claude"))
+        sent = {}
+        sender = threading.Thread(target=lambda: sent.setdefault("turn", self.call_cli(
+            "conversation", "send", editor["id"], "--message", "plugin-editor-hold-fixture", timeout=120,
+            extra_environment=environment)), daemon=True)
+        sender.start()
+        self.wait_for(Path(executable + ".plugin-editor-turn-ready").is_file, "The editor turn streams and keeps running.")
+        self.assertIn(editor["id"], self.assert_success(self.call_cli("conversation", "runtime")[0])["activeTaskIDs"],
+                      "The runtime reports the editor's turn running by its task ID.")
+        started = time.monotonic()
+        reopened = self.assert_success(self.call_cli("plugin", "edit", "--id", "busy-editor", timeout=30)[0])["task"]
+        elapsed = time.monotonic() - started
+        self.assertEqual(reopened["id"], editor["id"], "Edit reopens the same editor conversation.")
+        self.assertLess(elapsed, 10, "plugin edit does not wait for the editor's running turn.")
+        self.assertTrue(sender.is_alive(), "The editor's turn is still running after plugin edit returned.")
+        self.assertEqual(reopened["status"], "In Progress")
+        # A window reopening the editor follows its running turn the way it follows a task's.
+        watcher = self.start_cli("conversation", "watch", editor["id"])
+        readable, _, _ = select.select([watcher.stdout], [], [], 20)
+        self.assertTrue(readable, "The watcher subscribes to the editor's running turn.")
+        self.assertEqual(json.loads(watcher.stdout.readline()).get("type"), "watching")
+        Path(executable + ".plugin-editor-turn-continue").touch()
+        self.wait_for(Path(executable + ".plugin-editor-turn-continued").is_file, "The held turn streams more after plugin edit.")
+        self.assertTrue(sender.is_alive(), "The editor's turn keeps running while it streams.")
+        Path(executable + ".plugin-editor-turn-release").touch()
+        sender.join(timeout=60)
+        self.assertFalse(sender.is_alive())
+        self.assert_success(sent["turn"][0])
+        self.assertNotIn(editor["id"], self.assert_success(self.call_cli("conversation", "runtime")[0])["activeTaskIDs"],
+                         "The runtime drops the editor once its turn ends.")
+        watched, watched_events = self.finish_cli(watcher, "conversation watch", timeout=30)
+        # The standalone chat is followed through its history, which files turns under their pages.
+        chat = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assert_failure(self.call_cli("conversation", "watch", chat["id"], expected_status=2)[0], "invalid_argument")
+        self.assertTrue(self.assert_success(watched)["watched"])
+        self.assertIn("Still building the busy plugin.", "".join(event["payload"].get("text") or "" for event in watched_events if event["type"] == "text_delta"),
+                      "The watcher streams what the editor's turn writes after it subscribed.")
+        streamed = "".join(event["payload"].get("text") or "" for event in sent["turn"][1] if event["type"] == "text_delta")
+        self.assertIn("Working on the busy plugin. Still building the busy plugin.", streamed, "The turn streamed both parts of its answer.")
+        texts, _ = self.history_texts(editor["id"], environment)
+        self.assertEqual((texts.count("Working on the busy plugin. Still building the busy plugin."), texts.count("The busy plugin turn finished.")), (1, 1),
+                         "The reply follows the streamed answer once each in the same conversation.")
+        def sessions():
+            return [entry["id"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"] if entry["authoredPluginID"] == "busy-editor"]
+        self.assertEqual(sessions(), [editor["id"]], "plugin sessions lists the editor once.")
+        draft_script = self.plugins_folder() / ".drafts" / "plugins" / "busy-editor" / "index.js"
+        draft_script.write_text("Playhouse.render(h(Text, {}, 'Unsaved change'));", encoding="utf-8")
+        self.assert_success(self.call_cli("plugin", "discard", "--id", "busy-editor")[0])
+        self.assertEqual(draft_script.read_text(encoding="utf-8"), (self.plugins_folder() / "busy-editor" / "index.js").read_text(encoding="utf-8"),
+                         "Discard resets the saved plugin's draft.")
+        self.assertEqual(sessions(), [editor["id"]], "Discarding a saved plugin's draft keeps its editor.")
+        self.assert_success(self.call_cli("plugin", "delete", "--id", "busy-editor")[0])
+        self.assertEqual(sessions(), [], "Deleting the plugin removes its editor conversation.")
+        self.assertFalse((self.plugins_folder() / "busy-editor").exists())
+
     # case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation), then the task card's built-in Pull request mode and Pull requests plugins (inline at the taskItem placement), the board sidebar's built-in Agents info (a section at the mainSidebarBottom placement) and its built-in Scheduled Tasks (a popover at the mainSidebar placement), and the composer's built-in Built-in Commands (headless at the composerActions placement, with its / commands), before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar or on the task card. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A `plugin refresh` with nothing changed still bumps the revision and lists identical plugins, and in the window it leaves an open plugin submenu open. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete, and which labels Built-in Commands Headless (slash commands only), its submenu also offering Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar or the task card is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
     def test_plugin_enable_disable_and_builtins(self):
         def listed():

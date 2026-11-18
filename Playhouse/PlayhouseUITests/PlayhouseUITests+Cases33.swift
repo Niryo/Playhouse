@@ -716,12 +716,12 @@ extension PlayhouseUITests {
         XCTAssertTrue(terminateAppAndWait(app))
     }
 
-    // case-contract: test_update_restart_now_keeps_claude_turn_running | Restarting to update while a Claude Code turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the Claude Code process keeps running, the next daemon is the new version and reattaches the same run; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same run back; and when the turn finishes its answer is kept once and the task settles through its outcome.
+    // case-contract: test_update_restart_now_keeps_claude_turn_running | Restarting to update while a Claude Code turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the Claude Code process keeps running, the next daemon is the new version and reattaches the same run; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, gives up its socket before it exits so callers already queued on it are refused rather than dropped, and the daemon that follows starts only once it has exited, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same run back; and when the turn finishes its answer is kept once and the task settles through its outcome.
     func test_update_restart_now_keeps_claude_turn_running() throws {
         try assertRestartNowKeepsTurnRunning(provider: "claude")
     }
 
-    // case-contract: test_update_restart_now_keeps_codex_turn_running | Restarting to update while a Codex turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the shared Codex app-server keeps running, the next daemon is the new version and reconnects to the same server; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same server back; and when the turn finishes its answer is kept once and the task settles through its outcome.
+    // case-contract: test_update_restart_now_keeps_codex_turn_running | Restarting to update while a Codex turn is running doesn't wait for it: with the update waiting for the agent, installing now starts the installer, a second install while it runs is refused as busy, and the installer stops the app's own bridge daemon and installs over it; with the window running, the app quits by itself when the installer asks rather than being stopped. The send that was waiting on the stopped daemon fails as unavailable, the shared Codex app-server keeps running, the next daemon is the new version and reconnects to the same server; when that daemon is stopped in turn, it refuses new requests as exiting instead of dropping them and logs each one, gives up its socket before it exits so callers already queued on it are refused rather than dropped, and the daemon that follows starts only once it has exited, the CLI and the window's update check send them again to the daemon that follows (the headless suite runs no window, so only the CLI's are sent), and that daemon takes the same server back; and when the turn finishes its answer is kept once and the task settles through its outcome.
     func test_update_restart_now_keeps_codex_turn_running() throws {
         try assertRestartNowKeepsTurnRunning(provider: "codex")
     }
@@ -744,6 +744,8 @@ extension PlayhouseUITests {
         XCTAssertGreaterThanOrEqual(holder, 0, "The daemon should accept a connection.")
         Thread.sleep(forTimeInterval: 0.2)
         let requested = shutdownRequests()
+        func socketReleases() -> Int { daemonLog().components(separatedBy: "released the socket, exiting").count - 1 }
+        let released = socketReleases()
         let stopper = try startCLIProcess(["daemon", "shutdown"], extraEnvironment: environment, cli: cli)
         XCTAssertTrue(waitUntil({ shutdownRequests() > requested }, timeout: 20), "The daemon should log the shutdown request.")
         // The window's own request reaches the stopping daemon too.
@@ -760,6 +762,11 @@ extension PlayhouseUITests {
         let next = try XCTUnwrap((status["result"] as? [String: Any])?["processID"] as? Int)
         XCTAssertNotEqual(next, daemon, "The refused request is answered by the next daemon.")
         XCTAssertTrue(waitUntil({ kill(pid_t(daemon), 0) != 0 }, timeout: 25), "The stopped daemon exits.")
+        XCTAssertEqual(socketReleases(), released + 1, "The stopping daemon gives up its socket before it exits, so callers queued on it are refused rather than dropped.")
+        let log = daemonLog()
+        let lastListening = log.range(of: "listening at", options: .backwards)?.lowerBound
+        let lastRelease = log.range(of: "released the socket, exiting", options: .backwards)?.lowerBound
+        XCTAssertTrue(lastListening != nil && lastRelease != nil && lastListening! > lastRelease!, "The next daemon starts only after the stopping daemon has exited.")
         XCTAssertEqual(try finishCLIProcess(stopper)["ok"] as? Bool, true)
         XCTAssertGreaterThan(refusals("update.check"), windowRefusals, "The window's check reached the stopping daemon and was refused.")
         XCTAssertTrue(waitUntil({

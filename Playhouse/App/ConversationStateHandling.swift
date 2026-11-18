@@ -126,8 +126,8 @@ extension TaskConversationView {
                     return PendingImage(dataURL: dataURL, image: image)
                 }
             }
-            isResponding = hasPendingSubmittedPrompt
-                && (status == .inProgress || status == .waitingResponse)
+            isResponding = (hasPendingSubmittedPrompt
+                && (status == .inProgress || status == .waitingResponse)) || providerTurnIsActive
             if let threadID = task.activeConversationID {
                 isResponding = isResponding || conversationRuntime.isTurnActive(threadID: threadID)
                 // A turn paused while this view was closed can still be continued.

@@ -561,12 +561,6 @@ extension PlayhouseUITests {
     // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, the chosen name, placement and presentation with a note that the user can ask to change any of them, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions, which let the user change any of those choices, even the name; a changed name, placement and presentation names the unsaved draft's editor and is published under the same plugin ID on save; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
-        let codexExecutable = dataDirectory.appendingPathComponent("codex-fixture-plugin-author-success")
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-success"), to: codexExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexExecutable.path)
-        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
-        codexFixtureExecutable = codexExecutable.path
-        let codexEnvironment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": codexExecutable.path]
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
         func turns() -> [[String: Any]] {
             guard let data = try? Data(contentsOf: historyURL),
@@ -792,58 +786,6 @@ extension PlayhouseUITests {
         clickInstalledPluginAction("Delete…", pluginRow: "Installed editor — Main sidebar")
         app.dialogs.buttons["Delete"].click()
         XCTAssertTrue(waitUntil({ (try? sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" }) == false }, timeout: 10))
-
-        // A migrated Codex editor resumes its original thread with the isolated draft path.
-        let codexTaskResult = try runCLI(["task", "create", "--title", "New plugin: Codex legacy", "--prompt", "Legacy description", "--provider", "codex"])
-        let codexTask = try XCTUnwrap(codexTaskResult["result"] as? [String: Any])
-        let codexID = try XCTUnwrap(codexTask["id"] as? String)
-        _ = try runCLI(["conversation", "send", codexID, "--message", "Before migration"], extraEnvironment: codexEnvironment)
-        try writeInstalledPlugin("legacy-codex", source: Self.pluginContextSource, placement: "mainSidebar", name: "Codex legacy")
-        try seedLegacyPluginTask(taskID: codexID, pluginID: "legacy-codex")
-        _ = try runCLI(["plugin", "refresh"])
-        clickInstalledPluginAction("Edit…", pluginRow: "Codex legacy — Main sidebar")
-        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
-        let stopCodex = Process()
-        stopCodex.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        stopCodex.arguments = ["-f", codexExecutable.path]
-        try stopCodex.run()
-        stopCodex.waitUntilExit()
-        _ = try runCLI(["conversation", "send", codexID, "--message", "After migration"], extraEnvironment: codexEnvironment)
-        let codexHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: codexExecutable.path + ".history"))) as? [String: Any])
-        let resumedInstructions = try XCTUnwrap((codexHistory["threadResumeDeveloperInstructions"] as? [String])?.last)
-        XCTAssertTrue(resumedInstructions.contains(pluginsFolder.appendingPathComponent(".drafts/plugins").path))
-        XCTAssertTrue(resumedInstructions.contains("legacy-codex"))
-        XCTAssertTrue(element("plugin-creation-preview").exists)
-        attachScreenshot(named: "Migrated Codex plugin editor")
-        element("back-to-board-button").click()
-
-        // A pre-existing task-backed editor keeps its session, draft and preview when migrated.
-        let legacyResponse = try runCLI(["task", "create", "--title", "New plugin: Legacy editor", "--prompt", "Legacy description", "--provider", "claude"])
-        let legacy = try XCTUnwrap(legacyResponse["result"] as? [String: Any])
-        let legacyID = try XCTUnwrap(legacy["id"] as? String)
-        _ = try runCLI(["conversation", "send", legacyID, "--message", "Remember this legacy conversation"], extraEnvironment: environment)
-        _ = try runCLI(["task", "draft", legacyID, "--text", "Legacy unsent draft"])
-        try writeInstalledPlugin("legacy-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Legacy editor")
-        try seedLegacyPluginTask(taskID: legacyID, pluginID: "legacy-editor")
-        _ = try runCLI(["plugin", "refresh"])
-        clickInstalledPluginAction("Edit…", pluginRow: "Legacy editor — Main sidebar")
-        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
-        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").contains("Legacy unsent draft") }, timeout: 10))
-        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Remember this legacy conversation")).firstMatch.waitToExist(timeout: 10))
-        XCTAssertFalse(try boardTaskRecords().contains { $0["id"] as? String == legacyID })
-        attachScreenshot(named: "Migrated plugin editor")
-
-        element("back-to-board-button").click()
-        let legacyDeleteResponse = try runCLI(["task", "create", "--title", "New plugin: Delete legacy", "--prompt", "Legacy description"])
-        let legacyDeleteID = try XCTUnwrap((legacyDeleteResponse["result"] as? [String: Any])?["id"] as? String)
-        try writeInstalledPlugin("legacy-delete", source: Self.pluginContextSource, placement: "mainSidebar", name: "Delete legacy")
-        try seedLegacyPluginTask(taskID: legacyDeleteID, pluginID: "legacy-delete")
-        _ = try runCLI(["plugin", "refresh"])
-        clickInstalledPluginAction("Delete…", pluginRow: "Delete legacy — Main sidebar")
-        app.dialogs.buttons["Delete"].click()
-        XCTAssertTrue(waitUntil({ (try? self.boardTaskRecords().contains { $0["id"] as? String == legacyDeleteID }) == false }, timeout: 10))
-
     }
     /// Menus dropped from the menu bar are outside the window crop of `attachScreenshot(named:)`.
     func attachMenuScreenshot(_ menuBarItem: XCUIElement, named name: String) {
@@ -937,6 +879,116 @@ extension PlayhouseUITests {
         composer.typeText("Continue working")
         XCTAssertTrue((composer.value as? String ?? "").contains("Continue working"), "The composer accepts the next request.")
         attachScreenshot(named: "Plugin editor after daemon restart")
+    }
+    // case-contract: test_plugin_edit_opens_editor_mid_turn | Edit on a plugin whose editor conversation has a turn running opens that conversation at once: while the editor's Claude turn has streamed its first answer and still holds its turn, the editor that sent it shows the turn running, `conversation runtime` lists the editor's task ID in activeTaskIDs (and drops it once the turn ends), and `plugin edit --id` returns within seconds with the same editor ID and the turn keeps running, and in the window the plugin submenu's Edit…, from the board and again with the editor already open, shows the editor with its preview and the running turn's pause button without closing it, and the output the turn streams next appears live in the reopened editor, as it does for `conversation watch` on the editor. Once the turn finishes its reply follows in the same conversation; `plugin sessions` lists the editor, `plugin discard --id` resets the saved plugin's draft and keeps its editor, and deleting the plugin removes its editor from `plugin sessions`. Opening an editor is Playhouse-owned and provider neutral, so Claude represents both providers.
+    func test_plugin_edit_opens_editor_mid_turn() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-plugin-editor-hold")
+        let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        func editorIDs() throws -> [String] {
+            let sessions = try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
+            return sessions.filter { $0["authoredPluginID"] as? String == "busy-editor" }.compactMap { $0["id"] as? String }
+        }
+        // A menu click that never reaches the app sends no plugin edit; only such a missed click is retried.
+        func editRequests() -> Int {
+            ((try? diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == "bridge.request.started" && $0["command"] as? String == "plugin.edit"
+                    && $0["argument.__guiRuntime"] as? String == "true"
+            }.count
+        }
+        func clickEdit() {
+            for _ in 0..<3 {
+                let before = editRequests()
+                clickInstalledPluginAction("Edit…", pluginRow: "Busy editor — Main sidebar")
+                if waitUntil({ editRequests() > before }, timeout: 3) { return }
+            }
+            XCTFail("Edit… never reached the app.")
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        try writeInstalledPlugin("busy-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Busy editor")
+        _ = try runCLI(["plugin", "refresh"])
+        // The menu bar is rebuilt when the plugins refresh or the window changes what it shows; a
+        // submenu opened while that lands closes under the click, so the menu settles first.
+        func settlePluginsMenu() {
+            let pluginsMenu = app.menuBars.menuBarItems["Plugins"]
+            XCTAssertTrue(waitUntil({
+                pluginsMenu.click()
+                let found = pluginsMenu.menuItems["Busy editor — Main sidebar"].exists
+                self.app.typeKey(.escape, modifierFlags: [])
+                return found
+            }, timeout: 15), "The Plugins menu lists the installed plugin.")
+        }
+        settlePluginsMenu()
+        clickEdit()
+        let preview = element("plugin-creation-preview")
+        XCTAssertTrue(preview.waitToExist(timeout: 10))
+        let editorID = try XCTUnwrap(try editorIDs().first)
+
+        sendFromComposer("plugin-editor-hold-fixture")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".plugin-editor-turn-ready") }, timeout: 20), "The editor turn streams and keeps running.")
+        // A message still streaming is an assistant message labeled with its text so far.
+        func assistantMessage(containing text: String) -> XCUIElement {
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", text)).firstMatch
+        }
+        let streamed = assistantMessage(containing: "Working on the busy plugin.")
+        XCTAssertTrue(streamed.waitToExist(timeout: 10), "The running turn's streamed answer shows in the editor.")
+        func runtimeActiveTaskIDs() -> [String] {
+            ((try? runCLI(["conversation", "runtime"]))?["result"] as? [String: Any])?["activeTaskIDs"] as? [String] ?? []
+        }
+        XCTAssertTrue(runtimeActiveTaskIDs().contains(editorID), "The runtime reports the editor's turn running by its task ID.")
+        XCTAssertTrue(element("pause-response-button").waitToExist(timeout: 5), "The editor that sent the turn shows it running.")
+
+        // The bridge's edit returns at once with the same editor while the turn holds its reservation.
+        let started = Date()
+        let reopened = try XCTUnwrap((try runCLI(["plugin", "edit", "--id", "busy-editor"])["result"] as? [String: Any])?["task"] as? [String: Any])
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "plugin edit does not wait for the editor's running turn.")
+        XCTAssertEqual(reopened["id"] as? String, editorID)
+        XCTAssertEqual(reopened["status"] as? String, "In Progress")
+
+        // From the board, Edit… opens the editor mid-turn instead of waiting for the turn to end.
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ !preview.exists }, timeout: 5), "Back closes the editor.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+        settlePluginsMenu()
+        clickEdit()
+        XCTAssertTrue(preview.waitToExist(timeout: 5), "Edit… opens the editor while its turn is still running.")
+        XCTAssertTrue(element("pause-response-button").waitToExist(timeout: 5), "The reopened editor shows its turn still running.")
+        // The reopened editor follows the running turn: what it streams next shows live. Nothing
+        // streamed before it subscribed is replayed, so the turn continues once it has.
+        XCTAssertTrue(waitUntil({
+            ((try? self.diagnosticEvents()) ?? []).contains {
+                $0["event"] as? String == "bridge.request.started" && $0["command"] as? String == "conversation.events.subscribe"
+                    && ($0["argument.taskID"] as? String)?.caseInsensitiveCompare(editorID) == .orderedSame
+            }
+        }, timeout: 10), "The reopened editor subscribes to its running turn.")
+        touch(executable + ".plugin-editor-turn-continue")
+        let live = assistantMessage(containing: "Still building the busy plugin.")
+        XCTAssertTrue(live.waitToExist(timeout: 10), "The reopened editor shows the running turn's live output.")
+        XCTAssertTrue(element("pause-response-button").exists, "The turn is still running.")
+        attachScreenshot(named: "Plugin editor opened mid-turn")
+
+        // With the editor already open, Edit… keeps it open on the live turn.
+        clickEdit()
+        XCTAssertFalse(waitUntil({ !preview.exists || !live.exists }, timeout: 3), "Edit… on the open editor never closes it.")
+        XCTAssertTrue(element("pause-response-button").exists, "The open editor still shows its running turn.")
+        attachScreenshot(named: "Open plugin editor after Edit mid-turn")
+
+        touch(executable + ".plugin-editor-turn-release")
+        XCTAssertTrue(app.staticTexts["The busy plugin turn finished."].waitToExist(timeout: 30), "The reply follows in the same conversation.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30))
+        XCTAssertFalse(runtimeActiveTaskIDs().contains(editorID), "The runtime drops the editor once its turn ends.")
+        XCTAssertEqual(try editorIDs(), [editorID], "plugin sessions lists the editor once.")
+
+        let draftScript = pluginsFolder.appendingPathComponent(".drafts/plugins/busy-editor/index.js")
+        try Data("Playhouse.render(h(Text, {}, 'Unsaved change'));".utf8).write(to: draftScript)
+        _ = try runCLI(["plugin", "discard", "--id", "busy-editor"])
+        XCTAssertEqual(try Data(contentsOf: draftScript), try Data(contentsOf: pluginsFolder.appendingPathComponent("busy-editor/index.js")), "Discard resets the saved plugin's draft.")
+        XCTAssertEqual(try editorIDs(), [editorID], "Discarding a saved plugin's draft keeps its editor.")
+        clickInstalledPluginAction("Delete…", pluginRow: "Busy editor — Main sidebar")
+        XCTAssertTrue(app.dialogs.buttons["Delete"].waitToExist(timeout: 5))
+        app.dialogs.buttons["Delete"].click()
+        XCTAssertTrue(waitUntil({ !preview.exists }, timeout: 10), "Deleting the plugin closes its open editor.")
+        XCTAssertTrue(waitUntil({ (try? editorIDs().isEmpty) == true }, timeout: 10), "Deleting the plugin removes its editor conversation.")
     }
     // case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation), then the task card's built-in Pull request mode and Pull requests plugins (inline at the taskItem placement), the board sidebar's built-in Agents info (a section at the mainSidebarBottom placement) and its built-in Scheduled Tasks (a popover at the mainSidebar placement), and the composer's built-in Built-in Commands (headless at the composerActions placement, with its / commands), before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar or on the task card. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A `plugin refresh` with nothing changed still bumps the revision and lists identical plugins, and in the window it leaves an open plugin submenu open. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete, and which labels Built-in Commands Headless (slash commands only), its submenu also offering Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar or the task card is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
     func test_plugin_enable_disable_and_builtins() throws {

@@ -83,7 +83,7 @@ extension BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, prompt: String? = nil, pluginPlacement: String? = nil, authoredPluginID: String? = nil) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, prompt: String? = nil) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -107,8 +107,6 @@ extension BoardTaskManager {
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
-        task.pluginPlacement = pluginPlacement
-        task.authoredPluginID = authoredPluginID
         // A prompt given at creation has not been sent, so it is the composer's draft.
         if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             task.savedPrompt = prompt
@@ -229,7 +227,7 @@ extension BoardTaskManager {
 
     /// Plugin editor conversations; an editor's title and placement are its draft's current ones, not its setup-time choices.
     func pluginConversations() throws -> [BoardTaskRecord] {
-        let sessions = try modelContext.fetch(FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)]))
+        try modelContext.fetch(FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)]))
             .filter { $0.authoredPluginID != nil }.map { chat in
                 var record = BoardTaskRecord(task: chat)
                 // The agent can rename or move the plugin; its draft manifest wins over the setup-time choices.
@@ -241,10 +239,6 @@ extension BoardTaskManager {
                 }
                 return record
             }
-        let legacy = try modelContext.fetch(FetchDescriptor<BoardTask>())
-            .filter { $0.authoredPluginID != nil && $0.repositoryWorktrees.isEmpty }
-            .map { BoardTaskRecord(task: $0) }
-        return sessions + legacy
     }
 
     func withPluginOperationLock<T>(_ id: String, operation: @MainActor () async throws -> T) async throws -> T {
@@ -256,56 +250,6 @@ extension BoardTaskManager {
         }
         return try await withExclusiveFileLocks(at: [directory.appendingPathComponent("plugin-\(id).lock")], purpose: "plugin-operation") {
             try await operation()
-        }
-    }
-
-    /// Preserve the transcript and provider sessions of editors created as board cards.
-    func migrateLegacyPluginConversation(_ id: UUID) async throws -> BoardTaskRecord {
-        try await withConversationTurnReservation(id) {
-            try await self.withTaskOperationLock(id) {
-                if let existing = try self.standaloneChatModel(id) { return BoardTaskRecord(task: existing) }
-                let task = try self.requireTask(id)
-                guard task.authoredPluginID != nil, task.repositoryWorktrees.isEmpty else {
-                    throw BridgeCommandError(code: "invalid_argument", message: "This task cannot be converted to a plugin editor.")
-                }
-                let chat = StandaloneChat(provider: task.conversationProvider)
-                chat.id = task.id
-                chat.title = task.title.hasPrefix("New plugin: ") ? String(task.title.dropFirst("New plugin: ".count)) : task.title
-                chat.createdAt = task.createdAt
-                chat.authoredPluginID = task.authoredPluginID
-                chat.pluginPlacement = task.pluginPlacement
-                chat.pluginContextFolder = task.contextFolderPaths.first
-                chat.statusRawValue = task.status == .done ? TaskStatus.waitingResponse.rawValue : task.statusRawValue
-                chat.lifecycleRevision = task.lifecycleRevision
-                chat.statusMessage = task.statusMessage
-                chat.progressTypeRawValue = task.progressTypeRawValue
-                chat.progressLabel = task.progressLabel
-                chat.progressDetail = task.progressDetail
-                chat.inProgressStartedAt = task.inProgressStartedAt
-                chat.totalInProgressSeconds = task.totalInProgressSeconds
-                chat.codexThreadID = task.codexThreadID
-                chat.claudeSessionID = task.claudeSessionID
-                chat.conversationEffortRawValue = task.conversationEffortRawValue
-                chat.conversationModelIDsData = task.conversationModelIDsData
-                chat.savedPrompt = task.savedPrompt
-                chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
-                chat.hasUnsentDraft = task.hasUnsentDraft
-                chat.draftEditedAt = task.draftEditedAt
-                chat.draftImageDataURLsData = task.draftImageDataURLsData
-                chat.pendingAnnotationsData = task.pendingAnnotationsData
-                chat.sideChatsData = task.sideChatsData
-                chat.conversationActivityDurationsData = task.conversationActivityDurationsData
-                chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
-                chat.totalInputTokens = task.totalInputTokens
-                chat.totalOutputTokens = task.totalOutputTokens
-                chat.totalCacheReadTokens = task.totalCacheReadTokens
-                chat.totalCacheCreationTokens = task.totalCacheCreationTokens
-                chat.callUsageSnapshotsData = task.callUsageSnapshotsData
-                self.modelContext.insert(chat)
-                self.modelContext.delete(task)
-                try self.modelContext.save()
-                return BoardTaskRecord(task: chat)
-            }
         }
     }
 
@@ -344,7 +288,6 @@ extension BoardTaskManager {
             if installed { try library.delete(id: id) } else { try library.discardDraft(id: id) }
             for id in ids {
                 if let chat = try standaloneChatModel(id) { modelContext.delete(chat) }
-                else if let task = try? taskModel(id) { modelContext.delete(task) }
             }
             if !ids.isEmpty { try modelContext.save() }
         }

@@ -677,16 +677,6 @@ class BridgeTestHelpers01:
         )
         self.assertIn(f"Seeded linked PR #{number}", result.stdout)
         return seeded_url
-    def seed_legacy_plugin_task(self, task_id, plugin_id):
-        root = Path(__file__).resolve().parent.parent
-        executable = self.data_directory / "seed-legacy-plugin"
-        subprocess.run(["xcrun", "swiftc", "-module-name", "Playhouse",
-                        str(root / "Playhouse/App/BoardTask.swift"),
-                        str(root / "Playhouse/App/ConversationSubject.swift"),
-                        str(root / "scripts/seed-task-pr-link.swift"), "-o", str(executable)],
-                       check=True, capture_output=True, text=True)
-        subprocess.run([str(executable), str(self.data_directory), task_id, "--legacy-plugin",
-                        plugin_id, str(self.plugins_folder())], check=True, capture_output=True, text=True)
     def clear_task_provider_session(self, task_id):
         executable = self.data_directory / "seed-task-pr-link"
         if not executable.exists():

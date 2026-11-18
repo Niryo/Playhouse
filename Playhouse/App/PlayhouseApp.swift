@@ -340,15 +340,16 @@ struct PluginsMenuContent: View {
 @MainActor
 enum PluginManagement {
     /// Opens the plugin's editor conversation, creating it the first time.
+    ///
+    /// An existing editor opens at once, so a turn running in it shows live; the bridge call
+    /// that refreshes its draft follows and may wait behind a Save or Discard of the plugin.
     static func edit(_ pluginID: String, registry: PluginRegistry) {
+        let existing = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID })?.id
+        if let existing { NotificationCenter.default.post(name: .playhouseEditPlugin, object: existing) }
         Task { @MainActor in
             do {
-                if let existing = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) {
-                    NotificationCenter.default.post(name: .playhousePreparePluginEdit, object: existing.id)
-                    await Task.yield()
-                }
                 let id = try await registry.edit(pluginID)
-                NotificationCenter.default.post(name: .playhouseEditPlugin, object: id)
+                if id != existing { NotificationCenter.default.post(name: .playhouseEditPlugin, object: id) }
             } catch {
                 NSAlert(error: error).runModal()
             }
@@ -369,7 +370,7 @@ enum PluginManagement {
     /// Lets the plugin's editor conversation, if one is open, let go of its folder before it is deleted.
     static func prepareDelete(_ pluginID: String, registry: PluginRegistry) async {
         guard let session = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) else { return }
-        NotificationCenter.default.post(name: .playhousePreparePluginEdit, object: session.id)
+        NotificationCenter.default.post(name: .playhousePreparePluginDelete, object: session.id)
         await Task.yield()
     }
 

@@ -11,6 +11,31 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         (folder / "plugin.json").write_text(runtime.json.dumps({"id": folder.name, "name": "Timer", "placement": "mainSidebar", "presentation": "modal"}), encoding="utf-8")
         (folder / "index.js").write_text("Playhouse.render(h(Text, {testID: 'preview-content'}, " + runtime.json.dumps(payload["text"]) + "));", encoding="utf-8")
         runtime.text("msg_plugin_preview", "Plugin preview updated: " + payload["text"])
+    elif user_text.startswith("plugin-editor-hold-fixture"):
+        # A plugin editor turn that keeps running (holding its turn reservation) while it streams
+        # its answer in two parts: the first at once, the second when the test writes
+        # `<fixture>.plugin-editor-turn-continue`. It completes the answer only once the test writes
+        # `<fixture>.plugin-editor-turn-release`, as an answer still being written.
+        base = str(runtime.sys.argv[0]) + ".plugin-editor-turn"
+        def stream(chunk):
+            runtime.write({"type": "stream_event", "parent_tool_use_id": None,
+                           "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": chunk}}})
+        def hold(name):
+            marker = runtime.Path(f"{base}-{name}")
+            deadline = runtime.time.monotonic() + 90
+            while not marker.exists() and runtime.time.monotonic() < deadline:
+                runtime.time.sleep(0.02)
+            if not marker.exists():
+                raise TimeoutError(f"The test did not write the plugin editor turn's {name} marker.")
+        working, still = "Working on the busy plugin.", " Still building the busy plugin."
+        stream(working)
+        runtime.Path(f"{base}-ready").write_text("The plugin editor turn is running.\n", encoding="utf-8")
+        hold("continue")
+        stream(still)
+        runtime.Path(f"{base}-continued").write_text("The plugin editor turn streamed more.\n", encoding="utf-8")
+        hold("release")
+        runtime.assistant("msg_plugin_editor_working", [{"type": "text", "text": working + still}])
+        runtime.text("msg_plugin_editor_done", "The busy plugin turn finished.")
     elif user_text.startswith("Classify the latest user message for Playhouse's continuous chat page index."):
         hold = runtime.Path(str(runtime.sys.argv[0]) + ".hold-classifier")
         if hold.exists():

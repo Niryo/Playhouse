@@ -38,16 +38,6 @@ struct SeedTaskPullRequestLink {
             return
         }
 
-        if arguments.count == 5, arguments[2] == "--legacy-plugin" {
-            task.authoredPluginID = arguments[3]
-            task.pluginPlacement = "mainSidebar"
-            task.contextFolderPaths = [arguments[4]]
-            task.workspaceRootPaths = [arguments[4]]
-            try context.save()
-            print("Seeded legacy plugin task \(taskID).")
-            return
-        }
-
         guard (4...5).contains(arguments.count),
               let number = Int(arguments[2]), number > 0,
               let repositoryIndex = arguments.count == 5 ? Int(arguments[4]) : 0,
