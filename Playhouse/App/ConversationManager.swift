@@ -81,14 +81,20 @@ extension ConversationManager {
             ])
             prompt = "<selected-text>\n\(selection)\n</selected-text>\n\n\(message)"
         }
-        defer { SideChatSessions.sessions[id]?.isResponding = false }
+        defer {
+            if SideChatSessions.sessions[id]?.closesWhenIdle == true {
+                SideChatSessions.sessions.removeValue(forKey: id)
+            } else {
+                SideChatSessions.sessions[id]?.isResponding = false
+            }
+        }
         if let current = SideChatSessions.sessions[id], sideChatID != nil, requestedModelID != nil || requestedEffort != nil {
             // A follow-up's new choice is checked before it is kept for later messages.
             try await clients.client(for: current.saved.provider).validateEffort(
                 requestedEffort ?? current.saved.effort, modelID: requestedModelID ?? current.saved.modelID, workspace: current.workspace
             )
         }
-        // The live entry, which closing the bubble removes meanwhile; never a copy written back.
+        // The live entry, never a copy written back over what changed while awaiting.
         if let requestedModelID { SideChatSessions.sessions[id]?.saved.modelID = requestedModelID }
         if let requestedEffort { SideChatSessions.sessions[id]?.saved.effort = requestedEffort }
         guard let session = SideChatSessions.sessions[id] else {
@@ -127,10 +133,15 @@ extension ConversationManager {
     }
 
     /// Ends a side chat's live session. Its saved exchanges stay on the task, and its next
-    /// message continues the same provider conversation.
+    /// message continues the same provider conversation. A side chat still answering keeps
+    /// its session until the answer is saved.
     func closeSideChat(taskID: UUID, sideChatID: String) -> Bool {
         guard let session = SideChatSessions.sessions[sideChatID], session.taskID == taskID else { return false }
-        SideChatSessions.sessions.removeValue(forKey: sideChatID)
+        if session.isResponding {
+            SideChatSessions.sessions[sideChatID]?.closesWhenIdle = true
+        } else {
+            SideChatSessions.sessions.removeValue(forKey: sideChatID)
+        }
         return true
     }
 
@@ -324,10 +335,6 @@ final class ConversationManager {
                 value.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         let requiresSensitiveAnswerRedaction = request.questions.contains(where: \.isSecret)
-        let sensitiveCodexTurnIDsBeforeRecovery = Set(try transcripts.readState(taskID).sensitiveCodexTurnIDs ?? [])
-        try transcripts.mutate(taskID, turns: .none) { transcript in
-            transcript.pendingSensitiveUserInputRedaction = true
-        }
         let secretNote = request.questions.contains(where: \.isSecret)
             ? "The user re-entered the requested secret answer(s) after restart. Apply them now; do not ask for them again."
             : ""
@@ -338,8 +345,8 @@ final class ConversationManager {
 
         \(answerLines.joined(separator: "\n\n"))
         """
-        // The answered question stays saved for redaction and retry, but history
-        // hides it while this send applies it. The request is cleared before the
+        // The answered question stays saved for retry, but history hides the pending
+        // question while this send applies it; the prompt itself is stored as sent. The request is cleared before the
         // reservation is released, so a reader never sees it come back on success.
         _ = try await send(
             taskID: taskID,
@@ -352,22 +359,6 @@ final class ConversationManager {
             hideSensitiveRecoveryPrompt: true,
             applyingUserInputRequestID: request.id,
             onUserInputApplied: { [self] in
-                if requiresSensitiveAnswerRedaction {
-                    try transcripts.mutate(taskID, turns: .none) { transcript in
-                        let recoveryTurnIDs = Set(transcript.sensitiveCodexTurnIDs ?? []).subtracting(sensitiveCodexTurnIDsBeforeRecovery)
-                        var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
-                        for turnID in recoveryTurnIDs {
-                            storedMessages[turnID] = storedMessages[turnID]?.map { message in
-                                guard message.role == .assistant else { return message }
-                                var hidden = message
-                                hidden.text = "[Response to private answer hidden]"
-                                hidden.asyncQuestions = nil
-                                return hidden
-                            }
-                        }
-                        transcript.sensitiveCodexTurnMessages = storedMessages
-                    }
-                }
                 try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
             }
         )
@@ -443,7 +434,6 @@ final class ConversationManager {
     func publishImage(taskID: UUID, path: String, caption: String = "") async throws -> ConversationMessage {
         let task = try tasks.conversationSubject(taskID)
         let provider = task.conversationProvider
-        let codexClient = clients.codex
         let url = URL(fileURLWithPath: path)
         let data = try Data(contentsOf: url)
         guard data.count <= 10_000_000 else {
@@ -459,34 +449,20 @@ final class ConversationManager {
         guard Self.isValidImageDataURL(image) else {
             throw BridgeCommandError(code: "invalid_argument", message: "The file is not a valid PNG or JPEG image.")
         }
-        let activeCodexThreadID = provider == .codex ? task.activeConversationID : nil
-        let activeCodexTurnID = activeCodexThreadID.flatMap { threadID in
-            codexClient.activeTurnID(for: threadID)
-                ?? ConversationSteerMailbox.activeTurnID(threadID: threadID)
-        }
-        let isActiveCodexPublication = activeCodexThreadID != nil && activeCodexTurnID != nil
-        // A Codex thread can reject a history read while its turn is writing.
-        // An agent publishes its generated image from inside that turn, so use
-        // the active turn identity and attach the image to Playhouse's transcript.
-        // History composition positions it after that turn's native messages.
-        let existingHistory = isActiveCodexPublication ? nil : try await history(taskID: taskID)
-        let message = ConversationMessage(
+        // An image published from inside a running turn joins that turn; otherwise it is a
+        // turn of its own, appended after everything already recorded.
+        let activeTurn = task.activeConversationID.map {
+            client(for: task).isTurnActive(threadID: $0)
+                || client(for: task).isTurnActiveInProcess(threadID: $0)
+                || ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: $0) != nil
+                || (provider == .codex && ConversationSteerMailbox.activeTurnID(threadID: $0) != nil)
+        } == true
+        var message = ConversationMessage(
             id: UUID().uuidString.lowercased(), role: .assistant,
             text: caption.trimmingCharacters(in: .whitespacesAndNewlines),
-            imageDataURLs: [image], phase: "agent_image", turnID: activeCodexTurnID,
-            timelineOrder: existingHistory.flatMap { history in
-                provider == .codex
-                    ? (history.messages.compactMap(\.timelineOrder).max() ?? history.messages.count - 1) + 1
-                    : nil
-            },
+            imageDataURLs: [image], phase: "agent_image",
             provider: provider
         )
-        let activeClaudeTurn = provider == .claude
-            && task.activeConversationID.map {
-                client(for: task).isTurnActive(threadID: $0)
-                    || client(for: task).isTurnActiveInProcess(threadID: $0)
-                    || ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: $0) != nil
-            } == true
         try transcripts.mutate(taskID, turns: .latest) { transcript in
             var segment = transcript.segments.last.flatMap { $0.provider == provider ? $0 : nil }
             if segment == nil {
@@ -495,20 +471,11 @@ final class ConversationManager {
                 segment = created
             }
             guard let segment else { return }
-            if provider == .codex, let index = transcript.segments.firstIndex(where: { $0.id == segment.id }) {
-                if let activeCodexTurnID, !transcript.segments[index].codexTurnIDs.contains(activeCodexTurnID) {
-                    transcript.segments[index].codexTurnIDs.append(activeCodexTurnID)
-                }
-                let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
-                let ids = Self.orderedTurnIDs(existingHistory?.messages ?? [])
-                transcript.segments[index].codexTurnIDs += ids.filter { !claimed.contains($0) }
-            }
-            if activeClaudeTurn,
+            if activeTurn,
                let index = transcript.turns.indices.last,
                transcript.turns[index].segmentID == segment.id {
-                var attributed = message
-                attributed.turnID = transcript.turns[index].id
-                transcript.turns[index].messages.append(attributed)
+                message.turnID = transcript.turns[index].id
+                transcript.turns[index].messages.append(message)
             } else {
                 transcript.turns.append(.init(id: "agent-image-\(message.id)", segmentID: segment.id, messages: [message]))
             }
@@ -570,6 +537,8 @@ final class ConversationManager {
         guard let threadID = task.codexThreadID else { return nil }
         // Any goal call can load the thread, which then needs the skill bridge.
         let workspace = try launchWorkspace(for: task, roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
+        // The turns a goal runs on its own are recorded in the local transcript as they finish.
+        if action == "set" || action == "resume" { recordCodexContextlessTurns(taskID: taskID, threadID: threadID) }
         switch action {
         case "get": return try await client.getGoal(threadID: threadID, workspace: workspace)
         case "set":

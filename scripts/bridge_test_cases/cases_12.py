@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases12:
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows in the live turn and in history reloaded from Playhouse's store. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -135,8 +135,8 @@ class BridgeTestCases12:
         self.assertNotIn("RAW_ARGUMENT_SECRET", reloaded_serialized)
         self.assertNotIn("RAW_RESULT_SECRET", reloaded_serialized)
         reloaded_result = self.assert_success(reloaded_response)
-        self.assertIn("A later turn starts.", [message["text"] for message in reloaded_result["messages"]])
-    # case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering.
+        self.assertIn("Show tool activity.", [message["text"] for message in reloaded_result["messages"]])
+    # case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives a fresh history reload from Playhouse's transcript store with correct prompt/response ordering.
     def test_conversation_shows_context_compaction(self):
         task_id = self.create_task(title="Context compaction")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -196,7 +196,7 @@ class BridgeTestCases12:
         assistant = next(item for item in reloaded["messages"] if item.get("role") == "assistant")
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
-    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation, whose turns Playhouse holds in its own store, immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window: when its sent turn streams sixty replies, each stored as its own message in order, it keeps the newest 40 of those 61 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     def test_conversation_loads_newest_messages_before_older_history(self):
         task_id = self.create_task(title="Long conversation history")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -209,6 +209,15 @@ class BridgeTestCases12:
         env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary)}
         sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Create a long history.", extra_environment=env)
         self.assert_success(sent)
+        # The sent turn's sixty replies arrive as one turn, each its own message in order: more than
+        # the newest batch a conversation that was empty when it opened keeps rendered.
+        live = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])["messages"]
+        self.assertEqual(
+            [message["text"] for message in live],
+            ["Create a long history."] + [f"Live long history reply {index:02d}." for index in range(1, 61)],
+        )
+        # Earlier sessions' turns are already in Playhouse's own store; the provider holds none of them.
+        self.seed_long_history(task_id, tall_latest_answer=True)
         history_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         messages = self.assert_success(history_response)["messages"]
         self.assertEqual(len(messages), 120)
@@ -233,7 +242,7 @@ class BridgeTestCases12:
         reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(reloaded_response)["messages"]
         self.assertEqual([message["text"] for message in reloaded_messages], [message["text"] for message in messages])
-        # Paging a Codex-backed history slices the composed transcript the same way.
+        # Paging reads only the stored turns that hold the requested messages.
         newest = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=env)[0])
         self.assertEqual(newest["earlierMessageCount"], 40)
         self.assertEqual([message["text"] for message in newest["messages"]], [message["text"] for message in messages[40:]])
@@ -248,8 +257,8 @@ class BridgeTestCases12:
         paged_reads = [event for event in self.diagnostic_events()
                        if event.get("event") == "conversation.history.read" and event.get("taskID") == task_id.upper()
                        and event.get("messageLimit") == "80"]
-        self.assertEqual([read["source"] for read in paged_reads], ["composed", "composed"],
-                         "A Codex thread is composed from the app-server before it is paged.")
+        self.assertEqual([read["source"] for read in paged_reads], ["stored-page", "stored-page"],
+                         "A Codex conversation pages straight from Playhouse's store, never from the app-server.")
     # case-contract: test_conversation_settled_history_renders_lazily | In a 120-message conversation whose history has been revealed, the messages before the newest turn render lazily: once the reader is back at the latest turn, the oldest messages that scrolled far out of view are no longer kept as views, and they render again, in order, when the reader scrolls back to them. A message scrolled away and back by the same distance lands where it was. A command an earlier turn ran stays inline after the message it followed, with its whole output in fresh CLI/XPC history, and a call the reader expanded is still expanded when its row renders again. A message holding an open side chat keeps rendering while the reader scrolls far away, so its bubble and unsent draft are still there when the reader returns. Changing the transcript's width keeps the reader on the message they were reading, with the older messages above still in order.
     def test_conversation_settled_history_renders_lazily(self):
         task_id = self.create_task(title="Lazy long history")["id"]
@@ -262,6 +271,7 @@ class BridgeTestCases12:
         )
         env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary)}
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Create a long history.", extra_environment=env)[0])
+        self.seed_long_history(task_id, mid_history_command=True)
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
         messages = history["messages"]
         self.assertEqual([message["text"] for message in messages],
@@ -288,7 +298,7 @@ class BridgeTestCases12:
         self.assertEqual([activity["id"] for activity in fresh.get("timelineActivities", [])],
                          [activity["id"] for activity in history.get("timelineActivities", [])],
                          "A fresh read returns the same timeline.")
-    # case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
+    # case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by 120 stored messages, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
     def test_sent_prompt_stays_out_of_composer_past_history_page(self):
         task_id = self.create_task(title="Sent prompt past history page")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -310,6 +320,7 @@ class BridgeTestCases12:
         saved = self.assert_success(self.call_cli("task", "get", task_id)[0])
         self.assertFalse(saved["hasUnsentDraft"], "A sent prompt is the last sent prompt, not an unsent draft.")
         self.assertEqual(saved["savedPrompt"], "Create a long history.")
+        self.seed_long_history(task_id, sent_prompt=True)
         full = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
         self.assertEqual(len(full["messages"]), 121)
         self.assertEqual(full["messages"][0]["text"], "Create a long history.", "The sent prompt is the first stored message.")
@@ -702,7 +713,20 @@ class BridgeTestCases12:
         reloaded_messages = self.assert_success(history)["messages"]
         self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply
                             and message["phase"] == "final_answer" for message in reloaded_messages))
-        self.assertEqual(reloaded_messages[-1]["role"], "assistant", "The latest response should be last in bridge history.")
+        # Playhouse sends an outcome nudge after a turn ends, and the store records it as
+        # sent; the fixture completes it without a reply. Whether one has landed when history
+        # is read depends on timing, so the assertions hold either way: the user's prompts are
+        # stored once each in order, and nothing but nudges follows the latest reply.
+        nudge_prefix = "Playhouse internal outcome nudge:"
+        self.assertEqual([message["text"] for message in reloaded_messages
+                          if message["role"] == "user" and not message["text"].startswith(nudge_prefix)],
+                         ["Plan the task.", "Revise the plan to clarify the persistence step.",
+                          "Start implementing the plan.", "Continue the implementation."],
+                         "Each sent prompt is stored once, in order.")
+        last_reply = max(index for index, message in enumerate(reloaded_messages) if message["role"] == "assistant")
+        self.assertEqual([message for message in reloaded_messages[last_reply + 1:]
+                          if not (message["role"] == "user" and message["text"].startswith(nudge_prefix))], [],
+                         "The latest response should be last in bridge history, followed only by outcome nudges.")
         reloaded_plan = next(message["text"] for message in reloaded_messages
                              if message["role"] == "assistant" and message["phase"] == "final_answer")
         self.assertIn("| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |", reloaded_plan,

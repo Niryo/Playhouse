@@ -180,25 +180,6 @@ def list_items(runtime, _session_state, message):
             _session_state.contents.extend(runtime.follow_turn_items(finished=True))
         elif runtime.Path(str(runtime.sys.argv[0]) + ".follow-turn-ready").exists():
             _session_state.contents.extend(runtime.follow_turn_items(finished=False))
-    if "-long-history-" in _session_state.mode:
-        _session_state.contents = []
-        if "-with-prompt-" in _session_state.mode:
-            # The sent prompt is the first stored user message, outside the newest history page.
-            _session_state.contents.append({"id": "item_sent_prompt", "type": "userMessage", "content": [{"type": "text", "text": "Create a long history."}]})
-        for _session_state.index in range(1, 61):
-            _session_state.contents.append({"id": f"item_long_history_user_{_session_state.index}", "type": "userMessage", "content": [{"type": "text", "text": f"Long history user {_session_state.index:02d}."}]})
-            if _session_state.index == 21 and "-lazy-" in _session_state.mode:
-                # A mid-history call whose output runs past the clipped lines, so the UI can
-                # expand it and check it stays expanded after its row is rendered lazily again.
-                _session_state.contents.append({"id": "item_long_history_command_21", "type": "commandExecution", "command": "ls fixture-history",
-                                 "cwd": "/tmp/playhouse-fixture", "status": "completed", "exitCode": 0, "durationMs": 5,
-                                 "aggregatedOutput": "".join(f"history-file-{line}.txt\n" for line in range(1, 7))})
-            _session_state.text = f"Long history assistant {_session_state.index:02d}."
-            if _session_state.index == 60 and _session_state.mode.endswith("-long-history-success"):
-                # A newest answer taller than the transcript viewport, so a conversation opened
-                # on its question differs visibly from one opened at its end.
-                _session_state.text = "\n\n".join([_session_state.text, *(f"Long history closing paragraph {number:02d}." for number in range(1, 31))])
-            _session_state.contents.append({"id": f"item_long_history_assistant_{_session_state.index}", "type": "agentMessage", "phase": "final_answer", "text": _session_state.text})
     if _session_state.mode.endswith("-tool-activity"):
         # A concurrent `thread/items/list` read — a second CLI call, or a
         # window reopening the same thread mid-turn — rebuilds its snapshot
@@ -233,18 +214,6 @@ def list_items(runtime, _session_state, message):
             "command": "long-command-name " + "argument-" * 40, "cwd": "/tmp/playhouse-fixture",
             **({"status": "completed", "durationMs": 37} if latest_completed else {"status": "inProgress"}),
         })
-        if others_completed and latest_completed:
-            # A `userMessage` item resets the client's in-progress activity
-            # tracking, so reporting "a later turn starts" while the held
-            # turn's own commandExecution is still open would make that
-            # live activity unreadable from this same reconstruction. Only
-            # include it once the turn has genuinely settled, matching the
-            # real sequencing this item exists to exercise (later-turn
-            # items following the calls in history).
-            _session_state.contents.extend([
-                {"id": "item_user_fixture_later", "type": "userMessage", "content": [{"type": "text", "text": "A later turn starts."}]},
-                {"id": "item_assistant_fixture_later", "type": "agentMessage", "text": "Later turn response."},
-            ])
     if _session_state.mode.endswith("-markdown"):
         _session_state.saved_history = runtime.json.loads(_session_state.history_path.read_text(encoding="utf-8")) if _session_state.history_path.is_file() else {}
         _session_state.contents = [
@@ -338,8 +307,6 @@ def list_items(runtime, _session_state, message):
             try:
                 if "_fixture_turn_index" in _session_state.item:
                     _session_state.turn_index = _session_state.item.pop("_fixture_turn_index")
-                elif _session_state.item_id.startswith("item_long_history_"):
-                    _session_state.turn_index = int(_session_state.item_id.rsplit("_", 1)[1]) - 1
                 elif _session_state.item_id.rsplit("_", 1)[-1].isdigit():
                     _session_state.turn_index = int(_session_state.item_id.rsplit("_", 1)[1]) - 1
                 elif _session_state.mode.endswith("-tool-activity") and _session_state.ordinary_turn_indexes:
@@ -356,10 +323,6 @@ def list_items(runtime, _session_state, message):
                     _session_state.item["createdAt"] = "2026-10-26T12:34:00Z"
         if _session_state.item_id == "item_assistant_fixture_1" and runtime.Path(str(runtime.sys.argv[0]) + ".provider-timestamp").exists():
             _session_state.item["createdAt"] = "2026-10-26T12:34:00Z"
-        if "-long-history-lazy-" in _session_state.mode and _session_state.item_id.startswith("item_long_history_"):
-            # Each history turn is its own turn, as in a real multi-turn thread, so the app
-            # treats every turn but the last as settled and shows its calls inline.
-            _session_state.turn_id = f"turn_long_history_{_session_state.item_id.rsplit('_', 1)[1]}"
         if _session_state.unassociated_restart_question and _session_state.item.get("type") == "userMessage":
             _session_state.entries.append({"item": _session_state.item})
         else:

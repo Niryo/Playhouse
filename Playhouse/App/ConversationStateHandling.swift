@@ -176,21 +176,7 @@ extension TaskConversationView {
     }
 
     func loadSideChats() {
-        let taskID = task.id
-        Task { @MainActor in
-            guard let saved = try? await conversationManager.savedSideChats(taskID: taskID), task.id == taskID else { return }
-            sideChats = saved
-        }
-    }
-
-    /// Keeps the side chat a bubble just saved, so its text highlights while the bubble is
-    /// open and reopens with it after the bubble closes.
-    func keepSideChat(_ sideChat: SavedSideChat) {
-        if let index = sideChats.firstIndex(where: { $0.id == sideChat.id }) {
-            sideChats[index] = sideChat
-        } else {
-            sideChats.append(sideChat)
-        }
+        SideChatStore.shared.load(taskID: task.id, using: conversationManager)
     }
 
     func restoreAnnotations(from messages: [ConversationMessage], keepingPending: Bool = false) {

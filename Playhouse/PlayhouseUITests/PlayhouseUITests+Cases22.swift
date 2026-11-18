@@ -225,7 +225,7 @@ extension PlayhouseUITests {
         assertTaskVisible("Claude dev server", inColumn: "Review")
         attachScreenshot(named: "Board after the Claude stopping outcomes settle")
     }
-    // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
+    // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, stores and shows the prompt that carried the answer as sent, and keeps it out of saved task state and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-recovery-failure")
         try copyFixtureFile(
@@ -265,10 +265,12 @@ extension PlayhouseUITests {
         XCTAssertTrue(error.waitToExist(timeout: 15))
         XCTAssertEqual(error.label, "The private answer could not be applied. Please answer the question again.")
         XCTAssertTrue(element("conversation-user-input-request").exists)
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "private recovery prompt")).firstMatch.exists)
+        // The prompt that carried the answer was sent, so it is stored and shown as sent.
+        XCTAssertTrue(waitUntil({ self.transcriptContains("Answer: Green") }, timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response",
                        "An unanswered question stays available for retry after a failed recovery attempt.")
+        XCTAssertFalse((try taskRecord(id: taskID)?["savedPrompt"] as? String ?? "").contains("Answer: Green"),
+            "Saved task state stays free of the private answer.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude private recovery failure", inColumn: "Waiting Response")
@@ -284,9 +286,9 @@ extension PlayhouseUITests {
         assertTaskVisible("Claude private recovery failure", inColumn: "Waiting Response")
         openTask(named: "Claude private recovery failure")
         XCTAssertTrue(element("conversation-user-input-request").exists)
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
+        XCTAssertTrue(waitUntil({ self.transcriptContains("Answer: Green") }, timeout: 10), "The sent prompt survives an app restart.")
     }
-    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
+    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream and the stored transcript carry the recovery prompt, assistant response, activities, and diffs exactly as sent, including the re-entered secret with its surrounding whitespace, and the visible UI shows them immediately and after app restart; saved task state stays free of the secret. A later Codex turn keeps its own diff and response visible in refreshed CLI/UI history alongside the earlier recovery response. In one task, a no-secret recovery response remains visible after a later secret recovery. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
     func test_codex_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -339,37 +341,42 @@ extension PlayhouseUITests {
         secretAnswer.click()
         secretAnswer.typeText(" fixture-secret ")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitToExist(timeout: 15))
-        XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
+        let recoveryAnswer = "Recovered answer: Green; private token fixture-secret was applied."
+        XCTAssertTrue(transcriptMessage(recoveryAnswer).waitToExist(timeout: 15),
+            "The recovery response is shown as Codex sent it.")
+        XCTAssertTrue(transcriptContains("Question: What is the private token?"),
+            "The prompt that carried the re-entered answers is shown as sent.")
+        let shownPrompt = NSPredicate(format: "(label CONTAINS %@ AND label CONTAINS %@) OR (value CONTAINS %@ AND value CONTAINS %@)",
+                                      "Question: What is the private token?", "fixture-secret", "Question: What is the private token?", "fixture-secret")
+        XCTAssertTrue(app.descendants(matching: .any).matching(shownPrompt).firstMatch.exists,
+            "The shown recovery prompt carries the re-entered answer as sent.")
+        let storedPrompts = try XCTUnwrap((try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+            .filter { $0["role"] as? String == "user" }.compactMap { $0["text"] as? String }
+            .filter { $0.contains("Question: What is the private token?") }
+        XCTAssertEqual(storedPrompts.count, 1, "The recovery prompt is stored once.")
+        XCTAssertTrue(storedPrompts.first?.contains("Answer:  fixture-secret") == true, "The re-entered answer is stored exactly as sent.")
+        XCTAssertFalse((try taskRecord(id: taskID)?["savedPrompt"] as? String ?? "").contains("fixture-secret"),
+            "Saved task state stays free of the secret.")
         XCTAssertFalse(element("conversation-user-input-request").exists)
         let providerHistory = try String(contentsOf: URL(fileURLWithPath: executable.path + ".history"), encoding: .utf8)
         XCTAssertTrue(providerHistory.contains("Green"))
         XCTAssertTrue(providerHistory.contains("fixture-secret"))
-        let immediateActivityDisclosure = element("codex-activity-disclosure")
-        // The section is open during a turn and collapsed once it settles; expand only
-        // when collapsed, so the redaction check always inspects expanded details.
-        XCTAssertTrue(expandActivityDetails(immediateActivityDisclosure),
-            "The redaction check must inspect expanded activity details, not a collapsed section.")
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
-            "Playhouse conversation content and expanded activity details must redact the re-entered secret.")
-        XCTAssertEqual(immediateActivityDisclosure.value as? String, "Expanded, down chevron",
-            "The section must still be open, so the redaction check above was not vacuous.")
+        attachScreenshot(named: "Recovery prompt and response are shown as sent")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Restart-safe Codex question")
-        let persistedHiddenAnswer = transcriptMessage("[Response to private answer hidden]")
-        XCTAssertTrue(persistedHiddenAnswer.waitToExist(timeout: 15),
-            "After restart, history should hide the assistant response from a secret recovery turn.")
-        XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
+        XCTAssertTrue(transcriptMessage(recoveryAnswer).waitToExist(timeout: 15),
+            "After restart, the stored transcript shows the recovery response as sent.")
+        XCTAssertTrue(transcriptContains("Question: What is the private token?"),
+            "After restart, the stored transcript shows the recovery prompt as sent.")
         let persistedActivityDisclosure = element("codex-activity-disclosure")
         XCTAssertTrue(expandActivityDetails(persistedActivityDisclosure),
-            "The reloaded redaction check must inspect expanded activity details.")
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
-            "The secret must remain redacted from messages, activities, and diffs after Playhouse reloads provider history.")
-        XCTAssertEqual(persistedActivityDisclosure.value as? String, "Expanded, down chevron",
-            "The reloaded section must still be open, so the redaction check above was not vacuous.")
+            "The reloaded check must inspect expanded activity details.")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "printf fixture-secret")).firstMatch.waitToExist(timeout: 5),
+            "Recovery activities are stored and shown as Codex sent them.")
+        attachScreenshot(named: "After restart the stored recovery turn and its activity are shown as sent")
 
         let followUpComposer = element("message-composer")
         XCTAssertEqual(followUpComposer.value as? String, "",
@@ -378,25 +385,21 @@ extension PlayhouseUITests {
         followUpComposer.typeText("Follow up after private recovery.")
         element("send-message-button").click()
         XCTAssertTrue(app.staticTexts["Follow-up after private recovery complete."].waitToExist(timeout: 15),
-            "A normal follow-up after private recovery should remain visible in the refreshed conversation.")
+            "A normal follow-up after recovery should remain visible in the refreshed conversation.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 30),
             "The follow-up with no reported outcome should finish after two hidden reminders.")
         let followUpHistory = try runCLI(["conversation", "history", taskID])
         let followUpMessages = try XCTUnwrap((followUpHistory["result"] as? [String: Any])?["messages"] as? [[String: Any]])
         XCTAssertTrue(followUpMessages.contains { ($0["text"] as? String) == "Follow-up after private recovery complete." },
-            "Fresh UI-backed history should retain the safe follow-up response.")
-        XCTAssertFalse(followUpMessages.contains { (($0["text"] as? String) ?? "").contains("fixture-secret") },
-            "Fresh history after an ordinary turn must not reveal the earlier secret answer.")
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
-            "The normal follow-up transcript and its expanded activity must stay free of the earlier secret.")
+            "Fresh UI-backed history should retain the follow-up response.")
+        XCTAssertTrue(followUpMessages.contains { ($0["text"] as? String) == recoveryAnswer },
+            "Fresh history after a later turn keeps the earlier recovery response.")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Restart-safe Codex question")
         XCTAssertTrue(app.staticTexts["Follow-up after private recovery complete."].waitToExist(timeout: 15),
-            "The safe follow-up response should remain visible after reopening provider history.")
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
-            "The earlier secret must remain absent after the normal follow-up and another app restart.")
+            "The follow-up response should remain visible after reopening the stored transcript.")
 
         let noSecretExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question-no-secret")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: noSecretExecutable.path))
@@ -422,8 +425,7 @@ extension PlayhouseUITests {
         selectQuestionOption(identifier: "ai-question-option-color-Blue")
         element("submit-ai-answers-button").click()
         let noSecretAnswer = transcriptMessage("Recovered answer: Blue; no secret was required.")
-        XCTAssertTrue(noSecretAnswer.waitToExist(timeout: 15), "Codex recovery without secret answers should preserve its safe response.")
-        XCTAssertFalse(transcriptMessage("[Response to private answer hidden]").exists)
+        XCTAssertTrue(noSecretAnswer.waitToExist(timeout: 15), "Codex recovery without secret answers should preserve its response.")
         XCTAssertEqual(try taskRecord(id: noSecretTaskID)?["status"] as? String, "Waiting Response")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
@@ -443,7 +445,7 @@ extension PlayhouseUITests {
         tokenAnswer.click()
         tokenAnswer.typeText("fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitToExist(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token fixture-secret was applied.").waitToExist(timeout: 15))
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
@@ -451,14 +453,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         // Earlier rows render only near the viewport, so these checks scan the whole transcript.
         XCTAssertTrue(transcriptScan { self.transcriptMessage("Recovered answer: Blue; no secret was required.").exists },
-            "A later secret recovery must leave the earlier safe no-secret response visible after restart.")
-        XCTAssertTrue(transcriptScan { self.transcriptMessage("[Response to private answer hidden]").exists },
-            "The secret recovery response must remain hidden after restart.")
-        assertTranscriptLacks("No row anywhere in the reopened transcript may show the secret.") {
-            self.app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists
-        }
+            "A later secret recovery must leave the earlier no-secret response visible after restart.")
+        XCTAssertTrue(transcriptScan { self.transcriptMessage("Recovered answer: Green; private token fixture-secret was applied.").exists },
+            "The later recovery response stays stored as sent after restart.")
     }
-    // case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, Playhouse preserves the pending question while the task stays in Waiting Response, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
+    // case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex fails while applying recovered answers, Playhouse preserves the pending question while the task stays in Waiting Response, uses a generic visible error, stores and shows the sent recovery prompt as sent, and keeps the secret out of saved task state, diagnostics, and error text; later Codex thread read and resume failures do not affect history, which loads from Playhouse's own transcript store across fresh CLI/XPC reads and app restarts.
     func test_codex_secret_recovery_redaction_fails_closed() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unassociated-restart-question")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -495,12 +494,20 @@ extension PlayhouseUITests {
         element("submit-ai-answers-button").click()
         XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 15))
         XCTAssertEqual(element("codex-chat-error").label, "The private answer could not be applied. Please answer the question again.")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists)
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
-        XCTAssertTrue(element("conversation-user-input-request").exists, "A failed redaction association must leave the question available to retry.")
+        let shownSecretPrompt = NSPredicate(format: "(label CONTAINS %@ AND label CONTAINS %@) OR (value CONTAINS %@ AND value CONTAINS %@)",
+                                            "Question: What is the private token?", "fixture-secret", "Question: What is the private token?", "fixture-secret")
+        XCTAssertTrue(waitUntil({ self.app.descendants(matching: .any).matching(shownSecretPrompt).firstMatch.exists }, timeout: 10),
+            "The prompt that carried the answers was sent, so it is shown as sent, secret included.")
+        let failedPrompts = try XCTUnwrap((try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+            .filter { $0["role"] as? String == "user" }.compactMap { $0["text"] as? String }
+        XCTAssertTrue(failedPrompts.contains { $0.contains("Question: What is the private token?\nAnswer: fixture-secret") },
+            "The prompt that carried the answers is stored as sent.")
+        XCTAssertTrue(element("conversation-user-input-request").exists, "A failed recovery must leave the question available to retry.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response",
                        "An unanswered question stays available for retry after a failed recovery attempt.")
         XCTAssertFalse((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("fixture-secret"))
+        XCTAssertFalse((try taskRecord(id: taskID)?["savedPrompt"] as? String ?? "").contains("fixture-secret"),
+            "Saved task state stays free of the secret.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Fail-closed secret recovery", inColumn: "Waiting Response")
@@ -512,9 +519,15 @@ extension PlayhouseUITests {
         relaunchApp()
         openTask(named: "Fail-closed secret recovery")
         XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 15))
-        XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
-            "The failed recovery marker must keep history redacted after app restart.")
+        XCTAssertTrue(waitUntil({ self.app.descendants(matching: .any).matching(shownSecretPrompt).firstMatch.exists }, timeout: 10),
+            "The stored transcript keeps the sent prompt after app restart.")
+        // History comes from Playhouse's own transcript store, so Codex thread read and resume
+        // failures cannot break it.
+        try "Playhouse owns this Codex fixture history failure marker.\n".write(
+            to: URL(fileURLWithPath: executable.path + ".history-error"),
+            atomically: true,
+            encoding: .utf8
+        )
         try "Playhouse owns this Codex fixture resume failure marker.\n".write(
             to: URL(fileURLWithPath: executable.path + ".resume-error"),
             atomically: true,
@@ -524,11 +537,12 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Fail-closed secret recovery")
-        let historyError = element("codex-chat-error")
-        XCTAssertTrue(historyError.waitToExist(timeout: 15))
-        XCTAssertEqual(historyError.label, "History for a private recovery conversation could not be loaded.")
-        XCTAssertFalse(historyError.label.contains("fixture-secret"), "A history RPC error must not expose the re-entered secret.")
-        XCTAssertTrue(element("conversation-user-input-request").exists, "A history failure must leave the unanswered recovery request visible.")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 15),
+            "The unanswered recovery request stays visible when Codex cannot resume the thread.")
+        XCTAssertTrue(waitUntil({ self.app.descendants(matching: .any).matching(shownSecretPrompt).firstMatch.exists }, timeout: 10),
+            "The stored transcript loads without reading the Codex thread.")
+        XCTAssertFalse(element("codex-chat-error").exists, "Opening a conversation does not depend on the Codex thread.")
+        attachScreenshot(named: "Stored transcript loads while Codex cannot resume the thread")
     }
     // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, including a long paragraph, header, and option descriptions reach the client unchanged, and the UI renders the question inline with its Markdown formatted at the reply text size and its long paragraph wrapped in full across several lines without truncation, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     func test_claude_questions_can_be_answered_after_switching_conversations() throws {
@@ -618,7 +632,7 @@ extension PlayhouseUITests {
         // The answer renders as it streams; the status moves once the turn ends.
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response"), "The answered turn should end in Waiting Response.")
     }
-    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, waiting-response, and keep-working instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason.
+    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, waiting-response, and keep-working instructions, which fails the private turn; the rejected question and the private rejection instructions stay out of the transcript, while a prompt that applied the user's answer is stored and shown as sent. Playhouse then stops driving the work and marks the task Blocked naming that reason.
 
     func test_claude_outcome_reminder_rejects_user_questions() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-outcome-reminder-question")
@@ -654,10 +668,8 @@ extension PlayhouseUITests {
         XCTAssertFalse(pendingTurns.contains { ($0["userText"] as? String)?.contains("Playhouse internal outcome nudge:") == true }, "A successful turn with a pending question must not receive outcome nudges.")
         selectQuestionOption(identifier: "ai-question-option-question-1-Blue")
         element("submit-ai-answers-button").click()
-        // The answered turn already finished, so the answer may arrive as a recovery turn.
-        XCTAssertTrue(waitUntil({
-            self.transcriptMessage("Answer received: Blue.").exists || self.transcriptMessage("Recovered answer: Blue.").exists
-        }, timeout: 10))
+        // The answered turn already settled, so the answer arrives as a recovery turn.
+        XCTAssertTrue(transcriptMessage("Recovered answer: Blue.").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ !element("conversation-user-input-request").exists }, timeout: 5))
         element("message-composer").click()
         element("message-composer").typeText("Continue after answering.")
@@ -680,6 +692,13 @@ extension PlayhouseUITests {
         XCTAssertTrue(rejections.allSatisfy { $0.contains("completed") && $0.contains("waiting-response") && $0.contains("keep working in this turn") })
         XCTAssertFalse(element("conversation-user-input-request").exists, "Nudge questions must not become visible answer cards.")
         XCTAssertFalse(app.staticTexts["Which color should I use?"].exists)
+        // The recovery turn shows the prompt that carried the answer, as sent, and stores it once.
+        XCTAssertTrue(transcriptContains("Question: Which color should I use?"), "The answer's prompt is shown as sent.")
+        let reminderPrompts = try XCTUnwrap((try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+            .filter { $0["role"] as? String == "user" }.compactMap { $0["text"] as? String }
+            .filter { $0.contains("Answer: Blue") }
+        XCTAssertEqual(reminderPrompts.count, 1, "The prompt that applied the answer is stored once.")
+        XCTAssertTrue(reminderPrompts.first?.contains("Question: Which color should I use?") == true, "The answer's prompt is stored as sent.")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(
             format: "label CONTAINS %@", "This is a private Playhouse status nudge."
         )).firstMatch.exists, "Claude's private rejection instructions must not appear in the visible transcript.")
@@ -688,7 +707,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude reminder question", inColumn: "Blocked")
     }
-    // case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, applies both tasks' state atomically, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
+    // case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, applies both tasks' state atomically, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state, and the recovery prompt and response are stored and shown as sent and survive reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
     func test_pending_question_repair_restores_thread_owner() throws {
         let restartFixture = dataDirectory.appendingPathComponent("codex-fixture-restart-question")
         try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question"), to: restartFixture)
@@ -743,15 +762,16 @@ extension PlayhouseUITests {
         selectQuestionOption(identifier: "ai-question-option-color-Green")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitToExist(timeout: 15))
+        let recoveryAnswer = "Recovered answer: Green; private token fixture-secret was applied."
+        XCTAssertTrue(transcriptMessage(recoveryAnswer).waitToExist(timeout: 15))
         relaunchApp()
         openTask(named: "Repair original question")
         XCTAssertFalse(element("ai-question-form-title").exists)
-        XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").waitToExist(timeout: 10))
+        XCTAssertTrue(transcriptMessage(recoveryAnswer).waitToExist(timeout: 10), "The recovery response is stored and shown as sent.")
+        XCTAssertTrue(transcriptContains("Continue this conversation by applying"), "The prompt that carried the answers is shown as sent.")
         let history = try runCLI(["conversation", "history", target])["result"]
         let historyBytes = try JSONSerialization.data(withJSONObject: try XCTUnwrap(history))
-        XCTAssertFalse(String(decoding: historyBytes, as: UTF8.self).contains("fixture-secret"))
-        XCTAssertFalse(String(decoding: historyBytes, as: UTF8.self).contains("Continue this conversation by applying"))
+        XCTAssertTrue(String(decoding: historyBytes, as: UTF8.self).contains("Answer: fixture-secret"))
         try writeConversationState(source, displaced)
         _ = try runCLI(["conversation", "repair-user-input", target, "--from-task", source], expectedStatus: 1)
         XCTAssertNil(try XCTUnwrap(try conversationState(target))["pendingUserInputRequest"])

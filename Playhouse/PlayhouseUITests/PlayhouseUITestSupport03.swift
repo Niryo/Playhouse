@@ -650,6 +650,18 @@ extension PlayhouseUITests {
         return chatTranscriptSnapshot(.group)
             .contains { ($0.label.contains(text) || $0.identifier == text) && $0.frame.minY > separator.minY }
     }
+    /// Whether `text` shows below `earlier` with no page separator between them. A long page's
+    /// own separator can sit above the rows the transcript renders, so this places a turn on
+    /// its page by the page's earlier turn instead.
+    func chatTranscriptShows(_ text: String, after earlier: String) -> Bool {
+        let groups = chatTranscriptSnapshot(.group)
+        guard let earlierFrame = groups.first(where: { $0.label.contains(earlier) })?.frame,
+              let frame = groups.first(where: { $0.label.contains(text) && $0.frame.minY > earlierFrame.minY })?.frame
+        else { return false }
+        return !chatTranscriptSnapshot(.staticText).contains {
+            $0.identifier == "chat-page-separator" && $0.frame.minY > earlierFrame.minY && $0.frame.minY < frame.minY
+        }
+    }
     func chatPageSeparatorIsVisible(_ title: String) -> Bool {
         element("chat-sidebar")
             .descendants(matching: .scrollView)
@@ -701,16 +713,62 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ self.isModeOn("conversation-goal-button") }, timeout: 5),
                       "The Goal button should open the goal entry.", file: file, line: line)
     }
+    /// The divided pill that selected (or comment-and-side-chat highlighted) conversation text
+    /// shows: Comment on its left, Side chat on its right. An assistant reply's buttons take its
+    /// prose block's identifier, so they are found by label.
+    @discardableResult
+    func waitForSelectionActionsPill(
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> (comment: XCUIElement, sideChat: XCUIElement) {
+        let comment = app.buttons.matching(NSPredicate(format: "label == %@", "Comment")).firstMatch
+        let sideChat = app.buttons.matching(NSPredicate(format: "label == %@", "Side chat")).firstMatch
+        XCTAssertTrue(sideChat.waitToExist(timeout: 8), "The selection pill should show its Side chat button.", file: file, line: line)
+        XCTAssertTrue(comment.waitToExist(timeout: 3), "The selection pill should show its Comment button beside Side chat.", file: file, line: line)
+        XCTAssertEqual(sideChat.label, "Side chat", file: file, line: line)
+        XCTAssertEqual(comment.label, "Comment", file: file, line: line)
+        XCTAssertLessThan(comment.frame.minX, sideChat.frame.minX,
+                          "Comment is the pill's left half and Side chat its right (comment \(comment.frame), side chat \(sideChat.frame)).",
+                          file: file, line: line)
+        return (comment, sideChat)
+    }
+    /// With conversation text selected, adds `comment` on it through the selection pill's Comment
+    /// button and the comment popover it opens, submitting with the popover's arrow or Return.
+    func addCommentFromSelection(
+        _ comment: String, submitWithReturn: Bool = false, screenshot: String? = nil,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let pill = waitForSelectionActionsPill(file: file, line: line)
+        let popover = element("comment-popover")
+        XCTAssertFalse(popover.exists, "A selection alone must not open the comment popover.", file: file, line: line)
+        pill.comment.click()
+        XCTAssertTrue(popover.waitToExist(timeout: 8), "The pill's Comment button should open the comment popover.", file: file, line: line)
+        XCTAssertFalse(element("side-chat-bubble").exists, "Comment must not open the side chat bubble.", file: file, line: line)
+        let field = element("comment-input-field")
+        XCTAssertTrue(field.waitToExist(timeout: 5), "The comment popover should show its comment field.", file: file, line: line)
+        XCTAssertEqual(field.placeholderValue, "Add an optional comment…", file: file, line: line)
+        let initial = field.value as? String ?? ""
+        XCTAssertTrue(initial.isEmpty || initial == field.placeholderValue, "A new comment's field starts empty (\(initial)).", file: file, line: line)
+        let submit = element("add-comment-button")
+        XCTAssertTrue(submit.exists, "The comment popover should show its submit arrow.", file: file, line: line)
+        XCTAssertEqual(submit.label, "Add comment", file: file, line: line)
+        XCTAssertFalse(element("discard-comment-button").exists, "A new comment has nothing to discard.", file: file, line: line)
+        field.click()
+        // Typing a long comment would take most of a case's time budget.
+        if comment.count > 100 { pasteText(comment, into: field) } else if !comment.isEmpty { field.typeText(comment) }
+        if let screenshot { attachScreenshot(named: screenshot) }
+        if submitWithReturn { field.typeText("\r") } else { submit.click() }
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Adding the comment should close the comment popover.", file: file, line: line)
+        XCTAssertFalse(element("side-chat-user-message-0").exists, "A comment is never sent to a side chat.", file: file, line: line)
+    }
     @discardableResult
     func waitForSideChatBubble(
         at selection: XCUIElement? = nil, centered: Bool = false, hintScreenshot: String? = nil,
         file: StaticString = #filePath, line: UInt = #line
     ) throws -> XCUIElement {
-        // An assistant reply's hint takes its prose block's identifier, so it is found by label.
-        let hint = app.buttons.matching(NSPredicate(format: "label == %@", "Side chat")).firstMatch
+        // The selection pill's right half; its left half is Comment.
+        let pill = waitForSelectionActionsPill(file: file, line: line)
+        let hint = pill.sideChat
         let bubble = element("side-chat-bubble")
-        XCTAssertTrue(hint.waitToExist(timeout: 8), "Selecting transcript text should show the Side chat hint.", file: file, line: line)
-        XCTAssertEqual(hint.label, "Side chat", file: file, line: line)
         if let selection {
             // Measured against the selected text: a message's own frame also holds its header and padding.
             let textView = selection.textViews.firstMatch
@@ -731,18 +789,24 @@ extension PlayhouseUITests {
                           "The Side chat hint should be over the selected text's columns (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
             // A whole-text selection's hint is centred on it, its bottom just above the selected lines.
             if centered {
-                XCTAssertLessThan(abs(hintFrame.midX - selection.frame.midX), 70,
-                                  "The Side chat hint should be centred over the selection (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
+                // The whole pill is centred: Comment's left edge to Side chat's right edge.
+                let pillMidX = (pill.comment.frame.minX + hintFrame.maxX) / 2
+                XCTAssertLessThan(abs(pillMidX - selection.frame.midX), 70,
+                                  "The selection pill should be centred over the selection (pill centre \(pillMidX), selection \(selection.frame)).", file: file, line: line)
                 XCTAssertGreaterThanOrEqual(hintFrame.minY, selection.frame.minY - 60,
                                             "The Side chat hint should sit just above the selection (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
             }
         }
         Thread.sleep(forTimeInterval: 0.8)
         XCTAssertFalse(bubble.exists, "A selection alone must not open the side chat bubble.", file: file, line: line)
+        XCTAssertFalse(element("comment-popover").exists, "A selection alone must not open the comment popover.", file: file, line: line)
         if let hintScreenshot { attachScreenshot(named: hintScreenshot) }
         hint.click()
         XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking the Side chat hint should open the side chat bubble.", file: file, line: line)
-        XCTAssertTrue(waitUntil({ !hint.exists }, timeout: 3), "The Side chat hint should go away once its bubble is open.", file: file, line: line)
+        XCTAssertTrue(waitUntil({ !hint.exists && !pill.comment.exists }, timeout: 3), "The selection pill should go away once its bubble is open.", file: file, line: line)
+        XCTAssertFalse(element("comment-popover").exists, "Side chat must not open the comment popover.", file: file, line: line)
+        XCTAssertFalse(bubble.descendants(matching: .any).matching(identifier: "add-comment-button").firstMatch.exists,
+                       "The side chat bubble has no Comment button.", file: file, line: line)
         XCTAssertTrue(waitForStableFrame(bubble), "The side chat bubble should settle before it is measured.", file: file, line: line)
         let frame = bubble.frame
         // Its accessibility frame is its content, inside the bubble's 14pt padding: 452 to 632 points wide.

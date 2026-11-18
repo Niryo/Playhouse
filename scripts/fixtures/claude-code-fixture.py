@@ -224,10 +224,23 @@ def side_chat_respond(user_text, instructions, turn, prior_turns):
     `task create` whose quoted description contains shell punctuation. As Claude Code does, each
     call first goes through the `PreToolUse` hooks the launch's --settings carry (recorded in
     `hookDecisions`), and the fixture then asks Playhouse's permission handler about each one
-    (`permissionDecisions`). The CLI command really runs when both allow it."""
+    (`permissionDecisions`). The CLI command really runs when both allow it. A question naming
+    `hold-side-chat` holds its answer, before any output, until the test releases it: the fixture
+    writes `<fixture>.side-chat-hold-ready` and waits for `<fixture>.side-chat-hold-release`, which
+    it consumes so the next held question waits again."""
     selection = re.search(r"<selected-text>\n(.*?)\n</selected-text>", user_text, re.S)
     question = user_text.split("</selected-text>", 1)[-1].strip()
     session = turn["sessionID"]
+    if "hold-side-chat" in question.lower():
+        ready = Path(str(sys.argv[0]) + ".side-chat-hold-ready")
+        release = Path(str(sys.argv[0]) + ".side-chat-hold-release")
+        ready.write_text(f"Side chat answer held on {session}.\n", encoding="utf-8")
+        deadline = time.monotonic() + 120
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not release.exists():
+            raise TimeoutError("The test did not release the held side chat answer.")
+        release.unlink(missing_ok=True)
     if "create a task" in question.lower():
         line = next((line.strip() for line in instructions.splitlines()
                      if line.strip().startswith("'") and "task create" in line), "")

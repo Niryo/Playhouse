@@ -223,10 +223,13 @@ struct TaskConversationView: View {
     @State var annotations: [ConversationAnnotation] = []
     /// Pending comments handed to the turn now running; they leave the saved draft until it ends.
     @State var inFlightAnnotationIDs: Set<UUID> = []
+    /// The selection whose comment popover or side chat bubble is open, which `selectionAction` names.
     @State var annotationSelection: AnnotationSelection?
+    @State var selectionAction: SelectionAction = .sideChat
     @State var currentTextSelection: AnnotationSelection?
-    /// The side chats saved on the task; ones with a source highlight their text purple.
-    @State var sideChats: [SavedSideChat] = []
+    /// The task's side chats, saved or still answering their first question; ones with a source
+    /// highlight their text purple. `SideChatStore` owns them, so they outlive this view.
+    var sideChats: [SavedSideChat] { SideChatStore.shared.sideChats(taskID: task.id) }
     @State var activities: [ConversationActivity] = []
     /// Tool calls from every loaded turn, each shown in the timeline after the
     /// message it followed.
@@ -626,6 +629,10 @@ struct TaskConversationView: View {
     }
 
     var body: some View {
+        // Transcript rows read the side chats inside row and layout closures; reading them here
+        // too re-renders the rows' purple highlights whenever one is saved or starts answering,
+        // however those closures are tracked. Streaming deltas are not read, so they don't.
+        let _ = sideChats
         Group {
             if !hasTaskSidebar {
                 // The standalone chat sidebar reuses only the conversation transcript/composer,

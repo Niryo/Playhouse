@@ -513,6 +513,125 @@ class BridgeTestCases09:
         self.assertIn("BISCUIT-7 waited by the gate every evening. One night the boy finally came home.\n\nThe story is above.", visible)
         self.assertIn("What happened earlier?", visible)
         self.assertIn("OK.", visible)
+    # case-contract: test_codex_resume_recovers_visible_history | After a Codex turn and a provider restart, a normal Codex send resumes the saved thread without handoff context. If Codex then reports that it no longer has the thread, Playhouse starts a new Codex thread, saves its ID on the task, and sends the prior visible conversation from Playhouse's persisted transcript together with the new prompt; Codex completes the turn, the replacement is recorded in diagnostics, the next send continues on the new thread without handoff context, and fresh CLI/XPC history and the visible UI retain every turn.
+    def test_codex_resume_recovers_visible_history(self):
+        task = self.create_task("Codex resume recovery", roots=[self.primary])
+        codex = self.data_directory / "codex-fixture-resume-recovery"
+        turn_starts = Path(str(codex) + ".turn-starts")
+        reply = "Answers received: Blue / fixture-secret."
+
+        def last_turn_start(message):
+            starts = [json.loads(line) for line in turn_starts.read_text(encoding="utf-8").splitlines() if line.strip()]
+            return next(start for start in reversed(starts) if start["text"].endswith(message))
+
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="Start with Codex.")
+        original_thread = self.assert_success(self.call_cli("task", "get", task["id"])[0])["codexThreadID"]
+        self.assertTrue(original_thread)
+
+        # A working resume after a restart keeps the thread and sends no transcript.
+        self.restart_provider(codex)
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="Continue normally.")
+        normal = last_turn_start("Continue normally.")
+        self.assertEqual(normal["threadId"], original_thread)
+        self.assertEqual(normal["text"], "Continue normally.", "A working resume must not receive duplicate transcript context.")
+
+        # The test owns this fixture executable and its sidecar before arming the missing thread.
+        owner = self.data_directory / ".playhouse-codex-fixture-owner"
+        self.assertEqual(owner.read_text(encoding="utf-8"), "Playhouse test owns this Codex protocol fixture (v1).\n")
+        self.restart_provider(codex)
+        missing = Path(str(codex) + ".missing-thread")
+        missing.write_text("Playhouse test owns this missing-thread trigger.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="What happened earlier?")
+        self.assertFalse(missing.exists(), "Codex should have been asked to resume the missing thread.")
+        replacement = self.assert_success(self.call_cli("task", "get", task["id"])[0])["codexThreadID"]
+        self.assertTrue(replacement)
+        self.assertNotEqual(replacement, original_thread, "A missing thread is replaced by a new one saved on the task.")
+        recovered = last_turn_start("What happened earlier?")
+        self.assertEqual(recovered["threadId"], replacement)
+        prompt = recovered["text"]
+        self.assertIn("<playhouse-handoff-context>", prompt)
+        self.assertIn("User: Start with Codex.", prompt)
+        self.assertIn("User: Continue normally.", prompt)
+        self.assertIn(f"Codex: {reply}", prompt)
+        self.assertNotIn("User: What happened earlier?", prompt, "The new prompt is not repeated inside its own context.")
+        self.assertTrue(prompt.endswith("What happened earlier?"))
+        replaced = [
+            event for event in self.diagnostic_events()
+            if event.get("event") == "conversation.thread.replaced_missing" and event.get("taskID") == task["id"]
+        ]
+        self.assertEqual([(event["provider"], event["missingThreadID"], event["threadID"]) for event in replaced],
+                         [("codex", original_thread, replacement)])
+
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="And after that?")
+        following = last_turn_start("And after that?")
+        self.assertEqual(following["threadId"], replacement)
+        self.assertEqual(following["text"], "And after that?", "The replacement thread already has the conversation.")
+
+        history = self.assert_success(self.call_cli("conversation", "history", task["id"])[0])
+        user_texts = [message["text"] for message in history["messages"] if message["role"] == "user"]
+        for message in ("Start with Codex.", "Continue normally.", "What happened earlier?", "And after that?"):
+            self.assertIn(message, user_texts)
+        self.assertFalse(any("<playhouse-handoff-context>" in text for text in user_texts),
+                         "The transcript keeps the user's own prompt, not the context sent with it.")
+        self.assertEqual(sum(1 for message in history["messages"] if message["role"] == "assistant" and message["text"] == reply), 4)
+    # case-contract: test_codex_standalone_chat_resume_recovers_page_history | A Codex standalone chat page keeps its own thread: after a provider restart, a send on the page resumes that thread without page context. If Codex then reports that it no longer has the page's thread, Playhouse starts a new Codex thread, saves it as the page's provider session, and sends only that page's turns from Playhouse's stored chat pages as context together with the new prompt, never an earlier page's turns or the new prompt itself; the replacement is recorded in diagnostics, the next send on the page continues on the new thread without context, and the page keeps every turn in fresh CLI/XPC reads and the visible chat.
+    def test_codex_standalone_chat_resume_recovers_page_history(self):
+        executable, environment, chat_id = self.start_reattach_chat("codex-fixture-reattach-resume-recovery", provider="codex")
+
+        def active_page():
+            return self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+
+        def send(message, new_title=None):
+            self.send_filed_chat_turn(executable, environment, chat_id, message, new_title=new_title)
+            return json.loads(Path(str(executable) + ".reattach-ready").read_text(encoding="utf-8"))
+
+        send("Name a moon of Mars.")
+        earlier_page = active_page()
+        send("Tell me about volcanoes.", new_title="Volcanoes")
+        page = active_page()
+        self.assertNotEqual(page["id"], earlier_page["id"])
+        seeded = send("What about lava?")
+        page_thread = active_page()["providerSessionID"]
+        self.assertEqual(seeded["threadId"], page_thread, "The page's first turn starts the page's own thread.")
+
+        # A working resume after a restart keeps the page's thread and sends no page context.
+        self.restart_provider(executable)
+        normal = send("Continue normally.")
+        self.assertEqual(normal["threadId"], page_thread)
+        self.assertNotIn("<playhouse-handoff-context>", normal["text"], "A working resume must not receive the page again.")
+
+        self.restart_provider(executable)
+        missing = Path(str(executable) + ".missing-thread")
+        missing.write_text("Playhouse test owns this missing-thread trigger.\n", encoding="utf-8")
+        recovered = send("What happened earlier?")
+        self.assertFalse(missing.exists(), "Codex should have been asked to resume the page's missing thread.")
+        replacement = active_page()
+        self.assertEqual(replacement["id"], page["id"])
+        self.assertNotEqual(replacement["providerSessionID"], page_thread, "The page's missing thread is replaced by a new one saved on the page.")
+        self.assertEqual(recovered["threadId"], replacement["providerSessionID"])
+        prompt = recovered["text"]
+        self.assertIn("<playhouse-handoff-context>", prompt)
+        for earlier in ("Tell me about volcanoes.", "What about lava?", "Continue normally.", "After restart."):
+            self.assertIn(earlier, prompt, "The new thread receives the page's own turns.")
+        self.assertNotIn("Name a moon of Mars.", prompt, "An earlier page's turns never reach this page's thread.")
+        self.assertNotIn("User: What happened earlier?", prompt, "The new prompt is not repeated inside its own context.")
+        self.assertTrue(prompt.endswith("What happened earlier?"))
+        replaced = [
+            event for event in self.diagnostic_events()
+            if event.get("event") == "conversation.thread.replaced_missing" and event.get("taskID") == chat_id
+        ]
+        self.assertEqual([(event["provider"], event["missingThreadID"], event["threadID"]) for event in replaced],
+                         [("codex", page_thread, replacement["providerSessionID"])])
+
+        following = send("And after that?")
+        self.assertEqual(following["threadId"], replacement["providerSessionID"])
+        self.assertNotIn("<playhouse-handoff-context>", following["text"], "The replacement thread already has the page.")
+        self.assertEqual(
+            [text for text in self.chat_page_texts(page["id"], environment) if text != "Before restart." and text != "After restart."],
+            ["Tell me about volcanoes.", "What about lava?", "Continue normally.", "What happened earlier?", "And after that?"],
+            "The page keeps every turn, with the user's own prompts.",
+        )
+        self.assertEqual(self.chat_page_texts(earlier_page["id"], environment), ["Name a moon of Mars.", "Before restart.", "After restart."])
     # case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
     def test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary(self):
         task = self.create_task("Provider switch task")
@@ -571,7 +690,53 @@ class BridgeTestCases09:
             any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
-    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls, keeping its text clear of the scroller. The bubble shows its messages in 14-point text, the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
+    # case-contract: test_conversation_transcript_reopens_from_local_store | Playhouse stores every conversation turn in its own transcript store, for Codex and Claude alike. After a Codex turn and, following a provider switch, a Claude turn, a fresh daemon serves the same messages, roles, texts, providers and order without asking Codex for its thread history: Codex replies stay labeled Codex with the model that wrote them, Claude replies stay labeled Claude, and a limited read returns only the latest page with the count of earlier messages and keeps the Codex-to-Claude boundary after the last Codex message.
+    def test_conversation_transcript_reopens_from_local_store(self):
+        codex = self.data_directory / "codex-fixture-local-store"
+        claude = self.install_provider_fixture("claude", "claude-fixture-local-store")
+        environment = self.restart_service_environment("codex", codex, PLAYHOUSE_E2E_CLAUDE_EXECUTABLE=str(claude))
+        service = {"PLAYHOUSE_BRIDGE_SERVICE_NAME": environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"]}
+        task = self.create_task("Local transcript store")
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="Start with Codex.", extra_environment=service)
+        self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Tell me a very short dog story.", extra_environment=environment)[0])
+
+        def summary(history):
+            return [(message["id"], message["role"], message["text"], message.get("provider")) for message in history["messages"]]
+        before = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+        messages = before["messages"]
+        self.assertIn(("user", "Start with Codex.", "codex"), [(m["role"], m["text"], m.get("provider")) for m in messages])
+        self.assertIn(("user", "Tell me a very short dog story.", "claude"), [(m["role"], m["text"], m.get("provider")) for m in messages])
+        codex_replies = [m for m in messages if m["role"] == "assistant" and m.get("provider") == "codex"]
+        claude_replies = [m for m in messages if m["role"] == "assistant" and m.get("provider") == "claude"]
+        self.assertTrue(codex_replies, before)
+        self.assertTrue(all(m.get("modelID") for m in codex_replies), "Codex replies keep the model that wrote them.")
+        self.assertTrue(any("BISCUIT-7" in m["text"] for m in claude_replies), before)
+        self.assertLess(
+            max(i for i, m in enumerate(messages) if m.get("provider") == "codex"),
+            min(i for i, m in enumerate(messages) if m.get("provider") == "claude"),
+            "The transcript keeps the Codex turn before the Claude turn.",
+        )
+
+        methods = Path(str(codex) + ".methods")
+        self.assertIn("turn/start", methods.read_text(encoding="utf-8").split(), "The method log records this case's Codex requests.")
+        methods.write_text("", encoding="utf-8")
+        self.kill_daemon(environment)
+        after = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+        self.assertEqual(summary(after), summary(before), "A fresh daemon serves the stored transcript unchanged.")
+        self.assertEqual([m.get("modelID") for m in after["messages"]], [m.get("modelID") for m in messages])
+        page = self.assert_success(self.call_cli("conversation", "history", task["id"], "--limit", "2", extra_environment=environment)[0])
+        self.assertEqual(summary(page), summary(before)[-2:])
+        self.assertEqual(page["earlierMessageCount"], len(messages) - 2)
+        last_codex_message = max(i for i, m in enumerate(messages) if m.get("provider") == "codex")
+        expected_boundary = [("claude", messages[last_codex_message]["id"])]
+        self.assertEqual([(b["provider"], b["afterMessageID"]) for b in after["providerBoundaries"]], expected_boundary)
+        self.assertEqual([(b["provider"], b["afterMessageID"]) for b in page["providerBoundaries"]], expected_boundary,
+                         "A limited read keeps the Codex-to-Claude boundary after the last Codex message.")
+        requested = methods.read_text(encoding="utf-8").split()
+        for method in ("thread/read", "thread/turns/list", "thread/items/list"):
+            self.assertNotIn(method, requested, "Reading the transcript never asks Codex for its thread history.")
+    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a divided Comment and Side chat pill centered above the selection, and no bubble opens until its Side chat is clicked; clicking it hides the pill and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls, keeping its text clear of the scroller. The bubble shows its messages in 14-point text, the selected text and a compact chat with no subtitle, whose composer has the conversation's model picker and a send button but no Comment button, Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
     def test_side_chat_forks_claude_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat")
         source_session = task["claudeSessionID"]
@@ -657,7 +822,7 @@ class BridgeTestCases09:
         self.assertEqual(self.history_texts(task["id"], environment)[0], history_before,
                          "The side chat's messages must not reach the task's conversation.")
         self.assert_side_chat_validation(task, environment, opened["sideChatID"], fork_session)
-    # case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread with the model and effort chosen for it, reloading the fork in the read-only sandbox when the model changes, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange. Closing a side chat keeps it saved, and its next follow-up continues the same forked thread.
+    # case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread with the model and effort chosen for it, reloading the fork in the read-only sandbox when the model changes, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection from the pill's Side chat button, has no Comment button, shows the question and the answer below the selected text, and a follow-up adds a second exchange. Closing a side chat keeps it saved, and its next follow-up continues the same forked thread.
     def test_side_chat_forks_codex_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("codex", "codex-fixture-side-chat-success")
         source_thread = task["codexThreadID"]

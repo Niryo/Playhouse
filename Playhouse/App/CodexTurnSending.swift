@@ -213,6 +213,34 @@ extension CodexAppServerClient {
         }
     }
 
+    func loadThreadForSend(
+        threadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?,
+        sensitiveUserInputAnswerValues: [String], hideSensitiveRecoveryPrompt: Bool
+    ) async throws -> Bool {
+        // The same resume `sendMessage` makes, so the send finds the thread already loaded.
+        do {
+            try await resumeThreadIfNeeded(
+                id: threadID,
+                workspace: workspace,
+                modelID: modelID,
+                developerInstructions: developerInstructions,
+                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                sensitiveConversation: hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty,
+                confirmingModel: false
+            )
+            return true
+        } catch ClientError.threadNotFound {
+            return false
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Any other failure is the send's to report, once the turn's message is recorded:
+            // its own resume tries again (a transient failure may pass the second time) and
+            // fails the turn as it did before this check.
+            return true
+        }
+    }
+
     func sendMessage(
         _ text: String,
         imageDataURLs: [String] = [],
@@ -280,6 +308,7 @@ extension CodexAppServerClient {
         // thread keeps being followed: the CLI sends through the same client.
         if goalObservationThreadID == threadID { goalObservationThreadID = nil }
         contextlessTurnIDs.removeValue(forKey: threadID)
+        contextlessTurnEntries.removeValue(forKey: threadID)
         activeThreadID = threadID
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
@@ -377,8 +406,5 @@ extension CodexAppServerClient {
             }
         }
 
-        if let history = try? await readMessages(threadID: threadID) {
-            onHistory(history)
-        }
     }
 }

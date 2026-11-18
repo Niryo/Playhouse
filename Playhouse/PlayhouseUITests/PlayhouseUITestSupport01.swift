@@ -82,10 +82,13 @@ extension PlayhouseUITests {
         if provider == "codex" {
             relaunchApp()
             openTask(named: title)
-            XCTAssertTrue(app.staticTexts["message-time-item_user_fixture_1"].waitForExistence(timeout: 10),
-                          "The observed message time survives interruption and relaunch.")
+            let storedHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+            let promptID = try XCTUnwrap((storedHistory?["messages"] as? [[String: Any]] ?? [])
+                .first { $0["role"] as? String == "user" }?["id"] as? String)
+            XCTAssertTrue(app.staticTexts["message-time-\(promptID)"].waitForExistence(timeout: 10),
+                          "The stored message time survives interruption and relaunch.")
             attachScreenshot(named: "Interrupted Codex message timestamp")
-            attachElementScreenshot(app.staticTexts["message-time-item_user_fixture_1"], named: "Interrupted Codex timestamp detail")
+            attachElementScreenshot(app.staticTexts["message-time-\(promptID)"], named: "Interrupted Codex timestamp detail")
         }
     }
     func exerciseRejectedStop(provider: String, title: String) throws {
@@ -159,9 +162,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitForStableFrame(replyText), "The reply should settle before its text is selected.")
         replyText.click()
         replyText.typeKey("a", modifierFlags: .command)
-        // The reply is one short line, so its hint centres on those few characters, not the text view.
-        let bubble = try waitForSideChatBubble(at: replyText, hintScreenshot: "Side chat hint above the selected reply")
-        XCTAssertFalse(app.buttons["add-comment-to-selection-button"].exists, "The bubble replaces the Add comment hint.")
+        // The reply is one short line, so its pill centres on those few characters, not the text view.
+        // The pill offers Comment beside Side chat; its Side chat half opens the bubble.
+        let bubble = try waitForSideChatBubble(at: replyText, hintScreenshot: "Comment and Side chat pill above the selected reply")
         return (taskID, replyText, bubble)
     }
     func sendSideChatMessage(_ message: String, answerIndex index: Int, containing expected: String) -> XCUIElement {
