@@ -61,6 +61,15 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureStateDirectory = nil
         launchWindowTitle = nil
         fixture = try WorkspaceFixture.load()
+        // The provider fixtures are shared by the whole run and keep their thread history
+        // beside the executable, under thread and turn ids that repeat across cases; a Codex
+        // turn's end replays the history items it never streamed, so an earlier case's
+        // answers would land in this case's turn. Each case starts with none, as each
+        // CLI case does with its own fixture copy.
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: WorkspaceFixture.root.path)) ?? []
+        where name.hasSuffix(".history") {
+            try? FileManager.default.removeItem(at: WorkspaceFixture.root.appendingPathComponent(name))
+        }
         runDirectory = URL(fileURLWithPath: "/tmp/playhouse-ui-test-data", isDirectory: true)
             .appendingPathComponent("PlayhouseUITests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)

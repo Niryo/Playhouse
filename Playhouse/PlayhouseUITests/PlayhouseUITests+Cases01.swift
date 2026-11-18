@@ -316,7 +316,8 @@ extension PlayhouseUITests {
         launchAppWithOpen()
         waitForBoardOrAbortSuite()
         XCTAssertTrue(element("agents-info-login-codex").waitToExist(timeout: 40), "A signed-out Codex should offer Log in.")
-        XCTAssertTrue(element("agents-info-login-claude").exists, "A signed-out Claude should offer Log in.")
+        // The daemon reads each agent's account separately and shows the persisted state until its read lands.
+        XCTAssertTrue(element("agents-info-login-claude").waitToExist(timeout: 40), "A signed-out Claude should offer Log in.")
         XCTAssertFalse(element("agents-info-codex-window-primary").exists, "A signed-out agent shows no usage.")
         attachScreenshot(named: "Agents info with both agents signed out")
         element("agents-info-login-claude").click()
@@ -596,10 +597,6 @@ extension PlayhouseUITests {
     func test_task_creation_rejects_invalid_title_roots_and_missing_folder() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
-        // This fixture is shared by the whole run; an earlier case's history would answer for this one's turn.
-        for suffix in [".history", ".assessment.history"] {
-            try? FileManager.default.removeItem(atPath: try XCTUnwrap(codexFixtureExecutable) + suffix)
-        }
         launchApp(defaultParent: nil)
         openNewTaskConversation()
         let standaloneTaskID = try taskID(named: "Untitled task")

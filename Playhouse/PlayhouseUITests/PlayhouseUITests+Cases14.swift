@@ -244,6 +244,10 @@ extension PlayhouseUITests {
         selectAllText(userView)
         XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
         // The multiline selection's divided pill is centred above it; Side chat opens the bubble.
+        // This message is the transcript's first, at its top edge, where a pill above it would be
+        // clipped; the helper checks that it is pinned inside the transcript's top edge instead.
+        XCTAssertLessThan(userText.frame.minY, transcriptScrollView.frame.minY + 45,
+                          "The transcript's first message should start at its top edge (text \(userText.frame), transcript \(transcriptScrollView.frame)).")
         let initialPill = waitForSelectionActionsPill()
         XCTAssertLessThanOrEqual(initialPill.sideChat.frame.maxY, userText.frame.minY + 8,
                                  "The selection pill should sit above the selected text.")
@@ -253,6 +257,10 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Comment and Side chat pill above a multiline selection")
         XCTAssertTrue(element("selection-actions-pill").exists, "The Comment and Side chat actions should be one pill.")
         attachElementScreenshot(element("selection-actions-pill"), named: "Divided Comment and Side chat pill")
+        let pinnedPillAttachment = XCTAttachment(screenshot: transcriptScrollView.screenshot())
+        pinnedPillAttachment.name = "Selection pill pinned above the transcript's first message (transcript)"
+        pinnedPillAttachment.lifetime = .keepAlways
+        add(pinnedPillAttachment)
         let initialBubble = try waitForSideChatBubble(at: userText, centered: true)
         XCTAssertTrue(element("side-chat-input").waitToExist(timeout: 5))
         app.typeKey(.escape, modifierFlags: [])

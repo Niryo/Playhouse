@@ -19,10 +19,15 @@ final class PluginRegistry {
 
     func reload() async {
         do {
+            // Every assignment rebuilds the Plugins menu, closing a submenu the user has
+            // open, so an unchanged reload (the revision bump that follows an enable or
+            // disable this window already reloaded for) assigns nothing.
             let result = try await client.call("plugin.list")
-            plugins = try result.object?["plugins"]?.decoded([PluginRecord].self) ?? []
+            let listed = try result.object?["plugins"]?.decoded([PluginRecord].self) ?? []
+            if listed != plugins { plugins = listed }
             let sessions = try await client.call("plugin.sessions")
-            authoringSessions = try sessions.object?["sessions"]?.decoded([BoardTaskRecord].self) ?? []
+            let listedSessions = try sessions.object?["sessions"]?.decoded([BoardTaskRecord].self) ?? []
+            if listedSessions != authoringSessions { authoringSessions = listedSessions }
         } catch {
             PlayhouseDiagnostics.record("plugins.reload.failed", fields: ["error": error.localizedDescription])
         }

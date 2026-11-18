@@ -430,7 +430,15 @@ class BridgeTestCases05:
         # Green ends the slow poll. A turn that completes moves the task to Review while it
         # still holds the task, so that pass is skipped; the plugin looks again on the poll.
         gh_state.write_text("802=unmerged\n802.checks=success\n", encoding="utf-8")
-        wait_for_follows("poll", len(follows("poll")) + 1)
+        # A poll already started when the checks turned green may be the one that reads
+        # them, so wait for a poll that saw green rather than for one more poll.
+        def green_polls():
+            return [event for event in self.diagnostic_events() if event.get("event") == "plugin.pull_request_mode.followed"
+                    and event.get("taskID") == followed["id"] and event.get("trigger") == "poll" and event.get("action") == "green"]
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not green_polls():
+            time.sleep(0.25)
+        self.assertTrue(green_polls(), "A poll should read the green checks.")
         time.sleep(3)
         polls_when_green = len(follows("poll"))
         time.sleep(3)

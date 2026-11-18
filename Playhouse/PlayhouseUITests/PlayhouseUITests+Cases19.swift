@@ -167,7 +167,17 @@ extension PlayhouseUITests {
         )["result"] as? [String: Any]
         let reloadedMessages = reloadedHistory?["messages"] as? [[String: Any]] ?? []
         XCTAssertTrue(reloadedMessages.contains { $0["role"] as? String == "assistant" && $0["text"] as? String == markdownReply }, "The exact Markdown source should persist after reopening the plan conversation.")
-        XCTAssertEqual(reloadedMessages.last?["role"] as? String, "assistant", "The bridge history should keep the latest response last.")
+        // The store records each outcome nudge Playhouse sends after a turn as sent; this fixture
+        // completes it without a reply, so only nudges may follow the latest response.
+        let nudgePrefix = "Playhouse internal outcome nudge:"
+        let lastReply = try XCTUnwrap(reloadedMessages.lastIndex { $0["role"] as? String == "assistant" })
+        XCTAssertEqual(reloadedMessages[(lastReply + 1)...].filter {
+            !($0["role"] as? String == "user" && ($0["text"] as? String ?? "").hasPrefix(nudgePrefix))
+        }.count, 0, "The latest response should be last in bridge history, followed only by outcome nudges.")
+        XCTAssertEqual(reloadedMessages.filter {
+            $0["role"] as? String == "user" && !($0["text"] as? String ?? "").hasPrefix(nudgePrefix)
+        }.compactMap { $0["text"] as? String }, ["Plan the task.", "Revise the plan to clarify the persistence step."],
+        "Each sent prompt is stored once, in order.")
         let planDiagnostics = try diagnosticEvents()
         let planSummary = try XCTUnwrap(planDiagnostics.first {
             $0["event"] as? String == "codex.notification.summary"

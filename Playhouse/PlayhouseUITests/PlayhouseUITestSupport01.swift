@@ -1216,6 +1216,7 @@ extension PlayhouseUITests {
             environment["PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
         }
         environment.merge(environmentOverrides, uniquingKeysWith: { _, new in new })
+        if !isLiveIntegration { addDefaultGitHubFixture(to: &environment) }
         app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
         app.launchEnvironment = environment
         // Every case starts from no restored windows. AppKit saves open windows on

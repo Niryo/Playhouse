@@ -433,6 +433,8 @@ if [[ -x "${compiled_app}/Contents/MacOS/playhouse-cli" ]]; then
   bridge_watcher_pid=$!
   trap 'pkill -P "${bridge_watcher_pid}" 2>/dev/null || true; kill "${bridge_watcher_pid}" 2>/dev/null || true; cleanup' EXIT
 fi
+run_started_marker="${test_output_dir}/.run-started"
+touch "${run_started_marker}"
 for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   first_case=$(( batch_index * batch_size ))
   batch_cases=("${selected_cases[@]:first_case:batch_size}")
@@ -587,6 +589,20 @@ PY
     fi
   fi
 done
+
+# A failed case keeps its data directory, and the daemon logs its starts and exits, in the
+# guest's /tmp, which the next run's VM restart clears. Keep this run's copies (the top-level
+# files of each preserved `data/`, with Diagnostics.jsonl) with the run's artifacts.
+if [[ "${PLAYHOUSE_UI_TART_GUEST:-0}" == "1" ]]; then
+  while IFS= read -r -d '' preserved_case; do
+    [[ -d "${preserved_case}/data" ]] || continue
+    preserved_copy="${test_output_dir}/preserved-case-data/$(basename "${preserved_case}")"
+    mkdir -p "${preserved_copy}"
+    find "${preserved_case}/data" -mindepth 1 -maxdepth 1 -type f -exec cp -p {} "${preserved_copy}/" \; 2>/dev/null || true
+  done < <(find /tmp/playhouse-ui-test-data -mindepth 1 -maxdepth 1 -type d -name 'PlayhouseUITests-*' -newer "${run_started_marker}" -print0 2>/dev/null)
+  find "/private/tmp/playhouse-bridge/$(id -u)" -maxdepth 1 -type f -name '*.sock.log' -newer "${run_started_marker}" \
+    -exec cp -p {} "${test_output_dir}/" \; 2>/dev/null || true
+fi
 
 if ! python3 - "${test_output_dir}" "${batch_count}" "${expected_count}" <<'PY'
 import json

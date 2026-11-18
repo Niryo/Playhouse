@@ -774,27 +774,47 @@ extension PlayhouseUITests {
             let textView = selection.textViews.firstMatch
             let hasTextView = textView.exists
             let selection = hasTextView ? textView : selection
+            // A user message's text is a text view, passed itself or found inside its message; a reply's is static text.
+            let isUserText = hasTextView || selection.elementType == .textView
             let hintFrame = hint.frame
-            if hasTextView {
+            // The hint sits above the selection; where the transcript's top edge would clip it there,
+            // it stays pinned just inside that edge instead. Either way it is inside the transcript.
+            let transcript = element("conversation-scroll-view")
+            let transcriptTop = transcript.exists ? transcript.frame.minY : -CGFloat.greatestFiniteMagnitude
+            if transcript.exists {
+                XCTAssertTrue(hintFrame.minY >= transcriptTop && hintFrame.maxY <= transcript.frame.maxY,
+                              "The Side chat hint should be inside the transcript (hint \(hintFrame), transcript \(transcript.frame)).", file: file, line: line)
+            }
+            // How far above the selection the hint's top edge is; a user message lifts it 16pt more, into its top padding.
+            let lift: CGFloat = isUserText ? 53 : 37
+            if isUserText && selection.frame.minY - lift < transcriptTop + 4 {
+                XCTAssertLessThanOrEqual(hintFrame.minY, transcriptTop + 12,
+                                         "Without room above, the Side chat hint should be pinned to the transcript's top edge (hint \(hintFrame), selection \(selection.frame), transcript top \(transcriptTop)).", file: file, line: line)
+                // A hint clipped by that edge would report a cut frame there, so it must also be whole and clickable.
+                XCTAssertGreaterThanOrEqual(hintFrame.height, 28,
+                                            "The pinned Side chat hint should not be clipped by the transcript's top edge (hint \(hintFrame)).", file: file, line: line)
+                XCTAssertTrue(hint.isHittable, "The pinned Side chat hint should be clickable.", file: file, line: line)
+            } else if isUserText {
                 // A user message's hint has room in its message, so its whole frame is above the text.
                 XCTAssertLessThanOrEqual(hintFrame.maxY, selection.frame.minY + 8,
                                          "The Side chat hint should sit above the selected text (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
             } else {
                 // A reply's hint draws above its text too, but its accessibility frame is clipped to
                 // that text's container, so only its top edge is reliable: never below the selection's.
-                XCTAssertLessThanOrEqual(hintFrame.minY, selection.frame.minY + 4,
+                // A reply scrolled above the transcript's top has its hint pinned just inside that edge.
+                XCTAssertLessThanOrEqual(hintFrame.minY, max(selection.frame.minY + 4, transcriptTop + 12),
                                          "The Side chat hint should start above the selected text (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
             }
             XCTAssertTrue(hintFrame.maxX > selection.frame.minX - 60 && hintFrame.minX < selection.frame.maxX + 60,
                           "The Side chat hint should be over the selected text's columns (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
-            // A whole-text selection's hint is centred on it, its bottom just above the selected lines.
+            // A whole-text selection's hint is centred on it, right at the selected lines.
             if centered {
                 // The whole pill is centred: Comment's left edge to Side chat's right edge.
                 let pillMidX = (pill.comment.frame.minX + hintFrame.maxX) / 2
                 XCTAssertLessThan(abs(pillMidX - selection.frame.midX), 70,
                                   "The selection pill should be centred over the selection (pill centre \(pillMidX), selection \(selection.frame)).", file: file, line: line)
-                XCTAssertGreaterThanOrEqual(hintFrame.minY, selection.frame.minY - 60,
-                                            "The Side chat hint should sit just above the selection (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
+                XCTAssertTrue(hintFrame.minY >= selection.frame.minY - 60 && hintFrame.maxY <= selection.frame.maxY + 60,
+                              "The Side chat hint should sit just above the selection or at its start (hint \(hintFrame), selection \(selection.frame)).", file: file, line: line)
             }
         }
         Thread.sleep(forTimeInterval: 0.8)

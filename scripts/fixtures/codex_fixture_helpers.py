@@ -19,15 +19,20 @@ def echoed_outcome_answer(runtime, user_message):
 
 
 def own_user_text(runtime, message):
-    """The user's own words, without Playhouse's hidden context envelope.
+    """The user's own words, without Playhouse's hidden context envelopes.
 
-    Standalone chat seeds a page's first turn with that page's transcript, so a sentinel
-    repeated by an earlier assistant answer must not re-trigger a scenario branch here.
+    Standalone chat seeds a page's first turn with that page's transcript, and a comment
+    quotes the answer text it was made on, so a sentinel repeated by an earlier assistant
+    answer must not re-trigger a scenario branch here.
     """
     text = message or ""
     close = "</playhouse-handoff-context>"
     if text.startswith("<playhouse-handoff-context>") and close in text:
-        return text.split(close, 1)[1].strip()
+        text = text.split(close, 1)[1].strip()
+    start, close = "<playhouse-comment-context>", "</playhouse-comment-context>"
+    if start in text and close in text.split(start, 1)[1]:
+        before, rest = text.split(start, 1)
+        text = (before + rest.split(close, 1)[1]).strip()
     return text
 
 

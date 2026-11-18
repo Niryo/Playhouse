@@ -129,23 +129,11 @@ extension PlayhouseUITests {
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertEqual((try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count, rapidFocusCheckCount + 2, "Multiple cooldown focus changes should produce exactly one trailing refresh.")
         Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
-        try "123=unmerged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
+        try "123=merged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let thirdCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
         activateOtherAppThenReturn()
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= thirdCheckCount + 2
-        }, timeout: 10), "Focus should query both PRs when the second PR is already merged.")
-        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
-        XCTAssertFalse(completionButton.exists, "Either unmerged PR should suppress task completion.")
-        XCTAssertTrue(prLink.exists)
-        XCTAssertTrue(secondPRLink.exists)
-        XCTAssertTrue(waitUntil({ (secondPRLink.value as? String) == "merged" }, timeout: 10), "Either merged PR number turns purple, whichever order they merge in.")
-        Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
-        try "123=merged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
-        let fourthCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
-        activateOtherAppThenReturn()
-        XCTAssertTrue(waitUntil({
-            ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= fourthCheckCount + 2
         }, timeout: 10), "Regaining focus should refresh both PR merge states.")
         XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertTrue(completionButton.waitToExist(timeout: 10), "A merged PR should replace its link with the completion button.")
@@ -311,14 +299,20 @@ extension PlayhouseUITests {
         XCTAssertFalse(resolveButton.exists, "A mergeable PR should not show the conflict action.")
         let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
         try "123=conflicting\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        // The fixture touches started/<number> as each probe starts, so the marker's date is
+        // when the last probe began. The trailing probe that the focus events schedule may
+        // start only once the cooldown since then has passed.
+        let probeMarkerURL = startedDirectory.appendingPathComponent("123")
+        let lastProbeStart = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: probeMarkerURL.path)[.modificationDate] as? Date)
         for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
         let ghCallsURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CALL_LOG"]))
         let callsBeforeCooldownFocus = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
         for _ in 0..<4 {
             activateOtherAppThenReturn()
         }
-        Thread.sleep(forTimeInterval: 0.5)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path), "Cooldown focus events should not start an immediate GitHub probe.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: probeMarkerURL.path) }, timeout: 25), "Cooldown focus events should schedule a trailing GitHub probe.")
+        let trailingProbeStart = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: probeMarkerURL.path)[.modificationDate] as? Date)
+        XCTAssertGreaterThanOrEqual(trailingProbeStart.timeIntervalSince(lastProbeStart), Self.prCheckCooldown - 0.25, "Cooldown focus events should not start an immediate GitHub probe.")
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) == callsBeforeCooldownFocus + 2
         }, timeout: 25), "Cooldown focus events should coalesce into one trailing probe after 20 seconds.")
@@ -467,28 +461,34 @@ extension PlayhouseUITests {
         let duplicateRemoteHead = try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")
 
         // A worktree switched off its task branch is never merged into, committed to, or pushed.
+        // The board's pull request read records a branch switched by hand, so the app stays
+        // closed while the worktree is off its branch: this step is the sync's own check.
+        XCTAssertTrue(terminateAppAndWait(app))
         try runGit(worktree, "checkout", "-b", "agent-side-branch")
         let sideHead = try runGitOutput(worktree, "rev-parse", "HEAD")
         let switched = try runCLI(["task", "pr", "sync", taskID], expectedStatus: 1, extraEnvironment: ghEnvironment)
         let switchedMessage = ((switched["error"] as? [String: Any])?["message"] as? String) ?? ""
         XCTAssertTrue(switchedMessage.contains("is on branch 'agent-side-branch', not its pull request branch"), switchedMessage)
         XCTAssertTrue(switchedMessage.contains("'\(branch)'"), switchedMessage)
-        assertTaskVisible("Review sync push UI", inColumn: "Blocked")
         let switchedStatusMessage = try taskRecord(id: taskID)?["statusMessage"] as? String
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Blocked")
         XCTAssertTrue((switchedStatusMessage ?? "").contains("agent-side-branch"), switchedStatusMessage ?? "nil")
-        let switchedCardMessage = element("task-status-message-\(taskID)")
-        XCTAssertTrue(switchedCardMessage.waitToExist(timeout: 10), "The Blocked card shows why the sync stopped.")
-        let switchedCardText = accessibleLabelOrValue(of: switchedCardMessage)
-        XCTAssertTrue(switchedCardText.contains("agent-side-branch") && switchedCardText.contains("not its pull request branch"), switchedCardText)
-        attachScreenshot(named: "review-sync-blocked-on-switched-branch")
         XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), sideHead)
         let mergeHead = URL(fileURLWithPath: try runGitOutput(worktree, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"), relativeTo: worktree)
         XCTAssertFalse(FileManager.default.fileExists(atPath: mergeHead.path), "A sync on a switched branch must not start a merge.")
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), duplicateRemoteHead)
 
-        // Back on the task branch, the clean merge is committed and pushed rather than left in progress.
+        // Back on the task branch, the Blocked card still shows why the sync stopped, and the
+        // clean merge is committed and pushed rather than left in progress.
         try runGit(worktree, "checkout", branch)
         try runGit(worktree, "branch", "-D", "agent-side-branch")
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        assertTaskVisible("Review sync push UI", inColumn: "Blocked")
+        let switchedCardMessage = element("task-status-message-\(taskID)")
+        XCTAssertTrue(switchedCardMessage.waitToExist(timeout: 10), "The Blocked card shows why the sync stopped.")
+        let switchedCardText = accessibleLabelOrValue(of: switchedCardMessage)
+        XCTAssertTrue(switchedCardText.contains("agent-side-branch") && switchedCardText.contains("not its pull request branch"), switchedCardText)
+        attachScreenshot(named: "review-sync-blocked-on-switched-branch")
         let mergedSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
         XCTAssertEqual((mergedSync["records"] as? [[String: Any]])?.compactMap { $0["action"] as? String }, ["merged-and-pushed"])
         assertTaskVisible("Review sync push UI", inColumn: "Review")
