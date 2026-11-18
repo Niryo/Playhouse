@@ -335,7 +335,7 @@ extension TaskConversationView {
     @ViewBuilder
     func chatPageAnchorsOverlay(showsLabels: Bool, transcriptWidth: CGFloat) -> some View {
         if offersChatPageAnchors(transcriptWidth: transcriptWidth) {
-            let leading = ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth)
+            let leading = ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth, push: chatPageAnchorsPush)
             HStack(spacing: ChatPageAnchorsLayout.labelsHandleGap) {
                 ChatPageAnchorsHandle(
                     isOpen: showsLabels,
@@ -346,7 +346,7 @@ extension TaskConversationView {
                 if showsLabels {
                     ChatPageAnchorsView(
                         model: chatPageAnchors,
-                        width: ChatPageAnchorsLayout.labelsWidth(transcriptWidth: transcriptWidth),
+                        width: ChatPageAnchorsLayout.labelsWidth,
                         jump: { jumpToChatPage($0) },
                         jumpToBottom: { returnToLatestMessages() },
                         searchFocusChanged: { hoverChatPageAnchors(.search, $0) }

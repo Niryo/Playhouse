@@ -134,10 +134,14 @@ struct KanbanBoardView: View {
     /// frame of the drag made it stutter, so the chat catches up only when the edge pauses, and
     /// when the drag ends.
     @State var chatSidebarReflowWidth: CGFloat?
+    /// How far the chat's open page labels widen the sidebar beyond its set width, pushing the board aside.
+    @State var chatPageAnchorsPush: CGFloat = 0
 
     var chatSidebarWidth: CGFloat {
         chatSidebarDragWidth ?? ChatSidebarLayout.clampedWidth(CGFloat(storedChatSidebarWidth))
     }
+    /// The chat sidebar's width on screen: its set width and the room its open page labels take.
+    var chatSidebarShownWidth: CGFloat { chatSidebarWidth + chatPageAnchorsPush }
 
     @Environment(\.modelContext) var modelContext
     @Environment(PluginRegistry.self) var pluginRegistry
@@ -495,7 +499,7 @@ struct KanbanBoardView: View {
 
                     if isChatOverlayVisible {
                         Color.clear
-                            .frame(width: max(0, chatSidebarWidth - boardSidebarWidth - 1))
+                            .frame(width: max(0, chatSidebarShownWidth - boardSidebarWidth - 1))
                             .accessibilityHidden(true)
                     }
 
@@ -678,12 +682,22 @@ struct KanbanBoardView: View {
                 // The chat's Skills page spans the window, not just the sidebar.
                 .environment(\.skillsPageWindowWidth, boardContentWidth > 0 ? boardContentWidth : nil)
                 .onPreferenceChange(SkillsPageShowingKey.self) { isChatSkillsPageShowing = $0 }
+                // The open page labels widen the sidebar, pushing the board aside, and the chat moves
+                // its rows right by the same width in the same update, so they never narrow.
+                .onPreferenceChange(ChatPageAnchorsPushKey.self) { push in
+                    guard push != chatPageAnchorsPush else { return }
+                    withAnimation(ChatPageAnchorsLayout.slideAnimation) { chatPageAnchorsPush = push }
+                }
                 // Opening a task from the page removes the chat without a closing preference change.
-                .onDisappear { isChatSkillsPageShowing = false }
+                .onDisappear {
+                    isChatSkillsPageShowing = false
+                    chatPageAnchorsPush = 0
+                }
+                .environment(\.chatPageAnchorsPush, chatPageAnchorsPush)
                 // While the edge moves, the chat keeps the width it was last laid out at, and the panel
                 // clips or reveals the rest; it reflows when the edge rests and when the drag ends.
-                .frame(width: chatSidebarReflowWidth ?? chatSidebarWidth)
-                .frame(width: chatSidebarWidth, alignment: .leading)
+                .frame(width: (chatSidebarReflowWidth ?? chatSidebarWidth) + chatPageAnchorsPush)
+                .frame(width: chatSidebarShownWidth, alignment: .leading)
                 .background(WorkspaceTheme.windowBackground)
                 .clipShape(ChatSidebarClip(width: isChatSkillsPageShowing ? boardContentWidth : nil))
                 .task(id: chatSidebarDragWidth) {
