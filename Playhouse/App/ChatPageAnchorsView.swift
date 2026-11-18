@@ -171,12 +171,55 @@ private struct ChatPageAnchorsPushEnvironmentKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    /// The width the chat sidebar has grown by for the page labels. The transcript moves its
-    /// rows right by this much, in the same update that widens the sidebar, so the rows keep
-    /// their width throughout.
+    /// The width the chat sidebar grows by for the page labels, set in the same update that
+    /// widens the sidebar. It holds the slide's end value from that update on, while the
+    /// sidebar's width animates, so views read it through an `Animatable` modifier
+    /// (`ChatPageAnchorsPushedRows`, `ChatPageAnchorsColumnInset`) that follows the sidebar
+    /// frame by frame.
     var chatPageAnchorsPush: CGFloat {
         get { self[ChatPageAnchorsPushEnvironmentKey.self] }
         set { self[ChatPageAnchorsPushEnvironmentKey.self] = newValue }
+    }
+}
+
+/// Moves the transcript's rows right by the open labels' push, keeping their width. The push
+/// animates here, frame by frame with the chat sidebar widening by as much. Read straight from
+/// the environment it would reach its end at once while the sidebar is still growing, so for
+/// the slide's length the rows would narrow (or, folding, widen), reflow their text and move
+/// the reader's place in the transcript, then move it back.
+struct ChatPageAnchorsPushedRows: ViewModifier, Animatable {
+    var push: CGFloat
+
+    var animatableData: CGFloat {
+        get { push }
+        set { push = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.leading, push)
+            .padding(.horizontal, ChatPageAnchorsLayout.transcriptPadding)
+            .frame(maxWidth: ChatPageAnchorsLayout.transcriptMaxWidth + push)
+    }
+}
+
+/// Places the labels' handle at the transcript's centered column, which the push moves. Like
+/// `ChatPageAnchorsPushedRows`, the push animates here, so while the transcript widens the
+/// handle stays at the rows' edge instead of jumping by half the push and drifting back.
+struct ChatPageAnchorsColumnInset: ViewModifier, Animatable {
+    var push: CGFloat
+    let transcriptWidth: CGFloat
+
+    var animatableData: CGFloat {
+        get { push }
+        set { push = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content.padding(
+            .leading,
+            ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth, push: push) + ChatPageAnchorsLayout.handleInset
+        )
     }
 }
 

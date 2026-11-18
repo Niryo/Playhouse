@@ -96,12 +96,10 @@ extension TaskConversationView {
                         }
                     }
                 }
+                .padding(.vertical, Self.conversationVerticalPadding)
                 // The open page labels widen the chat sidebar and push the rows right by as much,
                 // so the rows keep their width and their text stays as it was.
-                .padding(.leading, chatPageAnchorsPush)
-                .padding(.horizontal, ChatPageAnchorsLayout.transcriptPadding)
-                .padding(.vertical, Self.conversationVerticalPadding)
-                .frame(maxWidth: ChatPageAnchorsLayout.transcriptMaxWidth + chatPageAnchorsPush)
+                .modifier(ChatPageAnchorsPushedRows(push: chatPageAnchorsPush))
                 .frame(maxWidth: .infinity)
                 .hoverRevealScrollers()
                 .transcriptScroll(

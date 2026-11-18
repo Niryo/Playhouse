@@ -335,7 +335,6 @@ extension TaskConversationView {
     @ViewBuilder
     func chatPageAnchorsOverlay(showsLabels: Bool, transcriptWidth: CGFloat) -> some View {
         if offersChatPageAnchors(transcriptWidth: transcriptWidth) {
-            let leading = ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth, push: chatPageAnchorsPush)
             HStack(spacing: ChatPageAnchorsLayout.labelsHandleGap) {
                 ChatPageAnchorsHandle(
                     isOpen: showsLabels,
@@ -364,7 +363,7 @@ extension TaskConversationView {
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
             }
-            .padding(.leading, leading + ChatPageAnchorsLayout.handleInset)
+            .modifier(ChatPageAnchorsColumnInset(push: chatPageAnchorsPush, transcriptWidth: transcriptWidth))
         }
     }
 
