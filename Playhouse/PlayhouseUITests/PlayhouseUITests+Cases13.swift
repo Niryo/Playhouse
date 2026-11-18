@@ -1045,4 +1045,98 @@ extension PlayhouseUITests {
         XCTAssertEqual(search.value as? String ?? "", "", "Escape empties the search.")
         XCTAssertFalse(clear.exists, "An empty search offers no clear button.")
     }
+    // case-contract: test_transcript_rows_stay_with_older_messages | A provider divider and a goal achievement stay right after the message they were recorded after. A long Claude history whose switch from Codex sits on its older page, with a switch to Claude and back that sent nothing stored on the same message, has one Codex-to-Claude divider after the last Codex message in complete and paged CLI/XPC history, the empty switch pair dropped, and the newest page leaves that message out; another turn leaves the divider where it was. Opened on its newest page, the visible transcript draws neither that divider nor a goal achievement recorded after the last Codex message, at the bottom or anywhere after a newer message, and they stay hidden after a new message is sent from the composer; a goal achievement recorded after the latest turn's folded commentary follows that turn's question, above its answer, not the newest message. Scrolling up loads the older page and shows the one divider, then that goal achievement, right after the last Codex message and before the next question, with no Switched to Codex divider. The placement is Playhouse-owned and the same for both providers, so one switch from Codex to Claude covers the case.
+    func test_transcript_rows_stay_with_older_messages() throws {
+        let claude = dataDirectory.appendingPathComponent("claude-fixture-row-anchors")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claude)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = claude.path
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
+        launchApp(defaultParent: fixture.parent.path)
+        let title = "Rows with older messages"
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Start with Codex."])
+        _ = try runCLI(["conversation", "provider", taskID, "set", "claude"])
+        // Earlier sessions' turns are already in Playhouse's own store, and Goal achievements in the
+        // app's preferences, as an earlier Goal recorded them.
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before its stored history is seeded.")
+        try seedLongHistory(taskID, switchAfterTurn: 10, latestCommentary: true)
+        let anchor = "item_long_history_assistant_10"
+        let olderGoal = "Goal achieved after the Codex turns"
+        let foldedGoal = "Goal achieved during the latest turn"
+        let goalEntries: [[String: String]] = [
+            ["id": "goal-row-older", "summary": olderGoal, "afterMessageID": anchor],
+            ["id": "goal-row-folded", "summary": foldedGoal, "afterMessageID": "item_long_history_commentary_60"],
+        ]
+        try XCTUnwrap(UserDefaults(suiteName: preferencesSuiteName)).set(
+            try JSONSerialization.data(withJSONObject: goalEntries), forKey: "playhouse.codex.goal-achievement-timeline.\(taskID.uppercased())"
+        )
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+
+        func boundaries(_ history: [String: Any]) -> [String] {
+            ((history["providerBoundaries"] as? [[String: Any]]) ?? []).map { "\($0["provider"] ?? "")|\($0["afterMessageID"] ?? "")" }
+        }
+        let full = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let messages = try XCTUnwrap(full["messages"] as? [[String: Any]])
+        let anchorIndex = try XCTUnwrap(messages.firstIndex { $0["id"] as? String == anchor })
+        XCTAssertEqual(messages[anchorIndex + 1]["text"] as? String, "Long history user 11.")
+        XCTAssertEqual(boundaries(full), ["claude|\(anchor)"], "The undone switch pair leaves no dividers of its own.")
+        let newest = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "80"])["result"] as? [String: Any])
+        XCTAssertFalse(((newest["messages"] as? [[String: Any]]) ?? []).contains { $0["id"] as? String == anchor }, "The divider's message sits on the older page.")
+        XCTAssertEqual(boundaries(newest), ["claude|\(anchor)"])
+
+        openTask(named: title)
+        let scrollView = element("conversation-scroll-view")
+        let claudeDividers = app.descendants(matching: .any).matching(identifier: "provider-boundary-claude")
+        let codexDivider = element("provider-boundary-codex")
+        func goalRow(_ summary: String) -> XCUIElement {
+            scrollView.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier == 'goal-achieved-banner' AND (label == %@ OR value == %@)", summary, summary)).firstMatch
+        }
+        let latestQuestion = element("user-message-item_long_history_user_60")
+        let latestAnswer = element("assistant-message-item_long_history_assistant_60")
+        XCTAssertTrue(waitUntil({ (scrollView.value as? String)?.hasPrefix("Showing latest") == true && latestAnswer.exists }, timeout: 20),
+                      "Reopening renders the newest page's latest turn.")
+        XCTAssertFalse(element("assistant-message-item_long_history_commentary_60").exists, "The latest turn's commentary is folded.")
+        XCTAssertTrue(goalRow(foldedGoal).waitToExist(timeout: 5), "A goal achievement after folded commentary is still shown.")
+        XCTAssertLessThanOrEqual(latestQuestion.frame.maxY, goalRow(foldedGoal).frame.minY, "It follows the latest question.")
+        XCTAssertLessThanOrEqual(goalRow(foldedGoal).frame.maxY, latestAnswer.frame.minY, "It sits above the answer, not after the newest message.")
+        XCTAssertEqual(claudeDividers.count, 0, "A divider whose message is not loaded is not drawn.")
+        XCTAssertFalse(goalRow(olderGoal).exists, "A goal achievement whose message is not loaded is not drawn.")
+        attachScreenshot(named: "Newest page without rows from older messages")
+
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+        composer.click()
+        composer.typeText("Tell me a very short dog story.")
+        element("send-message-button").click()
+        let reply = app.groups.matching(NSPredicate(format: "label BEGINSWITH %@", "BISCUIT-7")).firstMatch
+        XCTAssertTrue(reply.waitToExist(timeout: 20), "The new turn's reply arrives.")
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 60), "The new turn settles.")
+        XCTAssertEqual(claudeDividers.count, 0, "A new message does not pull the older divider after it.")
+        XCTAssertFalse(goalRow(olderGoal).exists, "A new message does not pull the older goal achievement after it.")
+        XCTAssertEqual(boundaries(try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])), ["claude|\(anchor)"])
+        attachScreenshot(named: "New message without rows from older messages below it")
+
+        let divider = claudeDividers.firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(divider), "Scrolling up loads the older page and shows the divider.")
+        let codexAnswer = element("assistant-message-\(anchor)")
+        let nextQuestion = element("user-message-item_long_history_user_11")
+        let older = goalRow(olderGoal)
+        XCTAssertTrue(codexAnswer.exists && nextQuestion.exists && older.exists, "The divider's neighbours and goal achievement render with it.")
+        XCTAssertLessThanOrEqual(codexAnswer.frame.maxY, divider.frame.minY, "The divider follows the last Codex message.")
+        XCTAssertLessThanOrEqual(divider.frame.maxY, older.frame.minY, "The goal achievement follows the divider recorded with it.")
+        XCTAssertLessThanOrEqual(older.frame.maxY, nextQuestion.frame.minY, "Both sit before the next question.")
+        XCTAssertEqual(claudeDividers.count, 1, "The undone switch pair adds no second divider.")
+        XCTAssertFalse(codexDivider.exists, "No Switched to Codex divider is drawn for the undone switch.")
+        attachScreenshot(named: "Divider and goal achievement after the last Codex message")
+        attachElementScreenshot(divider, named: "Conversation switched to Claude divider")
+    }
 }

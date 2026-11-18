@@ -250,29 +250,6 @@ extension TaskConversationView {
         return allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }).map { allMessages.count - $0 }
     }
 
-    /// Timeline anchors resolve against the whole transcript, while the
-    /// transcript renders a window that starts at the newest turn. Clamp an
-    /// anchor that falls above the window to its first rendered message so the
-    /// row still appears instead of disappearing with the messages it follows.
-    ///
-    /// Provider boundaries and goal achievements are state transitions that
-    /// stay meaningful wherever they are shown, so they are clamped. Context
-    /// compaction rows are not: they are positional markers whose meaning comes
-    /// from the two messages they sit between, and they reappear with those
-    /// messages as older batches are revealed.
-    static func renderedAnchorMessageID(for anchorID: String?, renderedIDs: Set<String>, firstRenderedID: String?) -> String? {
-        guard let anchorID else { return nil }
-        if renderedIDs.contains(anchorID) { return anchorID }
-        return firstRenderedID ?? anchorID
-    }
-
-    func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
-        if entry.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID { return nil }
-        if conversationMessages.contains(where: { $0.id == entry.afterMessageID }) {
-            return entry.afterMessageID
-        }
-        return conversationMessages.last?.id
-    }
     struct TranscriptRowContext {
         let inlineTools: [String: [ConversationActivity]]
         /// The message the activity disclosure sits above, or nil when it is not shown above one.
@@ -289,16 +266,17 @@ extension TaskConversationView {
     func makeTranscriptRowContext(rendered: [ConversationMessage]) -> TranscriptRowContext {
         let allMessages = conversationMessages
         let renderedIDs = Set(rendered.map(\.id))
-        func renderedAnchor(_ anchorID: String?) -> String? {
-            Self.renderedAnchorMessageID(for: anchorID, renderedIDs: renderedIDs, firstRenderedID: rendered.first?.id)
+        // Loaded and visible messages are listed once for every row rather than once per row.
+        let loadedIDs = messages.map(\.id)
+        let visibleIDs = Set(allMessages.map(\.id))
+        func anchor(_ messageID: String?) -> String? {
+            messageID.flatMap { TranscriptRowAnchors.visibleAnchor(after: $0, loadedIDs: loadedIDs, visibleIDs: visibleIDs) }
         }
-        var boundaries: [String: [ConversationProviderBoundary]] = [:]
-        for boundary in providerBoundaries {
-            if let anchor = renderedAnchor(boundaryAnchorID(for: boundary)) { boundaries[anchor, default: []].append(boundary) }
+        let boundaries = TranscriptRowAnchors.rowsByRenderedAnchor(providerBoundaries, renderedIDs: renderedIDs) {
+            anchor($0.afterMessageID)
         }
-        var goalEntries: [String: [GoalAchievementTimelineEntry]] = [:]
-        for entry in goalAchievementTimelineEntries {
-            if let anchor = renderedAnchor(goalAchievementAnchorMessageID(for: entry)) { goalEntries[anchor, default: []].append(entry) }
+        let goalEntries = TranscriptRowAnchors.rowsByRenderedAnchor(goalAchievementTimelineEntries, renderedIDs: renderedIDs) {
+            $0.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID ? nil : anchor($0.afterMessageID)
         }
         return TranscriptRowContext(
             inlineTools: inlineToolCalls.byMessageID,
@@ -671,16 +649,6 @@ extension TaskConversationView {
                 }
             }
         }
-    }
-
-    /// A boundary after a message that later folded into the activity list
-    /// anchors to the nearest visible message instead.
-    func boundaryAnchorID(for boundary: ConversationProviderBoundary) -> String? {
-        guard let afterMessageID = boundary.afterMessageID else { return nil }
-        if conversationMessages.contains(where: { $0.id == afterMessageID }) { return afterMessageID }
-        guard let index = messages.firstIndex(where: { $0.id == afterMessageID }) else { return conversationMessages.last?.id }
-        let visible = Set(conversationMessages.map(\.id))
-        return messages[...index].last(where: { visible.contains($0.id) })?.id
     }
 
     /// Composed only of plugin atoms (Plugins/Atoms).

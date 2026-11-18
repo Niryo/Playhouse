@@ -72,6 +72,7 @@ struct PluginAuthoringPreview: View {
     let onClose: () -> Void
     @State private var plugin: PluginRecord?
     @State private var isSaved = true
+    @State private var hasChanges = false
     @State private var revision = ""
     @State private var versions: [Int] = []
     @State private var operationError: String?
@@ -96,11 +97,15 @@ struct PluginAuthoringPreview: View {
                             .buttonHoverPointer().nativeHelp("Restore this plugin version")
                     }
                 }.disabled(versions.isEmpty)
-                Button("Discard draft") { confirmDiscard = true }
-                    .buttonHoverPointer().nativeHelp(isSaved ? "Reset the draft to the saved plugin" : "Delete this unsaved plugin and its conversation")
-                Button("Save") { perform("plugin.save") }
+                // A plugin that was never saved is itself unpublished, so it can always be discarded.
+                if !isSaved || hasChanges {
+                    Button("Discard changes") { confirmDiscard = true }
+                        .buttonHoverPointer().nativeHelp(isSaved ? "Reset the draft to the published plugin" : "Delete this unsaved plugin and its conversation")
+                }
+                Button("Publish") { perform("plugin.save") }
                     .keyboardShortcut("s", modifiers: .command)
-                    .buttonHoverPointer().nativeHelp("Publish this plugin draft")
+                    .disabled(!hasChanges)
+                    .buttonHoverPointer().nativeHelp(hasChanges ? "Publish this plugin draft" : "No unpublished changes")
             }.padding()
             Divider()
             if let plugin, plugin.valid {
@@ -136,13 +141,13 @@ struct PluginAuthoringPreview: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .alert(isSaved ? "Discard draft?" : "Discard plugin?", isPresented: $confirmDiscard) {
+        .alert(isSaved ? "Discard changes?" : "Discard plugin?", isPresented: $confirmDiscard) {
             Button("Discard", role: .destructive) { isSaved ? perform("plugin.discard") : discardUnsaved() }
-                .buttonHoverPointer().nativeHelp("Discard the plugin draft")
+                .buttonHoverPointer().nativeHelp("Discard the unpublished changes")
             Button("Cancel", role: .cancel) { }
-                .buttonHoverPointer().nativeHelp("Keep the plugin draft")
+                .buttonHoverPointer().nativeHelp("Keep the unpublished changes")
         } message: {
-            Text(isSaved ? "The preview will be reset to the saved plugin."
+            Text(isSaved ? "The preview will be reset to the published plugin."
                  : "This plugin was never saved. Its draft and this conversation will be deleted.")
         }
         .alert("Plugin operation", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
@@ -219,7 +224,9 @@ struct PluginAuthoringPreview: View {
         guard let folder = task.contextFolderPaths.first else { return }
         let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
         let library = PluginLibrary(dataDirectory: draftData.path)
-        isSaved = PluginLibrary(dataDirectory: draftData.deletingLastPathComponent().deletingLastPathComponent().path).isInstalled(id: pluginID)
+        let installed = PluginLibrary(dataDirectory: draftData.deletingLastPathComponent().deletingLastPathComponent().path)
+        isSaved = installed.isInstalled(id: pluginID)
+        hasChanges = installed.hasDraftChanges(id: pluginID)
         let current = try? library.plugin(id: pluginID, validate: false)
         let source = current.flatMap { try? String(contentsOfFile: $0.entryPath, encoding: .utf8) } ?? ""
         let signature = "\(String(describing: current))\n\(source)"

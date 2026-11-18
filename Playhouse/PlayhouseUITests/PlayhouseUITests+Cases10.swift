@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript.
+    // case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt, which explains the page metadata header and tells the agent to run chat page read only for a page the message continues, plus a Playhouse page metadata header, never a User line, that names the current page by title and ID with a shortened excerpt of its latest exchange and lists recent pages newest first by title and ID only. Later turns on that page resume it without repeating the header, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries that whole page into the current turn, marked as a Playhouse page. A page whose latest answer is long sends only the start of that answer, and the agent loads the whole page itself with the real chat page read command. Rotating sessions still leaves every page's messages visible in the transcript.
     func test_standalone_chat_page_sessions_isolate_context() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-sessions")
         try copyFixtureFile(
@@ -70,7 +70,7 @@ extension PlayhouseUITests {
         sendFromSidebar("Tell me about volcanoes")
         let volcanoes = try waitForPage("Volcanoes")
         sendFromSidebar("Tell me about Saturn's rings")
-        _ = try waitForPage("Saturn Rings")
+        let saturn = try waitForPage("Saturn Rings")
         sendFromSidebar("One more thought about Saturn")
         _ = try waitForPage("Saturn Rings")
 
@@ -94,9 +94,28 @@ extension PlayhouseUITests {
             )
         }
         XCTAssertEqual(second["resumed"] as? Bool, true, "A turn sent into an existing page resumes its session.")
+        let volcanoesID = try XCTUnwrap(volcanoes["id"] as? String)
+        let saturnID = try XCTUnwrap(saturn["id"] as? String)
+        let thirdArguments = try XCTUnwrap(third["arguments"] as? [String])
+        let thirdInstructions = thirdArguments[try XCTUnwrap(thirdArguments.firstIndex(of: "--append-system-prompt")) + 1]
+        XCTAssertTrue(thirdInstructions.contains("Playhouse page metadata block"), "The chat instructions explain the page metadata header.")
+        XCTAssertTrue(
+            thirdInstructions.contains("chat page read <page-id> to load that page before answering"),
+            "The chat instructions tell the agent to load a continued page itself."
+        )
         let thirdText = try XCTUnwrap(third["userText"] as? String)
-        XCTAssertTrue(thirdText.contains("Tell me about Saturn's rings"), "A fresh page session is seeded with its own page's turns.")
-        XCTAssertFalse(thirdText.contains("Tell me about volcanoes"), "An earlier page must never be sent as context for a later page.")
+        XCTAssertTrue(thirdText.contains("User: Tell me about Saturn's rings"), "A fresh page session gets its own page's latest exchange as an excerpt.")
+        XCTAssertTrue(thirdText.contains("Playhouse chat page metadata, not part of the user's message."))
+        XCTAssertTrue(thirdText.contains("Current page: \"Saturn Rings\" (id: \(saturnID), "), "The header names the current page by title and ID.")
+        XCTAssertTrue(
+            thirdText.contains("Recent pages, newest first:\n- \"Volcanoes\" (id: \(volcanoesID), "),
+            "The header lists earlier pages by title and ID."
+        )
+        XCTAssertFalse(thirdText.contains("[Page:"), "A page title is never written as a user line.")
+        XCTAssertFalse(
+            thirdText.contains("Tell me about volcanoes"),
+            "An earlier page's turns are never sent as context for a later page, only its title and ID."
+        )
 
         sendFromSidebar("Another thought about Mars")
         _ = try waitForPage("Saturn Rings")
@@ -111,7 +130,6 @@ extension PlayhouseUITests {
         // Commenting on a message from an earlier page must carry that page into this turn.
         // Driven through the visible select -> Add comment -> send flow, not the CLI flag, so
         // the composer's own annotation-to-page mapping is what is exercised.
-        let volcanoesID = try XCTUnwrap(volcanoes["id"] as? String)
         let archived = try XCTUnwrap(
             (try runCLI(["chat", "page", "read", volcanoesID])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
         )
@@ -145,9 +163,46 @@ extension PlayhouseUITests {
             try answerTurns().last { (($0["userText"] as? String) ?? "").contains("What did we say before?") },
             "The annotated turn never reached the provider."
         )
+        let annotatedText = try XCTUnwrap(annotated["userText"] as? String)
+        XCTAssertTrue(annotatedText.contains("User: Tell me about volcanoes"), "A page quoted by a comment travels whole with the turn that quotes it.")
         XCTAssertTrue(
-            try XCTUnwrap(annotated["userText"] as? String).contains("Tell me about volcanoes"),
-            "A page quoted by a comment travels with the turn that quotes it."
+            annotatedText.contains("Playhouse page \"Volcanoes\" (id: \(volcanoesID), "),
+            "An attached page is marked as a Playhouse page, not as a user line."
+        )
+        XCTAssertFalse(annotatedText.contains("[Page:"))
+
+        // A page whose answer is long: the next turn, in that page's fresh session, gets only a
+        // shortened excerpt of the latest exchange, and loads the whole page with chat page read.
+        sendFromSidebar("Open a lava page long-answer-page:Lava-Flows")
+        let lavaID = try XCTUnwrap(try waitForPage("Lava Flows")["id"] as? String)
+        let recall = "recall-earlier-pages page-id:\(lavaID)"
+        sendFromSidebar(recall)
+        _ = try waitForPage("Lava Flows")
+        let recalled = try turn(endingWith: recall)
+        XCTAssertEqual(recalled["resumed"] as? Bool, false, "The new page's first turn starts that page's own session.")
+        let header = try XCTUnwrap(recalled["userText"] as? String)
+        XCTAssertTrue(header.contains("Current page: \"Lava Flows\" (id: \(lavaID), "))
+        let saturnLine = try XCTUnwrap(header.range(of: "- \"Saturn Rings\" (id: \(saturnID), "), "Recent pages are listed.")
+        let volcanoesLine = try XCTUnwrap(header.range(of: "- \"Volcanoes\" (id: \(volcanoesID), "))
+        XCTAssertLessThan(saturnLine.lowerBound, volcanoesLine.lowerBound, "Recent pages are listed newest first.")
+        XCTAssertTrue(header.contains("Claude: Lava Flows full answer: lava detail"), "The excerpt keeps the start of the latest answer.")
+        XCTAssertTrue(header.contains(" […]"), "A long answer is shortened in the excerpt.")
+        XCTAssertFalse(header.contains("END-OF-LONG-ANSWER"), "The whole answer is not sent until the agent reads the page.")
+        XCTAssertFalse(header.contains("Lava Flows opening note."), "Only the latest exchange is excerpted.")
+        XCTAssertFalse(header.contains("One more thought about Saturn"), "Another page's turns never travel with the header.")
+        XCTAssertLessThan(header.count - recall.count, 3_500, "The header stays small however long the page is.")
+        let reads = ((recalled["reportCommands"] as? [[String: Any]]) ?? []).filter {
+            (($0["command"] as? String) ?? "").contains(" chat page read ")
+        }
+        XCTAssertEqual(reads.count, 1, "The agent loads the continued page itself.")
+        let readOutput = try XCTUnwrap(reads.first?["output"] as? String)
+        let loaded = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(readOutput.utf8)) as? [String: Any])?["result"] as? [String: Any]
+        )
+        XCTAssertEqual((loaded["page"] as? [String: Any])?["id"] as? String, lavaID)
+        XCTAssertTrue(
+            ((loaded["messages"] as? [[String: Any]]) ?? []).contains { (($0["text"] as? String) ?? "").hasSuffix("END-OF-LONG-ANSWER") },
+            "chat page read returns the whole page, long answer included."
         )
 
         // The transcript renders a window that starts at the latest turn, so earlier pages are
@@ -156,6 +211,7 @@ extension PlayhouseUITests {
         // Earlier pages render only near the viewport, so each check scans the transcript.
         XCTAssertTrue(transcriptScan { self.chatPageSeparatorIsVisible("Volcanoes") }, "Rotating sessions must not hide earlier pages.")
         XCTAssertTrue(transcriptScan { self.chatPageSeparatorIsVisible("Saturn Rings") })
+        XCTAssertTrue(transcriptScan { self.chatPageSeparatorIsVisible("Lava Flows") })
         XCTAssertTrue(
             transcriptScan { self.element("chat-sidebar").groups["Tell me about volcanoes"].exists },
             "Earlier pages stay visible in the chat transcript."
