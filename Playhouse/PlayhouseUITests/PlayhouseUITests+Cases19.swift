@@ -646,10 +646,13 @@ extension PlayhouseUITests {
         XCTAssertTrue(accessibleLabelOrValue(of: restoredBanner).contains("Goal achieved in"))
         let restoredAchievementRows = reopenedConversation.descendants(matching: .any)
             .matching(identifier: "goal-achievement-timeline-row")
+        // Each achievement renders with the message it follows, and the reopened transcript
+        // starts at its latest turn, so the earlier one appears as the reader scrolls up.
+        XCTAssertTrue(revealWholeTranscript(), "The archived conversation should reveal its earlier turns as the reader scrolls up.")
         XCTAssertEqual(restoredAchievementRows.count, 2, "Both completed Goal events should remain in the archived conversation.")
         XCTAssertTrue(reopenedConversation.scrollBars.firstMatch.waitToExist(timeout: 5), "The archived Goal transcript should expose scrolling when its conversation overflows.")
         let secondAchievementYBeforeScroll = restoredAchievementRows.element(boundBy: 1).frame.minY
-        reopenedConversation.swipeDown()
+        reopenedConversation.swipeUp()
         XCTAssertTrue(waitUntil({
             abs(restoredAchievementRows.element(boundBy: 1).frame.minY - secondAchievementYBeforeScroll) > 8
         }, timeout: 5), "Scrolling the conversation should move the Goal achievement with the transcript.")
