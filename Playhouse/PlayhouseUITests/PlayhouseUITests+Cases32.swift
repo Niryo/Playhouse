@@ -488,7 +488,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: done selecting", "The native page keeps its own state.")
         attachScreenshot(named: "Skills page: the Skills button reopened the JavaScript page")
     }
-    // case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit wix-one-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Viband); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit infragod) without re-rendering the other chip; and its remove badge removes it (Last: remove infragod) while the native chips keep theirs. A chip raises no onChange, so sending it one is refused as invalid_argument.
+    // case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit mobile-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Website); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit backend) without re-rendering the other chip; and its remove badge removes it (Last: remove backend) while the native chips keep theirs. A chip raises no onChange, so sending it one is refused as invalid_argument.
     func test_plugin_repository_chips_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -522,11 +522,11 @@ extension PlayhouseUITests {
         let lastAction = js("js-last-action")
         let nativeLastAction = native("native-last-action")
 
-        for identifier in ["conversation-repository-badge-infragod", "remove-conversation-repository-infragod", "conversation-repository-badge-Playhouse",
+        for identifier in ["conversation-repository-badge-backend", "remove-conversation-repository-backend", "conversation-repository-badge-Playhouse",
                            "remove-conversation-repository-Playhouse", "add-conversation-repository-button",
                            "conversation-repository-suggestion-parent", "choose-repository-suggestion-parent-button", "conversation-repository-search",
                            "conversation-repository-recent-header", "conversation-repository-list", "conversation-repository-recent-mre",
-                           "conversation-repository-recent-wix-one-app", "conversation-repository-recent-Viband"] {
+                           "conversation-repository-recent-mobile-app", "conversation-repository-recent-Website"] {
             assertSameSize(identifier)
         }
         // The picker is the panel's only child, so the two share one accessibility element: the panel's.
@@ -535,31 +535,31 @@ extension PlayhouseUITests {
         XCTAssertEqual(jsPicker.frame.size, nativePicker.frame.size, "The picker is the same size in both.")
         XCTAssertEqual(jsPicker.frame.width, 304, accuracy: 1, "The picker is 304 points wide: a 280-point column inside 12 points of padding.")
         // The chip and its remove badge, as the header's own chips are checked.
-        let chip = js("conversation-repository-badge-infragod")
-        let remove = js("remove-conversation-repository-infragod")
+        let chip = js("conversation-repository-badge-backend")
+        let remove = js("remove-conversation-repository-backend")
         XCTAssertGreaterThanOrEqual(chip.frame.height, 28, "A chip is prominent.")
         XCTAssertEqual(remove.frame.width, 20, accuracy: 1, "The remove badge is a 20-point circle.")
         XCTAssertEqual(remove.frame.height, 20, accuracy: 1)
         XCTAssertGreaterThan(remove.frame.midX, chip.frame.midX, "The remove badge sits on the chip's trailing corner.")
         XCTAssertLessThan(remove.frame.midY, chip.frame.midY, "The remove badge sits on the chip's top corner.")
-        XCTAssertEqual(remove.label, "Remove infragod")
+        XCTAssertEqual(remove.label, "Remove backend")
         let add = pair("add-conversation-repository-button")
         XCTAssertEqual(add.js.frame.width, 28, accuracy: 1, "The + button is a 28-point circle.")
         XCTAssertEqual(add.js.frame.height, 28, accuracy: 1)
         XCTAssertEqual(add.js.label, "Add repository")
         XCTAssertEqual(add.native.label, "Add repository")
         XCTAssertEqual(pluginText(js("conversation-repository-suggestion-parent")), "Suggestions from /Users/demo/git")
-        XCTAssertEqual(js("conversation-repository-search").placeholderValue, "infragod, Playhouse ↵", "The search shows the saved repositories.")
+        XCTAssertEqual(js("conversation-repository-search").placeholderValue, "backend, Playhouse ↵", "The search shows the saved repositories.")
         XCTAssertEqual(pair("conversation-repository-list").js.frame.height, 180, accuracy: 1, "Five rows would be 210 points; the list stops at 180.")
         XCTAssertEqual(pair("conversation-repository-list").js.frame.width, 280, accuracy: 1)
         // A row is one button whose label joins its name and the path under it.
-        for row in [js("conversation-repository-recent-wix-one-app"), native("native-conversation-repository-recent-wix-one-app")] {
-            XCTAssertEqual(row.label, "wix-one-app, /Users/demo/git/wix-one-app", "A row shows its path under its name.")
+        for row in [js("conversation-repository-recent-mobile-app"), native("native-conversation-repository-recent-mobile-app")] {
+            XCTAssertEqual(row.label, "mobile-app, /Users/demo/git/mobile-app", "A row shows its path under its name.")
         }
         attachScreenshot(named: "Repository chips: JavaScript beside native, the picker on Recent")
         // Five rows don't fit in 180 points: the last is below the fold until the list scrolls.
-        for (list, last) in [(js("conversation-repository-list"), js("conversation-repository-recent-zmk-config")),
-                             (native("native-conversation-repository-list"), native("native-conversation-repository-recent-zmk-config"))] {
+        for (list, last) in [(js("conversation-repository-list"), js("conversation-repository-recent-dotfiles")),
+                             (native("native-conversation-repository-list"), native("native-conversation-repository-recent-dotfiles"))] {
             XCTAssertTrue(last.waitToExist(timeout: 5))
             XCTAssertGreaterThan(last.frame.maxY, list.frame.maxY + 1, "The last row starts below the list's bottom edge.")
             list.scroll(byDeltaX: 0, deltaY: -200)
@@ -583,9 +583,9 @@ extension PlayhouseUITests {
         search.typeKey(.upArrow, modifierFlags: [])
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: up" }, timeout: 5), "Up ran onArrow.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).contains("update") }, timeout: 5), "Moving the highlight updated the rows' panels: \(pluginText(commit))")
-        attachScreenshot(named: "Repository chips: the JavaScript highlight moved to wix-one-app")
+        attachScreenshot(named: "Repository chips: the JavaScript highlight moved to mobile-app")
         search.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: submit wix-one-app" }, timeout: 5), "Return added the highlighted row.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: submit mobile-app" }, timeout: 5), "Return added the highlighted row.")
         XCTAssertTrue(waitUntil({ !jsPicker.exists }, timeout: 5), "Adding closed the JavaScript picker.")
         XCTAssertTrue(nativePicker.exists, "The native picker stays open.")
         // The native highlight never moved: its Return adds the first row.
@@ -603,9 +603,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !jsPicker.exists && self.pluginText(lastAction) == "Last: close picker" }, timeout: 5),
                       "The + button hid the picker.")
         js("add-conversation-repository-button").click()
-        XCTAssertTrue(js("conversation-repository-recent-Viband").waitToExist(timeout: 5))
-        js("conversation-repository-recent-Viband").click()
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: select Viband" }, timeout: 5), "Clicking a row ran its onPress.")
+        XCTAssertTrue(js("conversation-repository-recent-Website").waitToExist(timeout: 5))
+        js("conversation-repository-recent-Website").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: select Website" }, timeout: 5), "Clicking a row ran its onPress.")
         js("add-conversation-repository-button").click()
         XCTAssertTrue(js("choose-repository-suggestion-parent-button").waitToExist(timeout: 5))
         js("choose-repository-suggestion-parent-button").click()
@@ -613,14 +613,14 @@ extension PlayhouseUITests {
 
         // A chip opens its settings; its remove badge removes it.
         chip.click()
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: edit infragod" }, timeout: 5), "Clicking a chip ran its onPress.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: edit backend" }, timeout: 5), "Clicking a chip ran its onPress.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).contains(": text → node ") }, timeout: 5), "Clicking a chip re-rendered no chip: \(pluginText(commit))")
         remove.click()
-        XCTAssertTrue(waitUntil({ !js("conversation-repository-badge-infragod").exists }, timeout: 5), "The remove badge removed its chip.")
-        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: remove infragod" }, timeout: 5))
+        XCTAssertTrue(waitUntil({ !js("conversation-repository-badge-backend").exists }, timeout: 5), "The remove badge removed its chip.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: remove backend" }, timeout: 5))
         XCTAssertTrue(js("conversation-repository-badge-Playhouse").exists)
-        XCTAssertTrue(native("native-conversation-repository-badge-infragod").exists, "The native chips keep theirs.")
-        attachScreenshot(named: "Repository chips: the JavaScript infragod chip removed, native kept")
+        XCTAssertTrue(native("native-conversation-repository-badge-backend").exists, "The native chips keep theirs.")
+        attachScreenshot(named: "Repository chips: the JavaScript backend chip removed, native kept")
     }
     // case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) labels the menu Conversation mode: Plan mode and shows the Start Implementing button, and Goal (Last: mode goal) labels the menu Goal and shows the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its mode and provider menus as Menu atoms, with every identifier its controls had unchanged. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
     func test_plugin_composer_renders_from_atoms_like_native() throws {

@@ -3,8 +3,8 @@
     "prefix": "",
     "chips": [
       {
-        "name": "infragod",
-        "path": "/Users/demo/git/infragod"
+        "name": "backend",
+        "path": "/Users/demo/git/backend"
       },
       {
         "name": "Playhouse",
@@ -18,7 +18,7 @@
     "prefix": "",
     "parentFolder": "/Users/demo/git",
     "isChoosingParent": false,
-    "placeholder": "infragod, Playhouse ↵",
+    "placeholder": "backend, Playhouse ↵",
     "search": "",
     "listing": "recent",
     "showsList": true,
@@ -28,20 +28,20 @@
         "path": "/Users/demo/git/mre"
       },
       {
-        "name": "wix-one-app",
-        "path": "/Users/demo/git/wix-one-app"
+        "name": "mobile-app",
+        "path": "/Users/demo/git/mobile-app"
       },
       {
-        "name": "Viband",
-        "path": "/Users/demo/git/Viband"
+        "name": "Website",
+        "path": "/Users/demo/git/Website"
       },
       {
         "name": "packer",
         "path": "/Users/demo/git/packer"
       },
       {
-        "name": "zmk-config",
-        "path": "/Users/demo/git/zmk-config"
+        "name": "dotfiles",
+        "path": "/Users/demo/git/dotfiles"
       }
     ],
     "listHeight": 180,
