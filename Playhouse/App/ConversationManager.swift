@@ -81,14 +81,20 @@ extension ConversationManager {
             ])
             prompt = "<selected-text>\n\(selection)\n</selected-text>\n\n\(message)"
         }
-        defer { SideChatSessions.sessions[id]?.isResponding = false }
+        defer {
+            if SideChatSessions.sessions[id]?.closesWhenIdle == true {
+                SideChatSessions.sessions.removeValue(forKey: id)
+            } else {
+                SideChatSessions.sessions[id]?.isResponding = false
+            }
+        }
         if let current = SideChatSessions.sessions[id], sideChatID != nil, requestedModelID != nil || requestedEffort != nil {
             // A follow-up's new choice is checked before it is kept for later messages.
             try await clients.client(for: current.saved.provider).validateEffort(
                 requestedEffort ?? current.saved.effort, modelID: requestedModelID ?? current.saved.modelID, workspace: current.workspace
             )
         }
-        // The live entry, which closing the bubble removes meanwhile; never a copy written back.
+        // The live entry, never a copy written back over what changed while awaiting.
         if let requestedModelID { SideChatSessions.sessions[id]?.saved.modelID = requestedModelID }
         if let requestedEffort { SideChatSessions.sessions[id]?.saved.effort = requestedEffort }
         guard let session = SideChatSessions.sessions[id] else {
@@ -127,10 +133,15 @@ extension ConversationManager {
     }
 
     /// Ends a side chat's live session. Its saved exchanges stay on the task, and its next
-    /// message continues the same provider conversation.
+    /// message continues the same provider conversation. A side chat still answering keeps
+    /// its session until the answer is saved.
     func closeSideChat(taskID: UUID, sideChatID: String) -> Bool {
         guard let session = SideChatSessions.sessions[sideChatID], session.taskID == taskID else { return false }
-        SideChatSessions.sessions.removeValue(forKey: sideChatID)
+        if session.isResponding {
+            SideChatSessions.sessions[sideChatID]?.closesWhenIdle = true
+        } else {
+            SideChatSessions.sessions.removeValue(forKey: sideChatID)
+        }
         return true
     }
 

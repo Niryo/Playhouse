@@ -216,7 +216,7 @@ extension PluginRecord {
         case .popover: CGSize(width: 320, height: 260)
         case .modal: CGSize(width: 520, height: 420)
         case .sidebar: CGSize(width: 360, height: 0)
-        case .page, .inline, .section: CGSize(width: 0, height: 0)
+        case .page, .inline, .section, .headless: CGSize(width: 0, height: 0)
         }
         return CGSize(width: width ?? defaults.width, height: height ?? defaults.height)
     }
@@ -231,6 +231,7 @@ extension PluginRecord {
         // The section's header and the sidebar already inset it.
         case .section: 0
         case .modal, .page: CGFloat(ModalProps.defaultInset)
+        case .headless: 0
         }
     }
 }

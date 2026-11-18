@@ -5,36 +5,20 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct SideChatBubble: View {
-    private struct Message: Identifiable {
-        let id = UUID()
-        let isUser: Bool
-        let text: String
-    }
-
+    let taskID: UUID
     let selectedText: String
-    /// The comment already made on the selection, if any.
-    let comment: String?
-    /// Whether that comment is unsent, and so can still be changed or deleted.
-    let canEditComment: Bool
+    /// Where the selection is in the transcript, which a new side chat is saved with.
+    let source: ConversationTextSource?
     /// The task provider's models; the side chat starts on the task's model and effort.
     let models: [ConversationModelOption]
     let defaultModelName: String
-    let send: (_ sideChatID: String?, _ message: String, _ modelID: String, _ effort: ConversationEffort, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply
-    /// Receives the side chat as saved after each answer.
-    let onSaved: (SavedSideChat) -> Void
-    let addComment: (String) -> Void
-    /// Saves the edited comment; empty text deletes it.
-    let saveComment: (String) -> Void
-    let close: (_ sideChatID: String) -> Void
+    let conversationManager: RemoteConversationManager
     let dismiss: () -> Void
 
-    @State private var messages: [Message]
+    /// The side chat or run this bubble follows, from `SideChatStore`, which owns its messages
+    /// and turns: nil until the first message of a new selection is sent.
+    @State private var runID: String?
     @State private var draft = ""
-    @State private var commentDraft: String
-    @State private var sideChatID: String?
-    @State private var isResponding = false
-    @State private var streamingText = ""
-    @State private var errorMessage: String?
     @State private var didCopySelection = false
     /// The chat's natural height; the transcript shows all of it up to `maxTranscriptHeight`.
     @State private var transcriptContentHeight: CGFloat = 0
@@ -44,35 +28,25 @@ struct SideChatBubble: View {
     @State private var isModelPickerPresented = false
 
     init(
+        taskID: UUID,
         selectedText: String,
-        comment: String?,
-        canEditComment: Bool,
+        source: ConversationTextSource?,
         savedChat: SavedSideChat?,
         models: [ConversationModelOption],
         defaultModelName: String,
         modelID: String,
         effort: ConversationEffort,
-        send: @escaping (_ sideChatID: String?, _ message: String, _ modelID: String, _ effort: ConversationEffort, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply,
-        onSaved: @escaping (SavedSideChat) -> Void,
-        addComment: @escaping (String) -> Void,
-        saveComment: @escaping (String) -> Void,
-        close: @escaping (_ sideChatID: String) -> Void,
+        conversationManager: RemoteConversationManager,
         dismiss: @escaping () -> Void
     ) {
+        self.taskID = taskID
         self.selectedText = selectedText
-        self.comment = comment
-        self.canEditComment = canEditComment
+        self.source = source
         self.models = models
         self.defaultModelName = defaultModelName
-        self.send = send
-        self.onSaved = onSaved
-        self.addComment = addComment
-        self.saveComment = saveComment
-        self.close = close
+        self.conversationManager = conversationManager
         self.dismiss = dismiss
-        _messages = State(initialValue: (savedChat?.messages ?? []).map { Message(isUser: $0.isUser, text: $0.text) })
-        _commentDraft = State(initialValue: comment ?? "")
-        _sideChatID = State(initialValue: savedChat?.id)
+        _runID = State(initialValue: savedChat?.id)
         // A saved side chat continues on the model its last message chose.
         _modelID = State(initialValue: savedChat?.modelID ?? modelID)
         _effort = State(initialValue: savedChat?.effort ?? effort)
@@ -80,19 +54,27 @@ struct SideChatBubble: View {
 
     /// The bubble opens compact and grows as the chat does: wider once it has messages, taller
     /// with each one, until `maxTranscriptHeight`, after which the chat scrolls.
-    static let compactWidth: CGFloat = 442
-    static let width: CGFloat = 572
-    static let maxTranscriptHeight: CGFloat = 340
+    static let compactWidth: CGFloat = 480
+    static let width: CGFloat = 660
+    static let maxTranscriptHeight: CGFloat = 440
+    /// The size of the chat's messages.
+    static let bodyFontSize: CGFloat = 14
 
     private struct TranscriptHeightKey: PreferenceKey {
         static let defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
     }
 
+    private var store: SideChatStore { .shared }
+    private var run: SideChatRun? { store.run(taskID: taskID, id: runID) }
+    private var messages: [SavedSideChat.Message] { store.messages(taskID: taskID, id: runID) }
+    private var sideChatID: String? { store.sideChatID(taskID: taskID, id: runID) }
+    private var isResponding: Bool { run?.isResponding ?? false }
+    private var streamingText: String { run?.streamingText ?? "" }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            commentEditor
             transcript
             composer
         }
@@ -103,14 +85,17 @@ struct SideChatBubble: View {
         .animation(.easeOut(duration: 0.18), value: messages.isEmpty)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("side-chat-bubble")
-        .onDisappear { if let sideChatID { close(sideChatID) } }
+        .onAppear { store.bubbleOpened(runID) }
+        // A new selection's bubble shows its side chat once the first message opens one.
+        .onChange(of: runID) { old, new in if old == nil { store.bubbleOpened(new) } }
+        .onDisappear { store.bubbleClosed(taskID: taskID, id: runID, manager: conversationManager) }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 Label("Side chat", systemImage: "bubble.left.and.text.bubble.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button {
@@ -134,7 +119,7 @@ struct SideChatBubble: View {
                     .fill(Color.orange.opacity(0.8))
                     .frame(width: 3)
                 Text(verbatim: selectedText)
-                    .font(.system(size: 12))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                     .truncationMode(.tail)
@@ -146,59 +131,18 @@ struct SideChatBubble: View {
         }
     }
 
-    /// The comment already made on the selection: a field that changes it while it is unsent,
-    /// where saving it empty deletes it, or its text once sent.
-    @ViewBuilder
-    private var commentEditor: some View {
-        if let comment {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Comment")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                if canEditComment {
-                    HStack(alignment: .bottom, spacing: 8) {
-                        TextField("Empty, saving deletes the comment", text: $commentDraft, axis: .vertical)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 12.5))
-                            .lineLimit(1...5)
-                            .onSubmit { saveComment(commentDraft) }
-                            .onExitCommand(perform: dismiss)
-                            .accessibilityLabel("Comment")
-                            .accessibilityIdentifier("side-chat-comment-field")
-                        Button("Save") { saveComment(commentDraft) }
-                            .controlSize(.small)
-                            .disabled(commentDraft == comment)
-                            .buttonHoverPointer()
-                            .nativeHelp("Save the comment. Saving it empty deletes it.")
-                            .accessibilityIdentifier("side-chat-comment-save")
-                    }
-                    .padding(.horizontal, 9).padding(.vertical, 7)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
-                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.orange.opacity(0.45)))
-                } else {
-                    Text(verbatim: comment)
-                        .font(.system(size: 12.5))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityIdentifier("side-chat-comment-text")
-                }
-            }
-            .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 9) {
-                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                    ForEach(Array(messages.enumerated()), id: \.offset) { index, message in
                         messageRow(message, index: index)
                     }
                     if isResponding {
                         if streamingText.isEmpty {
                             HStack(spacing: 6) {
                                 ProgressView().controlSize(.small)
-                                Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
+                                Text("Thinking…").font(.system(size: 13)).foregroundStyle(.secondary)
                             }
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("side-chat-responding")
@@ -207,16 +151,18 @@ struct SideChatBubble: View {
                                 .accessibilityIdentifier("side-chat-streaming-reply")
                         }
                     }
-                    if let errorMessage {
+                    if let errorMessage = run?.errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 12))
+                            .font(.system(size: 13))
                             .foregroundStyle(.orange)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .accessibilityIdentifier("side-chat-error")
                     }
                     Color.clear.frame(height: 1).id("side-chat-bottom")
                 }
-                .padding(.horizontal, 2)
+                .padding(.leading, 2)
+                // The overlay scroller floats over the content's trailing edge; keep the text clear of it.
+                .padding(.trailing, HoverRevealScrollers.scrollerWidth)
                 .hoverRevealScrollers()
                 .background(GeometryReader { geometry in
                     Color.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
@@ -231,12 +177,12 @@ struct SideChatBubble: View {
     }
 
     @ViewBuilder
-    private func messageRow(_ message: Message, index: Int) -> some View {
+    private func messageRow(_ message: SavedSideChat.Message, index: Int) -> some View {
         if message.isUser {
             HStack {
                 Spacer(minLength: 40)
                 Text(verbatim: message.text)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Self.bodyFontSize))
                     .textSelection(.enabled)
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 11))
@@ -258,7 +204,7 @@ struct SideChatBubble: View {
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(text)
         return Text(markdown)
-            .font(.system(size: 12.5))
+            .font(.system(size: Self.bodyFontSize))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -274,26 +220,11 @@ struct SideChatBubble: View {
                     text: draft, placeholder: "Ask about the selection…", placeholderTestID: "side-chat-placeholder",
                     enabled: true, autofocus: true, inputTestID: "side-chat-input", inputLabel: "Side chat message"
                 ),
-                common: AtomCommon(testID: "side-chat-input-scroll-view", hint: "Return sends the message. Add comment adds it as a comment instead."),
+                common: AtomCommon(testID: "side-chat-input-scroll-view", hint: "Return sends the message."),
                 onChange: { draft = $0 }, onSubmit: sendDraft, onSteerSubmit: sendDraft,
                 onCancel: dismiss
             )
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
-                // An unsent comment is changed in its own field above instead; a sent one can't
-                // be, so another comment can still be added on its text.
-                if !canEditComment {
-                    AtomButton(
-                        common: AtomCommon(testID: "add-comment-button", label: "Comment", help: "Add what you typed as a comment on the selected text"),
-                        action: { addComment(draft.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                    ) {
-                        AtomStack(
-                            props: StackProps(axis: "h", fill: "primary", fillOpacity: 0.1, capsule: true),
-                            common: AtomCommon(height: 26, paddingX: 10)
-                        ) {
-                            AtomLabel(props: LabelProps(text: "Comment", icon: "text.bubble", size: 12, weight: "semibold"))
-                        }
-                    }
-                }
                 AtomSpacer(props: SpacerProps(minLength: 0))
                 ComposerModelPicker(
                     picker: modelPicker, prefix: "side-chat-",
@@ -355,23 +286,222 @@ struct SideChatBubble: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isResponding else { return }
         draft = ""
-        messages.append(Message(isUser: true, text: text))
-        isResponding = true
-        streamingText = ""
-        errorMessage = nil
+        runID = store.send(
+            taskID: taskID, id: runID, selectedText: selectedText, source: source,
+            message: text, modelID: modelID, effort: effort, manager: conversationManager
+        )
+    }
+}
+
+/// One side chat's turns as the app runs them. It lives in `SideChatStore` rather than in a
+/// bubble, so a question keeps being answered after its bubble closes or its conversation is
+/// left, and the bubble reopened on its text shows the answer. Streaming text is its own
+/// observed property, so a delta redraws the bubble showing it, not the transcript that
+/// highlights the side chat's text.
+@MainActor @Observable
+final class SideChatRun {
+    /// Stable for the run's lifetime: the side chat's id when it was already saved, otherwise a
+    /// local placeholder that the transcript's highlight and a reopened bubble use until the
+    /// first answer names the side chat.
+    let id: String
+    let taskID: UUID
+    let selectedText: String
+    let source: ConversationTextSource?
+    let createdAt = Date.now
+    /// The daemon's side chat, once one exists.
+    var sideChatID: String?
+    /// The question sent and not saved yet: still being answered, or failed.
+    var pendingMessage: String?
+    var modelID: String
+    var effort: ConversationEffort
+    var streamingText = ""
+    var isResponding = false
+    var errorMessage: String?
+
+    init(id: String, taskID: UUID, selectedText: String, source: ConversationTextSource?, sideChatID: String?, modelID: String, effort: ConversationEffort) {
+        self.id = id
+        self.taskID = taskID
+        self.selectedText = selectedText
+        self.source = source
+        self.sideChatID = sideChatID
+        self.modelID = modelID
+        self.effort = effort
+    }
+}
+
+/// The side chats of every task the app has shown, kept for the app's lifetime: those saved on
+/// the task and those whose turns are running. Sends run in tasks the store owns, so closing a
+/// bubble or leaving the conversation never drops a question being answered. The same
+/// `conversation.side_chat` bridge operation serves every provider, so nothing here depends on one.
+@MainActor @Observable
+final class SideChatStore {
+    static let shared = SideChatStore()
+
+    private var savedByTask: [UUID: [SavedSideChat]] = [:]
+    private var runsByTask: [UUID: [SideChatRun]] = [:]
+    /// How many bubbles show each side chat, by the id they opened on. A reply that arrives
+    /// while none does ends the daemon's live session, as closing an idle bubble does.
+    @ObservationIgnored private var shownCounts: [String: Int] = [:]
+    @ObservationIgnored private var loadsInFlight: [UUID: Int] = [:]
+    /// Replies kept while a load was in flight, which a list read before they were saved lacks.
+    @ObservationIgnored private var repliesDuringLoad: [UUID: [String: SavedSideChat]] = [:]
+
+    /// The task's side chats, oldest first, as the transcript highlights and reopens them. A
+    /// question still being answered is the last message of its side chat, or, while it is the
+    /// first, of a placeholder entry under its run's id, so its text highlights and reopens on
+    /// the run before the daemon has saved anything.
+    func sideChats(taskID: UUID) -> [SavedSideChat] {
+        var chats = savedByTask[taskID] ?? []
+        for run in runsByTask[taskID] ?? [] {
+            guard let pending = run.pendingMessage else { continue }
+            let question = SavedSideChat.Message(isUser: true, text: pending)
+            if let sideChatID = run.sideChatID, let index = chats.firstIndex(where: { $0.id == sideChatID }) {
+                chats[index].messages.append(question)
+            } else {
+                // Only the transcript and the bubble read this entry, never its provider or thread,
+                // and the daemon never sees it.
+                chats.append(SavedSideChat(
+                    id: run.sideChatID ?? run.id, provider: .claude, threadID: "", modelID: run.modelID, effort: run.effort,
+                    selectedText: run.selectedText, source: run.source, messages: [question], createdAt: run.createdAt
+                ))
+            }
+        }
+        return chats
+    }
+
+    /// The run a bubble opened on `id` follows: found by its placeholder or its side chat's id.
+    func run(taskID: UUID, id: String?) -> SideChatRun? {
+        guard let id else { return nil }
+        return runsByTask[taskID]?.first { $0.id == id || $0.sideChatID == id }
+    }
+
+    /// The daemon's side chat a bubble opened on `id` continues, if one exists yet.
+    func sideChatID(taskID: UUID, id: String?) -> String? {
+        guard let id else { return nil }
+        guard let run = run(taskID: taskID, id: id) else { return id }
+        return run.sideChatID
+    }
+
+    /// The messages a bubble opened on `id` shows: the saved exchanges, then the unsaved question.
+    func messages(taskID: UUID, id: String?) -> [SavedSideChat.Message] {
+        guard let id else { return [] }
+        let run = run(taskID: taskID, id: id)
+        let chatID = run == nil ? id : run?.sideChatID
+        var messages = chatID.flatMap { chatID in savedByTask[taskID]?.first { $0.id == chatID }?.messages } ?? []
+        if let pending = run?.pendingMessage { messages.append(SavedSideChat.Message(isUser: true, text: pending)) }
+        return messages
+    }
+
+    /// Reads the side chats saved on the task. Runs are kept apart, so none is dropped, and a
+    /// reply kept while the read was in flight stays when the list predates it.
+    func load(taskID: UUID, using manager: RemoteConversationManager) {
+        loadsInFlight[taskID, default: 0] += 1
+        Task { @MainActor in
+            let loaded = try? await manager.savedSideChats(taskID: taskID)
+            let replies = repliesDuringLoad[taskID] ?? [:]
+            loadsInFlight[taskID, default: 1] -= 1
+            if loadsInFlight[taskID] == 0 {
+                loadsInFlight[taskID] = nil
+                repliesDuringLoad[taskID] = nil
+            }
+            guard var chats = loaded else { return }
+            for reply in replies.values {
+                if let index = chats.firstIndex(where: { $0.id == reply.id }) {
+                    if chats[index].messages.count < reply.messages.count { chats[index] = reply }
+                } else {
+                    chats.append(reply)
+                }
+            }
+            if savedByTask[taskID] != chats { savedByTask[taskID] = chats }
+        }
+    }
+
+    /// Keeps a side chat as saved after an answer.
+    func keep(_ sideChat: SavedSideChat, taskID: UUID) {
+        if loadsInFlight[taskID] != nil { repliesDuringLoad[taskID, default: [:]][sideChat.id] = sideChat }
+        var chats = savedByTask[taskID] ?? []
+        if let index = chats.firstIndex(where: { $0.id == sideChat.id }) {
+            chats[index] = sideChat
+        } else {
+            chats.append(sideChat)
+        }
+        savedByTask[taskID] = chats
+    }
+
+    /// Sends `message` on the side chat a bubble opened on `id`, or opens one on `selectedText`
+    /// when it opened on none, and returns the id the bubble follows from then on. A side chat
+    /// still answering takes no second message.
+    func send(
+        taskID: UUID, id: String?, selectedText: String, source: ConversationTextSource?,
+        message: String, modelID: String, effort: ConversationEffort, manager: RemoteConversationManager
+    ) -> String {
+        let run: SideChatRun
+        if let existing = self.run(taskID: taskID, id: id) {
+            guard !existing.isResponding else { return id ?? existing.id }
+            run = existing
+        } else {
+            run = SideChatRun(
+                id: id ?? "pending-side-chat-\(UUID().uuidString.lowercased())", taskID: taskID,
+                selectedText: selectedText, source: source, sideChatID: id, modelID: modelID, effort: effort
+            )
+            runsByTask[taskID, default: []].append(run)
+        }
+        run.modelID = modelID
+        run.effort = effort
+        run.pendingMessage = message
+        run.streamingText = ""
+        run.errorMessage = nil
+        run.isResponding = true
+        let sideChatID = run.sideChatID
         Task { @MainActor in
             do {
-                let reply = try await send(sideChatID, text, modelID, effort) { delta in streamingText += delta }
-                sideChatID = reply.sideChatID
-                onSaved(reply.sideChat)
-                let answer = reply.reply.isEmpty ? streamingText : reply.reply
-                messages.append(Message(isUser: false, text: answer.trimmingCharacters(in: .whitespacesAndNewlines)))
+                let reply = try await manager.sideChat(
+                    taskID: taskID, sideChatID: sideChatID,
+                    selection: sideChatID == nil ? run.selectedText : nil,
+                    source: sideChatID == nil ? run.source : nil,
+                    message: message, modelID: modelID, effort: effort
+                ) { delta in run.streamingText += delta }
+                // In one step, so the question never shows both pending and saved.
+                run.sideChatID = reply.sideChatID
+                keep(reply.sideChat, taskID: taskID)
+                run.pendingMessage = nil
             } catch {
-                errorMessage = error.localizedDescription
+                run.errorMessage = error.localizedDescription
             }
-            streamingText = ""
-            isResponding = false
+            run.streamingText = ""
+            run.isResponding = false
+            if !isShown(run), let sideChatID = run.sideChatID {
+                await manager.closeSideChat(taskID: taskID, sideChatID: sideChatID)
+            }
         }
+        return id ?? run.id
+    }
+
+    func bubbleOpened(_ id: String?) {
+        guard let id else { return }
+        shownCounts[id, default: 0] += 1
+    }
+
+    /// Ends the daemon's live session when the last bubble on an idle side chat closes; one
+    /// still answering keeps it until its reply arrives.
+    func bubbleClosed(taskID: UUID, id: String?, manager: RemoteConversationManager) {
+        guard let id else { return }
+        let count = (shownCounts[id] ?? 1) - 1
+        shownCounts[id] = count > 0 ? count : nil
+        let sideChatID: String
+        if let run = run(taskID: taskID, id: id) {
+            guard !run.isResponding, !isShown(run), let id = run.sideChatID else { return }
+            sideChatID = id
+        } else {
+            // A saved side chat this app session sent nothing on, whose session a CLI may have opened.
+            guard shownCounts[id] == nil else { return }
+            sideChatID = id
+        }
+        Task { await manager.closeSideChat(taskID: taskID, sideChatID: sideChatID) }
+    }
+
+    private func isShown(_ run: SideChatRun) -> Bool {
+        (shownCounts[run.id] ?? 0) > 0 || run.sideChatID.map { (shownCounts[$0] ?? 0) > 0 } == true
     }
 }
 

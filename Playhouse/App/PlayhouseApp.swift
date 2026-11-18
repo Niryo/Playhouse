@@ -293,7 +293,7 @@ struct PluginsMenuContent: View {
     }
 
     private func pluginLabel(_ plugin: PluginRecord) -> some View {
-        let placement = PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement
+        let placement = plugin.hasSurface ? PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement : PluginPresentation.headless.title
         return Label("\(plugin.name) — \(placement)\(plugin.enabled ? "" : " (Disabled)")",
                      systemImage: plugin.valid ? plugin.icon : "exclamationmark.triangle")
     }
@@ -341,6 +341,24 @@ enum PluginManagement {
         }
     }
 
+    /// A plugin's `ui.confirm` as an alert over the window.
+    static func confirm(_ question: PluginConfirmation) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = question.title
+        alert.informativeText = question.message
+        alert.addButton(withTitle: question.confirm)
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = question.destructive
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Lets the plugin's editor conversation, if one is open, let go of its folder before it is deleted.
+    static func prepareDelete(_ pluginID: String, registry: PluginRegistry) async {
+        guard let session = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) else { return }
+        NotificationCenter.default.post(name: .playhousePreparePluginEdit, object: session.id)
+        await Task.yield()
+    }
+
     /// Asks first, then deletes the plugin's folder and its editor conversation.
     static func confirmDelete(_ pluginID: String, name: String, detail: String, registry: PluginRegistry) {
         let alert = NSAlert()
@@ -352,10 +370,7 @@ enum PluginManagement {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task { @MainActor in
             do {
-                if let session = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) {
-                    NotificationCenter.default.post(name: .playhousePreparePluginEdit, object: session.id)
-                    await Task.yield()
-                }
+                await prepareDelete(pluginID, registry: registry)
                 try await registry.delete(pluginID)
             } catch {
                 let failure = NSAlert(error: error)

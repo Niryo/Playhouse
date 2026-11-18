@@ -129,13 +129,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(revealInConversation(volcanoView), "The earlier page's message should scroll fully into view before it is clicked.")
         volcanoView.click()
         volcanoView.typeKey("a", modifierFlags: .command)
-        let commentBubble = try waitForSideChatBubble(at: volcanoView)
-        let commentField = element("side-chat-input")
-        XCTAssertTrue(commentField.waitToExist(timeout: 5))
-        commentField.typeText("What did we say before?")
-        // Add comment turns the side chat's text into a comment on a user message.
-        element("add-comment-button").click()
-        XCTAssertTrue(commentBubble.waitForNonExistence(timeout: 5), "Adding the comment should close the side chat bubble.")
+        // The selection pill's Comment opens the comment popover; its arrow adds a comment on a user message.
+        addCommentFromSelection("What did we say before?")
         XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 5), "A comment alone should be sendable.")
         XCTAssertTrue(waitUntil({
             self.accessibleLabelOrValue(of: self.element("pending-comment-count")).contains("1 comment")

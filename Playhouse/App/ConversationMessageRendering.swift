@@ -537,92 +537,114 @@ extension TaskConversationView {
             if let selection = currentTextSelection,
                selection.messageID == messageID, selection.anchorID == anchorID {
                 GeometryReader { geometry in
-                    let isBubbleOpen = annotationSelection?.id == selection.id
-                    // The bubble's anchor: the selected lines themselves, kept inside the text.
-                    Color.clear
-                        .frame(width: max(1, min(selection.bounds.width, geometry.size.width)), height: max(1, selection.bounds.height))
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                        .popover(isPresented: Binding(
-                            get: { isBubbleOpen },
-                            set: { isPresented in
-                                if !isPresented, annotationSelection?.id == selection.id {
-                                    annotationSelection = nil
-                                    // A reopened bubble selected nothing, so no hint is left behind.
-                                    if selection.isReopened, currentTextSelection?.id == selection.id { currentTextSelection = nil }
-                                }
-                            }
+                    let isOpen = annotationSelection?.id == selection.id
+                    // The popover's anchor: the selected lines themselves, kept inside the text. One
+                    // popover shows either action: sibling popovers presented as the selection appears
+                    // (reopening highlighted text) showed the wrong one.
+                    selectionAnchor(selection, in: geometry.size)
                         // Above the selected lines, where it covers what was read rather than what
                         // follows; AppKit moves it below them when the screen has no room above.
-                        ), arrowEdge: .top) {
-                            let comment = selection.annotationID.flatMap { id in annotations.first { $0.id == id } }
-                            SideChatBubble(
-                                selectedText: selection.text,
-                                comment: comment?.comment,
-                                canEditComment: comment.map { !isReadOnly && $0.pending && !inFlightAnnotationIDs.contains($0.id) } ?? false,
-                                savedChat: selection.sideChatID.flatMap { id in sideChats.first { $0.id == id } },
-                                models: modelOptions,
-                                defaultModelName: provider.defaultModelName,
-                                modelID: selectedModelID,
-                                effort: selectedEffort,
-                                send: { sideChatID, message, modelID, effort, onDelta in
-                                    try await conversationManager.sideChat(
-                                        taskID: task.id, sideChatID: sideChatID,
-                                        selection: sideChatID == nil ? selection.text : nil,
-                                        source: sideChatID == nil ? selection.source : nil,
-                                        message: message, modelID: modelID, effort: effort, onDelta: onDelta
-                                    )
-                                },
-                                onSaved: keepSideChat,
-                                addComment: { comment in addAnnotation(selection, comment: comment) },
-                                saveComment: { text in if let comment { editAnnotation(comment.id, comment: text) } },
-                                close: { sideChatID in
-                                    Task { await conversationManager.closeSideChat(taskID: task.id, sideChatID: sideChatID) }
-                                },
-                                dismiss: {
-                                    if annotationSelection?.id == selection.id { annotationSelection = nil }
-                                    if selection.isReopened, currentTextSelection?.id == selection.id { currentTextSelection = nil }
-                                }
-                            )
+                        .popover(isPresented: selectionPopoverBinding(selection), arrowEdge: .top) {
+                            switch selectionAction {
+                            case .sideChat:
+                                SideChatBubble(
+                                    taskID: task.id,
+                                    selectedText: selection.text,
+                                    source: selection.source,
+                                    savedChat: selection.sideChatID.flatMap { id in sideChats.first { $0.id == id } },
+                                    models: modelOptions,
+                                    defaultModelName: provider.defaultModelName,
+                                    modelID: selectedModelID,
+                                    effort: selectedEffort,
+                                    conversationManager: conversationManager,
+                                    dismiss: { dismissSelectionPopover(selection) }
+                                )
+                            case .comment:
+                                commentPopover(selection)
+                            }
                         }
                         .position(
                             x: min(max(selection.bounds.midX, 1), max(1, geometry.size.width - 1)),
                             y: selection.bounds.midY - raise
                         )
-                    // The hint that opens the bubble, centered above the selection, gone while it is open.
-                    // The scroll view clips what is above its top, so there the hint is pinned just inside
+                    // The actions that open them, centered above the selection, gone while one is open.
+                    // The scroll view clips what is above its top, so there they are pinned just inside
                     // it, over the selection's visible lines, and never further down than the selection's end.
                     let visibleTop = -geometry.frame(in: .scrollView).minY
-                    let hintY = min(max(selection.bounds.minY - raise - 22, visibleTop + 4 + 15), selection.bounds.maxY + 22)
-                    if !isBubbleOpen {
-                        Button {
-                            // Text already commented or side-chatted reopens with them.
-                            let opened = withSavedNotes(selection)
-                            currentTextSelection = opened
-                            annotationSelection = opened
-                        } label: {
-                            Label("Side chat", systemImage: "bubble.left.and.text.bubble.right")
-                                .font(.system(size: 13, weight: .medium))
-                                .padding(.horizontal, 12).padding(.vertical, 7)
-                                .background(.regularMaterial, in: Capsule())
-                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.12)))
-                                .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
-                        }
-                        .buttonStyle(.plain)
-                        .buttonHoverPointer()
-                        .nativeHelp("Discuss or comment on the selected text")
-                        .accessibilityLabel("Side chat")
-                        .accessibilityIdentifier("side-chat-hint-button")
-                        .frame(width: 120, height: 30)
+                    let pillY = min(
+                        max(selection.bounds.minY - raise - 22, visibleTop + 4 + SelectionActionsPill.height / 2),
+                        selection.bounds.maxY + 22
+                    )
+                    if !isOpen {
+                        SelectionActionsPill(
+                            comment: { openSelectionPopover(selection, action: .comment) },
+                            sideChat: { openSelectionPopover(selection, action: .sideChat) }
+                        )
+                        .frame(width: SelectionActionsPill.width, height: SelectionActionsPill.height)
                         .position(
-                            x: min(max(selection.bounds.midX, 60), max(60, geometry.size.width - 60)),
-                            y: hintY
+                            x: min(max(selection.bounds.midX, SelectionActionsPill.width / 2), max(SelectionActionsPill.width / 2, geometry.size.width - SelectionActionsPill.width / 2)),
+                            y: pillY
                         )
                         .zIndex(20)
                     }
                 }
             }
         }
+    }
+
+    private func selectionAnchor(_ selection: AnnotationSelection, in size: CGSize) -> some View {
+        Color.clear
+            .frame(width: max(1, min(selection.bounds.width, size.width)), height: max(1, selection.bounds.height))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private func selectionPopoverBinding(_ selection: AnnotationSelection) -> Binding<Bool> {
+        Binding(
+            get: { annotationSelection?.id == selection.id },
+            set: { isPresented in
+                if !isPresented, annotationSelection?.id == selection.id {
+                    dismissSelectionPopover(selection)
+                }
+            }
+        )
+    }
+
+    /// Opens the comment popover or side chat bubble on `selection`; text already commented or
+    /// side-chatted opens with them.
+    func openSelectionPopover(_ selection: AnnotationSelection, action: SelectionAction) {
+        let opened = selection.isReopened ? selection : withSavedNotes(selection)
+        selectionAction = action
+        currentTextSelection = opened
+        annotationSelection = opened
+    }
+
+    func dismissSelectionPopover(_ selection: AnnotationSelection) {
+        if annotationSelection?.id == selection.id { annotationSelection = nil }
+        // Closing it ends the selection too: actions left over the text would cover a click that
+        // reopens the highlight.
+        if currentTextSelection?.id == selection.id { currentTextSelection = nil }
+    }
+
+    /// The comment popover on `selection`: its unsent comment opens to be changed or discarded,
+    /// and text with only a sent comment shows it and adds another.
+    func commentPopover(_ selection: AnnotationSelection) -> some View {
+        let matching = annotations.filter { $0.source == selection.source }
+        let editable = isReadOnly ? nil : matching.last { $0.pending && !inFlightAnnotationIDs.contains($0.id) }
+        let sent = matching.last { $0.id != editable?.id }
+        return CommentPopover(
+            editingComment: editable?.comment,
+            sentComment: sent?.comment,
+            submit: { text in
+                if let editable {
+                    editAnnotation(editable.id, comment: text)
+                } else {
+                    addAnnotation(selection, comment: text.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            },
+            discard: { if let editable { editAnnotation(editable.id, comment: "") } },
+            dismiss: { dismissSelectionPopover(selection) }
+        )
     }
 
     func assistantMarkdownContent(
@@ -790,8 +812,8 @@ extension TaskConversationView {
         return selection
     }
 
-    /// Opens the bubble on the commented or side-chatted text `range` that was clicked, with
-    /// its comment and side chat.
+    /// Opens what the commented or side-chatted text `range` that was clicked holds: its comment
+    /// popover or its side chat bubble, or, holding both, the actions that choose between them.
     func reopenHighlight(
         _ range: NSRange, bounds: CGRect, messageID: String, anchorID: Int,
         rangeOf: (ConversationTextSource) -> NSRange?
@@ -804,9 +826,26 @@ extension TaskConversationView {
             messageID: messageID, anchorID: anchorID, blockID: source.blockID, startOffset: source.startOffset,
             endBlockID: source.endBlockID, endOffset: source.endOffset, text: text, bounds: bounds
         ))
-        guard selection.isReopened else { return }
-        currentTextSelection = selection
-        annotationSelection = selection
+        switch (selection.annotationID, selection.sideChatID) {
+        case (nil, nil):
+            return
+        case (.some, .some):
+            // Commented and side-chatted text shows both actions to choose between.
+            annotationSelection = nil
+            currentTextSelection = selection
+        case (.some, nil):
+            openSelectionPopover(selection, action: .comment)
+        case (nil, .some):
+            openSelectionPopover(selection, action: .sideChat)
+        }
+    }
+
+    /// Discards every unsent comment the composer holds; ones a running send carries stay with it.
+    func discardPendingAnnotations() {
+        annotations.removeAll { $0.pending && !inFlightAnnotationIDs.contains($0.id) }
+        annotationSelection = nil
+        currentTextSelection = nil
+        if !isReadOnly { persistPendingAnnotations() }
     }
 
     /// Changes an unsent comment's text; saving it empty deletes the comment.

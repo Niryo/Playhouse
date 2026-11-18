@@ -175,6 +175,9 @@ enum WorkspaceSettings {
     /// Set once the tasks' pull request modes, from before the `pull-request-mode`
     /// plugin kept them in its state, were carried into that state.
     static let legacyPullRequestModesImportedKey = "legacyPullRequestModesImported"
+    /// Set once the tasks saved while PR was the default pull request mode got
+    /// PR saved as their own, before Manual became the default.
+    static let existingTaskPullRequestModesPinnedKey = "existingTaskPullRequestModesPinned"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG

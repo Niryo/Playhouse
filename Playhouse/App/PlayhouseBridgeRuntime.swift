@@ -86,6 +86,7 @@ final class PlayhouseBridgeRuntime {
             let workspaces = WorkspaceManager(taskManager: taskManager, settingsManager: settings)
             try await workspaces.reconcileDeferredRepositoryRemovals()
             try taskManager.importLegacyPullRequestModes(into: settings)
+            try taskManager.pinPullRequestModeOfExistingTasks(into: settings)
 
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string
@@ -900,24 +901,76 @@ final class PlayhouseBridgeRuntime {
                     "recentIDs": try Self.value(catalog.recentIDs),
                     "suggestions": try Self.value(catalog.suggestions(query: request.arguments["query"]?.string ?? "")),
                 ])
-            case "slash.list":
-                // The composer's `/` menu for the text typed after the `/`; a command's own list
-                // reads only its source, and `/mcp` asks both agents for sign-ins on request.
+            case "slash.list", "slash.run":
+                // The composer's `/` commands, each a plugin's (the Built-in Commands
+                // plugin's first), run headlessly with the composer's context: bridge
+                // calls run as this caller's requests, `ui` calls are recorded.
                 let task = try taskManager.conversationSubject(request.requiredUUID("taskID"))
-                let includeStatus = request.arguments["includeStatus"]?.bool == true
-                let menu = try await SlashCommandManager(mentions: mentions, skills: skills).menu(
-                    query: request.arguments["query"]?.string ?? "", task: task, tasks: taskManager, settings: settings,
-                    mcpStatus: includeStatus ? {
-                        await ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
-                            .mcpStatus(taskID: task.id, provider: nil)
-                    } : nil,
-                    plugins: {
-                        let library = try pluginLibrary()
-                        let disabled = settings.disabledPluginIDs
-                        return await Task.detached { library.list(disabled: disabled) }.value
+                let library = try pluginLibrary()
+                let disabled = settings.disabledPluginIDs
+                let installed = await Task.detached { library.list(disabled: disabled) }.value
+                let states = settings.pluginStates
+                let plugins = (BuiltInPlugins.records(disabled: disabled) + installed).map { plugin in
+                    var plugin = plugin
+                    plugin.state = states[plugin.id] ?? [:]
+                    return plugin
+                }
+                let draft = request.arguments["draft"]?.string ?? ""
+                let appearance = settings.appearance
+                let context = PluginTaskContext(task: task)
+                let caller = request
+                let headless = PluginHeadlessHost(placement: .composerActions, confirm: request.arguments["confirm"]?.bool == true) { command, arguments in
+                    var nested = caller
+                    nested.id = UUID().uuidString
+                    nested.command = command
+                    nested.arguments = caller.arguments.filter { $0.key.hasPrefix("__") }.merging(BridgeValue(plugin: arguments).object ?? [:]) { _, new in new }
+                    let response = await PlayhouseBridgeRuntime().perform(nested) { _ in }
+                    guard response.ok else {
+                        throw PluginHostError(code: response.error?.code ?? "operation_failed", message: response.error?.message ?? "The bridge command failed.")
                     }
+                    return PluginValue(bridge: response.result ?? .null)
+                }
+                let manager = SlashCommandManager(
+                    plugins: plugins,
+                    props: { plugin in
+                        PluginContext.props(
+                            plugin: plugin, appearance: appearance, task: context,
+                            composer: PluginComposerContext(draft: draft, selectionLocation: (draft as NSString).length, selectionLength: 0)
+                        )
+                    },
+                    host: { _ in headless.answer }
                 )
-                result = try Self.value(menu)
+                let entries = await manager.entries()
+                // `hostCalls` reports the command's own calls, not the availability checks above.
+                let listingCalls = headless.hostCalls.count
+                if request.command == "slash.list" {
+                    let query = request.arguments["query"]?.string ?? ""
+                    let complete = request.arguments["complete"]?.bool == true || request.arguments["includeStatus"]?.bool == true
+                    var list: PluginCommandList?
+                    if let entry = SlashCommandCatalog.listedCommand(query, in: entries) {
+                        do {
+                            list = try await manager.list(entry, filter: SlashCommandCatalog.parse(query).filter ?? "", complete: complete)
+                        } catch let error as PluginHostError {
+                            throw BridgeCommandError(code: error.code, message: error.message)
+                        }
+                    }
+                    result = try Self.value(SlashCommandCatalog.menu(query: query, entries: entries, list: list))
+                } else {
+                    let name = try request.requiredString("command").trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+                    guard let entry = entries.first(where: { $0.name == name }) else {
+                        throw BridgeCommandError(code: "not_found", message: "No plugin exposes the command /\(name).")
+                    }
+                    let itemID = request.arguments["item"]?.string
+                    let button = request.arguments["button"]?.string
+                    do {
+                        var item: PluginCommandItem?
+                        if let itemID { item = try await manager.item(entry, id: itemID) }
+                        let outcome = try await manager.act(entry, item: item, button: button)
+                        result = .object(["outcome": try Self.value(outcome), "hostCalls": BridgeValue(plugin: .array(Array(headless.hostCalls.dropFirst(listingCalls))))])
+                    } catch let error as PluginHostError {
+                        throw BridgeCommandError(code: error.code, message: error.message)
+                    }
+                }
             case "rules.list":
                 result = try Self.value(rules.catalog(roots: skillRoots()))
             case "rules.get":

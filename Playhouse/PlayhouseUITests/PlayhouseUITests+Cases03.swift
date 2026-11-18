@@ -717,7 +717,7 @@ extension PlayhouseUITests {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
-        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        // Manual, the default, kept explicit: this case drives the manual PR path.
         try setPullRequestMode("manual", taskID: taskID)
         XCTAssertEqual(created["status"] as? String, "Backlog")
         XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 5), "The backlog task card should render before checking its PR controls.")

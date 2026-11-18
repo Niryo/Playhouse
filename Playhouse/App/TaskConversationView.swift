@@ -134,11 +134,13 @@ struct TaskConversationView: View {
     @State var mentionEdit: ChatEditorEdit?
     /// The `@` whose menu Escape closed; it stays closed until another mention starts.
     @State var dismissedMentionLocation: Int?
-    /// The items of the command the `/` menu lists, read from the daemon when that list opens.
-    @State var slashItems: [SlashCommandItem]?
-    @State var slashItemsCommand: SlashCommand?
-    /// Both agents are still asked which MCP servers in the `/mcp` list need a sign-in.
-    @State var isCheckingSlashSignIn = false
+    /// The plugins' `/` commands, read again as each new `/` is typed.
+    @State var slashEntries: [SlashCommandEntry]?
+    /// The list of the command the `/` menu lists, from its plugin when that list opens.
+    @State var slashList: PluginCommandList?
+    @State var slashListCommand: String?
+    /// A chosen command's handler is running; the menu stays closed meanwhile.
+    @State var isRunningSlashCommand = false
     /// The highlighted row of the open `/` menu.
     @State var slashSelection = 0
     /// The `/` whose menu Escape closed; it stays closed until another command starts.
@@ -221,10 +223,13 @@ struct TaskConversationView: View {
     @State var annotations: [ConversationAnnotation] = []
     /// Pending comments handed to the turn now running; they leave the saved draft until it ends.
     @State var inFlightAnnotationIDs: Set<UUID> = []
+    /// The selection whose comment popover or side chat bubble is open, which `selectionAction` names.
     @State var annotationSelection: AnnotationSelection?
+    @State var selectionAction: SelectionAction = .sideChat
     @State var currentTextSelection: AnnotationSelection?
-    /// The side chats saved on the task; ones with a source highlight their text purple.
-    @State var sideChats: [SavedSideChat] = []
+    /// The task's side chats, saved or still answering their first question; ones with a source
+    /// highlight their text purple. `SideChatStore` owns them, so they outlive this view.
+    var sideChats: [SavedSideChat] { SideChatStore.shared.sideChats(taskID: task.id) }
     @State var activities: [ConversationActivity] = []
     /// Tool calls from every loaded turn, each shown in the timeline after the
     /// message it followed.
@@ -624,6 +629,10 @@ struct TaskConversationView: View {
     }
 
     var body: some View {
+        // Transcript rows read the side chats inside row and layout closures; reading them here
+        // too re-renders the rows' purple highlights whenever one is saved or starts answering,
+        // however those closures are tracked. Streaming deltas are not read, so they don't.
+        let _ = sideChats
         Group {
             if !hasTaskSidebar {
                 // The standalone chat sidebar reuses only the conversation transcript/composer,

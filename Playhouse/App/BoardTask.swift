@@ -210,8 +210,8 @@ final class BoardTask {
     var callUsageSnapshotsData: Data?
     /// Legacy pull request mode columns, from before the `pull-request-mode`
     /// plugin kept each task's mode in its own state. Only the one-time import
-    /// (`legacyPullRequestMode`) reads them; a new task gets the default mode's
-    /// value, as tasks did before.
+    /// (`legacyPullRequestMode`) reads them; a new task gets PR's value, which
+    /// the import skips.
     var autoCreatePullRequestOnReview: Bool = false
     var pullRequestAutopilot: Bool = false
     var pullRequestAutoMerge: Bool = false
@@ -296,7 +296,7 @@ final class BoardTask {
         savedPrompt = nil
         pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
-        // Reads as the default mode, so the legacy import never gives a task
+        // Reads as PR, which the legacy import skips, so it never gives a task
         // created since the plugin owned the mode one it didn't choose.
         autoCreatePullRequestOnReview = true
         repositoryWorktreesData = nil

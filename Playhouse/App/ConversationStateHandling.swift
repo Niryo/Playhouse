@@ -176,21 +176,7 @@ extension TaskConversationView {
     }
 
     func loadSideChats() {
-        let taskID = task.id
-        Task { @MainActor in
-            guard let saved = try? await conversationManager.savedSideChats(taskID: taskID), task.id == taskID else { return }
-            sideChats = saved
-        }
-    }
-
-    /// Keeps the side chat a bubble just saved, so its text highlights while the bubble is
-    /// open and reopens with it after the bubble closes.
-    func keepSideChat(_ sideChat: SavedSideChat) {
-        if let index = sideChats.firstIndex(where: { $0.id == sideChat.id }) {
-            sideChats[index] = sideChat
-        } else {
-            sideChats.append(sideChat)
-        }
+        SideChatStore.shared.load(taskID: task.id, using: conversationManager)
     }
 
     func restoreAnnotations(from messages: [ConversationMessage], keepingPending: Bool = false) {
@@ -333,7 +319,7 @@ extension TaskConversationView {
             errorMessage = error.localizedDescription
             if action == "set" {
                 draft = objective ?? ""
-                isEnteringGoal = true
+                enterGoal()
                 activeGoal = try? await conversationManager.goal(taskID: task.id)
             }
             return false
@@ -1033,6 +1019,17 @@ extension TaskConversationView {
     func setConversationMode(_ mode: ConversationMode) {
         conversationMode = mode
         WorkspaceSettings.preferencesStore.set(mode.rawValue, forKey: conversationModeDefaultsKey)
+    }
+
+    /// Plan mode and goal entry are never on together: turning one on turns the other off.
+    func enterPlanMode() {
+        isEnteringGoal = false
+        setConversationMode(.plan)
+    }
+
+    func enterGoal() {
+        isEnteringGoal = true
+        if conversationMode == .plan { setConversationMode(.code) }
     }
 
     func startImplementingPlan() {

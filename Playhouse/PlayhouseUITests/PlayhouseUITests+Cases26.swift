@@ -882,7 +882,7 @@ extension PlayhouseUITests {
         let task = try createSkillsTask("Skills catalog", repositories: [repository, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
         openTask(named: "Skills catalog")
-        XCTAssertFalse(element("attach-chat-image-button").exists, "The composer has no paperclip.")
+        XCTAssertTrue(element("composer-attach-button").waitToExist(timeout: 15), "The composer leads with its attach button.")
         let composer = element("message-composer").frame
         let skillsButton = element("open-skills-button"), terminalButton = element("toggle-terminal-button")
         XCTAssertTrue(skillsButton.waitToExist(timeout: 15) && terminalButton.exists, "The task sidebar shows the Skills and terminal buttons.")

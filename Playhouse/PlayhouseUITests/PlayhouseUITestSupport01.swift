@@ -159,9 +159,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitForStableFrame(replyText), "The reply should settle before its text is selected.")
         replyText.click()
         replyText.typeKey("a", modifierFlags: .command)
-        // The reply is one short line, so its hint centres on those few characters, not the text view.
-        let bubble = try waitForSideChatBubble(at: replyText, hintScreenshot: "Side chat hint above the selected reply")
-        XCTAssertFalse(app.buttons["add-comment-to-selection-button"].exists, "The bubble replaces the Add comment hint.")
+        // The reply is one short line, so its pill centres on those few characters, not the text view.
+        // The pill offers Comment beside Side chat; its Side chat half opens the bubble.
+        let bubble = try waitForSideChatBubble(at: replyText, hintScreenshot: "Comment and Side chat pill above the selected reply")
         return (taskID, replyText, bubble)
     }
     func sendSideChatMessage(_ message: String, answerIndex index: Int, containing expected: String) -> XCUIElement {
@@ -1071,11 +1071,12 @@ extension PlayhouseUITests {
             XCTAssertTrue((invalid["errors"] as? [String] ?? []).contains { $0.contains(message) }, "\(source) reports \(message): \(invalid)")
         }
     }
-    func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension") throws {
+    func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension", commands: [[String: Any]]? = nil) throws {
         let folder = pluginsFolder.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
+        var manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
                                        "icon": icon, "placement": placement, "presentation": presentation]
+        if let commands { manifest["commands"] = commands }
         try JSONSerialization.data(withJSONObject: manifest).write(to: folder.appendingPathComponent("plugin.json"))
         if let source { try source.write(to: folder.appendingPathComponent("index.js"), atomically: true, encoding: .utf8) }
     }
@@ -1089,6 +1090,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitForStableFrame(row), "The \(pluginRow) row should settle before it is hovered.", file: file, line: line)
         row.hover()
         let item = row.descendants(matching: .menuItem)[action]
+        // A pointer that reaches the row while crossing the rows above can leave its submenu closed; hover it afresh.
+        if !waitUntil({ item.isHittable }, timeout: 3) {
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).hover()
+            row.hover()
+        }
         XCTAssertTrue(waitUntil({ item.isHittable }, timeout: 5), "The \(pluginRow) submenu offers \(action).", file: file, line: line)
         // The submenu is still opening too; a click on its first frame can miss the item.
         XCTAssertTrue(waitForStableFrame(item), "The \(action) item should settle before it is clicked.", file: file, line: line)
