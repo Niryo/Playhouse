@@ -10,6 +10,7 @@ enum AtomType: String, CaseIterable, Sendable {
     case stack = "Stack"
     case text = "Text"
     case icon = "Icon"
+    case image = "Image"
     case label = "Label"
     case button = "Button"
     case link = "Link"
@@ -52,7 +53,7 @@ enum AtomType: String, CaseIterable, Sendable {
         case .popover, .modal: ["onDismiss"]
         case .stepSlider: ["onChange"]
         case .scroll: ["onEndReached"]
-        case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
+        case .stack, .text, .icon, .image, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
         }
     }
 
@@ -60,7 +61,7 @@ enum AtomType: String, CaseIterable, Sendable {
     var takesAtomChildren: Bool {
         switch self {
         case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .overlay, .popover, .modal, .page, .sidePanel: true
-        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
+        case .text, .icon, .image, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
         }
     }
 
@@ -70,7 +71,7 @@ enum AtomType: String, CaseIterable, Sendable {
     var isContainer: Bool {
         switch self {
         case .stack, .panel, .card, .scroll, .disclosure, .overlay, .popover, .modal, .page, .sidePanel: true
-        case .text, .icon, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
+        case .text, .icon, .image, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
              .toggle, .textField, .segmented, .menu, .pressArea, .editor, .stepSlider: false
         }
     }
@@ -92,6 +93,7 @@ enum AtomType: String, CaseIterable, Sendable {
         case .stack: Self.keys(StackProps.CodingKeys.self)
         case .text: Self.keys(TextProps.CodingKeys.self)
         case .icon: Self.keys(IconProps.CodingKeys.self)
+        case .image: Self.keys(ImageProps.CodingKeys.self)
         case .label: Self.keys(LabelProps.CodingKeys.self)
         case .button: Self.keys(ButtonProps.CodingKeys.self)
         case .link: Self.keys(LinkProps.CodingKeys.self)
@@ -143,6 +145,7 @@ enum AtomType: String, CaseIterable, Sendable {
             case .stack: _ = try StackProps.decode(props)
             case .text: _ = try TextProps.decode(props)
             case .icon: _ = try IconProps.decode(props)
+            case .image: _ = try ImageProps.decode(props).validateURL()
             case .label: _ = try LabelProps.decode(props)
             case .button: _ = try ButtonProps.decode(props)
             case .link: _ = try LinkProps.decode(props)
@@ -321,6 +324,50 @@ struct IconProps: AtomPropsDecodable, Equatable {
     var original: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable { case name, asset, size, weight, color, original }
+}
+
+/// A picture loaded from `url`: `https`, `http` (which App Transport Security
+/// lets reach only IP addresses and local hosts, as for `fetch`), a `file://`
+/// path or a `data:image/…` URL. `size` makes it a square of that many points
+/// (otherwise the common `width` and `height` frame it, or it takes the width
+/// it is offered at the picture's aspect ratio). `contentMode` `fill` (the
+/// default) covers the frame and crops, `fit` shows all of it. `cornerRadius`
+/// rounds its corners and `circle` clips it to a circle (a profile picture).
+/// While it loads, and when it fails, it shows `placeholder` (an SF Symbol) on
+/// a faint fill, never an error. The window loads and caches it natively, so a
+/// re-render or another copy of the same URL doesn't load it again. It is
+/// decorative unless it has an accessibility `label`.
+struct ImageProps: AtomPropsDecodable, Equatable {
+    var url: String
+    var size: Double?
+    var contentMode: String?
+    var cornerRadius: Double?
+    var circle: Bool?
+    var placeholder: String?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case url, size, contentMode, cornerRadius, circle, placeholder }
+
+    /// The URL it loads, or nil when `url` isn't one it may load.
+    var source: URL? { try? validateURL() }
+
+    /// Checks `url` the way `fetch` checks its URL, also allowing local files and image data.
+    @discardableResult
+    func validateURL() throws -> URL {
+        let invalid = PluginTreeError(message:
+            "<Image> has an invalid prop: url: expected an absolute https, http, file or data:image URL, found \"\(url)\"")
+        guard let parsed = URL(string: url), let scheme = parsed.scheme?.lowercased() else { throw invalid }
+        switch scheme {
+        case "http", "https":
+            guard let host = parsed.host, !host.isEmpty else { throw invalid }
+        case "file":
+            guard parsed.path.hasPrefix("/"), parsed.path.count > 1 else { throw invalid }
+        case "data":
+            guard url.dropFirst("data:".count).lowercased().hasPrefix("image/") else { throw invalid }
+        default:
+            throw invalid
+        }
+        return parsed
+    }
 }
 
 /// An SF Symbol beside a string.

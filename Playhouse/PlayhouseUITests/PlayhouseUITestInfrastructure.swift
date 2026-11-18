@@ -324,18 +324,33 @@ final class DrainingPipe: @unchecked Sendable {
 final class PluginFetchServer: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "plugin-fetch-server")
+    private let log = RequestLog()
     let port: UInt16
+
+    /// The image atom case's picture, as the CLI case's server serves it: 16 x 8, red on the left, blue on the right.
+    static let avatarPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAICAIAAAB/FOjAAAAAGElEQVR42mN46uGLFdkl38WKGEY10EIDAHRHvgHbOOZdAAAAAElFTkSuQmCC")!
+
+    /// Counts the requests for each path.
+    private final class RequestLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var counts: [String: Int] = [:]
+        func record(_ path: String) { lock.withLock { counts[path, default: 0] += 1 } }
+        func count(_ path: String) -> Int { lock.withLock { counts[path] ?? 0 } }
+    }
 
     init() throws {
         listener = try Self.loopbackListener()
-        listener.newConnectionHandler = { [queue] connection in
+        listener.newConnectionHandler = { [queue, log] connection in
             connection.start(queue: queue)
-            Self.receive(connection, buffer: Data())
+            Self.receive(connection, buffer: Data(), log: log)
         }
         port = try Self.start(listener, queue: queue)
     }
 
     deinit { listener.cancel() }
+
+    /// How many requests reached `path` so far.
+    func requests(to path: String) -> Int { log.count(path) }
 
     /// A loopback port nothing listens on: bound, read, then released.
     static func closedPort() throws -> UInt16 {
@@ -368,7 +383,7 @@ final class PluginFetchServer: @unchecked Sendable {
     }
 
     /// Reads one request (headers, then Content-Length bytes of body) and answers it.
-    private static func receive(_ connection: NWConnection, buffer: Data) {
+    private static func receive(_ connection: NWConnection, buffer: Data, log: RequestLog) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
             var buffer = buffer
             if let data { buffer.append(data) }
@@ -386,12 +401,13 @@ final class PluginFetchServer: @unchecked Sendable {
                     let parts = (lines.first ?? "").split(separator: " ")
                     let method = parts.first.map(String.init) ?? ""
                     let path = parts.count > 1 ? String(parts[1]) : "/"
+                    log.record(path)
                     respond(connection, method: method, path: path, headers: headers, body: String(decoding: body.prefix(length), as: UTF8.self))
                     return
                 }
             }
             if isComplete || error != nil { connection.cancel(); return }
-            receive(connection, buffer: buffer)
+            receive(connection, buffer: buffer, log: log)
         }
     }
 
@@ -399,6 +415,7 @@ final class PluginFetchServer: @unchecked Sendable {
         var status = 404
         var reason = "Not Found"
         var text = "unexpected"
+        var binary: Data?
         var contentType = "text/plain"
         var extra: [String] = []
         switch (method, path) {
@@ -414,10 +431,16 @@ final class PluginFetchServer: @unchecked Sendable {
         case ("GET", "/redirect"):
             (status, reason, text) = (302, "Found", "")
             extra.append("Location: /greeting")
+        case ("GET", "/avatar.png"):
+            (status, reason, binary, contentType) = (200, "OK", avatarPNG, "image/png")
+            extra.append("Cache-Control: no-store")
+        case ("GET", "/not-an-image.png"):
+            (status, reason, text, contentType) = (200, "OK", "not a picture", "image/png")
+            extra.append("Cache-Control: no-store")
         default:
             break
         }
-        let payload = Data(text.utf8)
+        let payload = binary ?? Data(text.utf8)
         let head = (["HTTP/1.1 \(status) \(reason)", "Content-Type: \(contentType)", "Content-Length: \(payload.count)", "Connection: close"] + extra)
             .joined(separator: "\r\n") + "\r\n\r\n"
         connection.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in connection.cancel() })

@@ -671,6 +671,28 @@ Playhouse.render(h(Context));
 
 
 
+    # The Image atom case's picture: 16 x 8, red on the left, blue on the right (also served by plugin-fetch-server.py).
+    IMAGE_ATOM_PNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAICAIAAAB/FOjAAAAAGElEQVR42mN46uGLFdkl38WKGEY10EIDAHRHvgHbOOZdAAAAAElFTkSuQmCC"
+    # The UI case's pluginImageSource is the same script.
+    PLUGIN_IMAGE_SOURCE = """
+function Avatars() {
+  var copies = React.useState(1);
+  var avatars = [];
+  for (var index = 1; index <= copies[0]; index++) {
+    avatars.push(h(Image, { key: index, url: BASE + "/avatar.png", size: 48, circle: true, label: "Avatar " + index, testID: "image-remote-" + index }));
+  }
+  return h(Stack, { spacing: 12, align: "leading", group: true, testID: "image-plugin" },
+    h(Stack, { axis: "h", spacing: 12 }, avatars),
+    h(Button, { style: "bordered", testID: "image-add-copy", onPress: function () { copies[1](copies[0] + 1); } }, h(Text, null, "Add a copy")),
+    h(Text, { size: 11, testID: "image-copies" }, "Copies: ", String(copies[0])),
+    h(Image, { url: FILE, width: 64, height: 32, cornerRadius: 8, label: "Picture from disk", testID: "image-file" }),
+    h(Image, { url: BASE + "/avatar.png", size: 24, testID: "image-decorative" }),
+    h(Stack, { axis: "h", spacing: 12 },
+      h(Image, { url: BASE + "/not-an-image.png", size: 48, placeholder: "person.crop.circle", label: "Not a picture", testID: "image-broken" }),
+      h(Image, { url: CLOSED + "/avatar.png", size: 48, placeholder: "person.crop.circle", label: "Unreachable picture", testID: "image-refused" })));
+}
+Playhouse.render(h(Avatars));
+"""
     # The UI case's pluginFetchSource is the same script.
     PLUGIN_FETCH_SOURCE = """
 function Fetcher() {
