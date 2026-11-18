@@ -9,7 +9,9 @@ extension TaskConversationView {
             let showsPageAnchors = showsChatPageAnchors(transcriptWidth: viewport.size.width)
             let isBrowsingEarlier = isBrowsingEarlierMessages
             ScrollView {
-                let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
+                let leadingGoalEntries = goalAchievementTimelineEntries.filter {
+                    $0.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID
+                }
                 // Worked out once per pass rather than once per row: each walks the whole transcript, and
                 // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
                 let renderedMessages = renderedConversationMessages

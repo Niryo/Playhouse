@@ -938,12 +938,28 @@ extension PlayhouseUITests {
     /// provider segment, as earlier sessions would have recorded them. Playhouse keeps the
     /// transcript itself, so a long history is written into its store rather than read from a
     /// provider. Mirrors the CLI suite's `seed_long_history`; quit the app before calling it.
-    func seedLongHistory(_ taskID: String, sentPrompt: Bool = false, midHistoryCommand: Bool = false, tallLatestAnswer: Bool = false) throws {
+    /// With `switchAfterTurn`, the turns up to it belong to the previous segment and the rest to the
+    /// newest, with a switch to the newest provider and back stored between them with nothing sent in
+    /// between, as older conversations recorded an undone switch. `latestCommentary` gives the newest
+    /// turn a commentary message before its answer. The CLI suite's `seed_long_history` writes the same rows.
+    func seedLongHistory(
+        _ taskID: String, sentPrompt: Bool = false, midHistoryCommand: Bool = false, tallLatestAnswer: Bool = false,
+        switchAfterTurn: Int? = nil, latestCommentary: Bool = false
+    ) throws {
         let key = taskID.uppercased()
-        let segments = try XCTUnwrap(try conversationState(key)?["segments"] as? [[String: Any]])
+        var state = try XCTUnwrap(try conversationState(key))
+        var segments = try XCTUnwrap(state["segments"] as? [[String: Any]])
         let segment = try XCTUnwrap(segments.last)
-        let segmentID = try XCTUnwrap(segment["id"] as? String)
-        let provider = try XCTUnwrap(segment["provider"] as? String)
+        var earlierSegment = segment
+        if switchAfterTurn != nil {
+            earlierSegment = segments[segments.count - 2]
+            let undone = [(segment, "segment_undone_switch"), (earlierSegment, "segment_undone_switch_back")].map { source, id in
+                source.merging(["id": id, "codexTurnIDs": [String](), "codexTurnModelIDs": [String: String]()]) { _, new in new }
+            }
+            segments.insert(contentsOf: undone, at: segments.count - 1)
+            state["segments"] = segments
+            try writeConversationState(key, state)
+        }
         var turns: [(id: String, messages: [(id: String, role: String, text: String)], activities: [[String: Any]])] = []
         if sentPrompt {
             // The sent prompt is the first stored user message, outside the newest history page.
@@ -968,10 +984,12 @@ extension PlayhouseUITests {
                     "output": (1...6).map { "history-file-\($0).txt\n" }.joined(),
                 ])
             }
-            turns.append(("turn_long_history_\(index)", [
-                ("item_long_history_user_\(index)", "user", "Long history user \(number)."),
-                ("item_long_history_assistant_\(index)", "assistant", answer),
-            ], activities))
+            var messages: [(id: String, role: String, text: String)] = [("item_long_history_user_\(index)", "user", "Long history user \(number).")]
+            if index == 60 && latestCommentary {
+                messages.append(("item_long_history_commentary_60", "commentary", "Long history commentary 60."))
+            }
+            messages.append(("item_long_history_assistant_\(index)", "assistant", answer))
+            turns.append(("turn_long_history_\(index)", messages, activities))
         }
         try withConversationDatabase { database in
             func run(_ sql: String, _ values: [Any]) throws {
@@ -999,11 +1017,14 @@ extension PlayhouseUITests {
                 try run("DELETE FROM \(table) WHERE task_id = ?", [key])
             }
             for (offset, turn) in turns.enumerated() {
+                let turnSegment = switchAfterTurn.map { offset + 1 <= $0 } == true ? earlierSegment : segment
+                let segmentID = try XCTUnwrap(turnSegment["id"] as? String)
+                let provider = try XCTUnwrap(turnSegment["provider"] as? String)
                 try run("INSERT INTO conversation_turns (task_id, id, segment_id, seq) VALUES (?, ?, ?, ?)", [key, turn.id, segmentID, offset + 1])
                 for (position, message) in turn.messages.enumerated() {
-                    var payload: [String: Any] = ["id": message.id, "role": message.role, "text": message.text, "turnID": turn.id,
-                                                  "imageDataURLs": [String](), "provider": provider]
-                    if message.role == "assistant" { payload["phase"] = "final_answer" }
+                    var payload: [String: Any] = ["id": message.id, "role": message.role == "commentary" ? "assistant" : message.role,
+                                                  "text": message.text, "turnID": turn.id, "imageDataURLs": [String](), "provider": provider]
+                    if message.role != "user" { payload["phase"] = message.role == "commentary" ? "commentary" : "final_answer" }
                     try run("INSERT INTO conversation_messages (task_id, turn_id, id, position, payload) VALUES (?, ?, ?, ?, ?)",
                             [key, turn.id, message.id, position, try json(payload)])
                 }

@@ -530,7 +530,11 @@ def background_state(runtime):
 
 
 def save_background_state(runtime, state):
-    runtime.Path(str(runtime.sys.argv[0]) + ".background-state").write_text(runtime.json.dumps(state), encoding="utf-8")
+    # Replaced in one rename: a test reading it while it is written must never see it empty.
+    path = runtime.Path(str(runtime.sys.argv[0]) + ".background-state")
+    staged = path.with_name(f"{path.name}.{runtime.os.getpid()}.tmp")
+    staged.write_text(runtime.json.dumps(state), encoding="utf-8")
+    runtime.os.replace(staged, path)
 
 
 def _start_background_command(runtime, state):

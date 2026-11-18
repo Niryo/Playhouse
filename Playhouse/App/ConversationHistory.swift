@@ -381,20 +381,37 @@ extension ConversationManager {
         segments: [ConversationTranscript.Segment], turns: [ConversationTranscriptStore.Outline.Turn]
     ) -> [ConversationProviderBoundary] {
         var lastMessageBefore: [String: String] = [:]
+        var segmentsWithMessages: Set<String> = []
         var lastMessageID: String?
         var turnIndex = 0
         for segment in segments {
             lastMessageBefore[segment.id] = lastMessageID
             while turnIndex < turns.count, turns[turnIndex].segmentID == segment.id {
-                lastMessageID = turns[turnIndex].messageIDs.last ?? lastMessageID
+                if let last = turns[turnIndex].messageIDs.last {
+                    lastMessageID = last
+                    segmentsWithMessages.insert(segment.id)
+                }
                 turnIndex += 1
             }
         }
-        return segments.indices.dropFirst().filter { segments[$0].provider != segments[$0 - 1].provider }.map { index in
+        return Self.dividers(segments: segments, showsMessages: { segmentsWithMessages.contains(segments[$0].id) }) { index in
+            lastMessageBefore[segments[index].id]
+        }
+    }
+
+    /// A divider wherever the provider changes between the segments that showed messages. A
+    /// segment that showed none, such as a switch undone before anything was sent, draws no
+    /// divider of its own, so it leaves no pair of dividers with nothing between them. The
+    /// latest segment always counts: a switch still waiting for its first message shows.
+    static func dividers(
+        segments: [ConversationTranscript.Segment], showsMessages: (Int) -> Bool, afterMessageID: (Int) -> String?
+    ) -> [ConversationProviderBoundary] {
+        let shown = segments.indices.filter { $0 == segments.count - 1 || showsMessages($0) }
+        return zip(shown, shown.dropFirst()).filter { segments[$0.0].provider != segments[$0.1].provider }.map { _, index in
             ConversationProviderBoundary(
                 id: "provider-boundary-\(segments[index].id)",
                 provider: segments[index].provider,
-                afterMessageID: lastMessageBefore[segments[index].id]
+                afterMessageID: afterMessageID(index)
             )
         }
     }
@@ -470,13 +487,12 @@ extension ConversationManager {
             lastMessageBeforeSegment[nextSegment] = lastMessageID
             nextSegment += 1
         }
-        var boundaries: [ConversationProviderBoundary] = []
-        for index in segments.indices.dropFirst() where segments[index].provider != segments[index - 1].provider {
-            boundaries.append(ConversationProviderBoundary(
-                id: "provider-boundary-\(segments[index].id)",
-                provider: segments[index].provider,
-                afterMessageID: lastMessageBeforeSegment[index] ?? nil
-            ))
+        let segmentsWithMessages = Set(elements.compactMap { item -> Int? in
+            if case .message = item.element { return item.segment }
+            return nil
+        })
+        let boundaries = Self.dividers(segments: segments, showsMessages: segmentsWithMessages.contains) { index in
+            lastMessageBeforeSegment[index] ?? nil
         }
 
         // Activity details follow the latest turn the user started. Status nudges Playhouse
