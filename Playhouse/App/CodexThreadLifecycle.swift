@@ -4,21 +4,18 @@ import SwiftData
 import Darwin
 
 extension CodexAppServerClient {
-    func loadThread(
+    /// Loads a thread for a window without reading its history, which Playhouse keeps
+    /// itself: the window follows the thread's Goal turns and owns the action handler.
+    func attachThread(
         id threadID: String,
         workspace: ConversationWorkspaceContext,
         modelID: String? = nil,
         developerInstructions: String? = nil,
-        sensitiveUserInputAnswerValues: [String] = [],
-        sensitiveConversation: Bool = false,
-        observeGoalTurns: Bool = false,
         onActionRequest: @escaping () -> Void
-    ) async throws -> ConversationHistory {
-        // A window's history request follows the thread's Goal turns and owns the action
-        // handler; a CLI read on the same client only reads.
-        if observeGoalTurns || actionRequestHandler == nil { actionRequestHandler = onActionRequest }
+    ) async throws {
+        actionRequestHandler = onActionRequest
         // A thread whose send runs here already streams to its sender.
-        if observeGoalTurns, turnContexts[threadID] == nil {
+        if turnContexts[threadID] == nil {
             followGoalTurns(threadID: threadID)
         }
         // A thread with a turn running here is already loaded with that turn's
@@ -32,23 +29,19 @@ extension CodexAppServerClient {
             workspace: workspace,
             modelID: modelID ?? Self.modelID,
             developerInstructions: developerInstructions,
-            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-            sensitiveConversation: sensitiveConversation,
             // A Goal turn Codex runs on its own uses the loaded thread too.
             reusingLoadedThread: turnContexts[threadID] != nil || contextlessTurnIDs[threadID] != nil,
             confirmingModel: false
         )
-        return try await readMessages(threadID: threadID)
     }
 
 
     /// Requests Codex app-server to compact a thread's native history. The
-    /// provider returns no size metadata for this control request; the refreshed
-    /// history carries its native contextCompaction item when available.
+    /// provider returns no size metadata for this control request.
     func compactThread(
         id threadID: String, workspace: ConversationWorkspaceContext, modelID: String,
         developerInstructions: String?
-    ) async throws -> ConversationHistory {
+    ) async throws {
         try await resumeThreadIfNeeded(
             id: threadID, workspace: workspace, modelID: modelID,
             developerInstructions: developerInstructions,
@@ -66,7 +59,6 @@ extension CodexAppServerClient {
             try await Task.sleep(for: .milliseconds(50))
         }
         try pending.result?.get()
-        return try await readMessages(threadID: threadID)
     }
 
     /// Reads a child thread without resuming it or changing its turn state.

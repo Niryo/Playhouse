@@ -1,21 +1,20 @@
 import Foundation
 import GRDB
 
-/// Playhouse's own record of a task's provider timeline.
+/// Playhouse's own record of a task's conversation: the transcript it shows.
 ///
-/// Codex keeps its full thread history in its app-server, so Playhouse stores
-/// only which Codex turns belong to each Codex segment. Claude Code turns are
-/// stored here in full (visible messages and activities), so a mixed-provider
-/// transcript can be reopened in order without depending on another runtime's
-/// private session files. Tasks that never left Codex have no transcript file.
+/// Every turn of every provider is stored here in full, as it streamed (messages,
+/// activities, usage and the latest diff), so a conversation and any page of it
+/// reopen from this store alone. Neither Codex's app-server thread nor Claude
+/// Code's session files are read back to show a conversation; the provider's
+/// thread or session ID only resumes the agent's own context.
 struct ConversationTranscript: Codable, Equatable {
     struct Segment: Codable, Equatable, Identifiable {
         let id: String
         let provider: ConversationProvider
         let startedAt: Date
-        /// Codex turns that ran while this segment was active, captured when
-        /// the task switched away from Codex. Later Codex turns belong to the
-        /// last Codex segment.
+        /// Codex's own IDs for the turns that ran in this segment: resume metadata
+        /// for the app-server thread, never a source of the transcript.
         var codexTurnIDs: [String] = []
         /// Selected models keyed by the Codex turn IDs above. Older transcripts
         /// omit this map and render provider-only labels for those turns.
@@ -65,9 +64,9 @@ struct ConversationTranscript: Codable, Equatable {
 
     /// What one turn cost, and what ran in it.
     ///
-    /// Kept at transcript level rather than inside `Turn` because only Claude
-    /// turns have a `Turn` row — Codex keeps its own thread history — and both
-    /// providers must appear in the same breakdown.
+    /// Kept at transcript level rather than inside `Turn` so usage reported for
+    /// a turn with no recorded messages, such as a compaction, still appears in
+    /// the breakdown.
     struct TurnTokenUsage: Codable, Equatable, Identifiable {
         let id: String
         let provider: ConversationProvider
@@ -98,22 +97,8 @@ struct ConversationTranscript: Codable, Equatable {
     /// Retained after answering, so retrying an interrupted two-file repair
     /// cannot resurrect the source's old question.
     var userInputRepairs: [UserInputRepair]?
-    /// Private recovery turns. The submitted answers and prompt are never stored
-    /// raw; provider activity and diffs for these turns stay hidden.
-    var sensitiveTurnIDs: [String]?
-    /// Codex turn IDs containing private recovery prompts. Codex-only tasks may
-    /// not have a transcript segment to associate these IDs with.
-    var sensitiveCodexTurnIDs: [String]?
-    /// Codex recovery turns whose assistant responses must stay hidden because
-    /// their recovered user input included a secret answer.
-    var sensitiveCodexSecretTurnIDs: [String]?
-    /// Locally sanitized message copies for private Codex recovery turns. Raw
-    /// provider messages can be replaced after restart without losing safe text.
-    var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?
-    /// Locally observed message times for provider histories that omit them.
-    var messageTimestamps: [String: Date]?
-    /// Fail-closed marker written before a private recovery prompt is sent.
-    var pendingSensitiveUserInputRedaction: Bool?
+    /// The latest turn's working-tree diff, as its provider last reported it.
+    var latestDiff: ConversationTurnDiff?
     /// Every compaction of the Claude session's context, oldest first: what
     /// fired it and how far it shrank the context.
     var contextCompactions: [ContextCompactionEvent]?

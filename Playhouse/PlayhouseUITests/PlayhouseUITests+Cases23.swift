@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
+    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovery prompt and response, including the secret answer, are stored and shown as sent.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
         _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
@@ -63,9 +63,9 @@ extension PlayhouseUITests {
             Thread.sleep(forTimeInterval: 0.05)
         }
         XCTAssertEqual(nonblockingStatus, "In Progress", "A non-blocking recovery answer should leave the task active until the resumed turn completes.")
-        // The recovered turn carried a secret answer, so its reply stays hidden, as in CLI/XPC history.
-        XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").waitToExist(timeout: 10))
-        XCTAssertFalse(app.groups.matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists, "The secret answer must not appear in the transcript.")
+        // The recovered turn and the prompt that carried its answers are shown as sent, as in CLI/XPC history.
+        XCTAssertTrue(transcriptMessage("Answers received: Custom approach / fixture-secret.").waitToExist(timeout: 10))
+        XCTAssertTrue(transcriptContains("Answer: Custom approach"), "The prompt that carried the answers is shown as sent.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(named: "Non-blocking question")?["status"] as? String) == "Waiting Response" }, timeout: 20))
         let fixturePath = try XCTUnwrap(codexFixtureExecutable)
         let fixtureHistoryData = try Data(contentsOf: URL(fileURLWithPath: fixturePath + ".history"))

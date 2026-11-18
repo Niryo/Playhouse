@@ -228,7 +228,7 @@ final class PlayhouseBridgeRuntime {
             switch request.command {
             case "status", "board.list", "task.list", "archive.search":
                 result = try await bridgeOverviewOperation(
-                    request, taskManager: taskManager, settings: settings, callerCodexHome: callerCodexHome
+                    request, taskManager: taskManager, settings: settings
                 )
             case "task.create":
                 let title = try request.requiredString("title")
@@ -472,7 +472,6 @@ final class PlayhouseBridgeRuntime {
                     onActionRequest: {
                         eventHandler(BridgeEvent(requestID: request.id, type: "action_request", payload: .object([:])))
                     },
-                    restoringEarlierChatPages: true,
                     messageLimit: messageLimit,
                     beforeMessageID: request.arguments["before"]?.string,
                     afterMessageID: request.arguments["after"]?.string,

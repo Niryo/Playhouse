@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, which still shows the question that started it, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
+    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, stores and shows the prompt that carried it as sent, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, which still shows the question that started it, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     func test_claude_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-restart-question")
         try copyFixtureFile(
@@ -68,10 +68,9 @@ extension PlayhouseUITests {
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         openTask(named: "Restart-safe Claude question")
-        // The private answer placeholder is not a turn the user started, so reopening anchors on
-        // the question that started this conversation and keeps it in view.
-        XCTAssertTrue(waitUntil({ self.transcriptContains("[Private answer sent after restart]") }, timeout: 10),
-                      "The reopened conversation should load its saved history.")
+        // The prompt that carries the answer is stored and shown as sent.
+        XCTAssertTrue(waitUntil({ self.transcriptContains("Answer: Green") }, timeout: 10),
+                      "The reopened conversation should load its saved history, with the answer's prompt as sent.")
         XCTAssertTrue(transcriptContains("Ask a restart-safe structured question."),
                       "Reopening mid-recovery must still show the conversation the recovery continues.")
         XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
@@ -103,7 +102,7 @@ extension PlayhouseUITests {
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ self.transcriptContains("Recovered answer: Green.") }, timeout: 15))
         XCTAssertFalse(element("conversation-user-input-request").exists)
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
+        XCTAssertTrue(transcriptContains("Question: Which color should I use?"), "The retried answer's prompt is shown as sent.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         attachScreenshot(named: "Retried answer applied and the question cleared")
     }

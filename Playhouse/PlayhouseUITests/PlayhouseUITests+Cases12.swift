@@ -147,7 +147,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(accessibleLabelOrValue(of: cardMessage).contains("without a result"))
         attachScreenshot(named: "Blocked card after the result was lost in a restart")
     }
-    // case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it.
+    // case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state, which the next daemon reads once to record the output it missed, exactly once and without an outcome command its answer echoed. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it.
     func test_codex_turn_reattaches_after_daemon_restart() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-reattach").path
         codexFixtureExecutable = executable
@@ -196,7 +196,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The window follows the reattached turn to its end.")
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
         attachScreenshot(named: "codex-reattach-3-finished")
-        // Consecutive agent messages share one history entry, so count within the joined text.
+        // Each agent message is its own history entry; count within the joined text.
         let texts = try historyTexts(taskID: taskID, environment: environment)
         let joinedHistory = texts.joined(separator: "\n")
         for text in ["Before restart.", "Answer received: blue.", "After restart."] {
@@ -213,11 +213,23 @@ extension PlayhouseUITests {
         sendFromComposer("Finish while Playhouse is down.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
         try killDaemon(environment: environment)
+        // Its answer also echoes the outcome command, which the backfill records without.
+        touch(executable + ".reattach-leak-outcome")
         touch(executable + ".reattach-release")
         XCTAssertTrue(waitUntil({
             (((try? self.historyTexts(taskID: taskID, environment: environment)) ?? []).joined(separator: "\n")).components(separatedBy: "After restart.").count - 1 == 2
         }, timeout: 40))
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment, timeout: 40))
+        // The output it missed is recorded exactly once, also once the turn has settled.
+        let settledHistory = try historyTexts(taskID: taskID, environment: environment).joined(separator: "\n")
+        XCTAssertEqual(settledHistory.components(separatedBy: "After restart.").count - 1, 2,
+                       "The backfilled reply is recorded exactly once.")
+        XCTAssertEqual(try historyTexts(taskID: taskID, environment: environment).filter { $0.contains("After restart.") },
+                       ["After restart.", "After restart."], "The backfilled answer is recorded without the outcome command it echoed.")
+        XCTAssertTrue(waitUntil({
+            self.app.groups.matching(NSPredicate(format: "label == %@", "After restart.")).count == 2
+        }, timeout: 15), "The window shows the backfilled reply once, after the earlier one.")
+        attachScreenshot(named: "codex-reattach-4-backfilled-while-down")
         XCTAssertFalse(element("codex-chat-error").exists)
     }
     // case-contract: test_claude_turn_reattaches_after_daemon_restart | A Claude Code turn with file-backed stdio keeps running when the daemon is killed: the next daemon replays the handled log without repeating its writes, keeps the task In Progress, shows the output written before the restart once, restores the still unanswered question and never answers an answered request again, ignores a late reply to the old daemon's request and numbers its own requests past the old ones, delivers a steered follow-up, streams the rest of the turn to a watcher, records the turn's usage once, settles it through its outcome, and removes the finished run.
@@ -406,14 +418,14 @@ extension PlayhouseUITests {
         XCTAssertEqual(Array(restartChatPageTexts(legacyPageID, environment: environment).prefix(3)), legacyTexts)
         attachScreenshot(named: "standalone-chat-orphan-4-next-turn-seeded")
     }
-    // case-contract: test_standalone_chat_codex_turns_survive_daemon_restart | A Codex standalone chat turn survives daemon restarts even though Codex's own history carries no message times. A turn still running in its shared app-server when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files its question and answers once on the new titled page, found from the turn's durable in-flight record and close-turn record, with no page decision left pending. A turn whose daemon and app-server both die after its close-turn opened a new page is filed on that page, with what its thread saved, by the next send, which reads the Codex thread before seeding; that send's fresh page session carries the recovered turn, and the recovery is recorded in diagnostics.
+    // case-contract: test_standalone_chat_codex_turns_survive_daemon_restart | A Codex standalone chat turn survives daemon restarts, each of its agent messages stored on its own as the turn streamed it. A turn still running in its shared app-server when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files its question and answers once on the new titled page, found from the turn's durable in-flight record and close-turn record, with no page decision left pending. A turn whose daemon and app-server both die after its close-turn opened a new page is filed on that page, with what its stored transcript holds, by the next daemon as it starts, before the next send seeds; that send's fresh page session carries the recovered turn, and the recovery is recorded in diagnostics.
     func test_standalone_chat_codex_turns_survive_daemon_restart() throws {
         let (executable, environment, chatID) = try launchRestartFixtureChat(provider: "codex")
         _ = sendFiledRestartChatTurn(executable, "Name a moon of Mars.", environment: environment)
         let earlierID = try XCTUnwrap((restartChatStatus(environment)?["activePage"] as? [String: Any])?["id"] as? String)
-        // Codex history joins a turn's consecutive agent messages into one.
-        let answer = "Before restart.\n\nAfter restart."
-        let earlierTexts = ["Name a moon of Mars.", answer]
+        // Each agent message is stored on its own, as the turn streamed it.
+        let answer = ["Before restart.", "After restart."]
+        let earlierTexts = ["Name a moon of Mars."] + answer
         XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), earlierTexts, "The daemon that sent the first turn files it.")
 
         // The window reconnects to the next daemon, which follows the running turn; its agent
@@ -434,7 +446,7 @@ extension PlayhouseUITests {
                   let page = status["activePage"] as? [String: Any], page["title"] as? String == "Parallel Android build",
                   let id = page["id"] as? String else { return false }
             pageID = id
-            return self.restartChatPageTexts(id, environment: environment) == [question, answer]
+            return self.restartChatPageTexts(id, environment: environment) == [question] + answer
         }, timeout: 20), "The daemon that followed the Codex turn files it once on the page its close-turn opened.")
         XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), earlierTexts, "The earlier page keeps only its own turn.")
         let filed = try diagnosticEvents().filter { $0["event"] as? String == "chat.page.reattached_turn.filed" && $0["taskID"] as? String == chatID }
@@ -458,7 +470,8 @@ extension PlayhouseUITests {
         let pages = (try runCLI(["chat", "page", "list"], extraEnvironment: environment)["result"] as? [String: Any])?["pages"] as? [[String: Any]] ?? []
         let lostPageID = try XCTUnwrap(pages.first { $0["title"] as? String == "Parallel iOS tests" }?["id"] as? String)
 
-        // The next send reads the Codex thread, files the lost turn, then seeds its page's session.
+        // The next daemon files the lost turn from its stored transcript as it starts, before the
+        // next send seeds its page's session.
         let seeded = sendFiledRestartChatTurn(executable, "Which suite is slowest?", environment: environment)
         XCTAssertEqual(Array(restartChatPageTexts(lostPageID, environment: environment).prefix(2)), [lostQuestion, "Before restart."],
                        "The lost Codex turn is filed on the page its close-turn opened.")
@@ -469,7 +482,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ self.chatTranscriptShows(lostQuestion, belowPage: "Parallel iOS tests") }, timeout: 20))
         let recovered = try diagnosticEvents().filter { $0["event"] as? String == "chat.page.turn_recovered" && $0["taskID"] as? String == chatID }
         XCTAssertEqual(recovered.map { [$0["pageID"] as? String ?? "", $0["source"] as? String ?? "", $0["reason"] as? String ?? ""] },
-                       [[lostPageID, "close-turn", "send"]], "The send-time recovery is recorded once.")
+                       [[lostPageID, "close-turn", "startup"]], "The daemon's startup recovery is recorded once.")
         attachScreenshot(named: "standalone-chat-codex-restart-3-lost-turn-recovered")
     }
     // case-contract: test_standalone_chat_reattached_turn_without_close_turn_uses_fallback | A standalone chat turn that is still running when its daemon dies and then ends without close-turn is filed by the daemon that followed it on the active page, marked as a missed page signal, and handed to the background page classifier, which moves it to the new page it titles; the earlier page keeps only its own turn and nothing stays pending. When the daemon instead dies during the close-turn nudge that follows a turn without close-turn, the daemon that follows the nudge files the user's turn, never the nudge, hands it to the classifier the same way, and the chat keeps accepting sends. The missed-signal and classifier path is shared by Claude and Codex once a reattached turn ends, so one representative provider (Claude) covers this case.

@@ -5,17 +5,33 @@ import Darwin
 import SQLite3
 
 extension ConversationManager {
-    func recordClaudeMessage(taskID: UUID, turnID: String? = nil, modelID: String? = nil, _ message: ConversationMessage) {
+    /// Records a message of a local turn as its provider streamed it.
+    func recordTurnMessage(
+        taskID: UUID, turnID: String, provider: ConversationProvider = .claude,
+        modelID: String? = nil, _ message: ConversationMessage
+    ) {
         do {
             try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
-                guard let index = turnID.flatMap({ id in transcript.turns.lastIndex { $0.id == id } }) ?? transcript.turns.indices.last else { return }
+                // `.turn` also loads the latest turn; a message whose turn is gone is
+                // dropped rather than attached to another turn.
+                guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else {
+                    PlayhouseDiagnostics.record("conversation.turn_message.dropped", fields: [
+                        "taskID": taskID.uuidString, "turnID": turnID,
+                    ])
+                    return
+                }
                 var message = message
                 message.turnID = transcript.turns[index].id
-                message.provider = .claude
+                message.provider = provider
                 message.modelID = message.modelID ?? modelID
+                // Stored order is the timeline; a provider's own item order would only
+                // mark the message as positioned.
+                message.timelineOrder = nil
                 if let existing = transcript.turns[index].messages.firstIndex(where: { $0.id == message.id }) {
+                    message.createdAt = message.createdAt ?? transcript.turns[index].messages[existing].createdAt
                     transcript.turns[index].messages[existing] = message
                 } else {
+                    message.createdAt = message.createdAt ?? .now
                     transcript.turns[index].messages.append(message)
                 }
             }
@@ -56,7 +72,7 @@ extension ConversationManager {
         }
     }
 
-    func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
+    func recordTurnActivity(taskID: UUID, turnID: String, provider: ConversationProvider = .claude, _ activity: ConversationActivity) {
         // Loads only the turns this update can touch: its own turn, wherever an
         // activity with the same background task lives, and wherever that
         // activity's background agent report already sits.
@@ -92,10 +108,11 @@ extension ConversationManager {
                         transcript.turns[turnIndex].activities[existingIndex] = updatedActivity
                         let reportTurnIndex = transcript.turns.lastIndex(where: { $0.id == turnID }) ?? turnIndex
                         let reportTurnID = transcript.turns[reportTurnIndex].id
-                        Self.upsertClaudeBackgroundAgentReport(
+                        Self.upsertBackgroundAgentReport(
                             activity: updatedActivity,
                             transcript: &transcript,
-                            turnID: reportTurnID
+                            turnID: reportTurnID,
+                            provider: provider
                         )
                         return
                     }
@@ -117,7 +134,7 @@ extension ConversationManager {
                     activity = activity.preservingTimelineFields(of: transcript.turns[index].activities[existing])
                     transcript.turns[index].activities[existing] = activity
                 } else {
-                    // Claude reports a call after the text written before it, so the
+                    // A provider reports a call after the text written before it, so the
                     // turn's latest message is the one this call follows.
                     if activity.isTimelineToolCall, activity.afterMessageID == nil {
                         activity.afterMessageID = transcript.turns[index].messages.last?.id
@@ -125,7 +142,7 @@ extension ConversationManager {
                     transcript.turns[index].activities.append(activity)
                 }
                 let targetTurnID = transcript.turns[index].id
-                Self.upsertClaudeBackgroundAgentReport(activity: activity, transcript: &transcript, turnID: targetTurnID)
+                Self.upsertBackgroundAgentReport(activity: activity, transcript: &transcript, turnID: targetTurnID, provider: provider)
             }
         } catch {
             var fields = PlayhouseDiagnostics.errorFields(error)
@@ -134,18 +151,19 @@ extension ConversationManager {
         }
     }
 
-    func debugImportRecordClaudeMessage(taskID: UUID, turnID: String, modelID: String?, _ message: ConversationMessage) { recordClaudeMessage(taskID: taskID, turnID: turnID, modelID: modelID, message) } // DEBUG-IMPORT:
-    func debugImportRecordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) { recordClaudeActivity(taskID: taskID, turnID: turnID, activity) } // DEBUG-IMPORT:
+    func debugImportRecordClaudeMessage(taskID: UUID, turnID: String, modelID: String?, _ message: ConversationMessage) { recordTurnMessage(taskID: taskID, turnID: turnID, modelID: modelID, message) } // DEBUG-IMPORT:
+    func debugImportRecordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) { recordTurnActivity(taskID: taskID, turnID: turnID, activity) } // DEBUG-IMPORT:
     func debugImportPrepareSegmentID(taskID: UUID) async throws -> String? { try await prepareSegment(task: tasks.conversationSubject(taskID))?.segmentID } // DEBUG-IMPORT:
 
     /// Claude reports a background agent's result on its task notification,
     /// outside the parent assistant response. Persist that report as a normal
     /// assistant message so it is visible in the conversation and available to
-    /// later turns, matching Codex's parent-thread agent message behavior.
-    static func upsertClaudeBackgroundAgentReport(
+    /// later turns, as a Codex subagent's report arrives as an agent message of its parent turn.
+    static func upsertBackgroundAgentReport(
         activity: ConversationActivity,
         transcript: inout ConversationTranscript,
-        turnID: String
+        turnID: String,
+        provider: ConversationProvider = .claude
     ) {
         guard activity.backgroundTaskID != nil,
               activity.status == "completed",
@@ -159,7 +177,7 @@ extension ConversationManager {
             text: summary,
             phase: "subagent_report",
             turnID: turnID,
-            provider: .claude
+            provider: provider
         )
         for index in transcript.turns.indices {
             transcript.turns[index].messages.removeAll { $0.id == messageID }
@@ -176,24 +194,6 @@ extension ConversationManager {
                     transcript.segments[index].codexTurnIDs.append(turnID)
                 }
                 transcript.segments[index].codexTurnModelIDs[turnID] = modelID
-            }
-        } catch {
-            var fields = PlayhouseDiagnostics.errorFields(error)
-            fields["taskID"] = taskID.uuidString
-            PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
-        }
-    }
-
-    /// Assigns Codex turns that ran during a segment to it, so a mixed transcript
-    /// keeps them in order after later switches.
-    func claimCodexTurns(taskID: UUID, segmentID: String, _ messages: [ConversationMessage]) {
-        let turnIDs = Self.orderedTurnIDs(messages)
-        do {
-            try transcripts.mutate(taskID, turns: .none) { transcript in
-                guard let index = transcript.segments.firstIndex(where: { $0.id == segmentID }) else { return }
-                let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
-                let newTurnIDs = turnIDs.filter { !claimed.contains($0) }
-                transcript.segments[index].codexTurnIDs += newTurnIDs
             }
         } catch {
             var fields = PlayhouseDiagnostics.errorFields(error)
@@ -231,7 +231,6 @@ extension ConversationManager {
         } ?? 0
         let unseen = Self.withoutNudgeTurns(Array(history.messages.dropFirst(unseenStart))).filter {
             $0.provider != provider && !Self.isPrivateOutcomeReminderPrompt($0.text)
-                && $0.text != Self.privateOutcomeReminderResponsePlaceholder
         }
         return (segment.id, ConversationHandoff.context(for: provider, messages: Array(unseen)))
     }
@@ -247,11 +246,43 @@ extension ConversationManager {
         var checksResumeCacheMiss = false
         /// How long the session had gone without a model call before this turn.
         var resumeIdleSeconds: Double?
+        /// When each activity was last written, with the status written then. Codex
+        /// reports every chunk of a command's output as an update, so a running
+        /// activity is rewritten at most once a second; its status changes always are.
+        var activityWrites: [String: (status: String, at: Date)] = [:]
+        /// The newest update of each activity that the throttle held back. It is written
+        /// once its second has passed unless a newer write superseded it, so the store,
+        /// the only record of the turn, never misses an activity's last state.
+        var heldActivities: [String: ConversationActivity] = [:]
+        /// The files this turn changed so far; each reported diff replaces its files' chunks.
+        var turnDiff: ConversationTurnDiff?
+
+        enum ActivityWrite { case now, holdUntil(Date), held }
+
+        func activityWrite(_ activity: ConversationActivity, now: Date = .now) -> ActivityWrite {
+            if let last = activityWrites[activity.id], last.status == activity.status,
+               activity.durationMs == nil, now.timeIntervalSince(last.at) < 1 {
+                let alreadyHeld = heldActivities[activity.id] != nil
+                heldActivities[activity.id] = activity
+                return alreadyHeld ? .held : .holdUntil(last.at.addingTimeInterval(1))
+            }
+            activityWrites[activity.id] = (activity.status, now)
+            heldActivities[activity.id] = nil
+            return .now
+        }
+
+        /// The held update of an activity, if a newer write hasn't superseded it.
+        func releaseHeldActivity(_ id: String, now: Date = .now) -> ConversationActivity? {
+            guard let activity = heldActivities.removeValue(forKey: id) else { return nil }
+            activityWrites[id] = (activity.status, now)
+            return activity
+        }
     }
 
     /// The callbacks a provider reports one turn through: they record its transcript, usage and
     /// questions and stream its updates. A sent turn and a turn this daemon reattached after a
-    /// restart use the same set, so both land the same way.
+    /// restart use the same set, so both land the same way. `turnID` is the local turn every
+    /// message, activity and usage row of this turn is recorded under, whichever provider runs it.
     func turnCallbacks(
         taskID: UUID,
         provider: ConversationProvider,
@@ -259,42 +290,46 @@ extension ConversationManager {
         threadID: String,
         modelID: String,
         segment: (segmentID: String, handoff: String?)?,
-        claudeTurnID: String?,
-        hideSensitiveRecoveryPrompt: Bool,
-        sensitiveUserInputAnswerValues: [String],
+        turnID localTurnID: String,
         isPlayhouseNudge: Bool,
         userInputAnswers: [String: [String]],
         recording: TurnRecording,
         onUpdate: @escaping (ConversationUpdate) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void
     ) -> ConversationTurnCallbacks {
-        // Only a private answer's recovery turn hides its output; a status nudge is shown.
-        let hidesRecoveryOutput = hideSensitiveRecoveryPrompt
         let streamTurnUpdate = onUpdate
         let approvalNotice = "\(provider.displayName) requested an approval. Playhouse denied it because approval prompts are disabled."
         return ConversationTurnCallbacks(
             onDelta: { delta in
-                // Deltas are many and superseded by the recorded message, so a
-                // turn not shown yet drops them instead of withholding them.
-                guard !hidesRecoveryOutput else { return }
                 onUpdate(ConversationUpdate(type: "text_delta", text: delta))
             },
             onFinalMessage: { answer in
                 let split = LeakedTurnOutcome.split(answer)
                 if split.taskID == taskID { recording.leakedOutcome = split.outcome }
-                let message = Self.redactingSensitiveText(split.text, values: sensitiveUserInputAnswerValues)
+                let message = split.text
                 // An answer that was only the echo still replaces the streamed text.
-                if let claudeTurnID, !message.isEmpty {
+                if !message.isEmpty {
                     recording.finalMessageCount += 1
-                    self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
-                        id: "\(claudeTurnID)-final-\(recording.finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
+                    self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, ConversationMessage(
+                        id: "\(localTurnID)-final-\(recording.finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
                     ))
                 }
                 streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message))
             },
             onActivity: { activity in
-                guard !hidesRecoveryOutput else { return }
-                if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
+                switch recording.activityWrite(activity) {
+                case .now:
+                    self.recordTurnActivity(taskID: taskID, turnID: localTurnID, provider: provider, activity)
+                case .holdUntil(let deadline):
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow)))
+                        if let held = recording.releaseHeldActivity(activity.id) {
+                            self.recordTurnActivity(taskID: taskID, turnID: localTurnID, provider: provider, held)
+                        }
+                    }
+                case .held:
+                    break
+                }
                 // Claude Code's own threshold compaction, or a /compact the user or agent ran.
                 if provider == .claude, activity.isContextCompaction, activity.status == "completed", let details = activity.compaction {
                     self.recordContextCompaction(taskID: taskID, ContextCompactionEvent(
@@ -314,145 +349,19 @@ extension ConversationManager {
                 streamTurnUpdate(ConversationUpdate(type: "activity", activity: activity))
             },
             onDiff: { diff in
-                guard !hidesRecoveryOutput else { return }
-                streamTurnUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
+                // A Playhouse reminder continues the turn it nudges, so its changes add to
+                // that turn's diff rather than replace it.
+                let base = recording.turnDiff
+                    ?? (isPlayhouseNudge ? (try? self.transcripts.readState(taskID))?.latestDiff : nil)
+                let merged = base?.merging(diff) ?? diff
+                recording.turnDiff = merged
+                self.recordLatestDiff(taskID: taskID, merged)
+                streamTurnUpdate(ConversationUpdate(type: "diff", diff: merged.unifiedDiff))
             },
             onHistory: { history in
-                if provider == .codex, let segment { self.claimCodexTurns(taskID: taskID, segmentID: segment.segmentID, history.messages) }
-                var history = history
-                let matchedPrivateRecoveryTurnIDs = Set(history.messages.filter { message in
-                    guard message.role == .user else { return false }
-                    let containsPrivatePrompt = hideSensitiveRecoveryPrompt
-                        && Self.isPrivateTaskPrompt(message.text)
-                        && !Self.isPrivateOutcomeReminderPrompt(message.text)
-                    let containsSecretAnswer = sensitiveUserInputAnswerValues.contains {
-                        !$0.isEmpty && message.text.contains($0)
-                    }
-                    return containsPrivatePrompt || containsSecretAnswer
-                }.compactMap(\.turnID))
-                let privateOutcomeReminderTurnIDs = Set(history.messages.filter {
-                    $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
-                }.compactMap(\.turnID))
-                let previousTranscript = try? self.transcripts.readState(taskID)
-                let previouslyPrivateTurnIDs = Set(previousTranscript?.sensitiveCodexTurnIDs ?? [])
-                let previouslySecretRecoveryTurnIDs = Set(previousTranscript?.sensitiveCodexSecretTurnIDs ?? [])
-                let currentSecretRecoveryTurnIDs = Set(history.messages.filter { message in
-                    guard message.role == .user else { return false }
-                    return sensitiveUserInputAnswerValues.contains { !$0.isEmpty && message.text.contains($0) }
-                }.compactMap(\.turnID))
-                let privateSecretRecoveryTurnIDs = previouslySecretRecoveryTurnIDs.union(currentSecretRecoveryTurnIDs)
-                let previouslyPrivateReminderTurnIDs = Set((previousTranscript?.sensitiveCodexTurnMessages ?? [:]).compactMap { turnID, messages in
-                    messages.contains { $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text) } ? turnID : nil
-                })
-                let allPrivateTurnIDs = matchedPrivateRecoveryTurnIDs
-                    .union(previouslyPrivateTurnIDs)
-                    .union(privateOutcomeReminderTurnIDs)
-                let allPrivateReminderTurnIDs = privateOutcomeReminderTurnIDs.union(previouslyPrivateReminderTurnIDs)
-                if !matchedPrivateRecoveryTurnIDs.isEmpty, previousTranscript != nil {
-                    do {
-                        var safeCodexMessages: [String: [ConversationMessage]] = [:]
-                        if provider == .codex {
-                            for turnID in matchedPrivateRecoveryTurnIDs {
-                                safeCodexMessages[turnID] = history.messages
-                                    .filter { $0.turnID == turnID }
-                                    .map { message -> ConversationMessage in
-                                        var safe = Self.redactingSensitiveMessages(
-                                            [message], turnIDs: matchedPrivateRecoveryTurnIDs, values: sensitiveUserInputAnswerValues
-                                        )[0]
-                                        if message.role == .user {
-                                            safe.text = Self.privatePromptPlaceholder(for: message.text)
-                                            safe.asyncQuestions = nil
-                                        } else {
-                                            let redactedText = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
-                                            let stillContainsSecret = sensitiveUserInputAnswerValues.contains {
-                                                !$0.isEmpty && redactedText.contains($0)
-                                            }
-                                            safe.text = privateSecretRecoveryTurnIDs.contains(turnID) || stillContainsSecret
-                                                ? "[Response to private answer hidden]"
-                                                : redactedText
-                                            safe.asyncQuestions = nil
-                                        }
-                                        return safe
-                                    }
-                            }
-                        }
-                        try self.transcripts.mutate(taskID, turns: .none) { transcript in
-                            transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
-                            if provider == .codex {
-                                transcript.sensitiveCodexTurnIDs = Array(Set(transcript.sensitiveCodexTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
-                                transcript.sensitiveCodexSecretTurnIDs = Array(Set(transcript.sensitiveCodexSecretTurnIDs ?? []).union(currentSecretRecoveryTurnIDs)).sorted()
-                                var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
-                                storedMessages.merge(safeCodexMessages) { _, new in new }
-                                transcript.sensitiveCodexTurnMessages = storedMessages
-                            }
-                            transcript.pendingSensitiveUserInputRedaction = false
-                        }
-                    } catch {
-                        // Keep the pending marker so later reads redact conservatively.
-                    }
-                }
-                let currentTranscript = try? self.transcripts.readState(taskID)
-                let safeMessages = history.messages.filter { message in
-                    guard let turnID = message.turnID else { return true }
-                    return !privateOutcomeReminderTurnIDs.contains(turnID)
-                }.map { message -> ConversationMessage in
-                    if let turnID = message.turnID, allPrivateTurnIDs.contains(turnID) {
-                        var privateMessage = message
-                        privateMessage.text = message.role == .user
-                            ? Self.privatePromptPlaceholder(for: message.text)
-                            : (allPrivateReminderTurnIDs.contains(turnID)
-                                ? Self.privateOutcomeReminderResponsePlaceholder
-                                : "[Response to private answer hidden]")
-                        privateMessage.asyncQuestions = nil
-                        return privateMessage
-                    }
-                    if hideSensitiveRecoveryPrompt,
-                       message.role == .user,
-                       Self.isPrivateTaskPrompt(message.text) {
-                        var privatePrompt = message
-                        privatePrompt.text = Self.privatePromptPlaceholder(for: message.text)
-                        privatePrompt.asyncQuestions = nil
-                        return privatePrompt
-                    }
-                    return Self.redactingSensitiveMessages(
-                        [message], turnIDs: [], values: sensitiveUserInputAnswerValues,
-                        redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
-                    )[0]
-                }
-                let hideProviderDetails = hidesRecoveryOutput
-                    || currentTranscript?.pendingSensitiveUserInputRedaction == true
-                let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
-                    result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
-                } ?? [:]
-                let attributedMessages = safeMessages.map { message -> ConversationMessage in
-                    var message = message
-                    if provider == .codex {
-                        message.createdAt = message.createdAt ?? currentTranscript?.messageTimestamps?[message.id]
-                        message.provider = message.provider ?? .codex
-                        if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
-                    }
-                    return message
-                }
-                history = ConversationHistory(
-                    messages: attributedMessages,
-                    activities: hideProviderDetails
-                        ? []
-                        : history.activities.filter { activity in
-                            activity.turnID.map { !allPrivateTurnIDs.contains($0) } ?? true
-                        },
-                    timelineActivities: hideProviderDetails
-                        ? []
-                        : ConversationActivity.visibleTimelineActivities(
-                            history.timelineActivities,
-                            visibleMessageIDs: Set(attributedMessages.map(\.id)),
-                            excludedTurnIDs: allPrivateTurnIDs
-                        ),
-                    diff: hideProviderDetails ? nil : history.diff,
-                    answeredAsyncQuestionIDs: (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? [],
-                    pendingUserInputRequest: history.pendingUserInputRequest,
-                    providerBoundaries: history.providerBoundaries
-                )
-                onUpdate(ConversationUpdate(type: "history", history: self.standaloneChatDisplayHistory(taskID: taskID, history)))
+                // A provider hands over history only for a turn that ran while no daemon
+                // followed it; record whatever of it this turn did not stream.
+                self.backfillTurn(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, history)
             },
             onActionRequest: {
                 onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
@@ -506,65 +415,40 @@ extension ConversationManager {
                 await onUserInput(request)
             },
             onSteerMessage: { message, images in
-                if claudeTurnID != nil {
-                    self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
-                        id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
-                    ))
-                }
+                self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, ConversationMessage(
+                    id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
+                ))
                 onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
             },
             onProgressMessage: { message in
-                var safeMessage = message
-                safeMessage.text = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
-                safeMessage.asyncQuestions = message.asyncQuestions?.map { question in
-                    ConversationAsyncQuestion(
-                        title: Self.redactingSensitiveText(question.title, values: sensitiveUserInputAnswerValues),
-                        options: question.options?.map { Self.redactingSensitiveText($0, values: sensitiveUserInputAnswerValues) }
-                    )
-                }
-                if let claudeTurnID {
-                    self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, safeMessage)
-                }
+                self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, message)
                 // A notice the provider's runtime added to the turn streams as the user-side
                 // message it is recorded as, not as the assistant's progress.
-                if safeMessage.role == .user {
-                    streamTurnUpdate(ConversationUpdate(type: "steered_message", message: safeMessage.text))
+                if message.role == .user {
+                    streamTurnUpdate(ConversationUpdate(type: "steered_message", message: message.text))
                     return
                 }
                 streamTurnUpdate(ConversationUpdate(
                     type: "assistant_progress",
-                    text: safeMessage.text,
-                    itemID: safeMessage.id,
-                    phase: safeMessage.phase,
-                    asyncQuestions: safeMessage.asyncQuestions
+                    text: message.text,
+                    itemID: message.id,
+                    phase: message.phase,
+                    asyncQuestions: message.asyncQuestions
                 ))
             },
-            onMessageTimestamp: { id, date in
-                do {
-                    try self.transcripts.mutate(taskID, turns: .none) { transcript in
-                        var timestamps = transcript.messageTimestamps ?? [:]
-                        if timestamps[id] == nil { timestamps[id] = date }
-                        transcript.messageTimestamps = timestamps
-                    }
-                } catch {
-                    PlayhouseDiagnostics.record("conversation.timestamp.write_failed", fields: PlayhouseDiagnostics.errorFields(error))
-                }
-            },
-            onTurnStarted: { turnID in
+            onMessageTimestamp: { _, _ in },
+            onTurnStarted: { providerTurnID in
                 ConversationTurnLaunch.turnStarted(taskID)
+                // Codex's own turn ID is kept as resume metadata beside the local turn.
                 if provider == .codex, let segment {
-                    self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: turnID, modelID: modelID)
+                    self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: providerTurnID, modelID: modelID)
                 }
             },
             onTokenUsage: { report in
-                // A private recovery turn still costs tokens, so the task's
-                // totals include it, but its per-turn row is withheld for the
-                // same reason its activity and messages are.
-                let isHidden = hidesRecoveryOutput
                 let attributed = ConversationTurnUsageReport(
-                    turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
+                    turnID: localTurnID,
                     usage: report.usage,
-                    toolLabels: isHidden ? [] : report.toolLabels,
+                    toolLabels: report.toolLabels,
                     liveCall: report.liveCall
                 )
                 let claudeConfigDirectory = (client as? ClaudeCodeClient)?.configDirectory
@@ -573,7 +457,7 @@ extension ConversationManager {
                     recording.checksResumeCacheMiss = false
                     if ContextCompactionPolicy.isCacheMiss(cacheReadTokens: call.cacheReadTokens, cacheWriteTokens: call.cacheWriteTokens) {
                         self.recordPromptCacheMiss(taskID: taskID, PromptCacheMissEvent(
-                            id: UUID().uuidString.lowercased(), recordedAt: .now, turnID: claudeTurnID,
+                            id: UUID().uuidString.lowercased(), recordedAt: .now, turnID: localTurnID,
                             cacheReadTokens: call.cacheReadTokens, cacheWriteTokens: call.cacheWriteTokens,
                             idleSeconds: recording.resumeIdleSeconds
                         ))
@@ -594,6 +478,59 @@ extension ConversationManager {
                 }
             }
         )
+    }
+
+    /// Persists the working-tree diff its provider last reported for the latest turn.
+    func recordLatestDiff(taskID: UUID, _ diff: ConversationTurnDiff?) {
+        do {
+            try transcripts.mutate(taskID, turns: .none) { transcript in
+                transcript.latestDiff = diff
+            }
+        } catch {
+            var fields = PlayhouseDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
+    }
+
+    /// Adds a provider's own record of a turn to the local turn: the messages the turn
+    /// didn't stream (matched by role and text), its activities, and its diff.
+    func backfillTurn(
+        taskID: UUID, turnID: String, provider: ConversationProvider, modelID: String, _ history: ConversationHistory
+    ) {
+        do {
+            try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
+                guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
+                var turn = transcript.turns[index]
+                for var message in history.messages {
+                    // An answer is recorded without a leaked outcome block, as the live path records it.
+                    if message.role == .assistant { message.text = LeakedTurnOutcome.split(message.text).text }
+                    let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty, !turn.messages.contains(where: {
+                        $0.id == message.id || ($0.role == message.role && $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == text)
+                    }) else { continue }
+                    message.turnID = turnID
+                    message.provider = provider
+                    message.modelID = message.modelID ?? modelID
+                    message.timelineOrder = nil
+                    message.createdAt = message.createdAt ?? .now
+                    turn.messages.append(message)
+                }
+                for activity in history.activities where !activity.isContextCompaction
+                    && !turn.activities.contains(where: { $0.id == activity.id }) {
+                    var activity = activity
+                    activity.turnID = turnID
+                    activity.timelineOrder = nil
+                    turn.activities.append(activity)
+                }
+                transcript.turns[index] = turn
+                if let diff = history.diff { transcript.latestDiff = diff }
+            }
+        } catch {
+            var fields = PlayhouseDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
     }
 
     /// Settles a turn that ended: its activity durations, the outcome it reported and the

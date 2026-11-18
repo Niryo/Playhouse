@@ -24,8 +24,13 @@ extension PlayhouseUITests {
         composer.typeText("Create a long history.")
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ !self.element("codex-working-duration").exists && self.noTurnIsRunning() }, timeout: 30),
-                      "The streamed long history should settle before the conversation is reopened.")
+                      "The sent turn should settle before earlier history is seeded.")
         let taskID = try taskID(named: title)
+        // Earlier sessions' turns are already in Playhouse's own store; the provider holds none of them.
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before its stored history is seeded.")
+        try seedLongHistory(taskID, midHistoryCommand: true)
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         XCTAssertEqual((history["messages"] as? [[String: Any]])?.count, 120, "CLI/XPC history stays complete while the transcript renders lazily.")
         let call = try XCTUnwrap((history["timelineActivities"] as? [[String: Any]])?.first { $0["id"] as? String == "item_long_history_command_21" },
@@ -33,8 +38,6 @@ extension PlayhouseUITests {
         XCTAssertEqual(call["afterMessageID"] as? String, "item_long_history_user_21", "The command follows the question of its own turn.")
         XCTAssertEqual((call["output"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").count, 6,
                        "Fresh history keeps the command's whole output.")
-        element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: title)
 
         let scrollView = element("conversation-scroll-view")
@@ -175,7 +178,7 @@ extension PlayhouseUITests {
         showSidebar.click()
         XCTAssertTrue(waitUntil({ abs(scrollView.frame.width - widthBeforeResize) <= 2 }, timeout: 5), "Showing the task sidebar again should restore the transcript's width.")
     }
-    // case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
+    // case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by 120 stored messages, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
     func test_sent_prompt_stays_out_of_composer_past_history_page() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-with-prompt-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -192,9 +195,13 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({
             guard let record = try? self.taskRecord(named: "Sent prompt past history page") else { return false }
             return record["status"] as? String != "In Progress" && (record["pendingSubmittedPrompt"] as? String) == nil
-        }, timeout: 20), "The long turn should settle before the conversation is reopened.")
-        element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The completed turn should return to the board before reopening.")
+        }, timeout: 20), "The sent turn should settle before the conversation is reopened.")
+        // The 120 messages that follow the sent prompt are seeded into Playhouse's own store,
+        // which holds the transcript; the provider holds none of it.
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before its stored history is seeded.")
+        try seedLongHistory(try taskID(named: "Sent prompt past history page"), sentPrompt: true)
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
 
         openTask(named: "Sent prompt past history page")
         let scrollView = element("conversation-scroll-view")

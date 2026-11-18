@@ -670,7 +670,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("goal-pause-resume-button").exists)
         XCTAssertFalse(element("goal-clear-button").exists)
     }
-    // case-contract: test_codex_window_and_cli_share_one_app_server | A window and the CLI use one Codex app-server per Codex home. Every Codex request against one data folder (sends on two tasks, Goal set/get/pause/clear, history and usage refreshes, from the CLI and, in the UI, from an open window as well) runs on the same recorded server process, which listens on the shared unix socket with features.goals=true and the caller's CODEX_HOME and is the one live Codex manifest; it keeps running after every CLI Goal call, including a rejected blank objective, and a CLI call that spells the same CODEX_HOME differently reuses it. A send on the second task while the first task's Goal is active leaves that Goal active. The work turn Codex runs for the Goal is active and interruptible whether the window or the CLI set it; a history read during it, even with another model selected, never resumes the thread, and once pausing the Goal ends the turn, history resumes the thread with the selected model. A usage read the server never answers times out without stopping the server and keeps the last known Codex account, and the next refresh reads it again. In the UI, the window sets a Goal and follows the turn Codex starts for it, which stays active and interruptible while the CLI sends on the second task and ends when the window pauses the Goal; a Goal the CLI sets appears in the open window without reopening the task, the window's pause and clear reach the CLI's Goal reads, and the Agents info block shows the Codex account read through that server.
+    // case-contract: test_codex_window_and_cli_share_one_app_server | A window and the CLI use one Codex app-server per Codex home. Every Codex request against one data folder (sends on two tasks, Goal set/get/pause/clear, history and usage refreshes, from the CLI and, in the UI, from an open window as well) runs on the same recorded server process, which listens on the shared unix socket with features.goals=true and the caller's CODEX_HOME and is the one live Codex manifest; it keeps running after every CLI Goal call, including a rejected blank objective, and a CLI call that spells the same CODEX_HOME differently reuses it. A send on the second task while the first task's Goal is active leaves that Goal active. The work turn Codex runs for the Goal is active and interruptible whether the window or the CLI set it; a history read, during it or after pausing the Goal ends it, and even with another model selected, never resumes the thread, because history is read from Playhouse's store. The Goal's work turn, which no send streamed, is recorded once from its streamed items when it ends and shows in history and the open window, without Playhouse ever reading Codex's thread. A usage read the server never answers times out without stopping the server and keeps the last known Codex account, and the next refresh reads it again. In the UI, the window sets a Goal and follows the turn Codex starts for it, which stays active and interruptible while the CLI sends on the second task and ends when the window pauses the Goal; a Goal the CLI sets appears in the open window without reopening the task, the window's pause and clear reach the CLI's Goal reads, and the Agents info block shows the Codex account read through that server.
     func test_codex_window_and_cli_share_one_app_server() throws {
         let fixtureName = "codex-fixture-single-server-goal-success"
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent(fixtureName).path
@@ -789,7 +789,20 @@ extension PlayhouseUITests {
         // CLI history, usage refreshes (one the server never answers) and a CLI call with
         // CODEX_HOME spelled differently use the same server.
         XCTAssertTrue(try historyTexts(taskID: taskID).contains("Hello from the window."))
-        XCTAssertEqual(threadResumes().last?["model"] as? String, "gpt-6-sol", "Once the turn ends, history resumes the thread with the selected model.")
+        XCTAssertEqual(threadResumes().count, resumedBefore, "History is read from Playhouse's store, so it never resumes the thread, even once the turn ends.")
+        // The Goal's work turn, which no send streamed, is recorded once from its streamed items
+        // and shows in the window, without reading Codex's thread.
+        let goalReply = "Goal work: \(objective)"
+        XCTAssertTrue(waitUntil({ (try? self.historyTexts(taskID: taskID))?.contains(goalReply) == true }, timeout: 15),
+                      "The Goal's work turn is recorded when it ends.")
+        XCTAssertEqual(try historyTexts(taskID: taskID).filter { $0 == goalReply }.count, 1, "The Goal's work turn is recorded once.")
+        XCTAssertTrue(transcriptMessage(goalReply).waitToExist(timeout: 15), "The window shows the recorded Goal turn.")
+        let requested = ((try? String(contentsOfFile: codexFixtureExecutable! + ".methods", encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        XCTAssertTrue(requested.contains("thread/goal/set"), "The method log saw this case's Goal requests.")
+        for method in ["thread/read", "thread/turns/list", "thread/items/list"] {
+            XCTAssertFalse(requested.contains(method), "Recording the Goal turn never reads Codex's thread (\(method)).")
+        }
+        attachScreenshot(named: "shared-codex-server-4-recorded-goal-turn")
         XCTAssertEqual(try codexUsage()?["account"] as? String, "codex-fixture@example.com")
         let hang = stateDirectory.appendingPathComponent("\(fixtureName).account-read-hang").path
         touch(hang)

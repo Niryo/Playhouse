@@ -101,6 +101,108 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("provider-boundary-claude").exists)
         XCTAssertFalse(transcriptContains("playhouse-handoff-context"))
     }
+    // case-contract: test_conversation_transcript_reopens_from_local_store | Playhouse stores every conversation turn in its own transcript store, for Codex and Claude alike. After a Codex turn and, following a provider switch, a Claude turn, a fresh daemon serves the same messages, roles, texts, providers and order without asking Codex for its thread history: Codex replies stay labeled Codex with the model that wrote them, Claude replies stay labeled Claude, and a limited read returns only the latest page with the count of earlier messages and keeps the Codex-to-Claude boundary after the last Codex message.
+    func test_conversation_transcript_reopens_from_local_store() throws {
+        let executablePath = try makeCodexFixture(emptyQuestions: false).path
+        codexFixtureExecutable = executablePath
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-local-store")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
+        // Its own daemon, so killing it before reopening leaves the UI runner's shared one alone.
+        let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).local-store-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
+        try createTaskFixture(title: "Local transcript UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Local transcript UI")
+        openTask(named: "Local transcript UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Local transcript UI", prompt: "Start with Codex.")
+        let codexReply = transcriptMessage("Answers received: Blue / fixture-secret.")
+        XCTAssertTrue(codexReply.waitToExist(timeout: 10))
+
+        let providerMenu = element("conversation-provider-menu")
+        XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10))
+        providerMenu.click()
+        let claudeChoice = app.menuItems["conversation-provider-claude"]
+        XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
+        claudeChoice.click()
+        XCTAssertTrue(element("provider-boundary-claude").waitToExist(timeout: 10))
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+        composer.click()
+        composer.typeText("Tell me a very short dog story.")
+        element("send-message-button").click()
+        let story = "BISCUIT-7 waited by the gate every evening."
+        // A message's group carries its whole text as the label; matching every descendant's
+        // value instead snapshots the full tree and can time out in the VM.
+        let storyText = app.groups.matching(NSPredicate(format: "label BEGINSWITH %@", story)).firstMatch
+        XCTAssertTrue(storyText.waitToExist(timeout: 20), "The Claude reply streams into the transcript.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The Claude turn settles.")
+        attachScreenshot(named: "Codex and Claude turns in one transcript")
+        let before = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let beforeMessages = try XCTUnwrap(before["messages"] as? [[String: Any]])
+
+        // Reopening must come from Playhouse's own store, never from Codex's thread, even in a
+        // fresh daemon that has no turn of this conversation in memory.
+        let methods = URL(fileURLWithPath: executablePath + ".methods")
+        let loggedTurns = (try? String(contentsOf: methods, encoding: .utf8)) ?? ""
+        XCTAssertTrue(loggedTurns.split(separator: "\n").contains("turn/start"), "The method log records this case's Codex requests.")
+        try Data().write(to: methods, options: .atomic)
+        element("back-to-board-button").click()
+        let firstPID = try XCTUnwrap(try daemonProcessID(environment: daemonEnvironment))
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before reopening.")
+        kill(pid_t(firstPID), SIGKILL)
+        XCTAssertTrue(waitUntil({ kill(pid_t(firstPID), 0) != 0 }, timeout: 10), "The daemon that recorded the turns is gone.")
+        launchAppWithOpen(environmentOverrides: daemonEnvironment)
+        waitForBoardOrAbortSuite()
+        openTask(named: "Local transcript UI")
+        // A reopened conversation renders from its latest turn; earlier turns render as it scrolls up.
+        // The relaunch replaced `app`, so the queries are built again against it.
+        let reopenedStory = app.groups.matching(NSPredicate(format: "label BEGINSWITH %@", story)).firstMatch
+        let reopenedCodexReply = transcriptMessage("Answers received: Blue / fixture-secret.")
+        XCTAssertTrue(reopenedStory.waitToExist(timeout: 10), "The Claude reply reopens from the local store.")
+        let claudeReplyID = try XCTUnwrap(beforeMessages.last { $0["role"] as? String == "assistant" && $0["provider"] as? String == "claude" }?["id"] as? String)
+        let claudeLabel = element("assistant-provider-\(claudeReplyID)")
+        XCTAssertTrue(claudeLabel.waitToExist(timeout: 5))
+        XCTAssertTrue((claudeLabel.value as? String)?.hasPrefix("Claude") == true, "The Claude reply keeps its provider label.")
+        attachElementScreenshot(claudeLabel, named: "Reopened Claude reply keeps its provider label")
+        XCTAssertTrue(scrollTranscriptUntilExists(reopenedCodexReply), "The Codex reply reopens from the local store.")
+        let codexReplyID = try XCTUnwrap(beforeMessages.last { $0["role"] as? String == "assistant" && $0["provider"] as? String == "codex" }?["id"] as? String)
+        let codexLabel = element("assistant-provider-\(codexReplyID)")
+        XCTAssertEqual(codexLabel.value as? String, "Codex · Luna", "The Codex reply keeps its provider and model label.")
+        let boundary = element("provider-boundary-claude")
+        XCTAssertTrue(boundary.exists, "The provider boundary reopens between the turns.")
+        XCTAssertLessThan(reopenedCodexReply.frame.maxY, boundary.frame.minY, "The boundary follows the Codex turn.")
+        XCTAssertTrue(reopenedStory.exists, "Scrolling up keeps the Claude turn rendered below.")
+        XCTAssertLessThan(boundary.frame.maxY, reopenedStory.frame.minY, "The Codex turn stays before the Claude turn.")
+        attachScreenshot(named: "Transcript reopened from the local store after relaunch")
+        attachElementScreenshot(codexLabel, named: "Reopened Codex reply keeps its model label")
+
+        let secondPID = try XCTUnwrap(try daemonProcessID(environment: daemonEnvironment))
+        XCTAssertNotEqual(secondPID, firstPID, "A fresh daemon serves the reopened conversation.")
+        let after = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let afterMessages = try XCTUnwrap(after["messages"] as? [[String: Any]])
+        func summary(_ messages: [[String: Any]]) -> [String] {
+            messages.map { "\($0["id"] ?? "")|\($0["role"] ?? "")|\($0["provider"] ?? "")|\($0["modelID"] ?? "")|\($0["text"] ?? "")" }
+        }
+        XCTAssertEqual(summary(afterMessages), summary(beforeMessages), "The reopened transcript is unchanged.")
+        XCTAssertTrue(beforeMessages.contains { $0["role"] as? String == "assistant" && $0["provider"] as? String == "codex" && ($0["modelID"] as? String)?.isEmpty == false })
+        let page = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "2"])["result"] as? [String: Any])
+        XCTAssertEqual(summary(try XCTUnwrap(page["messages"] as? [[String: Any]])), Array(summary(beforeMessages).suffix(2)))
+        XCTAssertEqual(page["earlierMessageCount"] as? Int, beforeMessages.count - 2)
+        let lastCodexMessageID = try XCTUnwrap(beforeMessages.last { $0["provider"] as? String == "codex" }?["id"] as? String)
+        func boundaries(_ history: [String: Any]) -> [String] {
+            ((history["providerBoundaries"] as? [[String: Any]]) ?? []).map { "\($0["provider"] ?? "")|\($0["afterMessageID"] ?? "")" }
+        }
+        XCTAssertEqual(boundaries(after), ["claude|\(lastCodexMessageID)"])
+        XCTAssertEqual(boundaries(page), ["claude|\(lastCodexMessageID)"], "A limited read keeps the Codex-to-Claude boundary after the last Codex message.")
+        let requested = (try? String(contentsOf: methods, encoding: .utf8)) ?? ""
+        for method in ["thread/read", "thread/turns/list", "thread/items/list"] {
+            XCTAssertFalse(requested.split(separator: "\n").contains(Substring(method)), "Reopening never asks Codex for its thread history.")
+        }
+    }
     // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records the single private recovery prompt for each unreported turn; fresh history shows the nudge prompts and their replies. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     func test_claude_answer_stays_final_around_outcome_report() throws {
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")

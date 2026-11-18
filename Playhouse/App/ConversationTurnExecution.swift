@@ -112,12 +112,12 @@ extension ConversationManager {
         historyMessageLimit: Int? = nil
     ) async throws -> ConversationHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let persistedText = hideSensitiveRecoveryPrompt
-            ? Self.privatePromptPlaceholder(for: normalizedText)
-            : Self.redactingSensitiveText(normalizedText, values: sensitiveUserInputAnswerValues)
+        // The transcript keeps a recovery prompt as sent; the task's saved prompt, which is
+        // task state rather than conversation, holds a stand-in for the answers it carries.
+        let savedPromptText = hideSensitiveRecoveryPrompt ? PrivatePromptPlaceholder.recoveryAnswer : normalizedText
         // The provider and the transcript get the mention block; the task's own prompt, title and
         // worktree names keep what was typed.
-        let typedText = MentionText.displayText(persistedText)
+        let typedText = MentionText.displayText(savedPromptText)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
@@ -188,7 +188,7 @@ extension ConversationManager {
             : task.title
         do {
             if reopensDoneTask {
-                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+                _ = try await tasks.savePrompt(taskID, prompt: savedPromptText, status: .inProgress, submitted: true)
             }
             // A task with explicit workspace roots is self-contained and may be
             // sent through CLI/XPC before the UI has initialized the global
@@ -200,7 +200,7 @@ extension ConversationManager {
                 .first ?? settingsManager.requireRepositoryRootFolder())
             try ConversationTurnLaunch.checkStop(taskID)
             if !isPlayhouseNudge && !reopensDoneTask {
-                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+                _ = try await tasks.savePrompt(taskID, prompt: savedPromptText, status: .inProgress, submitted: true)
             }
             // Resolve the first submitted prompt's title before preparing any
             // repositories. The app's model context can lag repository changes
@@ -448,22 +448,15 @@ extension ConversationManager {
             // The last point where nothing of this turn exists yet: past it the message is
             // recorded and sent, and a stop interrupts the provider turn instead.
             try ConversationTurnLaunch.checkStop(taskID)
-            let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
-            // Only a private answer's recovery turn hides its output; a status nudge is shown.
-            let hidesRecoveryOutput = hideSensitiveRecoveryPrompt
-            if let claudeTurnID, let segment {
+            // Every turn is recorded locally, whichever provider runs it: the transcript is
+            // Playhouse's own and never read back from a provider.
+            let localTurnID = UUID().uuidString.lowercased()
+            if let segment {
                 try transcripts.mutate(taskID, turns: .none) { transcript in
-                    if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
-                        if hidesRecoveryOutput || !sensitiveUserInputAnswerValues.isEmpty {
-                            transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union([claudeTurnID])).sorted()
-                        }
-                        // Claude messages are persisted locally from sanitized
-                        // callbacks, so the prompt is already safe to retain.
-                        transcript.pendingSensitiveUserInputRedaction = false
-                    }
-                    transcript.turns.append(.init(id: claudeTurnID, segmentID: segment.segmentID, messages: [ConversationMessage(
-                        id: "\(claudeTurnID)-user", role: .user, text: persistedText, imageDataURLs: imageDataURLs,
-                        turnID: claudeTurnID, provider: .claude, modelID: modelID
+                    if !isPlayhouseNudge { transcript.latestDiff = nil }
+                    transcript.turns.append(.init(id: localTurnID, segmentID: segment.segmentID, messages: [ConversationMessage(
+                        id: "\(localTurnID)-user", role: .user, text: normalizedText, imageDataURLs: imageDataURLs,
+                        turnID: localTurnID, provider: provider, createdAt: .now, modelID: modelID
                     )]))
                 }
             }
@@ -474,9 +467,7 @@ extension ConversationManager {
             }
             let callbacks = turnCallbacks(
                 taskID: taskID, provider: provider, client: client, threadID: threadID, modelID: modelID,
-                segment: segment, claudeTurnID: claudeTurnID,
-                hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt,
-                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                segment: segment, turnID: localTurnID,
                 isPlayhouseNudge: isPlayhouseNudge, userInputAnswers: userInputAnswers,
                 recording: recording, onUpdate: onUpdate, onUserInput: onUserInput
             )
@@ -539,14 +530,7 @@ extension ConversationManager {
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
             )
-            if hideSensitiveRecoveryPrompt,
-               try transcripts.readState(taskID).pendingSensitiveUserInputRedaction == true {
-                throw BridgeCommandError(
-                    code: "operation_failed",
-                    message: "Playhouse couldn't safely record the private answer for conversation history. The question remains available to retry."
-                )
-            }
-            if let segment, segment.handoff != nil || provider == .claude {
+            if let segment {
                 try transcripts.mutate(taskID, turns: .none) { transcript in
                     guard let index = transcript.segments.firstIndex(where: { $0.id == segment.segmentID }) else { return }
                     transcript.segments[index].handoffDelivered = true
@@ -600,7 +584,7 @@ extension ConversationManager {
                 ? (isPlayhouseNudge
                     ? "The private status nudge could not be completed."
                     : "The private answer could not be applied. Please answer the question again.")
-                : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
+                : error.localizedDescription
             let pendingQuestion = try? transcripts.readState(taskID).pendingUserInputRequest
             let hasPendingBlockingQuestion = pendingQuestion?.isBlocking == true
             // A saved non-blocking question stays answerable after the provider
@@ -631,11 +615,10 @@ extension ConversationManager {
             onActionRequest: {
             onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
             },
-            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
             messageLimit: historyMessageLimit,
             includesImageData: true
         )
-        onUpdate(ConversationUpdate(type: "completed", history: standaloneChatDisplayHistory(taskID: taskID, finalHistory)))
+        onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
     }
 }

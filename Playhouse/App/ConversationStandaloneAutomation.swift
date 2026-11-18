@@ -5,21 +5,6 @@ import Darwin
 import SQLite3
 
 extension ConversationManager {
-    func standaloneChatDisplayHistory(taskID: UUID, _ history: ConversationHistory) -> ConversationHistory {
-        guard (try? tasks.conversationSubject(taskID))?.isStandaloneChat == true else { return history }
-        let restored = standaloneChatMessagesRestoringEarlierPages(taskID: taskID, history.messages)
-        guard restored.count != history.messages.count else { return history }
-        return ConversationHistory(
-            messages: restored,
-            activities: history.activities,
-            timelineActivities: history.timelineActivities,
-            diff: history.diff,
-            answeredAsyncQuestionIDs: history.answeredAsyncQuestionIDs,
-            pendingUserInputRequest: history.pendingUserInputRequest,
-            providerBoundaries: history.providerBoundaries
-        )
-    }
-
     /// Names a one-time scheduled task that still has a placeholder title from its scheduled
     /// prompt, as its first send would, so it doesn't wait on the board untitled. The title is
     /// reserved before this returns; the name is generated in the background and falls back to
@@ -140,7 +125,6 @@ extension ConversationManager {
     static let privateRecoveryPromptMarker = "Continue this conversation by applying the user's answer to the pending question"
     static let privateOutcomeReminderMarker = PrivateOutcomeNudgeMarker.current
     static let privateOutcomeReminderPlaceholder = PrivatePromptPlaceholder.outcomeReminder
-    static let privateOutcomeReminderResponsePlaceholder = "[Playhouse private outcome response hidden]"
 
     /// Sent once when a turn ended with no stopping outcome and no work left running: the
     /// agent either carries on in this turn or says why it stopped.
@@ -335,114 +319,10 @@ extension ConversationManager {
         }
     }
 
-    static func isPrivateTaskPrompt(_ text: String) -> Bool {
-        text.contains(privateRecoveryPromptMarker) || isPrivateOutcomeReminderPrompt(text)
-    }
-
-    static func privatePromptPlaceholder(for text: String) -> String {
-        isPrivateOutcomeReminderPrompt(text)
-            ? privateOutcomeReminderPlaceholder
-            : PrivatePromptPlaceholder.recoveryAnswer
-    }
-
     /// Only transcripts written before nudges were shown still hold a nudge as the hidden-prompt
     /// placeholder; those turns stay hidden. A nudge sent today is stored and shown as sent.
     static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
         text.contains(privateOutcomeReminderPlaceholder)
-    }
-
-    static func redactingSensitiveText(_ text: String, values: [String]) -> String {
-        values.filter { !$0.isEmpty }.sorted { $0.count > $1.count }.reduce(text) { result, value in
-            result.replacingOccurrences(of: value, with: "[redacted secret answer]")
-        }
-    }
-
-    static func sensitiveCodexTurnIDs(_ transcript: ConversationTranscript) -> Set<String> {
-        let codexTurnIDs = Set(transcript.segments.filter { $0.provider == .codex }.flatMap(\.codexTurnIDs))
-        return Set(transcript.sensitiveCodexTurnIDs ?? [])
-            .union(Set(transcript.sensitiveTurnIDs ?? []).intersection(codexTurnIDs))
-    }
-
-    static func codexMessagesForDisplay(
-        _ messages: [ConversationMessage],
-        transcript: ConversationTranscript
-    ) -> [ConversationMessage] {
-        let privateTurnIDs = sensitiveCodexTurnIDs(transcript)
-        let privateReminderTurnIDs = Set(messages.filter {
-            $0.role == .user && isPrivateOutcomeReminderPrompt($0.text)
-        }.compactMap(\.turnID))
-        let safeMessagesByTurn = transcript.sensitiveCodexTurnMessages ?? [:]
-        var emittedSafeTurnIDs = Set<String>()
-        var visible: [ConversationMessage] = []
-        for message in messages {
-            var message = message
-            message.createdAt = message.createdAt ?? transcript.messageTimestamps?[message.id]
-            if message.turnID.map(privateReminderTurnIDs.contains) == true { continue }
-            guard let turnID = message.turnID, privateTurnIDs.contains(turnID) else {
-                visible.append(message)
-                continue
-            }
-            if let safeMessages = safeMessagesByTurn[turnID] {
-                if emittedSafeTurnIDs.insert(turnID).inserted {
-                    visible.append(contentsOf: safeMessages)
-                }
-            } else {
-                var placeholder = message
-                placeholder.text = message.role == .user
-                    ? privatePromptPlaceholder(for: message.text)
-                    : (privateReminderTurnIDs.contains(turnID)
-                        ? privateOutcomeReminderResponsePlaceholder
-                        : "[Response to private answer hidden]")
-                placeholder.asyncQuestions = nil
-                visible.append(placeholder)
-            }
-        }
-        return visible
-    }
-
-    static func shouldHideCodexDiff(_ transcript: ConversationTranscript, codex: ConversationHistory?) -> Bool {
-        if transcript.pendingSensitiveUserInputRedaction == true { return true }
-        let latestCodexTurnID = transcript.segments.last(where: { $0.provider == .codex })?.codexTurnIDs.last
-            ?? codex?.messages.reversed().compactMap(\.turnID).first
-        guard let latestCodexTurnID else {
-            return !(transcript.sensitiveCodexTurnIDs ?? []).isEmpty
-        }
-        return sensitiveCodexTurnIDs(transcript).contains(latestCodexTurnID)
-    }
-
-    static func redactingSensitiveMessages(
-        _ messages: [ConversationMessage],
-        turnIDs: Set<String>,
-        values: [String] = [],
-        redactAllMessages: Bool = false
-    ) -> [ConversationMessage] {
-        let privateReminderTurnIDs = Set(messages.filter {
-            $0.role == .user && isPrivateOutcomeReminderPrompt($0.text)
-        }.compactMap(\.turnID))
-        return messages.map { message in
-            let matchesTurn = message.turnID.map(turnIDs.contains) ?? false
-            let matchesValue = values.contains { !$0.isEmpty && message.text.contains($0) }
-            var redacted = message
-            if redactAllMessages || matchesTurn {
-                redacted.text = message.role == .user
-                    ? privatePromptPlaceholder(for: message.text)
-                    : (message.turnID.map { privateReminderTurnIDs.contains($0) } == true
-                        ? privateOutcomeReminderResponsePlaceholder
-                        : "[Response to private answer hidden]")
-                redacted.asyncQuestions = nil
-            } else if matchesValue {
-                redacted.text = Self.redactingSensitiveText(message.text, values: values)
-            }
-            if !redactAllMessages, !matchesTurn, let questions = message.asyncQuestions {
-                redacted.asyncQuestions = questions.map { question in
-                    ConversationAsyncQuestion(
-                        title: Self.redactingSensitiveText(question.title, values: values),
-                        options: question.options?.map { Self.redactingSensitiveText($0, values: values) }
-                    )
-                }
-            }
-            return redacted
-        }
     }
 
     static func isValidModelID(_ value: String) -> Bool {

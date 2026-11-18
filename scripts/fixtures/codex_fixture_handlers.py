@@ -338,7 +338,16 @@ def run_reattach_server(runtime):
             release = runtime.Path(f"{base}.reattach-release")
             if release.exists() and "reporting" not in turn:
                 release.unlink()
-                emit_message(thread_id, turn["turn"], f"item_{turn['turn']}_after", "After restart.")
+                text = "After restart."
+                leak = runtime.Path(f"{base}.reattach-leak-outcome")
+                if leak.exists():
+                    # The model also echoes its outcome command as answer text, which Playhouse
+                    # removes wherever it records the answer from.
+                    leak.unlink()
+                    instructions = threads[thread_id].get("instructions") or ""
+                    line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), "")
+                    text += "\n\n`" + line.replace("<completed|waiting-response|blocked>", "waiting-response") + "`"
+                emit_message(thread_id, turn["turn"], f"item_{turn['turn']}_after", text)
                 turn["reporting"] = report_outcome(thread_id)
                 if turn["reporting"] is None:
                     complete(thread_id)

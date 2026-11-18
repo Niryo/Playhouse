@@ -489,7 +489,7 @@ extension PlayhouseUITests {
         let retainedOfflineCache = try XCTUnwrap((try runCLI(["conversation", "models", offlineTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
         XCTAssertEqual(retainedOfflineCache.first?["name"] as? String, "Offline Cached Claude")
     }
-    // case-contract: test_codex_message_timestamps | Codex records a timestamp when a message event arrives and restores it after reload when provider history omits a time. A provider-supplied timestamp takes precedence over the locally observed time.
+    // case-contract: test_codex_message_timestamps | Playhouse stores each Codex message with the time it recorded it, and fresh CLI/XPC reads and app restarts show that same stored time. A timestamp in the provider's own thread history has no effect, because history is read only from Playhouse's store.
     func test_codex_message_timestamps() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
         codexFixtureExecutable = executable.path
@@ -505,28 +505,35 @@ extension PlayhouseUITests {
         composer.click()
         composer.typeText("Check message time.")
         element("send-message-button").click()
-        XCTAssertTrue(app.staticTexts["message-time-item_assistant_fixture_1"].waitForExistence(timeout: 15))
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 20), "The turn should settle before its stored time is read.")
+        func storedReply() throws -> [String: Any] {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+            return try XCTUnwrap((history["messages"] as? [[String: Any]])?.last { $0["role"] as? String == "assistant" })
+        }
+        let reply = try storedReply()
+        let replyID = try XCTUnwrap(reply["id"] as? String)
+        let recordedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: try XCTUnwrap(reply["createdAt"] as? String)))
+        XCTAssertLessThan(abs(recordedAt.timeIntervalSinceNow), 120, "The reply carries the time Playhouse stored it.")
+        let recordedLabel = recordedAt.formatted(.dateTime.hour().minute())
+        XCTAssertTrue(app.staticTexts["message-time-\(replyID)"].waitForExistence(timeout: 15))
         relaunchApp()
         openTask(named: "Codex timestamp UI")
-        let timestamp = app.staticTexts["message-time-item_assistant_fixture_1"]
+        let timestamp = app.staticTexts["message-time-\(replyID)"]
         XCTAssertTrue(timestamp.waitForExistence(timeout: 10))
+        XCTAssertEqual(accessibleLabelOrValue(of: timestamp), recordedLabel, "A restart shows the stored time.")
         attachScreenshot(named: "Restored Codex timestamp")
         attachElementScreenshot(timestamp, named: "Restored Codex timestamp detail")
+        // The provider's own thread history now carries a different time; history never reads it.
         try Data().write(to: marker)
-        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
-        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
-        let reply = try XCTUnwrap(messages.first { $0["id"] as? String == "item_assistant_fixture_1" })
-        XCTAssertEqual(reply["createdAt"] as? String, "2026-10-26T12:34:00Z")
+        XCTAssertEqual(try storedReply()["createdAt"] as? String, reply["createdAt"] as? String)
         relaunchApp()
         openTask(named: "Codex timestamp UI")
-        let providerTimestamp = app.staticTexts["message-time-item_assistant_fixture_1"]
-        XCTAssertTrue(providerTimestamp.waitForExistence(timeout: 10))
-        let providerDate = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-26T12:34:00Z"))
-        XCTAssertEqual(accessibleLabelOrValue(of: providerTimestamp), providerDate.formatted(.dateTime.hour().minute()))
-        attachScreenshot(named: "Provider-supplied Codex timestamp")
-        attachElementScreenshot(providerTimestamp, named: "Provider-supplied Codex timestamp detail")
+        let storedTimestamp = app.staticTexts["message-time-\(replyID)"]
+        XCTAssertTrue(storedTimestamp.waitForExistence(timeout: 10))
+        XCTAssertEqual(accessibleLabelOrValue(of: storedTimestamp), recordedLabel, "A provider-supplied time does not replace the stored one.")
+        attachScreenshot(named: "Stored Codex timestamp unaffected by provider history")
     }
-    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its locally recorded timestamp after history reload, while a legacy history item without a known time has no timestamp label.
+    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then sends a Luna turn; each stored reply stays attributed to the model its own turn ran on, and both replies show their stored timestamps after an app reload.
     func test_conversation_effort_dispatches_to_codex() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -560,51 +567,45 @@ extension PlayhouseUITests {
         element("send-message-button").click()
         XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitToExist(timeout: 15), "The Codex fixture's reply should arrive.")
         XCTAssertTrue(app.staticTexts["Codex · Sol"].waitForExistence(timeout: 10), "The sent reply's label reflects the model actually selected for the turn, not the hardcoded default.")
-        var transcript = try XCTUnwrap(try conversationState(taskID))
-        var segments = try XCTUnwrap(transcript["segments"] as? [[String: Any]])
-        for index in segments.indices {
-            segments[index]["codexTurnIDs"] = []
-            segments[index].removeValue(forKey: "codexTurnModelIDs")
-        }
-        transcript["segments"] = segments
-        transcript.removeValue(forKey: "messageTimestamps")
-        try writeConversationState(taskID, transcript)
         picker.click()
         app.buttons["model-option-gpt-6-luna"].click()
         picker.click()
         // With a transcript the empty-state prompt is gone; the picker names the model.
         XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Luna") }, timeout: 10))
         composer.click()
-        composer.typeText("Check legacy model attribution.")
+        composer.typeText("Check the next model.")
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({
             app.groups.matching(NSPredicate(
                 format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Answers received: Blue / fixture-secret."
             )).count >= 2
         }, timeout: 15))
-        XCTAssertTrue(app.staticTexts["Codex"].exists, "A legacy reply without a stored model stays provider-only.")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists, "The earlier reply keeps the model its own turn ran on.")
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "The new turn is attributed to the model selected for that send.")
-        relaunchApp()
-        openTask(named: "Codex effort UI")
-        let legacyReply = app.groups["assistant-message-item_assistant_fixture_1"]
-        let transcriptScrollView = element("conversation-scroll-view")
-        for _ in 0..<10 where !legacyReply.exists {
-            transcriptScrollView.scroll(byDeltaX: 0, deltaY: 400)
-            _ = waitUntil({ legacyReply.exists }, timeout: 1)
-        }
-        XCTAssertTrue(legacyReply.exists, "Scrolling up loads the older legacy reply.")
-        XCTAssertEqual(app.staticTexts.matching(identifier: "message-time-item_assistant_fixture_1").count, 0,
-                       "Legacy provider history without createdAt has no timestamp label.")
         // The latest ordinary reply is the one the user's turn got, not a reply to a status nudge.
         let effortHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
-        let latestReplyItem = try XCTUnwrap(ordinaryMessages(effortHistory["messages"] as? [[String: Any]] ?? []).last { ($0["role"] as? String) == "assistant" }?["id"] as? String)
-        XCTAssertNotEqual(latestReplyItem, "item_assistant_fixture_1")
+        let replies = ordinaryMessages(effortHistory["messages"] as? [[String: Any]] ?? []).filter { ($0["role"] as? String) == "assistant" }
+        let firstReplyItem = try XCTUnwrap(replies.first?["id"] as? String)
+        let latestReplyItem = try XCTUnwrap(replies.last?["id"] as? String)
+        XCTAssertNotEqual(latestReplyItem, firstReplyItem)
+        XCTAssertEqual(replies.first?["modelID"] as? String, "gpt-6-sol")
+        XCTAssertEqual(replies.last?["modelID"] as? String, "gpt-6-luna")
         relaunchApp()
         openTask(named: "Codex effort UI")
         let timestamp = app.staticTexts.matching(identifier: "message-time-\(latestReplyItem)").firstMatch
-        XCTAssertTrue(timestamp.waitToExist(timeout: 10), "The locally recorded timestamp survives an app reload.")
+        XCTAssertTrue(timestamp.waitToExist(timeout: 10), "The stored timestamp survives an app reload.")
         attachScreenshot(named: "Codex message timestamp")
         attachElementScreenshot(timestamp, named: "Codex message timestamp detail")
+        let firstReply = app.groups["assistant-message-\(firstReplyItem)"]
+        let transcriptScrollView = element("conversation-scroll-view")
+        for _ in 0..<10 where !firstReply.exists {
+            transcriptScrollView.scroll(byDeltaX: 0, deltaY: 400)
+            _ = waitUntil({ firstReply.exists }, timeout: 1)
+        }
+        XCTAssertTrue(firstReply.exists, "Scrolling up loads the earlier reply.")
+        XCTAssertTrue(app.staticTexts.matching(identifier: "message-time-\(firstReplyItem)").firstMatch.exists,
+                      "The earlier reply also shows its stored time after a reload.")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists, "The earlier reply's model survives a reload.")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
         let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
@@ -612,7 +613,7 @@ extension PlayhouseUITests {
         let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
-    // case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation. A second Codex conversation that never chose a model keeps the model its own turn ran on, in CLI/XPC reads and in the reopened composer’s picker, after the provider-wide remembered selection moves to another model.
+    // case-contract: test_codex_history_keeps_loaded_thread_model | After a Codex turn on a non-default model (Sol) ends, loading history never resumes the Codex thread, with Sol still selected or after the selection moves to another non-default model (Mini), and the stored reply stays attributed to Sol. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation. A second Codex conversation that never chose a model keeps the model its own turn ran on, in CLI/XPC reads and in the reopened composer’s picker, after the provider-wide remembered selection moves to another model.
     func test_codex_history_keeps_loaded_thread_model() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -639,21 +640,21 @@ extension PlayhouseUITests {
         let reply = "Answers received: Blue / fixture-secret."
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 15), "The Sol turn's reply should arrive.")
         XCTAssertTrue(app.staticTexts["Codex · Sol"].waitToExist(timeout: 5), "The reply should be labeled with the model it ran on.")
-        // The turn just ended with Sol still selected: reopening reuses the loaded
-        // thread instead of resuming it with the hardcoded default (Luna).
+        // History is read from Playhouse's store, so reopening never resumes the Codex thread,
+        // whether or not the selected model matches the one Codex holds the thread on.
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")
         try "gpt-6-sol\n".write(to: keptModel, atomically: true, encoding: .utf8)
+        func recordedResumes() -> [[String: String]] {
+            ((try? JSONSerialization.jsonObject(with: Data(contentsOf: historyURL))) as? [String: Any])?["threadResumeKeptModels"] as? [[String: String]] ?? []
+        }
+        let resumesBefore = recordedResumes()
         returnToBoard()
         openTask(named: "Codex kept model UI")
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Sol") }, timeout: 10),
             "Opening the conversation should restore its saved model selection.")
         attachElementScreenshot(picker, named: "Reopening the Codex conversation restores Sol")
-        XCTAssertFalse(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 3),
-                       "History must not resume a thread already loaded with the task's model.")
         XCTAssertFalse(element("codex-chat-error").exists)
-        // Codex still holds the thread on Sol while the selection moves to Mini (neither
-        // Sol nor the default), so reopening resumes with Mini and Codex reports Sol.
         picker.click()
         app.buttons["model-option-gpt-6-mini"].click()
         picker.click()
@@ -663,18 +664,13 @@ extension PlayhouseUITests {
         }, timeout: 10))
         returnToBoard()
         openTask(named: "Codex kept model UI")
-        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 15),
-                      "Reopening the task should resume the thread and read the model Codex kept.")
-        let resumes = try XCTUnwrap(
-            (try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["threadResumeKeptModels"] as? [[String: String]]
-        )
-        XCTAssertEqual(resumes.last, ["requested": "gpt-6-mini", "reported": "gpt-6-sol"],
-                       "History resumes with the task's selected model, not the hardcoded default.")
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 10), "History still shows the Sol reply.")
-        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
-        XCTAssertFalse(element("codex-chat-error").waitToExist(timeout: 2),
-                       "Loading history must not fail when Codex keeps the loaded thread's model.")
-        attachScreenshot(named: "History loads after Codex keeps the Sol thread model")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists, "The stored reply keeps the model its turn ran on.")
+        XCTAssertFalse(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 3),
+                       "Reopening must not resume the Codex thread.")
+        XCTAssertEqual(recordedResumes(), resumesBefore, "Reopening must not resume the Codex thread.")
+        XCTAssertFalse(element("codex-chat-error").exists, "Loading history never depends on the Codex thread's model.")
+        attachScreenshot(named: "Stored history loads with Mini selected and no Codex resume")
         // The thread still reports Sol, but a new turn should switch to the
         // model selected in this conversation.
         picker.click()

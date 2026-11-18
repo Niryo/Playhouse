@@ -280,6 +280,7 @@ extension CodexAppServerClient {
         // thread keeps being followed: the CLI sends through the same client.
         if goalObservationThreadID == threadID { goalObservationThreadID = nil }
         contextlessTurnIDs.removeValue(forKey: threadID)
+        contextlessTurnEntries.removeValue(forKey: threadID)
         activeThreadID = threadID
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
@@ -377,8 +378,5 @@ extension CodexAppServerClient {
             }
         }
 
-        if let history = try? await readMessages(threadID: threadID) {
-            onHistory(history)
-        }
     }
 }

@@ -78,6 +78,11 @@ def set_goal(runtime, _session_state, message):
             _session_state.goal_turns[goal_thread] = f"turn-goal-{runtime.uuid.uuid4()}"
             runtime.write({"jsonrpc": "2.0", "method": "turn/started", "params": {
                 "threadId": goal_thread, "turn": {"id": _session_state.goal_turns[goal_thread], "status": "inProgress"}}})
+            # The work turn streams its reply; no send of Playhouse's follows it.
+            runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                "threadId": goal_thread, "turnId": _session_state.goal_turns[goal_thread],
+                "item": {"id": f"item-goal-{runtime.uuid.uuid4()}", "type": "agentMessage", "phase": "final_answer",
+                         "text": f"Goal work: {_session_state.goal['objective']}"}}})
         elif _session_state.goal["status"] != "active" and goal_thread in _session_state.goal_turns:
             runtime.write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": goal_thread, "turn": {"id": _session_state.goal_turns.pop(goal_thread), "status": "completed"}}})

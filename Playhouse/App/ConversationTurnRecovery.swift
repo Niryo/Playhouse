@@ -182,21 +182,17 @@ extension ConversationManager {
         installStoppingOutcomeProbe(taskID: taskID, client: client, threadID: threadID)
         let transcript = try transcripts.readState(taskID)
         let segment = transcript.segments.last.map { (segmentID: $0.id, handoff: String?.none) }
-        // Claude records its turn locally; the reattached run carries on in the turn it started,
-        // the transcript's newest, since a task runs one turn at a time.
-        let claudeTurn = provider == .claude ? try transcripts.read(taskID, turns: .all, includeImages: false).turns.last : nil
-        let claudeTurnID = claudeTurn?.id
+        // The reattached run carries on in the turn it started, the transcript's newest,
+        // since a task runs one turn at a time.
+        guard let localTurn = try transcripts.read(taskID, turns: .all, includeImages: false).turns.last else { return false }
         let recording = TurnRecording()
         // Final answers are numbered within their turn; carry on after the ones already recorded.
-        recording.finalMessageCount = claudeTurn.map { turn in
-            turn.messages.filter { $0.id.hasPrefix("\(turn.id)-final-") }.count
-        } ?? 0
+        recording.finalMessageCount = localTurn.messages.filter { $0.id.hasPrefix("\(localTurn.id)-final-") }.count
         let modelID = (try? modelID(taskID: taskID)) ?? nil
         let callbacks = turnCallbacks(
             taskID: taskID, provider: provider, client: client, threadID: threadID,
             modelID: modelID ?? provider.defaultModelID,
-            segment: segment, claudeTurnID: claudeTurnID,
-            hideSensitiveRecoveryPrompt: false, sensitiveUserInputAnswerValues: [],
+            segment: segment, turnID: localTurn.id,
             isPlayhouseNudge: false, userInputAnswers: [:], recording: recording,
             onUpdate: onUpdate, onUserInput: { _ in }
         )
@@ -277,7 +273,7 @@ extension ConversationManager {
         })?.turnID {
             fileReattachedStandaloneChatTurn(chat: chat, history: finalHistory, turnID: turnID, onUpdate: onUpdate)
         }
-        onUpdate(ConversationUpdate(type: "completed", history: standaloneChatDisplayHistory(taskID: taskID, finalHistory)))
+        onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return true
     }
 
@@ -747,12 +743,9 @@ extension ConversationManager {
         return result
     }
 
-    /// The chat's turns with their messages. Playhouse keeps Claude turns itself, so they read
-    /// without any provider; Codex keeps its turns in its own thread, read only on request.
-    func standaloneChatTranscriptMessages(taskID: UUID, readingProviderThread: Bool) async -> [ConversationMessage] {
-        if readingProviderThread, (try? tasks.conversationSubject(taskID))?.conversationProvider == .codex {
-            return (try? await history(taskID: taskID).messages) ?? []
-        }
+    /// The chat's turns with their messages, from Playhouse's own transcript store for either
+    /// provider, so recovery never waits on one.
+    func standaloneChatTranscriptMessages(taskID: UUID) -> [ConversationMessage] {
         let turns = (try? transcripts.read(taskID, turns: .all, includeImages: false).turns) ?? []
         return turns.flatMap { turn in
             turn.messages.map { message in
@@ -796,13 +789,12 @@ extension ConversationManager {
     @discardableResult
     func recoverUnfiledStandaloneChatTurns(
         taskID: UUID,
-        reason: String,
-        readingProviderThread: Bool = true
+        reason: String
     ) async -> Int {
         guard (try? tasks.conversationSubject(taskID))?.isStandaloneChat == true,
               let chatManager = try? tasks.standaloneChatManager(),
               let filed = try? chatManager.filedTurnIDs() else { return 0 }
-        let messages = await standaloneChatTranscriptMessages(taskID: taskID, readingProviderThread: readingProviderThread)
+        let messages = standaloneChatTranscriptMessages(taskID: taskID)
         let inFlightSince = (try? chatManager.inflightTurnStartedAt()) ?? nil
         defer {
             // The record names the newest turn; once that turn is filed it has done its job.
@@ -847,14 +839,13 @@ extension ConversationManager {
 
     /// Recovers each chat's unfiled turns when a daemon starts, before it answers any request.
     /// A chat whose cut-off turn this daemon is following is skipped (that turn files itself when
-    /// it ends), as is one whose turn another process holds. Only Playhouse's own transcript is
-    /// read here, so a start never waits on a provider.
+    /// it ends), as is one whose turn another process holds.
     func recoverUnfiledStandaloneChatTurnsAtStartup(skipping followed: Set<UUID>) async {
         for chatID in tasks.standaloneChatIDs() where !followed.contains(chatID) {
             // Every request waits for this scan, so a chat whose turn is running (a window's own
             // send, say) is left to that send's own recovery rather than waited for.
             _ = try? await tasks.withConversationTurnReservationIfFree(chatID) {
-                await self.recoverUnfiledStandaloneChatTurns(taskID: chatID, reason: "startup", readingProviderThread: false)
+                await self.recoverUnfiledStandaloneChatTurns(taskID: chatID, reason: "startup")
             }
         }
     }

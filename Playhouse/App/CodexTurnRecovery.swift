@@ -86,19 +86,30 @@ extension CodexAppServerClient {
             }
             defer { mailboxTask.cancel() }
             try await waitForTurn(turnKey)
+            // Items that finished while no daemon followed the turn were never streamed.
+            await backfillFinishedTurn(threadID: threadID, turnID: turnID, callbacks: callbacks)
         } else {
             onAttached()
             completedTurns.removeValue(forKey: turnKey)
             if latest["status"] as? String != "completed" {
                 if latest["status"] as? String == "interrupted" { interruptedThreadIDs.insert(threadID) }
-                if let history = try? await readMessages(threadID: threadID) { callbacks.onHistory(history) }
+                await backfillFinishedTurn(threadID: threadID, turnID: turnID, callbacks: callbacks)
                 throw ClientError.turnFailed(Self.turnFailureDescription(latest))
             }
-        }
-        if let history = try? await readMessages(threadID: threadID) {
-            callbacks.onHistory(history)
+            await backfillFinishedTurn(threadID: threadID, turnID: turnID, callbacks: callbacks)
         }
         return .finished
+    }
+
+    /// A turn that ended while no daemon followed it streamed nothing to Playhouse, so its
+    /// messages are read from the thread once and handed over for recording.
+    func backfillFinishedTurn(threadID: String, turnID: String, callbacks: ConversationTurnCallbacks) async {
+        guard let history = try? await readMessages(threadID: threadID, joinsAgentMessages: false) else { return }
+        callbacks.onHistory(ConversationHistory(
+            messages: history.messages.filter { $0.turnID == turnID },
+            activities: history.activities.filter { $0.turnID == turnID },
+            diff: history.diff
+        ))
     }
 
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {

@@ -249,6 +249,7 @@ extension CodexAppServerClient {
         resumedThreadParameters.removeAll()
         activeThreadID = nil
         contextlessTurnIDs.removeAll()
+        contextlessTurnEntries.removeAll()
         runningTurnThreadIDs.removeAll()
         threadStatuses.removeAll()
 

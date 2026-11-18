@@ -93,14 +93,6 @@ extension ConversationManager {
         // Opening a conversation asks this on the main thread, so it reads the segments and
         // then only as many messages as it takes to find a model, never the whole transcript.
         guard let transcript = try? transcripts.readState(taskID) else { return nil }
-        if provider == .codex {
-            for segment in transcript.segments.reversed() where segment.provider == .codex {
-                for turnID in segment.codexTurnIDs.reversed() {
-                    if let modelID = segment.codexTurnModelIDs[turnID] { return modelID }
-                }
-            }
-            return nil
-        }
         let segmentIDs = Set(transcript.segments.filter { $0.provider == provider }.map(\.id))
         return try? transcripts.latestAssistantModelID(taskID, segmentIDs: segmentIDs)
     }
@@ -253,29 +245,17 @@ extension ConversationManager {
             return try await tasks.setConversationProvider(taskID, provider: provider)
         }
         let history = try await requireSettledConversation(task)
-        let transcript = try transcripts.read(taskID, turns: .latest, includeImages: false)
-        var codexTurnIDs: [String] = []
         if history.activities.contains(where: { $0.isSubagent && $0.isActive }) {
             throw Self.switchBlocked("Subagents are still running. Wait for them to finish before switching providers.")
         }
-        if transcript.isEmpty, task.conversationProvider == .codex {
-            // A Codex-only task's turns all precede its first boundary. Tracked
-            // segments claim their Codex turns as each turn completes.
-            codexTurnIDs = Self.orderedTurnIDs(history.messages)
-        }
-        let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
         // Turns follow their segments in order, so the last segment has turns
         // exactly when it owns the latest turn.
         try transcripts.mutate(taskID, turns: .latest) { transcript in
             if transcript.segments.isEmpty {
                 transcript.segments.append(.init(id: UUID().uuidString, provider: task.conversationProvider, startedAt: .now, handoffDelivered: true))
             }
-            if var last = transcript.segments.last, last.provider == .codex {
-                last.codexTurnIDs += codexTurnIDs.filter { !claimed.contains($0) && !last.codexTurnIDs.contains($0) }
-                transcript.segments[transcript.segments.count - 1] = last
-            }
             // A segment with no turns can be replaced instead of leaving an empty boundary.
-            if let last = transcript.segments.last, transcript.turns(in: last).isEmpty, last.codexTurnIDs.isEmpty, transcript.segments.count > 1 {
+            if let last = transcript.segments.last, transcript.turns(in: last).isEmpty, transcript.segments.count > 1 {
                 transcript.segments.removeLast()
             }
             if transcript.segments.last?.provider != provider {
@@ -323,10 +303,5 @@ extension ConversationManager {
     static func switchBlocked(_ message: String) -> BridgeCommandError {
         PlayhouseDiagnostics.record("conversation.provider.switch.blocked", fields: ["reason": message])
         return BridgeCommandError(code: "invalid_transition", message: message)
-    }
-
-    static func orderedTurnIDs(_ messages: [ConversationMessage]) -> [String] {
-        var seen = Set<String>()
-        return messages.compactMap(\.turnID).filter { seen.insert($0).inserted }
     }
 }

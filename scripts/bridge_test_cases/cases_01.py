@@ -192,7 +192,7 @@ class BridgeTestCases01:
         rerun.join(timeout=20)
         self.assertFalse(rerun.is_alive())
         self.assertEqual(self.task_for(task["id"], environment)["status"], "Waiting Response")
-    # case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it.
+    # case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state, which the next daemon reads once to record the output it missed, exactly once and without an outcome command its answer echoed. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it.
     def test_codex_turn_reattaches_after_daemon_restart(self):
         executable = self.install_provider_fixture("codex", "codex-fixture-reattach")
         environment = self.restart_service_environment("codex", executable, PLAYHOUSE_E2E_CODEX_SERVER_IDLE_SECONDS="3")
@@ -285,6 +285,8 @@ class BridgeTestCases01:
         self.wait_for(ready.is_file, "The second turn should be running.")
         self.kill_daemon(environment)
         second.join(timeout=20)
+        # Its answer also echoes the outcome command, which the backfill records without.
+        Path(str(executable) + ".reattach-leak-outcome").touch()
         Path(str(executable) + ".reattach-release").touch()
         # The fixture's outcome report starts a daemon of its own; either way the turn settles.
         settled = self.wait_for(
@@ -295,6 +297,8 @@ class BridgeTestCases01:
         texts, _ = self.history_texts(task["id"], environment)
         joined = "\n".join(texts)
         self.assertEqual(joined.count("After restart."), 2, f"The result written during the restart appears: {texts}")
+        self.assertEqual([text for text in texts if "After restart." in text], ["After restart.", "After restart."],
+                         "The backfilled answer is recorded without the outcome command it echoed.")
 
         # Idle, the server stops by itself and leaves no files behind.
         self.wait_for(lambda: not self.agent_process_alive(server), "The idle app-server stops.", timeout=40)
@@ -525,14 +529,14 @@ class BridgeTestCases01:
         self.assertIn("After restart.", seeded)
         self.assertNotIn(question, seeded, "Another page's turn never reaches this page's session.")
         self.assertEqual(self.chat_page_texts(legacy_page["id"], environment)[:3], legacy_texts)
-    # case-contract: test_standalone_chat_codex_turns_survive_daemon_restart | A Codex standalone chat turn survives daemon restarts even though Codex's own history carries no message times. A turn still running in its shared app-server when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files its question and answers once on the new titled page, found from the turn's durable in-flight record and close-turn record, with no page decision left pending. A turn whose daemon and app-server both die after its close-turn opened a new page is filed on that page, with what its thread saved, by the next send, which reads the Codex thread before seeding; that send's fresh page session carries the recovered turn, and the recovery is recorded in diagnostics.
+    # case-contract: test_standalone_chat_codex_turns_survive_daemon_restart | A Codex standalone chat turn survives daemon restarts, each of its agent messages stored on its own as the turn streamed it. A turn still running in its shared app-server when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files its question and answers once on the new titled page, found from the turn's durable in-flight record and close-turn record, with no page decision left pending. A turn whose daemon and app-server both die after its close-turn opened a new page is filed on that page, with what its stored transcript holds, by the next daemon as it starts, before the next send seeds; that send's fresh page session carries the recovered turn, and the recovery is recorded in diagnostics.
     def test_standalone_chat_codex_turns_survive_daemon_restart(self):
         executable, environment, chat_id = self.start_reattach_chat("codex-fixture-reattach-chat", provider="codex")
         self.send_filed_chat_turn(executable, environment, chat_id, "Name a moon of Mars.")
         earlier = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
-        # Codex history joins a turn's consecutive agent messages into one.
-        answer = "Before restart.\n\nAfter restart."
-        earlier_texts = ["Name a moon of Mars.", answer]
+        # Each agent message is stored on its own, as the turn streamed it.
+        answer = ["Before restart.", "After restart."]
+        earlier_texts = ["Name a moon of Mars.", *answer]
         self.assertEqual(self.chat_page_texts(earlier["id"], environment), earlier_texts, "The daemon that sent the first turn files it.")
 
         # The next daemon follows the running turn, whose agent opens a new page and finishes.
@@ -542,7 +546,7 @@ class BridgeTestCases01:
         Path(str(executable) + ".reattach-release-quiet").touch()
         self.wait_for(lambda: self.chat_page_texts(
             self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]["id"], environment)
-            == [question, answer],
+            == [question, *answer],
             "The daemon that followed the Codex turn files it once on the page its close-turn opened.", timeout=40)
         status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
         self.assertEqual(status["activePage"]["title"], "Parallel Android build")
@@ -562,7 +566,8 @@ class BridgeTestCases01:
             lambda: next((page for page in self.chat_pages(environment) if page["title"] == "Parallel iOS tests"), None),
             "The close-turn page should be visible after the app-server exits.",
         )
-        # The next send reads the Codex thread, files the lost turn, then seeds its page's session.
+        # The next daemon files the lost turn from its stored transcript as it starts, before the
+        # next send seeds its page's session.
         seeded = self.send_filed_chat_turn(executable, environment, chat_id, "Which suite is slowest?")
         self.assertEqual(self.chat_page_texts(lost_page["id"], environment)[:2], [lost_question, "Before restart."],
                          "The lost Codex turn is filed on the page its close-turn opened.")
@@ -571,7 +576,7 @@ class BridgeTestCases01:
         self.assertNotIn(question, seeded, "Another page's turn never reaches this page's session.")
         recovered = [(event["pageID"], event["source"], event["reason"]) for event in self.diagnostic_events()
                      if event.get("event") == "chat.page.turn_recovered" and event.get("taskID") == chat_id]
-        self.assertEqual(recovered, [(lost_page["id"], "close-turn", "send")], "The send-time recovery is recorded once.")
+        self.assertEqual(recovered, [(lost_page["id"], "close-turn", "startup")], "The daemon's startup recovery is recorded once.")
     # case-contract: test_standalone_chat_reattached_turn_without_close_turn_uses_fallback | A standalone chat turn that is still running when its daemon dies and then ends without close-turn is filed by the daemon that followed it on the active page, marked as a missed page signal, and handed to the background page classifier, which moves it to the new page it titles; the earlier page keeps only its own turn and nothing stays pending. When the daemon instead dies during the close-turn nudge that follows a turn without close-turn, the daemon that follows the nudge files the user's turn, never the nudge, hands it to the classifier the same way, and the chat keeps accepting sends. The missed-signal and classifier path is shared by Claude and Codex once a reattached turn ends, so one representative provider (Claude) covers this case.
     def test_standalone_chat_reattached_turn_without_close_turn_uses_fallback(self):
         executable, environment, chat_id = self.start_reattach_chat("claude-fixture-reattach-chat-fallback")

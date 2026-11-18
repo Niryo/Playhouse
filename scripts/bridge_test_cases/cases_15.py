@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases15:
-    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
+    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream and the stored transcript carry the recovery prompt, assistant response, activities, and diffs exactly as sent, including the re-entered secret with its surrounding whitespace, and the visible UI shows them immediately and after app restart; saved task state stays free of the secret. A later Codex turn keeps its own diff and response visible in refreshed CLI/UI history alongside the earlier recovery response. In one task, a no-secret recovery response remains visible after a later secret recovery. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
     def test_codex_pending_question_recovers_after_provider_process_restarts(self):
         task_id = self.create_task("Restart-safe Codex question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -39,24 +39,31 @@ class BridgeTestCases15:
             "--answer", "color=Green", "--answer", "token= fixture-secret ", extra_environment=env,
         )
         self.assert_success(answer_final)
-        self.assertNotIn("fixture-secret", json.dumps(recovery_events), "Live recovery events must not expose secret-bearing activities or diffs.")
-        safe_recovery_answer = "Recovered answer: Green; private token [redacted secret answer] was applied."
-        self.assertIn(safe_recovery_answer, json.dumps(recovery_events), "The live recovery stream should retain the safe assistant answer after redacting the re-entered secret.")
+        recovery_answer = "Recovered answer: Green; private token fixture-secret was applied."
+        self.assertIn(recovery_answer, json.dumps(recovery_events), "The live recovery stream carries the assistant answer as Codex sent it.")
+        self.assertTrue(any(
+            event.get("type") == "diff" and "fixture-secret" in event["payload"]["diff"] for event in recovery_events
+        ), "Live recovery diffs are streamed as is.")
         provider_history = Path(str(executable) + ".history").read_text(encoding="utf-8")
         self.assertIn("fixture-secret", provider_history, "The freshly re-entered secret must reach the resumed provider turn.")
         completed, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         completed_history = self.assert_success(completed)
         self.assertIsNone(completed_history.get("pendingUserInputRequest"))
         self.assertTrue(any(
-            message["role"] == "assistant" and message["text"] == "[Response to private answer hidden]"
+            message["role"] == "assistant" and message["text"] == recovery_answer
             for message in completed_history["messages"]
-        ), "Persisted history should hide the assistant response from a secret recovery turn.")
+        ), "Persisted history stores the recovery response as Codex sent it.")
+        recovery_prompts = [
+            message["text"] for message in completed_history["messages"]
+            if message["role"] == "user" and "Question: What is the private token?" in message["text"]
+        ]
+        self.assertEqual(len(recovery_prompts), 1, "The recovery prompt is stored once, as sent.")
+        self.assertIn("Question: Which color should I use?\nAnswer: Green", recovery_prompts[0])
+        self.assertIn("Answer:  fixture-secret", recovery_prompts[0], "The re-entered answer is stored exactly as sent.")
         self.assertTrue(any(
-            message["role"] == "user" and message["text"] == "[Private answer sent after restart]"
-            for message in completed_history["messages"]
-        ))
-        self.assertNotIn("fixture-secret", json.dumps(completed_history), "Secret echoes in Codex activities or diffs must stay hidden too.")
-        self.assertFalse(any("fixture-secret" in message["text"] for message in completed_history["messages"]))
+            activity["id"] == "item_private_recovery_command" and activity.get("output") == "fixture-secret"
+            for activity in completed_history["activities"]
+        ), "Recovery activities are stored as Codex sent them.")
         self.assertNotIn("fixture-secret", self.assert_success(self.call_cli("task", "get", task_id)[0]).get("savedPrompt", ""))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
 
@@ -70,9 +77,12 @@ class BridgeTestCases15:
             for message in follow_up_history["messages"]
         ), "A normal Codex follow-up after recovery must remain visible in refreshed history.")
         self.assertIn("follow-up-visible-diff", follow_up_history["diff"]["unifiedDiff"],
-            "A later non-sensitive Codex turn must retain its own file-change diff.")
-        self.assertNotIn("fixture-secret", json.dumps(follow_up_history))
-    # case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, Playhouse preserves the pending question while the task stays in Waiting Response, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
+            "A later Codex turn must retain its own file-change diff.")
+        self.assertTrue(any(
+            message["role"] == "assistant" and message["text"] == recovery_answer
+            for message in follow_up_history["messages"]
+        ), "The earlier recovery response stays in history after a later turn.")
+    # case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex fails while applying recovered answers, Playhouse preserves the pending question while the task stays in Waiting Response, uses a generic visible error, stores and shows the sent recovery prompt as sent, and keeps the secret out of saved task state, diagnostics, and error text; later Codex thread read and resume failures do not affect history, which loads from Playhouse's own transcript store across fresh CLI/XPC reads and app restarts.
     def test_codex_secret_recovery_redaction_fails_closed(self):
         task_id = self.create_task("Fail-closed secret recovery", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -106,11 +116,11 @@ class BridgeTestCases15:
         fresh_history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         history = self.assert_success(fresh_history)
         self.assertIsNotNone(history.get("pendingUserInputRequest"), "The failed recovery must leave the question available to retry.")
+        recovery_prompt = "Question: What is the private token?\nAnswer: fixture-secret"
         self.assertTrue(any(
-            message["role"] == "user" and message["text"] == "[Private answer sent after restart]"
+            message["role"] == "user" and recovery_prompt in message["text"]
             for message in history["messages"]
-        ))
-        self.assertFalse(any("fixture-secret" in message["text"] for message in history["messages"]))
+        ), "The prompt that carried the answers was sent, so it is stored as sent.")
         record = self.assert_success(self.call_cli("task", "get", task_id)[0])
         self.assertEqual(record["status"], "Waiting Response", "An unanswered question stays available for retry after a failed recovery attempt.")
         self.assertNotIn("fixture-secret", record.get("statusMessage", ""))
@@ -118,30 +128,21 @@ class BridgeTestCases15:
         diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("fixture-secret", diagnostics)
         self.assertNotIn("Answer: Green", diagnostics)
+        # History comes from Playhouse's own transcript store, so Codex thread read and
+        # resume failures cannot break it.
         Path(str(executable) + ".history-error").write_text(
             "Playhouse owns this Codex fixture history failure marker.\n", encoding="utf-8"
         )
-        history_failure, _ = self.call_cli(
-            "conversation", "history", task_id, expected_status=1, extra_environment=env
-        )
-        self.assert_failure(history_failure, "operation_failed")
-        self.assertNotIn("fixture-secret", history_failure["error"]["message"])
-        diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
-        self.assertNotIn("fixture-secret", diagnostics)
-        Path(str(executable) + ".history-error").unlink()
-        # A resume failure needs a provider that has to load the thread again.
         self.restart_provider(executable)
         Path(str(executable) + ".resume-error").write_text(
             "Playhouse owns this Codex fixture resume failure marker.\n", encoding="utf-8"
         )
-        resume_failure, _ = self.call_cli(
-            "conversation", "history", task_id, expected_status=1, extra_environment=env
-        )
-        self.assert_failure(resume_failure, "operation_failed")
-        self.assertEqual(
-            resume_failure["error"]["message"],
-            "History for a private recovery conversation could not be loaded.",
-        )
+        reloaded = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertIsNotNone(reloaded.get("pendingUserInputRequest"), "The question stays available to retry after a provider restart.")
+        self.assertTrue(any(
+            message["role"] == "user" and recovery_prompt in message["text"]
+            for message in reloaded["messages"]
+        ), "The stored transcript loads without reading the Codex thread.")
         diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("fixture-secret", diagnostics)
     # case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section, and the successful retry returns to Waiting Response without an explicit completed outcome.
@@ -185,7 +186,7 @@ class BridgeTestCases15:
         self.assertTrue(self.assert_success(retry)["messages"])
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
-    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
+    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovery prompt and response, including the secret answer, are stored and shown as sent.
     def test_codex_nonblocking_question_keeps_task_in_progress(self):
         task_id = self.create_task("Non-blocking question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -221,14 +222,13 @@ class BridgeTestCases15:
         completed_history = self.assert_success(completed)
         self.assertIsNone(completed_history.get("pendingUserInputRequest"))
         self.assertTrue(any(
-            message["role"] == "user" and message["text"] == "[Private answer sent after restart]"
+            message["role"] == "user" and "Answer: Custom approach" in message["text"] and "Answer: fixture-secret" in message["text"]
             for message in completed_history["messages"]
-        ))
+        ), "The prompt that carried the answers is stored as sent.")
         self.assertTrue(any(
-            message["role"] == "assistant" and message["text"] == "[Response to private answer hidden]"
+            message["role"] == "assistant" and message["text"] == "Answers received: Custom approach / fixture-secret."
             for message in completed_history["messages"]
-        ))
-        self.assertNotIn("fixture-secret", json.dumps(completed_history))
+        ), "The recovery response is stored as Codex sent it.")
         provider_history = Path(str(executable) + ".history").read_text(encoding="utf-8")
         self.assertIn("Custom approach", provider_history, "The free-text Other answer must reach the recovered Codex turn.")
         task, _ = self.call_cli("task", "get", task_id)
@@ -274,8 +274,10 @@ class BridgeTestCases15:
             {"title": "Additional detail"},
         ])
         self.assertEqual(question["phase"], "final_answer")
-        self.assertEqual(next(message for message in history["messages"] if message["id"] == "item_playhouse_async_followup")["text"],
-                         "I can continue while you decide.")
+        followups = [index for index, message in enumerate(history["messages"])
+                     if message["role"] == "assistant" and message["text"] == "I can continue while you decide."]
+        self.assertEqual(len(followups), 1, "The later assistant text is its own message.")
+        self.assertGreater(followups[0], history["messages"].index(question), "The later assistant text follows the question.")
         live_questions = [event.get("payload", {}).get("asyncQuestions") for event in events
                           if event.get("type") == "assistant_progress" and event.get("payload", {}).get("itemID") == question["id"]]
         self.assertEqual(live_questions, [question["asyncQuestions"]], "The live bridge update must retain structured choices.")

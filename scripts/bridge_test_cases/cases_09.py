@@ -571,6 +571,52 @@ class BridgeTestCases09:
             any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
+    # case-contract: test_conversation_transcript_reopens_from_local_store | Playhouse stores every conversation turn in its own transcript store, for Codex and Claude alike. After a Codex turn and, following a provider switch, a Claude turn, a fresh daemon serves the same messages, roles, texts, providers and order without asking Codex for its thread history: Codex replies stay labeled Codex with the model that wrote them, Claude replies stay labeled Claude, and a limited read returns only the latest page with the count of earlier messages and keeps the Codex-to-Claude boundary after the last Codex message.
+    def test_conversation_transcript_reopens_from_local_store(self):
+        codex = self.data_directory / "codex-fixture-local-store"
+        claude = self.install_provider_fixture("claude", "claude-fixture-local-store")
+        environment = self.restart_service_environment("codex", codex, PLAYHOUSE_E2E_CLAUDE_EXECUTABLE=str(claude))
+        service = {"PLAYHOUSE_BRIDGE_SERVICE_NAME": environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"]}
+        task = self.create_task("Local transcript store")
+        self.complete_fixture_turn(task["id"], executable_name=codex.name, message="Start with Codex.", extra_environment=service)
+        self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Tell me a very short dog story.", extra_environment=environment)[0])
+
+        def summary(history):
+            return [(message["id"], message["role"], message["text"], message.get("provider")) for message in history["messages"]]
+        before = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+        messages = before["messages"]
+        self.assertIn(("user", "Start with Codex.", "codex"), [(m["role"], m["text"], m.get("provider")) for m in messages])
+        self.assertIn(("user", "Tell me a very short dog story.", "claude"), [(m["role"], m["text"], m.get("provider")) for m in messages])
+        codex_replies = [m for m in messages if m["role"] == "assistant" and m.get("provider") == "codex"]
+        claude_replies = [m for m in messages if m["role"] == "assistant" and m.get("provider") == "claude"]
+        self.assertTrue(codex_replies, before)
+        self.assertTrue(all(m.get("modelID") for m in codex_replies), "Codex replies keep the model that wrote them.")
+        self.assertTrue(any("BISCUIT-7" in m["text"] for m in claude_replies), before)
+        self.assertLess(
+            max(i for i, m in enumerate(messages) if m.get("provider") == "codex"),
+            min(i for i, m in enumerate(messages) if m.get("provider") == "claude"),
+            "The transcript keeps the Codex turn before the Claude turn.",
+        )
+
+        methods = Path(str(codex) + ".methods")
+        self.assertIn("turn/start", methods.read_text(encoding="utf-8").split(), "The method log records this case's Codex requests.")
+        methods.write_text("", encoding="utf-8")
+        self.kill_daemon(environment)
+        after = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+        self.assertEqual(summary(after), summary(before), "A fresh daemon serves the stored transcript unchanged.")
+        self.assertEqual([m.get("modelID") for m in after["messages"]], [m.get("modelID") for m in messages])
+        page = self.assert_success(self.call_cli("conversation", "history", task["id"], "--limit", "2", extra_environment=environment)[0])
+        self.assertEqual(summary(page), summary(before)[-2:])
+        self.assertEqual(page["earlierMessageCount"], len(messages) - 2)
+        last_codex_message = max(i for i, m in enumerate(messages) if m.get("provider") == "codex")
+        expected_boundary = [("claude", messages[last_codex_message]["id"])]
+        self.assertEqual([(b["provider"], b["afterMessageID"]) for b in after["providerBoundaries"]], expected_boundary)
+        self.assertEqual([(b["provider"], b["afterMessageID"]) for b in page["providerBoundaries"]], expected_boundary,
+                         "A limited read keeps the Codex-to-Claude boundary after the last Codex message.")
+        requested = methods.read_text(encoding="utf-8").split()
+        for method in ("thread/read", "thread/turns/list", "thread/items/list"):
+            self.assertNotIn(method, requested, "Reading the transcript never asks Codex for its thread history.")
     # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or mode menu. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
     def test_side_chat_forks_claude_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat")

@@ -192,6 +192,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// `activeThreadID`/`activeTurnID`, which sends also use. Only a window follows its Goal
     /// signals (`goalObservationThreadID`), but every caller sees it running.
     var contextlessTurnIDs: [String: String] = [:]
+    /// Per task thread, records a turn Codex ran without a send of ours once it ends, from the
+    /// items it streamed; no send's callbacks recorded it into Playhouse's transcript.
+    var contextlessTurnRecorders: [String: (_ turnID: String, _ entries: [[String: Any]]) -> Void] = [:]
+    /// The completed items (`{turnId, item}`) of each thread's contextless turn so far.
+    var contextlessTurnEntries: [String: [[String: Any]]] = [:]
     /// Follows a thread's Goal turns for a window. A turn running on another thread keeps its
     /// entry until it completes, so it stays active and interruptible meanwhile.
     func followGoalTurns(threadID: String) {
