@@ -3,5 +3,5 @@
 /// half in the maintainer's login keychain. Empty means this build has no
 /// release key yet, and it never offers an update.
 enum ReleaseSigningKey {
-    static let publicKey = ""
+    static let publicKey = "Baq+1gP87LOKiAZYPjLXVIq9E6+Xe5fhz69l7cT2rUI="
 }
