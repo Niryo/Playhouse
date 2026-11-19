@@ -10,11 +10,11 @@
     "build": "webpack --config webpack.config.cjs --mode production"
   },
   "dependencies": {
-    "dompurify": "3.4.16",
+    "dompurify": "3.4.17",
     "monaco-editor": "0.55.1"
   },
   "overrides": {
-    "dompurify": "3.4.16"
+    "dompurify": "3.4.17"
   },
   "devDependencies": {
     "css-loader": "7.1.5",
