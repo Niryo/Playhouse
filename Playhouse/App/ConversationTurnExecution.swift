@@ -103,6 +103,7 @@ extension ConversationManager {
         requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool,
         isPlayhouseNudge: Bool,
+        returnsToQueueOnFailure: Bool = false,
         deferMissingOutcomeStatus: Bool,
         statusBeforeSubmission: TaskStatus?,
         contextPageIDs: [String],
@@ -298,6 +299,8 @@ extension ConversationManager {
         let started = try await tasks.setLifecycleStatus(taskID, to: .inProgress)
         onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))
         var phase = "thread-start"
+        // The locally recorded turn, kept so a failure before the provider accepts it can drop it.
+        var localTurn: (id: String, recording: TurnRecording)?
         let approvalNotice = "\(provider.displayName) requested an approval. Playhouse denied it because approval prompts are disabled."
         do {
             // Read the visible history for the handoff before this provider gets a
@@ -501,6 +504,7 @@ extension ConversationManager {
                 }
             }
             let recording = TurnRecording()
+            localTurn = (localTurnID, recording)
             if let state = resumeCacheState, !compactedBeforeTurn, !state.compactedSinceLastCall {
                 recording.checksResumeCacheMiss = true
                 recording.resumeIdleSeconds = state.lastCallAt.map { Date.now.timeIntervalSince($0) }
@@ -598,6 +602,13 @@ extension ConversationManager {
                     "phase": phase
                 ])
                 throw error
+            }
+            if returnsToQueueOnFailure, let localTurn, !localTurn.recording.providerTurnStarted {
+                // The follow-up never reached the agent and stays queued for a retry, so the
+                // transcript must not show it as sent.
+                try? transcripts.mutate(taskID, turns: .turn(localTurn.id)) { transcript in
+                    transcript.turns.removeAll { $0.id == localTurn.id }
+                }
             }
             for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
                 try? await tasks.recordConversationActivityDuration(

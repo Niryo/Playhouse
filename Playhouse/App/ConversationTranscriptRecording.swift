@@ -239,6 +239,8 @@ extension ConversationManager {
     /// get their own.
     final class TurnRecording {
         var finalMessageCount = 0
+        /// Whether the provider accepted the turn; until then nothing of it reached the agent.
+        var providerTurnStarted = false
         var leakedOutcome: String?
         var pendingQuestionLifecycleRevision: Int?
         /// Set on a turn that resumes a Claude session with a warm-looking
@@ -438,6 +440,7 @@ extension ConversationManager {
             },
             onMessageTimestamp: { _, _ in },
             onTurnStarted: { providerTurnID in
+                recording.providerTurnStarted = true
                 ConversationTurnLaunch.turnStarted(taskID)
                 // Codex's own turn ID is kept as resume metadata beside the local turn.
                 if provider == .codex, let segment {

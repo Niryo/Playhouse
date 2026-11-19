@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, missed composer and queued-row steers start their own turns without blocking other steering and leave the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn; a steer the provider refuses for any other reason reports the provider's error, is not queued, and returns its text and image to the composer with no message left in the transcript. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, missed composer and queued-row steers start their own turns without blocking other steering and leave the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action, stays out of the conversation history, and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn; a steer the provider refuses for any other reason reports the provider's error, is not queued, and returns its text and image to the composer with no message left in the transcript. Plain Return queues a follow-up; while the composer has a draft during the active turn, Send replaces Stop and queues the follow-up with its attached image like Return, clears the draft and preview so Stop returns, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     func test_conversation_steers_and_queues_active_turn() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
         let fixtureOwner = try String(contentsOf: WorkspaceFixture.root.appendingPathComponent(WorkspaceFixture.ownerMarker), encoding: .utf8)
@@ -232,20 +232,35 @@ extension PlayhouseUITests {
         XCTAssertTrue(retainedQueueIDs.contains(retainedQueueID), "Removing an unknown ID must leave existing queued follow-ups unchanged.")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setData(uiPNG, forType: .png)
+        XCTAssertEqual(composer.value as? String ?? "", "", "The composer should be empty before typing the second follow-up.")
+        XCTAssertEqual(element("pause-response-button").label, "Stop response", "The fixture turn should still be active, showing Stop, before typing a second follow-up.")
+        XCTAssertFalse(element("send-message-button").exists, "An empty composer during an active turn shows Stop, not Send.")
         composer.click()
         composer.typeText(rowSteeringText)
         composer.typeKey("v", modifierFlags: .command)
         XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The queued follow-up's image should be previewed before Return.")
         XCTAssertEqual(composer.value as? String, rowSteeringText, "The native composer should contain the second follow-up before Return.")
+        // With a draft, Send takes Stop's place while the turn is still running.
+        let activeTurnSend = element("send-message-button")
+        XCTAssertTrue(activeTurnSend.waitToExist(timeout: 5), "Send should replace Stop while the composer has a draft. app=\(app.debugDescription)")
+        XCTAssertFalse(element("pause-response-button").exists, "Stop should give way to Send while the composer has a draft.")
+        XCTAssertTrue(activeTurnSend.isEnabled, "Send should be enabled during the active turn when the composer has a draft.")
+        attachScreenshot(named: "Send replaces Stop while a follow-up is typed")
+        attachElementScreenshot(activeTurnSend, named: "The Send button during an active turn")
+        activeTurnSend.click()
+        var acceptedQueue: [[String: Any]]?
+        XCTAssertTrue(waitUntil({
+            acceptedQueue = try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+            return acceptedQueue?.contains(where: { $0["text"] as? String == rowSteeringText }) == true
+        }, timeout: 5), "Send should queue the typed follow-up while the active turn is held. composer=\(composer.value as? String ?? "<none>"), error=\(element("codex-chat-error").exists ? element("codex-chat-error").label : "<none>"), fixtureHeld=\(FileManager.default.fileExists(atPath: ready.path))")
+        XCTAssertEqual(composer.value as? String ?? "", "", "Send should clear the queued draft.")
         let activeTurnControl = element("pause-response-button")
-        XCTAssertEqual(activeTurnControl.label, "Stop response", "The fixture turn should still be active before queueing a second follow-up.")
-        XCTAssertTrue(activeTurnControl.isEnabled, "The active-turn control should be enabled before Return queues a second follow-up. app=\(app.debugDescription)")
-        composer.typeKey(.return, modifierFlags: [])
-        let acceptedQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
-        XCTAssertTrue(acceptedQueue?.contains(where: { $0["text"] as? String == rowSteeringText }) == true, "Return should queue the typed follow-up while the active turn is held. activeControl=\(element("pause-response-button").label), composer=\(composer.value as? String ?? "<none>"), error=\(element("codex-chat-error").exists ? element("codex-chat-error").label : "<none>"), fixtureHeld=\(FileManager.default.fileExists(atPath: ready.path))")
+        XCTAssertTrue(activeTurnControl.waitToExist(timeout: 5), "Stop should return once the queued draft clears the composer.")
+        XCTAssertEqual(activeTurnControl.label, "Stop response")
+        XCTAssertTrue(activeTurnControl.isEnabled, "Stop should still pause the running turn after Send queues a follow-up.")
         let acceptedQueueItem = try XCTUnwrap(acceptedQueue?.first(where: { $0["text"] as? String == rowSteeringText }))
         let acceptedQueueID = try XCTUnwrap(acceptedQueueItem["id"] as? String)
-        let acceptedQueueImages = try XCTUnwrap(acceptedQueueItem["imageDataURLs"] as? [String], "Return should queue the attached image with the follow-up.")
+        let acceptedQueueImages = try XCTUnwrap(acceptedQueueItem["imageDataURLs"] as? [String], "Send should queue the attached image with the follow-up.")
         XCTAssertEqual(acceptedQueueImages.count, 1)
         XCTAssertTrue(acceptedQueueImages[0].hasPrefix("data:image/png;base64,"))
         XCTAssertFalse(element("pending-chat-images").exists, "Queueing a follow-up should clear its image preview.")
@@ -444,6 +459,7 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any]
         let userMessages = (history?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
         XCTAssertEqual(userMessages.compactMap { $0["text"] as? String }.filter { $0 == queuedText }.count, 1)
+        XCTAssertFalse(userMessages.contains { $0["text"] as? String == failedTargetText }, "A queued follow-up whose turn never started must not be recorded as sent.")
         XCTAssertEqual(userMessages.compactMap { $0["text"] as? String }.filter { $0 == missedUISteerText }.count, 1, "The missed composer steer should be in the conversation once, from its own turn.")
         let fixtureHistory = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: sharedFixture.path + ".history"))) as? [String: Any]
@@ -632,6 +648,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("chat-image-\(imagePromptID)-0").waitToExist(timeout: 10), "Conversation history should render the pasted image.")
 
         let followupPrompt = "Continue using the earlier image as context."
+        // A draft shows Send even while a turn runs, so wait for idle before typing it.
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The first image turn should settle before the follow-up.")
         composer.click()
         composer.typeText(followupPrompt)
         let composerEnabled = waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10)
@@ -734,7 +752,8 @@ extension PlayhouseUITests {
         let pastedAnswer = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
         ).firstMatch
-        XCTAssertTrue(pastedAnswer.waitToExist(timeout: 10))
+        // Playhouse's outcome nudge can follow at once and push the answer out of the rendered rows.
+        XCTAssertTrue(pastedAnswer.waitToExist(timeout: 10) || transcriptScan { pastedAnswer.exists }, "The pasted image's answer should be in the transcript.")
         let pastedHistory = try runCLI(["conversation", "history", try taskID(named: "Pasted image conversation")])["result"] as? [String: Any]
         let pastedPromptID = try XCTUnwrap((pastedHistory?["messages"] as? [[String: Any]] ?? []).first {
             $0["role"] as? String == "user" && !($0["imageDataURLs"] as? [String] ?? []).isEmpty

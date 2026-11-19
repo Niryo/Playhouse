@@ -413,6 +413,8 @@ extension ConversationManager {
                         requiresSensitiveAnswerRedaction: requiresSensitiveAnswerRedaction,
                         hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt,
                         isPlayhouseNudge: isPlayhouseNudge,
+                        // A queued follow-up that fails returns to its queue as needing action.
+                        returnsToQueueOnFailure: !retainQueuedMessagesOnFailure,
                         deferMissingOutcomeStatus: true,
                         statusBeforeSubmission: statusBeforeSubmission,
                         contextPageIDs: contextPageIDs,

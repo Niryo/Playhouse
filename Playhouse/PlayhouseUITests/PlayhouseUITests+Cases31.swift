@@ -667,6 +667,8 @@ extension PlayhouseUITests {
         func sendPreviewTurn(_ value: String) throws {
             let payload = try JSONSerialization.data(withJSONObject: ["folder": pluginsFolder.appendingPathComponent(".drafts/plugins").appendingPathComponent(pluginID).path, "text": value])
             let message = "plugin-preview-fixture " + (try XCTUnwrap(String(data: payload, encoding: .utf8)))
+            // A draft shows Send even while a turn runs, so wait for idle before typing it.
+            XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 20), "The previous preview turn should finish first.")
             element("message-composer").click()
             element("message-composer").typeKey("a", modifierFlags: .command)
             element("message-composer").typeText(message)

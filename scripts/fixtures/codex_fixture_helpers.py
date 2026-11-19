@@ -258,6 +258,14 @@ def _unstreamed_turn_items(runtime, thread_id, turn_id):
     current = collections.Counter(
         runtime.json.dumps(entry, sort_keys=True) for entry in entries if entry.get("turnId") == turn_id
     )
+    # A thread's history only grows, so a shorter one was reset (a test removes the history
+    # file before its next task) and none of its entries were completed yet.
+    if not hasattr(runtime, "COMPLETED_HISTORY_LENGTHS"):
+        runtime.COMPLETED_HISTORY_LENGTHS = {}
+    history_lengths = runtime.COMPLETED_HISTORY_LENGTHS
+    if len(entries) < history_lengths.get(thread_id, 0):
+        earlier = collections.Counter()
+    history_lengths[thread_id] = len(entries)
     runtime.COMPLETED_TURN_ENTRIES[turn_id] = current
     unseen = current - earlier
     items = []

@@ -126,29 +126,29 @@ extension PlayhouseUITests {
         element("submit-async-questions-item_playhouse_async_question").click()
 
         XCTAssertTrue(waitUntil({ self.transcriptContains("Additional detail: Keep the draft intact.") }, timeout: 10), "The full two-answer reply must be sent.")
-        let response = element("assistant-message-item_playhouse_async_answer_steered")
-        XCTAssertTrue(response.waitToExist(timeout: 10))
+        // Once Playhouse's outcome nudge reloads the stored transcript, the reply carries a stored
+        // final-answer ID instead of the provider item ID, so match it by its answer.
+        let response = app.groups.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Additional detail: Keep the draft intact."
+        )).firstMatch
+        XCTAssertTrue(response.waitToExist(timeout: 10) || transcriptScan { response.exists }, "The steered answer should be in the transcript.")
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Keep the draft intact."))
-        XCTAssertTrue(card.exists)
-        XCTAssertTrue(app.staticTexts["Answered"].exists)
+        XCTAssertTrue(transcriptScan { card.exists && card.staticTexts["Answered"].exists }, "The answered card should stay in the transcript.")
         XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
         let laterCard = element("async-question-item_playhouse_async_later_question")
-        XCTAssertTrue(laterCard.waitToExist(timeout: 10))
-        let idleDeadline = Date().addingTimeInterval(10)
-        while !element("send-message-button").isEnabled && Date() < idleDeadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
-        XCTAssertTrue(element("send-message-button").isEnabled, "The later answer must be submitted after the first turn completes.")
+        XCTAssertTrue(laterCard.waitToExist(timeout: 10) || transcriptScan { laterCard.exists }, "The later question should be in the transcript.")
+        // The unsent draft shows Send in Stop's place while the turn runs, so wait on the runtime.
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The later answer must be submitted after the first turn completes.")
         let laterAnswer = element("async-question-answer-item_playhouse_async_later_question-0")
         // Later replies below the card can carry its field out of view; bring it back before typing.
         XCTAssertTrue(revealInConversation(laterAnswer), "The later question's answer field should scroll into view.")
         laterAnswer.click()
         laterAnswer.typeText("Finish after the turn.")
         element("submit-async-questions-item_playhouse_async_later_question").click()
-        // Hidden outcome reminders take turn numbers, so match the reply by its answer.
+        // Stored replies carry Playhouse's own turn IDs, so match the reply by its answer.
         let completedResponse = app.groups.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-item_playhouse_async_answer_", "Finish after the turn."
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Answers received: One more check: Finish after the turn."
         )).firstMatch
         XCTAssertTrue(completedResponse.waitToExist(timeout: 10),
                       "A question answered after its original turn must refresh the visible conversation.")
@@ -200,9 +200,9 @@ extension PlayhouseUITests {
         let retry = element("retry-queued-message-\(queuedID.uppercased())")
         XCTAssertTrue(retry.waitToExist(timeout: 5))
         retry.click()
-        // The fixture numbers answer items per turn, so find the answer by content.
+        // Stored replies carry Playhouse's own turn IDs, so find the answer by content.
         let response = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-item_playhouse_async_answer_", "Answers received: Test and verify"))
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Answers received: Test and verify"))
             .firstMatch
         XCTAssertTrue(response.waitToExist(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
