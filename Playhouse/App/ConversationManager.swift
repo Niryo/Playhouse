@@ -528,7 +528,8 @@ final class ConversationManager {
                     pluginID: task.authoringPluginID,
                     pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                     pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory,
+                    isOptimizedContext: task.conversationContextMode == .optimized
                 )
             )
             _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)

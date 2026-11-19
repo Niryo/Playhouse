@@ -963,7 +963,13 @@ def main():
             if SIDE_CHAT_MARKER in instructions:
                 turn["reportCommands"] = side_chat_respond(user_text, instructions, turn, prior_turns)
             else:
-                turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome,
+                # An optimized follow-up's seed repeats the user's earlier messages, so the
+                # fixture reacts only to the message after it, as an agent would.
+                respond_text = user_text
+                if user_text.startswith("<playhouse-handoff-context>\nPlayhouse optimized context") \
+                        and "</playhouse-handoff-context>" in user_text:
+                    respond_text = user_text.split("</playhouse-handoff-context>", 1)[1].strip()
+                turn["reportCommands"] = respond(respond_text, instructions, preserve_no_outcome=preserve_no_outcome,
                                                 previous_prompt=previous_prompt)
             if (os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME") == "1"
                     and "playhouse internal outcome nudge:" not in user_text.lower()

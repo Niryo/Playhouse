@@ -288,7 +288,8 @@ extension ConversationManager {
             pluginID: task.authoringPluginID,
             pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
             pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-            pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
+            pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory,
+            isOptimizedContext: task.conversationContextMode == .optimized
         )
         Task { @MainActor in
             do {
@@ -625,5 +626,391 @@ extension ConversationManager {
         let titles = titleMatches.sorted { $0.createdAt > $1.createdAt }
         let conversations = conversationIDs.compactMap { byID[$0] }.sorted { $0.createdAt > $1.createdAt }
         return titles + conversations
+    }
+}
+
+/// A board task's conversation numbered by position, the one numbering the optimized context
+/// seed, `conversation outline` and `conversation read` share. Messages (the user's, steers,
+/// the agent's commentary and final answers, subagent reports, prompts Playhouse sent) take
+/// whole numbers from 1 in transcript order; the tool calls after message 12 are 12.1, 12.2
+/// and so on, so a whole number is always a message and a decimal always a tool call. The
+/// transcript only grows, so a position keeps naming the same entry.
+struct ConversationTimeline {
+    struct Position: Comparable, Hashable, CustomStringConvertible {
+        let message: Int
+        /// Zero for the message itself; the tool call's ordinal after it otherwise.
+        let tool: Int
+
+        init(message: Int, tool: Int = 0) {
+            self.message = message
+            self.tool = tool
+        }
+
+        /// `12` or `12.3`; nil for anything else.
+        init?(_ text: String) {
+            let parts = text.trimmingCharacters(in: .whitespaces).split(separator: ".", omittingEmptySubsequences: false)
+            guard (1...2).contains(parts.count), let message = Int(parts[0]), message >= 1 else { return nil }
+            let tool = parts.count == 2 ? Int(parts[1]) : 0
+            guard let tool, tool >= 0, parts.count == 1 || tool >= 1 else { return nil }
+            self.init(message: message, tool: tool)
+        }
+
+        var description: String { tool == 0 ? "\(message)" : "\(message).\(tool)" }
+        var isToolCall: Bool { tool > 0 }
+
+        static func < (lhs: Position, rhs: Position) -> Bool {
+            (lhs.message, lhs.tool) < (rhs.message, rhs.tool)
+        }
+    }
+
+    enum Kind: String, Codable, CaseIterable {
+        /// A message the user wrote to start a turn.
+        case user
+        /// A message the user added to a running turn.
+        case steer
+        /// The agent's text before its answer.
+        case agent
+        case final
+        /// The final answer of a turn sent in Plan mode.
+        case plan
+        case subagent
+        /// A prompt Playhouse or the provider's runtime sent on its own.
+        case playhouse
+        case tool
+    }
+
+    struct Entry: Codable, Equatable {
+        let position: String
+        let kind: Kind
+        let turn: Int
+        let id: String
+        let text: String
+        var createdAt: Date?
+        var title: String?
+        var status: String?
+        var input: String?
+        var output: String?
+    }
+
+    struct Turn {
+        let number: Int
+        let startedByUser: Bool
+        let isPlan: Bool
+        let startedFreshSession: Bool
+        var positions: [Position] = []
+        var kinds: [Kind] = []
+    }
+
+    private(set) var entries: [(position: Position, entry: Entry)] = []
+    private(set) var turns: [Turn] = []
+
+    var messageCount: Int { entries.filter { !$0.position.isToolCall }.count }
+    var toolCallCount: Int { entries.filter { $0.position.isToolCall }.count }
+
+    init(transcript: ConversationTranscript) {
+        let planTurnIDs = Set(transcript.planTurnIDs ?? [])
+        let freshTurnIDs = Set(transcript.freshSessionTurnIDs ?? [])
+        var number = 0
+        for turn in transcript.turns {
+            // Turns written before nudges were shown hold only a placeholder; history hides them
+            // with the same check, so positions follow the visible conversation.
+            if turn.messages.contains(where: { $0.role == .user && ConversationManager.isPrivateOutcomeReminderPrompt($0.text) }) { continue }
+            guard !turn.messages.isEmpty else { continue }
+            let firstUser = turn.messages.first { $0.role == .user }
+            let startedByUser = firstUser.map { !Self.isPlayhouseSent($0) } ?? false
+            let isPlan = planTurnIDs.contains(turn.id)
+            let planAnswerID = isPlan ? turn.messages.last { $0.role == .assistant && $0.phase == "final_answer" }?.id : nil
+            var summary = Turn(
+                number: turns.count + 1, startedByUser: startedByUser,
+                isPlan: isPlan, startedFreshSession: freshTurnIDs.contains(turn.id)
+            )
+            var messageNumbers: [String: Int] = [:]
+            var dated: [(date: Date, number: Int)] = []
+            var seenUser = false
+            for message in turn.messages {
+                number += 1
+                messageNumbers[message.id] = number
+                if let date = message.createdAt { dated.append((date, number)) }
+                let kind: Kind
+                switch message.role {
+                case .user:
+                    kind = Self.isPlayhouseSent(message) ? .playhouse : (seenUser ? .steer : .user)
+                    seenUser = true
+                case .assistant:
+                    switch message.phase {
+                    case "final_answer": kind = message.id == planAnswerID ? .plan : .final
+                    case "subagent_report": kind = .subagent
+                    default: kind = .agent
+                    }
+                }
+                let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let position = Position(message: number)
+                entries.append((position, Entry(
+                    position: position.description, kind: kind, turn: summary.number, id: message.id,
+                    text: text.isEmpty && !message.imageDataURLs.isEmpty ? "[image]" : text, createdAt: message.createdAt
+                )))
+                summary.positions.append(position)
+                summary.kinds.append(kind)
+            }
+            let firstNumber = number - turn.messages.count + 1
+            var toolCounts: [Int: Int] = [:]
+            var toolEntries: [(position: Position, entry: Entry)] = []
+            var previousParent: Int?
+            for activity in turn.activities where !activity.isContextCompaction {
+                // A call sits under the message it followed. A call recorded without that falls
+                // back to the latest message written before it started, and a call with neither
+                // follows the call before it, since a turn's calls are stored in order.
+                let parent = activity.afterMessageID.flatMap { messageNumbers[$0] }
+                    ?? activity.startedAt.flatMap { start in dated.last { $0.date <= start }?.number }
+                    ?? previousParent
+                    ?? firstNumber
+                previousParent = parent
+                let ordinal = toolCounts[parent, default: 0] + 1
+                toolCounts[parent] = ordinal
+                let position = Position(message: parent, tool: ordinal)
+                toolEntries.append((position, Entry(
+                    position: position.description, kind: .tool, turn: summary.number, id: activity.id,
+                    text: activity.summary ?? activity.detail, createdAt: activity.startedAt,
+                    title: activity.title, status: activity.status,
+                    input: activity.input.map { Self.shortened($0, limit: 4_000) },
+                    output: activity.output.map { Self.shortened($0, limit: 4_000) }
+                )))
+            }
+            for item in toolEntries.sorted(by: { $0.position < $1.position }) {
+                summary.positions.append(item.position)
+                summary.kinds.append(.tool)
+            }
+            entries.append(contentsOf: toolEntries)
+            turns.append(summary)
+        }
+        entries.sort { $0.position < $1.position }
+    }
+
+    private static func isPlayhouseSent(_ message: ConversationMessage) -> Bool {
+        message.isPlayhouseSent || PrivateOutcomeNudgeMarker.matches(message.text)
+            || PrivatePromptPlaceholder.matches(message.text) || ProviderAutomaticNotice.matches(message.text)
+    }
+
+    static func shortened(_ text: String, limit: Int) -> String {
+        text.count > limit ? String(text.prefix(limit)) + " […]" : text
+    }
+
+    func entry(at position: Position) -> Entry? {
+        entries.first { $0.position == position }?.entry
+    }
+
+    var latestPlan: Entry? { entries.last { $0.entry.kind == .plan }?.entry }
+    var latestFinalAnswer: Entry? { entries.last { $0.entry.kind == .final || $0.entry.kind == .plan }?.entry }
+
+    var outline: ConversationOutline {
+        ConversationOutline(
+            totalMessages: messageCount,
+            totalToolCalls: toolCallCount,
+            totalTurns: turns.count,
+            latestPlanPosition: latestPlan?.position,
+            latestFinalAnswerPosition: latestFinalAnswer?.position,
+            turns: turns.map { turn in
+                let messages = zip(turn.positions, turn.kinds).filter { !$0.0.isToolCall }
+                return ConversationOutline.Turn(
+                    turn: turn.number,
+                    startedBy: turn.startedByUser ? "user" : "playhouse",
+                    firstPosition: messages.first?.0.description ?? "",
+                    lastPosition: messages.last?.0.description ?? "",
+                    userPositions: messages.filter { $0.1 == .user || $0.1 == .playhouse }.map(\.0.description),
+                    steerPositions: messages.filter { $0.1 == .steer }.map(\.0.description),
+                    agentMessages: messages.filter { [.agent, .subagent].contains($0.1) }.count,
+                    toolCalls: turn.kinds.filter { $0 == .tool }.count,
+                    finalAnswerPositions: messages.filter { $0.1 == .final || $0.1 == .plan }.map(\.0.description),
+                    plan: turn.isPlan,
+                    freshSession: turn.startedFreshSession
+                )
+            }
+        )
+    }
+}
+
+/// `conversation outline`: the positional map an optimized follow-up's seed also carries.
+struct ConversationOutline: Codable, Equatable {
+    struct Turn: Codable, Equatable {
+        let turn: Int
+        /// user, or playhouse for a turn Playhouse sent on its own (an outcome nudge).
+        let startedBy: String
+        let firstPosition: String
+        let lastPosition: String
+        let userPositions: [String]
+        let steerPositions: [String]
+        let agentMessages: Int
+        let toolCalls: Int
+        let finalAnswerPositions: [String]
+        let plan: Bool
+        let freshSession: Bool
+    }
+
+    let totalMessages: Int
+    let totalToolCalls: Int
+    let totalTurns: Int
+    let latestPlanPosition: String?
+    let latestFinalAnswerPosition: String?
+    let turns: [Turn]
+}
+
+/// `conversation read`: the requested entries, with the totals that bound positions.
+struct ConversationReadResult: Codable, Equatable {
+    let totalMessages: Int
+    let totalToolCalls: Int
+    let entries: [ConversationTimeline.Entry]
+}
+
+extension ConversationManager {
+    func timeline(taskID: UUID) throws -> ConversationTimeline {
+        _ = try tasks.conversationSubject(taskID)
+        return ConversationTimeline(transcript: try transcripts.read(taskID, turns: .all, includeImages: false))
+    }
+
+    func outline(taskID: UUID) throws -> ConversationOutline {
+        try timeline(taskID: taskID).outline
+    }
+
+    /// Entries by position: the listed `positions`, or the range `from`...`to` (each end
+    /// optional), narrowed to `kinds`. A range holds messages only unless `includesTools`
+    /// or `kinds` asks for tool calls; listed positions are returned as named.
+    func read(
+        taskID: UUID,
+        positions: [String],
+        from: String?,
+        to: String?,
+        kinds: [String],
+        includesTools: Bool
+    ) throws -> ConversationReadResult {
+        func parse(_ text: String) throws -> ConversationTimeline.Position {
+            guard let position = ConversationTimeline.Position(text) else {
+                throw BridgeCommandError(
+                    code: "invalid_argument",
+                    message: "\"\(text)\" is not a conversation position. Use a message number such as 12, or a tool call such as 12.3."
+                )
+            }
+            return position
+        }
+        let kindFilter = try Set(kinds.map { name -> ConversationTimeline.Kind in
+            guard let kind = ConversationTimeline.Kind(rawValue: name) else {
+                throw BridgeCommandError(
+                    code: "invalid_argument",
+                    message: "Unknown entry kind \"\(name)\". Use: \(ConversationTimeline.Kind.allCases.map(\.rawValue).joined(separator: ", "))."
+                )
+            }
+            return kind
+        })
+        guard positions.isEmpty || (from == nil && to == nil) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Read listed positions with --at, or a range with --from and --to; choose one.")
+        }
+        let timeline = try timeline(taskID: taskID)
+        let bounds = "The conversation has \(timeline.messageCount) messages and \(timeline.toolCallCount) tool calls."
+        var selected: [ConversationTimeline.Entry]
+        if !positions.isEmpty {
+            selected = try positions.map { text in
+                let position = try parse(text)
+                guard let entry = timeline.entry(at: position) else {
+                    throw BridgeCommandError(code: "not_found", message: "Nothing is at position \(position). \(bounds)")
+                }
+                return entry
+            }
+        } else {
+            let lower = try from.map(parse) ?? ConversationTimeline.Position(message: 1)
+            let explicitUpper = try to.map(parse)
+            if let explicitUpper, lower > explicitUpper {
+                throw BridgeCommandError(code: "invalid_argument", message: "--from \(lower) comes after --to \(explicitUpper).")
+            }
+            guard timeline.messageCount == 0 || lower.message <= timeline.messageCount else {
+                throw BridgeCommandError(code: "not_found", message: "Position \(lower) is past the end of the conversation. \(bounds)")
+            }
+            // Without --to, the range runs through the last message and the calls after it.
+            let upper = explicitUpper ?? ConversationTimeline.Position(message: max(timeline.messageCount, 1), tool: Int.max)
+            let tools = includesTools || kindFilter.contains(.tool)
+            selected = timeline.entries
+                .filter { $0.position >= lower && $0.position <= upper && (tools || !$0.position.isToolCall) }
+                .map(\.entry)
+        }
+        if !kindFilter.isEmpty {
+            selected = selected.filter { kindFilter.contains($0.kind) }
+        }
+        return ConversationReadResult(totalMessages: timeline.messageCount, totalToolCalls: timeline.toolCallCount, entries: selected)
+    }
+}
+
+extension ConversationHandoff {
+    /// The user's messages are cut to this many characters, newest kept whole first.
+    static let optimizedUserMessagesCharacterLimit = 24_000
+    static let optimizedPlanCharacterLimit = 16_000
+    static let optimizedFinalAnswerCharacterLimit = 2_400
+    /// The outline lists at most this many of the newest turns, one line each.
+    static let optimizedOutlineTurnLimit = 200
+
+    /// The seed of an optimized follow-up's fresh session: the conversation's positional
+    /// outline, every message the user wrote, the latest plan and the latest final answer,
+    /// with how to read the rest. Nil for a conversation with nothing in it yet.
+    static func optimizedFollowUpContext(taskID: UUID, timeline: ConversationTimeline) -> String? {
+        guard !timeline.turns.isEmpty else { return nil }
+        let outline = timeline.outline
+        var sections = ["""
+        Playhouse optimized context, not part of the user's message. This follow-up runs in a fresh session: none of this conversation's earlier turns are loaded, only what is below. Positions number the whole conversation: a whole number is a message, and a decimal such as 12.3 is the third tool call after message 12, so the gap between two user messages shows how much the agent did in between. Read anything else of task \(taskID.uuidString) with conversation read, which reads entries by position or range, every turn's final answer without the work before it, or the tool calls too; run help conversation --for task for its options.
+        """]
+
+        func count(_ value: Int, _ noun: String) -> String { "\(value) \(noun)\(value == 1 ? "" : "s")" }
+        var lines = ["Conversation outline: \(count(outline.totalMessages, "message")) and \(count(outline.totalToolCalls, "tool call")) in \(count(outline.totalTurns, "turn"))."]
+        let shownTurns = outline.turns.suffix(optimizedOutlineTurnLimit)
+        if shownTurns.count < outline.turns.count {
+            lines.append("- Turns 1-\(outline.turns.count - shownTurns.count): run conversation outline for these.")
+        }
+        for turn in shownTurns {
+            var parts: [String] = []
+            let opener = turn.startedBy == "user" ? "user" : "Playhouse"
+            parts.append("\(opener) @\(turn.userPositions.first ?? turn.firstPosition)")
+            if !turn.steerPositions.isEmpty {
+                parts.append("steers @" + turn.steerPositions.joined(separator: ", @"))
+            }
+            parts.append("\(turn.agentMessages) agent \(turn.agentMessages == 1 ? "message" : "messages"), \(turn.toolCalls) tool \(turn.toolCalls == 1 ? "call" : "calls")")
+            if let answer = turn.finalAnswerPositions.last {
+                parts.append("\(turn.plan ? "plan" : "final answer") @\(answer)")
+            }
+            parts.append("ends @\(turn.lastPosition)")
+            lines.append("- Turn \(turn.turn)\(turn.plan ? " (Plan mode)" : ""): " + parts.joined(separator: "; "))
+        }
+        sections.append(lines.joined(separator: "\n"))
+
+        // The newest messages stay whole; older ones shrink once the budget runs out.
+        let userEntries = timeline.entries.map(\.entry).filter { $0.kind == .user || $0.kind == .steer }
+        var budget = optimizedUserMessagesCharacterLimit
+        var userLines: [String] = []
+        for entry in userEntries.reversed() {
+            let label = "@\(entry.position)\(entry.kind == .steer ? " (steer)" : "")"
+            if entry.text.count <= budget {
+                budget -= entry.text.count
+                userLines.append("\(label): \(entry.text)")
+            } else {
+                let kept = max(budget, 200)
+                budget = max(budget - kept, 0)
+                userLines.append("\(label): \(String(entry.text.prefix(kept))) […] (read @\(entry.position) for the full text)")
+            }
+        }
+        if !userLines.isEmpty {
+            sections.append((["The user's messages, oldest first:"] + userLines.reversed()).joined(separator: "\n\n"))
+        }
+        if let plan = timeline.latestPlan {
+            sections.append("The latest plan (@\(plan.position)):\n\n" + shortenedWithReadHint(plan, limit: optimizedPlanCharacterLimit))
+        }
+        if let answer = timeline.latestFinalAnswer, answer.position != timeline.latestPlan?.position {
+            sections.append("The latest final answer (@\(answer.position)), shortened when long:\n\n" + shortenedWithReadHint(answer, limit: optimizedFinalAnswerCharacterLimit))
+        }
+        return """
+        \(openTag)
+        \(sections.joined(separator: "\n\n"))
+        \(closeTag)
+        """
+    }
+
+    private static func shortenedWithReadHint(_ entry: ConversationTimeline.Entry, limit: Int) -> String {
+        entry.text.count > limit
+            ? String(entry.text.prefix(limit)) + " […] (read @\(entry.position) for the rest)"
+            : entry.text
     }
 }

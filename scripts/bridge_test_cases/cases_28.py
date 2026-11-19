@@ -1,0 +1,379 @@
+from test_bridge_support import *
+from test_bridge_support import __file__
+
+
+class BridgeTestCases28:
+    def optimized_claude_fixture(self, name, report_outcome=False):
+        executable = self.data_directory / name
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        if report_outcome:
+            environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
+        return executable, environment
+
+    def claude_fixture_turns(self, executable):
+        history = Path(str(executable) + ".history")
+        turns = json.loads(history.read_text(encoding="utf-8"))["turns"] if history.is_file() else []
+        return [turn for turn in turns if not (turn.get("userText") or "").startswith("Write a concise task title")]
+
+    def claude_turn_ending(self, executable, message):
+        matches = [turn for turn in self.claude_fixture_turns(executable) if (turn.get("userText") or "").endswith(message)]
+        self.assertTrue(matches, f"The Claude fixture never received a turn ending with {message!r}.")
+        return matches[-1]
+
+    # case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, carries the latest plan in full, states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
+    def test_claude_optimized_follow_up_starts_fresh_seeded_session(self):
+        executable, environment = self.optimized_claude_fixture("claude-fixture-optimized-follow-up")
+        task_id = self.create_task(title="Optimized Claude follow-up", provider="claude")["id"]
+
+        def send(message, *extra):
+            return self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        first_message = "Inspect the readme and plan the change."
+        send(first_message, "--mode", "plan")
+        first = self.claude_turn_ending(executable, first_message)
+        original_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+        self.assertEqual(first["sessionID"], original_session)
+        self.assertFalse(first["resumed"])
+        self.assertNotIn("This task uses optimized context", first["arguments"][first["arguments"].index("--append-system-prompt") + 1],
+                         "A task on full context never gets the optimized-context guidance.")
+
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id)[0])["mode"], "full",
+                         "A task that never chose resumes its whole conversation.")
+        updated = self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        self.assertEqual(updated["conversationContextMode"], "optimized")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id)[0])["mode"], "optimized")
+
+        second_message = "Second request: keep the summary short."
+        send(second_message)
+        second = self.claude_turn_ending(executable, second_message)
+        second_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+        self.assertNotEqual(second_session, original_session, "An optimized follow-up starts a session of its own.")
+        self.assertEqual(second["sessionID"], second_session, "The fresh session becomes the task's session.")
+        self.assertFalse(second["resumed"], "An optimized follow-up launches with --session-id, never --resume.")
+        self.assertNotIn("--resume", second["arguments"])
+        prompt = second["userText"]
+        self.assertTrue(prompt.startswith("<playhouse-handoff-context>"), prompt[:200])
+        self.assertIn("Playhouse optimized context, not part of the user's message.", prompt)
+        self.assertIn(f"Read anything else of task {task_id.upper()} with conversation read", prompt)
+        self.assertIn("run help conversation --for task for its options", prompt,
+                      "The seed points at help for the command's options instead of copying them.")
+        self.assertIn(f"@1: {first_message}", prompt, "The seed lists the user's messages with their positions.")
+        self.assertIn("- Turn 1 (Plan mode): user @1; 1 agent message, 1 tool call; plan @3; ends @3", prompt,
+                      "The outline places the plan turn's user message, its work and its plan by position.")
+        self.assertIn("The latest plan (@3):\n\nInspection done: the workspace is ready.", prompt)
+        self.assertNotIn("I'll inspect the workspace first.", prompt, "The agent's commentary is not seeded; it is read on demand.")
+        self.assertTrue(prompt.endswith(f"</playhouse-handoff-context>\n\n{second_message}"))
+        instructions = second["arguments"][second["arguments"].index("--append-system-prompt") + 1]
+        self.assertIn("This task uses optimized context.", instructions)
+        self.assertIn("It is a summary, not the whole conversation", instructions)
+        self.assertIn(" conversation read ", instructions)
+        self.assertIn(" conversation outline ", instructions)
+
+        nudges = [turn for turn in self.claude_fixture_turns(executable)
+                  if "playhouse internal outcome nudge:" in (turn.get("userText") or "").lower()]
+        self.assertTrue(nudges, "Turns that report no outcome get Playhouse's nudge.")
+        for nudge in nudges:
+            self.assertTrue(nudge["resumed"], "A Playhouse nudge resumes the session it nudges.")
+            self.assertIn(nudge["sessionID"], {original_session, second_session})
+            self.assertNotIn("<playhouse-handoff-context>", nudge["userText"])
+
+        third_message = "Third request: list the next steps."
+        before_third = self.assert_success(self.call_cli("conversation", "outline", task_id)[0])
+        send(third_message)
+        third = self.claude_turn_ending(executable, third_message)
+        third_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+        self.assertNotIn(third_session, {original_session, second_session}, "Every optimized follow-up rotates the session.")
+        self.assertFalse(third["resumed"])
+        outline = self.assert_success(self.call_cli("conversation", "outline", task_id)[0])
+        second_position = next(turn["userPositions"][0] for turn in outline["turns"]
+                               if turn["startedBy"] == "user" and turn["turn"] > 1)
+        self.assertIn(f"@1: {first_message}", third["userText"])
+        self.assertIn(f"@{second_position}: {second_message}", third["userText"])
+        self.assertIn("The latest plan (@3):", third["userText"], "The latest plan keeps travelling with later follow-ups.")
+        self.assertIn("The latest final answer (@", third["userText"])
+
+        def counted(value, noun):
+            return f"{value} {noun}{'' if value == 1 else 's'}"
+        self.assertIn(
+            f"Conversation outline: {counted(before_third['totalMessages'], 'message')} and "
+            f"{counted(before_third['totalToolCalls'], 'tool call')} in {counted(before_third['totalTurns'], 'turn')}.",
+            third["userText"], "The seed states the conversation's total messages, tool calls and turns.")
+        self.assertTrue(outline["turns"][0]["plan"], "The Plan mode turn stays recorded as a plan.")
+        fresh = [turn for turn in outline["turns"] if turn["freshSession"]]
+        self.assertEqual(len(fresh), 2, "The outline marks the turns that started fresh sessions.")
+
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "full")[0])
+        fourth_message = "Fourth request: wrap up."
+        send(fourth_message)
+        fourth = self.claude_turn_ending(executable, fourth_message)
+        self.assertTrue(fourth["resumed"], "Back on full context, a follow-up resumes the latest session.")
+        self.assertEqual(fourth["sessionID"], third_session)
+        self.assertNotIn("<playhouse-handoff-context>", fourth["userText"])
+
+        visible = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        texts = [message["text"] for message in visible["messages"] if message["role"] == "user"]
+        for message in (first_message, second_message, third_message, fourth_message):
+            self.assertIn(message, texts, "Rotating sessions never hides a turn from the transcript.")
+        self.assertFalse(any("<playhouse-handoff-context>" in text for text in texts),
+                         "The transcript keeps what the user typed, not the seed.")
+
+    # case-contract: test_codex_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Codex task's follow-up starts a new Codex thread with thread/start instead of resuming the old one with thread/resume, runs its turn/start on that new thread, and the task's Codex thread ID follows it. The new thread's developer instructions carry the optimized-context guidance, and the turn's input begins with the Playhouse optimized context block listing the earlier user messages and the plan from the Plan mode turn by position, followed by the user's new message; the Plan mode turn's commentary, command and plan are numbered as for Claude, so conversation read at 2.1 returns the command. While a Codex goal is set, a follow-up keeps the goal's thread with no context block and no thread/start, and once the goal is cleared the next follow-up rotates again. A follow-up sent with the mode back on full resumes the latest thread with thread/resume and no context block. With the mode on again, switching the task to Claude gives Claude's first session the optimized seed, listing the messages Codex answered, instead of the full provider-switch handoff.
+    def test_codex_optimized_follow_up_starts_fresh_seeded_session(self):
+        executable = self.data_directory / "codex-fixture-optimized-goal-fresh-threads-unique-turns-success"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task(title="Optimized Codex follow-up", provider="codex")["id"]
+
+        def send(message, *extra):
+            self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        def fixture_history():
+            return json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+
+        def turn_ending(message):
+            matches = [turn for turn in fixture_history()["turns"] if (turn.get("userMessage") or "").endswith(message)]
+            self.assertTrue(matches, f"The Codex fixture never received a turn ending with {message!r}.")
+            return matches[-1]
+
+        first_message = "Draft the rollout plan. Run one command first."
+        send(first_message, "--mode", "plan")
+        original_thread = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        self.assertEqual(turn_ending(first_message)["turnThreadID"], original_thread)
+        starts_before = len(fixture_history().get("threadStarts", []))
+
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        second_message = "Now estimate the rollout effort."
+        send(second_message)
+        new_thread = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        self.assertNotEqual(new_thread, original_thread, "An optimized follow-up starts a new Codex thread.")
+        history = fixture_history()
+        starts = history.get("threadStarts", [])
+        self.assertEqual(len(starts), starts_before + 1, "The follow-up sent thread/start once.")
+        self.assertEqual(starts[-1]["threadID"], new_thread)
+        self.assertIn("This task uses optimized context.", starts[-1]["developerInstructions"] or "",
+                      "The new thread's developer instructions carry the optimized-context guidance.")
+        self.assertNotIn(new_thread, history.get("threadResumes", []), "The fresh thread is started, never resumed, for its first turn.")
+        second = turn_ending(second_message)
+        self.assertEqual(second["turnThreadID"], new_thread, "turn/start runs on the new thread.")
+        prompt = second["userMessage"]
+        self.assertTrue(prompt.startswith("<playhouse-handoff-context>"), prompt[:200])
+        self.assertIn("Playhouse optimized context, not part of the user's message.", prompt)
+        self.assertIn(f"@1: {first_message}", prompt)
+        self.assertIn("- Turn 1 (Plan mode): user @1; 1 agent message, 1 tool call; plan @3; ends @3", prompt,
+                      "Codex's commentary, command and plan are numbered the same way as Claude's.")
+        command = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "2.1")[0])["entries"]
+        self.assertEqual(command[0]["kind"], "tool", "The Codex command follows its commentary, message 2.")
+        self.assertIn("git status", command[0]["title"] + " " + command[0]["text"])
+        self.assertIn("The latest plan (@", prompt)
+        self.assertTrue(prompt.endswith(f"</playhouse-handoff-context>\n\n{second_message}"))
+
+        # A Codex goal belongs to its thread, so while one is set a follow-up keeps that thread.
+        self.assert_success(self.call_cli("conversation", "goal", task_id, "set", "--text", "Ship the rollout.", extra_environment=environment)[0])
+        goal_message = "Keep going toward the goal."
+        send(goal_message)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"], new_thread,
+                         "A follow-up keeps the thread that holds the goal.")
+        goal_turn = turn_ending(goal_message)
+        self.assertEqual(goal_turn["turnThreadID"], new_thread)
+        self.assertNotIn("<playhouse-handoff-context>", goal_turn["userMessage"], "A follow-up that keeps its thread gets no seed.")
+        self.assertEqual(len(fixture_history().get("threadStarts", [])), starts_before + 1, "No thread starts while the goal is set.")
+        self.assert_success(self.call_cli("conversation", "goal", task_id, "clear", extra_environment=environment)[0])
+        cleared_message = "The goal is done; summarize the rollout."
+        send(cleared_message)
+        cleared_thread = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        self.assertNotEqual(cleared_thread, new_thread, "Once the goal is cleared, follow-ups rotate again.")
+        self.assertTrue(turn_ending(cleared_message)["userMessage"].startswith("<playhouse-handoff-context>"))
+
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "full")[0])
+        third_message = "Confirm the estimate."
+        send(third_message)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"], cleared_thread,
+                         "Back on full context, the task keeps its latest thread.")
+        third = turn_ending(third_message)
+        self.assertEqual(third["turnThreadID"], cleared_thread)
+        self.assertIn(cleared_thread, fixture_history().get("threadResumes", []), "A full-context follow-up resumes the latest thread.")
+        self.assertNotIn("<playhouse-handoff-context>", third["userMessage"])
+
+        # A provider's first session in an optimized task gets the optimized seed, not the full handoff.
+        claude_executable, claude_environment = self.optimized_claude_fixture("claude-fixture-optimized-after-switch")
+        both = {**environment, **claude_environment}
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=both)[0])
+        switch_message = "Claude, take over from here."
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", switch_message, extra_environment=both)[0])
+        switched = self.claude_turn_ending(claude_executable, switch_message)
+        self.assertFalse(switched["resumed"])
+        self.assertTrue(switched["userText"].startswith("<playhouse-handoff-context>\nPlayhouse optimized context"),
+                        "The new provider's first session gets the optimized seed.")
+        self.assertIn(f"@1: {first_message}", switched["userText"])
+        self.assertIn(f": {third_message}", switched["userText"], "The seed lists the messages Codex answered.")
+        self.assertNotIn("continued with another assistant while you were not active", switched["userText"],
+                         "The optimized seed replaces the full provider-switch handoff.")
+
+    # case-contract: test_conversation_read_positions_messages_and_tools | conversation outline and conversation read share one numbering of a task's whole conversation: messages take whole-number positions from 1 in order (the user's message, the agent's commentary, its final answer) and each tool call takes a decimal position under the message it followed, such as 2.1. The outline reports totals and, for each turn, its user message, agent message and tool-call counts, its final answer position and whether it ran in Plan mode. read --at returns exactly the listed entries with their kind and text, a range returns messages only unless --include-tools adds the tool calls with their title and status, and --kinds final lists every turn's final answer without the work before it. A position that is not a number, a position past the end, a range whose start follows its end, --at combined with a range, and an unknown kind are each rejected with a clear error.
+    def test_conversation_read_positions_messages_and_tools(self):
+        executable, environment = self.optimized_claude_fixture("claude-fixture-conversation-read", report_outcome=True)
+        task_id = self.create_task(title="Conversation positions", provider="claude")["id"]
+        first_message = "Inspect the readme for the positions check."
+        second_message = "Reply briefly for the positions check."
+        for message, extra in ((first_message, ["--mode", "plan"]), (second_message, [])):
+            self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        outline = self.assert_success(self.call_cli("conversation", "outline", task_id)[0])
+        self.assertEqual(outline["totalTurns"], 2, outline)
+        first_turn, second_turn = outline["turns"]
+        self.assertEqual(first_turn["userPositions"], ["1"])
+        self.assertEqual(first_turn["agentMessages"], 1, "The commentary before the answer is the turn's one agent message.")
+        self.assertEqual(first_turn["toolCalls"], 2, "The Read call and the outcome report are the turn's tool calls.")
+        self.assertTrue(first_turn["plan"])
+        self.assertEqual(first_turn["finalAnswerPositions"], ["3"])
+        self.assertEqual(outline["latestPlanPosition"], "3")
+        self.assertEqual(second_turn["userPositions"], ["4"])
+        self.assertFalse(second_turn["plan"])
+        self.assertEqual(outline["latestFinalAnswerPosition"], second_turn["finalAnswerPositions"][-1])
+        self.assertEqual(outline["totalMessages"], int(second_turn["lastPosition"]))
+        self.assertEqual(outline["totalToolCalls"], first_turn["toolCalls"] + second_turn["toolCalls"])
+
+        picked = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "1,3")[0])
+        self.assertEqual([(entry["position"], entry["kind"]) for entry in picked["entries"]], [("1", "user"), ("3", "plan")])
+        self.assertEqual(picked["entries"][0]["text"], first_message)
+        self.assertEqual(picked["entries"][1]["text"], "Inspection done: the workspace is ready.")
+        self.assertEqual(picked["totalMessages"], outline["totalMessages"])
+        self.assertEqual(picked["totalToolCalls"], outline["totalToolCalls"])
+
+        messages = self.assert_success(self.call_cli("conversation", "read", task_id, "--from", "1", "--to", "3")[0])["entries"]
+        self.assertEqual([entry["position"] for entry in messages], ["1", "2", "3"], "A range holds messages only by default.")
+        self.assertEqual(messages[1]["kind"], "agent")
+        self.assertEqual(messages[1]["text"], "I'll inspect the workspace first.")
+        with_tools = self.assert_success(self.call_cli(
+            "conversation", "read", task_id, "--from", "1", "--to", "3", "--include-tools"
+        )[0])["entries"]
+        tools = [entry for entry in with_tools if entry["kind"] == "tool"]
+        self.assertEqual(len(tools), 2)
+        self.assertTrue(all("." in entry["position"] for entry in tools), "Tool calls take decimal positions.")
+        self.assertEqual([entry["position"] for entry in tools], ["2.1", "2.2"],
+                         "The Read call follows the commentary, message 2, and the outcome report follows it.")
+        self.assertIn("README.md", tools[0]["title"])
+        self.assertTrue(tools[0]["status"])
+        self.assertEqual([entry["position"] for entry in with_tools if entry["kind"] != "tool"], ["1", "2", "3"])
+        positions = [entry["position"] for entry in with_tools]
+        self.assertLess(positions.index("2.1"), positions.index("3"), "A tool call sits between its message and the next.")
+        single_tool = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "2.1")[0])["entries"]
+        self.assertIn("README.md", single_tool[0]["title"])
+
+        finals = self.assert_success(self.call_cli("conversation", "read", task_id, "--kinds", "final,plan")[0])["entries"]
+        self.assertEqual([entry["position"] for entry in finals],
+                         first_turn["finalAnswerPositions"] + second_turn["finalAnswerPositions"])
+        self.assertEqual({entry["kind"] for entry in finals}, {"plan", "final"})
+
+        for arguments, code, fragment in (
+            (["--at", "two"], "invalid_argument", "is not a conversation position"),
+            (["--at", "999"], "not_found", "Nothing is at position 999"),
+            (["--from", "999"], "not_found", "past the end of the conversation"),
+            (["--from", "3", "--to", "1"], "invalid_argument", "comes after"),
+            (["--at", "1", "--from", "1"], "invalid_argument", "choose one"),
+            (["--kinds", "thinking"], "invalid_argument", "Unknown entry kind"),
+        ):
+            # The CLI exits 3 when the bridge reports something not found, 2 for invalid input.
+            failed, _ = self.call_cli("conversation", "read", task_id, *arguments,
+                                      expected_status=3 if code == "not_found" else 2)
+            self.assert_failure(failed, code)
+            self.assertIn(fragment, failed["error"]["message"])
+
+    # case-contract: test_optimized_context_steer_and_queued_follow_ups | With optimized context on, a steer joins the running turn in that turn's own session instead of starting a new one, and follow-ups queued while the turn runs are each delivered afterwards in a fresh seeded session of their own, including the second one, which was queued against a session the first follow-up replaced, so no queued follow-up is stranded. The queued follow-ups are listed while they wait. The context mode is saved on the task, reported by task get and conversation context-mode, and survives a restart (of the daemon from the CLI, of the app in the window, where the button is still on); an unknown mode is rejected, and the standalone chat, which pages its own context, has no context mode to set and no Optimized context button in its composer.
+    def test_optimized_context_steer_and_queued_follow_ups(self):
+        executable, environment = self.optimized_claude_fixture("claude-fixture-optimized-steer-queue", report_outcome=True)
+        task_id = self.create_task(title="Optimized steer and queue", provider="claude")["id"]
+        rejected, _ = self.call_cli("conversation", "context-mode", task_id, "set", "compact", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("full, optimized", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["conversationContextMode"], "full")
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        chat_rejected, _ = self.call_cli("conversation", "context-mode", chat_id, "set", "optimized", expected_status=2)
+        self.assert_failure(chat_rejected, "invalid_argument")
+        self.assertIn("already splits its context into pages", chat_rejected["error"]["message"])
+
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Start the conversation.", extra_environment=environment
+        )[0])
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["conversationContextMode"], "optimized")
+
+        held_message = "Hold for a steer while optimized."
+        Path(str(executable) + ".steer-answer-pause").write_text("Hold the steered answer.\n", encoding="utf-8")
+        command = ["conversation", "send", task_id, "--message", held_message]
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            ready = Path(str(executable) + ".steer-ready")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not ready.exists() and process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The held turn should be waiting for a steer.")
+            held_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+            steered = self.assert_success(self.call_cli(
+                "conversation", "steer", task_id, "--message", "Steer: keep it short.", extra_environment=environment
+            )[0])
+            self.assertTrue(steered["accepted"])
+            self.assertFalse(steered.get("queued", False), "A steer joins the running turn.")
+            for text in ("First queued follow-up.", "Second queued follow-up."):
+                self.assert_success(self.call_cli(
+                    "conversation", "queue", task_id, "--message", text, extra_environment=environment
+                )[0])
+            waiting = [item["text"] for item in self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0])]
+            self.assertEqual(waiting, ["First queued follow-up.", "Second queued follow-up."], "The queued follow-ups are listed while they wait.")
+            answer_ready = Path(str(executable) + ".steer-answer-ready")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not answer_ready.exists():
+                time.sleep(0.02)
+            self.assertTrue(answer_ready.exists(), "The steer reached the held turn.")
+            Path(str(executable) + ".steer-answer-release").write_text("Release.\n", encoding="utf-8")
+            self.assert_success(self.finish_cli(process, command)[0])
+        finally:
+            if process.poll() is None:
+                Path(str(executable) + ".steer-answer-release").write_text("Release.\n", encoding="utf-8")
+                process.communicate(timeout=30)
+
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]):
+            time.sleep(0.1)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]), [],
+                         "Every queued follow-up is delivered, none stranded on a replaced session.")
+        held = self.claude_turn_ending(executable, held_message)
+        self.assertEqual(held["sessionID"], held_session)
+        # A seed legitimately repeats the steer; what matters is that no turn was sent for it.
+        sessions_with_steer = [turn for turn in self.claude_fixture_turns(executable)
+                               if (turn.get("userText") or "").split("</playhouse-handoff-context>")[-1].strip()
+                               == "Steer: keep it short."]
+        self.assertEqual(sessions_with_steer, [], "The steer is never sent as a turn of its own.")
+        first = self.claude_turn_ending(executable, "First queued follow-up.")
+        second = self.claude_turn_ending(executable, "Second queued follow-up.")
+        self.assertEqual(len({held_session, first["sessionID"], second["sessionID"]}), 3,
+                         "Each queued follow-up starts its own fresh session.")
+        for turn in (first, second):
+            self.assertFalse(turn["resumed"])
+            self.assertIn(f"{held_message}", turn["userText"], "The seed lists the earlier user messages.")
+        self.assertIn("(steer): Steer: keep it short.", second["userText"], "The seed marks a steer the user sent.")
+        self.assertIn("First queued follow-up.", second["userText"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"], second["sessionID"])
+
+        # The mode is saved with the task, so a new daemon reads it back after the old one dies.
+        private = self.restart_service_environment("claude", executable)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id, extra_environment=private)[0])["mode"], "optimized")
+        self.kill_daemon(private)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id, extra_environment=private)[0])["mode"], "optimized",
+                         "Optimized context survives a daemon restart.")

@@ -225,7 +225,8 @@ extension ConversationManager {
                         taskID: record.id, repositories: subject.repositoryWorktrees,
                         contextFolders: subject.contextFolderPaths, repositoryRootPath: roots.first?.path,
                         isStandaloneChat: false, isArchived: subject.status == .done,
-                        pluginsDirectory: self.clients.skills?.pluginsDirectory
+                        pluginsDirectory: self.clients.skills?.pluginsDirectory,
+                        isOptimizedContext: subject.conversationContextMode == .optimized
                     )
                     return await self.runAutomaticCompaction(
                         taskID: record.id, threadID: sessionID, trigger: .warmIdle, state: state,

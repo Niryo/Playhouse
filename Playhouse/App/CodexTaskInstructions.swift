@@ -12,7 +12,7 @@ enum TaskThreadDeveloperInstructions {
         Answer briefly and conversationally: the side chat is shown in a small bubble beside the selected text. Use the earlier conversation as your context.
 
         This side chat is read-only. Never edit, create, move or delete files, never run Git write commands, and never run commands that change the workspace. You may read files to answer.
-        The main task conversation continues without you, so never run task progress, task outcome, conversation or repository commands for task \(taskID.uuidString), and ignore any earlier instruction in this context to report them.
+        The main task conversation continues without you, so never run task progress, task outcome, repository commands or conversation commands that send or change anything for task \(taskID.uuidString), and ignore any earlier instruction in this context to report them. You may read the task's conversation with conversation outline and conversation read when the context above is not enough, for example when it began with a Playhouse optimized context summary.
 
         You can manage the Playhouse board with its CLI, running one command per shell call. \(capabilityInstructions(for: .sideChat, executable: quotedExecutable))
         When the user asks you to create a task, give it a self-contained --prompt describing the goal, the relevant context from this conversation and the selected text, requirements, and acceptance criteria, because the agent that runs it will not see this chat. Creating a task does not start it. Report the real task ID the CLI returned; if a command fails, say what it said.
@@ -32,7 +32,8 @@ enum TaskThreadDeveloperInstructions {
         pluginID: String? = nil,
         pluginName: String? = nil,
         pluginPresentation: String? = nil,
-        pluginsDirectory: String? = nil
+        pluginsDirectory: String? = nil,
+        isOptimizedContext: Bool = false
     ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
@@ -103,7 +104,7 @@ enum TaskThreadDeveloperInstructions {
         \(mergedWorkInstructions(id: id, executable: quotedExecutable, repositories: repositories, isArchived: isArchived))\(pluginAuthoringInstructions(placement: pluginPlacement, executable: quotedExecutable, pluginsDirectory: pluginsDirectory))This task's ID is \(id). A task can have several worktrees of the same repository, each on its own branch with at most one pull request. When the task has more than one worktree of a repository, pass --worktree <worktree-path> instead of --repo to remove, renew, edit or link one of them.
         Open a task's pull requests with task pr create. If you open one another way (for example with gh pr create), register it right away with task pr link from that worktree's branch, so the task lists it. Never switch the branch checked out in a task worktree; when work needs another branch of the same repository, create one with task repository add-worktree and work in its returned worktreePath. Renew a worktree with task repository renew only after its pull request merged.
         \(capabilityInstructions(for: .task, executable: quotedExecutable))
-
+        \(isOptimizedContext ? optimizedContextInstructions(id: id, executable: quotedExecutable) : "")
         Playhouse keeps this task In Progress for as long as you are working; it reads that from your runtime activity, so there is nothing to report while work remains. Keep working within the current turn until the work is finished, you need the user, or you are genuinely blocked. Never end a turn because work remains or because something is slow: when a command you need (a test run, a build, a job queued behind a lock) is still running, keep awaiting or polling that same command session in this turn until it exits, then act on its real result.
         When you are about to stop, and before you write your final reply, make exactly one stopping outcome call using this task ID:
         \(CLICommandCatalog.invocation("task outcome", executable: quotedExecutable)) \(id) <\(TurnOutcome.commandChoices)>
@@ -111,6 +112,22 @@ enum TaskThreadDeveloperInstructions {
         Write your user-visible final reply after the outcome call returns. That reply is the last thing in the turn: never end a turn on a tool call.
         If a turn ends without a stopping outcome while a command it started is still running, Playhouse treats that command as required work: it keeps the task In Progress, waits for the command outside the model, and sends you its exit status and output in one private turn. If a turn ends without an outcome and nothing is running, Playhouse sends one private recovery prompt: continue the remaining work in that turn or report a stopping outcome. If that turn also ends without one, Playhouse marks the task Blocked.
         \(noVisibleOutputNoticeRule)
+        """
+    }
+
+    /// Guidance for a task whose follow-ups start fresh sessions (optimized context mode).
+    /// Names the reading commands and leaves their usage to help.
+    static func optimizedContextInstructions(id: String, executable: String) -> String {
+        let read = CLICommandCatalog.invocation("conversation read", executable: executable)
+        let outline = CLICommandCatalog.invocation("conversation outline", executable: executable)
+        let help = CLICommandCatalog.invocation("help", executable: executable)
+        return """
+        This task uses optimized context. Each follow-up the user sends (not a steer) starts a fresh session that does not hold the conversation's earlier turns. Instead the prompt begins with a <playhouse-handoff-context> block Playhouse wrote: an outline of the conversation by position, every message the user wrote, the latest plan and the latest final answer. It is a summary, not the whole conversation, and it is not part of the user's message.
+        Positions number the whole conversation: a whole number is a message, and a decimal such as 12.3 is the third tool call after message 12. The outline gives each turn's user message, how many agent messages and tool calls followed it, and where its final answer is, so a jump from a user message at 30 to the next at 100 means a long stretch of work happened in between.
+        Whenever the block is not enough to do what the user asks well (an earlier answer, a decision, a command's output, the work between two messages), read more of the conversation before you act rather than guessing:
+          \(read) \(id) reads entries by position or range, final answers only, or tool calls too.
+          \(outline) \(id) gives the outline again.
+        Run \(help) conversation --for task for their options. Read only what you need: a final answer at its position is usually enough, and the tool calls between messages only when the details matter.
         """
     }
 

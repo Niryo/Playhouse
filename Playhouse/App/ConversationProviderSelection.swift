@@ -126,6 +126,15 @@ extension ConversationManager {
         try await tasks.setConversationEffort(taskID, effort: effort)
     }
 
+    func contextMode(taskID: UUID) throws -> ConversationContextMode {
+        try tasks.conversationSubject(taskID).conversationContextMode
+    }
+
+    func setContextMode(taskID: UUID, mode: ConversationContextMode) async throws -> BoardTaskRecord {
+        defer { Self.bumpVisibleRevision(taskID) }
+        return try await tasks.setConversationContextMode(taskID, mode: mode)
+    }
+
     func setModelID(taskID: UUID, modelID: String) async throws {
         let task = try tasks.conversationSubject(taskID)
         try await tasks.setConversationModelID(taskID, modelID: modelID)

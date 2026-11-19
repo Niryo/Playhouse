@@ -122,13 +122,32 @@ def success(runtime, _session_state, message):
     # Emit the same item identities that thread/items/list returns.
     if "-unique-turns-success" in _session_state.mode:
         _session_state.index = len(_session_state.serial_history().get("turns", []))
-        for _session_state.item in (
-            {"id": f"item_user_fixture_{_session_state.index}", "type": "userMessage"},
-            {"id": f"item_assistant_fixture_{_session_state.index}", "type": "agentMessage", "phase": "final_answer", "text": runtime.answer_text(_session_state.turn_message)},
-        ):
+        runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+            "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID,
+            "item": {"id": f"item_user_fixture_{_session_state.index}", "type": "userMessage"},
+        }})
+        # `-fresh-threads-` turns that ask for a command first write commentary, run one
+        # command and then answer, so a test can number a Codex tool call.
+        if "-fresh-threads-" in _session_state.mode and (_session_state.turn_message or "").rstrip().endswith("Run one command first."):
+            command = {"id": f"item_command_fixture_{_session_state.index}", "type": "commandExecution",
+                       "command": "git status --short", "cwd": runtime.workspace_cwd(), "status": "inProgress"}
             runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
-                "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID, "item": _session_state.item,
+                "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID,
+                "item": {"id": f"item_commentary_fixture_{_session_state.index}", "type": "agentMessage",
+                         "phase": "commentary", "text": "Checking the workspace first."},
             }})
+            runtime.write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID, "item": command,
+            }})
+            runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID,
+                "item": {**command, "status": "completed", "exitCode": 0, "aggregatedOutput": "", "durationMs": 5},
+            }})
+        runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+            "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID,
+            "item": {"id": f"item_assistant_fixture_{_session_state.index}", "type": "agentMessage", "phase": "final_answer",
+                     "text": runtime.answer_text(_session_state.turn_message)},
+        }})
     if _session_state.mode.endswith("-long-history-success") and _session_state.turn_message == "Create a long history.":
         # Sixty replies in one turn, so a conversation that was empty when it opened
         # receives more messages than the newest batch it keeps rendered.

@@ -332,8 +332,9 @@ extension ConversationManager {
 
     /// Only transcripts written before nudges were shown still hold a nudge as the hidden-prompt
     /// placeholder; those turns stay hidden. A nudge sent today is stored and shown as sent.
-    static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
-        text.contains(privateOutcomeReminderPlaceholder)
+    /// History's composition and the conversation timeline both hide these turns with this check.
+    nonisolated static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
+        text.contains(PrivatePromptPlaceholder.outcomeReminder)
     }
 
     static func isValidModelID(_ value: String) -> Bool {
