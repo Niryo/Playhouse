@@ -742,7 +742,7 @@ class BridgeTestCases13:
         # Its plugin services (the pull-request-mode plugin's), which the daemon runs too.
         command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Services").glob("*.swift")))
         # The daemon's update commands, as build-bridge.sh compiles them for the daemon.
-        command.extend(str(root / "Playhouse/Bridge" / f"{name}.swift") for name in ("BridgeContract", "BridgeSocket", "UpdateCore", "ReleaseSigningKey"))
+        command.extend(str(root / "Playhouse/Bridge" / f"{name}.swift") for name in ("BridgeContract", "CLICommandCatalog", "BridgeSocket", "UpdateCore", "ReleaseSigningKey"))
         command.extend([str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
         compiled = subprocess.run(command, capture_output=True, text=True, timeout=180)
         self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)

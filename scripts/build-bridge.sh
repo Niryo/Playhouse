@@ -123,6 +123,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/Plugins/Services/BuiltInCommandsPlugin.swift"
   "${repository_root}/Playhouse/App/UpdateManager.swift"
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
+  "${repository_root}/Playhouse/Bridge/CLICommandCatalog.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
   "${repository_root}/Playhouse/Bridge/UpdateCore.swift"
   "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"
@@ -188,6 +189,7 @@ shared_sources=(
 
 cli_sources=(
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
+  "${repository_root}/Playhouse/Bridge/CLICommandCatalog.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
   "${repository_root}/Playhouse/Bridge/UpdateCore.swift"
   "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"

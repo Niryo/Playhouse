@@ -138,13 +138,13 @@ def side_chat_selection(runtime, text):
 
 
 def run_side_chat_cli(runtime, instructions, marker, extra):
-    """Runs the Playhouse CLI the side chat instructions list (found by `marker`) with `extra`
+    """Runs the Playhouse CLI the side chat instructions name (on the line holding `marker`) with `extra`
     arguments inside a read-only macOS sandbox, as Codex runs a side chat's commands, and
     returns its parsed JSON output."""
     line = next((line.strip() for line in (instructions or "").splitlines()
                  if line.strip().startswith("'") and marker in line), None)
     if line is None:
-        return {"ok": False, "error": "The side chat instructions list no such command."}
+        return {"ok": False, "error": "The side chat instructions name no such command."}
     executable = runtime.shlex.split(line)[0]
     completed = runtime.subprocess.run(["/usr/bin/sandbox-exec", "-p", runtime.READ_ONLY_SANDBOX_PROFILE, executable] + extra,
                                capture_output=True, text=True, timeout=60)
@@ -191,13 +191,13 @@ def handle_side_chat(runtime, message, history_path):
     selection = runtime.side_chat_selection(text)
     question = text.split("</selected-text>", 1)[-1].strip()
     if "create a task" in question.lower():
-        created = runtime.run_side_chat_cli(side_chat["instructions"], "task create", [
+        created = runtime.run_side_chat_cli(side_chat["instructions"], " help --for side-chat", [
             "task", "create", "--title", "Side chat follow-up", "--prompt", f"Follow up on the side chat about: {question}"])
         task_id = (created.get("result") or {}).get("id") if created.get("ok") else None
         reply = f"Created task {task_id}." if task_id else f"Could not create the task: {created.get('error')}"
         if task_id:
             # Beyond the board commands, the daemon refuses what the sandbox would stop.
-            deleted = runtime.run_side_chat_cli(side_chat["instructions"], "task create", ["task", "delete", task_id])
+            deleted = runtime.run_side_chat_cli(side_chat["instructions"], " help --for side-chat", ["task", "delete", task_id])
             record("sideChatForbiddenRequests", {"command": "task delete", "ok": deleted.get("ok"),
                                                   "error": (deleted.get("error") or {}).get("code") if isinstance(deleted.get("error"), dict) else deleted.get("error")})
     elif selection is not None:

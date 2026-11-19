@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Playhouse: a macOS Kanban board for coding agents</title>
+  <meta name="description" content="Playhouse is a macOS Kanban board for Claude Code and Codex. Run agent tasks in parallel across repositories, extend the app with plugins, and track progress, tokens and CPU per task.">
+  <meta property="og:title" content="Playhouse">
+  <meta property="og:description" content="A macOS Kanban board for coding agents.">
+  <meta property="og:image" content="images/board.png">
+  <link rel="icon" type="image/png" href="images/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <div class="backdrop" aria-hidden="true">
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <div class="orb orb-c"></div>
+    <div class="grain"></div>
+  </div>
+
+  <header class="nav" id="nav">
+    <a class="brand" href="#top">
+      <img src="images/icon.png" alt="" width="28" height="28">
+      <span>Playhouse</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#multi-repo">Overview</a>
+      <a href="#features">Features</a>
+      <a href="#start">Install</a>
+    </nav>
+    <a class="btn btn-ghost btn-sm" href="https://github.com/Niryo/Playhouse">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </header>
+
+  <main id="top">
+    <!-- Hero -->
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow reveal">Native macOS · Claude Code · Codex</p>
+        <h1 class="reveal" style="--d:80ms">A Kanban board<br>for coding agents.</h1>
+        <p class="lede reveal" style="--d:160ms">
+          Playhouse runs Claude Code and Codex tasks in parallel on your Mac. Each task works in its own Git worktrees,
+          reports its progress and resource usage, and ends in a pull request for you to review.
+        </p>
+        <div class="hero-cta reveal" style="--d:240ms">
+          <a class="btn btn-primary" href="#start">Install</a>
+          <a class="btn btn-ghost" href="#multi-repo">Overview <span aria-hidden="true">↓</span></a>
+        </div>
+      </div>
+      <div class="hero-shot reveal" style="--d:320ms">
+        <div class="window">
+          <div class="window-bar"><i></i><i></i><i></i><span>Playhouse</span></div>
+          <img src="images/board.png" alt="The Playhouse board with tasks in Blocked, Waiting Response, In Progress, Backlog and Review" width="1600" height="885">
+        </div>
+        <div class="hero-glow"></div>
+      </div>
+    </section>
+
+    <!-- Flow strip -->
+    <section class="flow reveal" aria-label="Task lifecycle">
+      <div class="flow-track">
+        <span class="chip chip-gray">Backlog</span><b></b>
+        <span class="chip chip-orange">In Progress</span><b></b>
+        <span class="chip chip-purple">Waiting Response</span><b></b>
+        <span class="chip chip-red">Blocked</span><b></b>
+        <span class="chip chip-blue">Review</span><b></b>
+        <span class="chip chip-green">Done</span>
+      </div>
+      <p>Task status updates automatically as the agent works.</p>
+    </section>
+
+    <!-- Pillar 1: multi repo -->
+    <section class="pillar" id="multi-repo">
+      <div class="pillar-copy">
+        <span class="pillar-num reveal">01</span>
+        <h3 class="reveal" style="--d:60ms">Tasks span multiple repositories</h3>
+        <p class="reveal" style="--d:120ms">
+          A task is not tied to one repository. Attach as many as the work needs, or none at all.
+        </p>
+        <ul class="ticks reveal" style="--d:180ms">
+          <li>Each repository gets its own Git worktree and branch, so parallel tasks don't conflict.</li>
+          <li>Add a repository at any point in the conversation.</li>
+          <li>One task can open a pull request in each of its repositories.</li>
+          <li>Add a second worktree of the same repository to work on two branches.</li>
+        </ul>
+      </div>
+      <div class="pillar-visual reveal" style="--d:120ms">
+        <div class="graph" data-graph>
+          <svg class="graph-lines" viewBox="0 0 520 420" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="lg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="520" y2="0">
+                <stop offset="0" stop-color="#8b7bff"/>
+                <stop offset="1" stop-color="#4fc3ff"/>
+              </linearGradient>
+            </defs>
+            <path d="M260 120 C 260 190, 81 190, 81 270"/>
+            <path d="M260 120 L 260 270"/>
+            <path d="M260 120 C 260 190, 439 190, 439 270"/>
+          </svg>
+          <div class="mock-card graph-task">
+            <div class="mock-title">Ship Apple Pay checkout</div>
+            <div class="mock-line"><span class="dot dot-orange pulse"></span>Updating payment intents in 3 repos</div>
+            <div class="mock-row">
+              <span class="mini-chip">storefront-web</span>
+              <span class="mini-chip">payments-api</span>
+              <span class="mini-chip">ios-app</span>
+            </div>
+          </div>
+          <div class="repo repo-1">
+            <div class="repo-name">storefront-web</div>
+            <div class="repo-meta"><code>playhouse/apple-pay</code></div>
+            <span class="pr pr-open">PR #482</span>
+          </div>
+          <div class="repo repo-2">
+            <div class="repo-name">payments-api</div>
+            <div class="repo-meta"><code>playhouse/apple-pay</code></div>
+            <span class="pr pr-green">PR #131 ✓</span>
+          </div>
+          <div class="repo repo-3">
+            <div class="repo-name">ios-app</div>
+            <div class="repo-meta"><code>playhouse/apple-pay</code></div>
+            <span class="pr pr-merged">Merged</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Pillar 2: plugins -->
+    <section class="pillar pillar-flip" id="plugins">
+      <div class="pillar-copy">
+        <span class="pillar-num reveal">02</span>
+        <h3 class="reveal" style="--d:60ms">Extend it with plugins</h3>
+        <p class="reveal" style="--d:120ms">
+          Plugins are JavaScript files that render as native SwiftUI and have access to app state and actions.
+          Built-in features such as the pull request modes are implemented as plugins.
+        </p>
+        <ul class="ticks reveal" style="--d:180ms">
+          <li>Add controls to the sidebar, task cards, the task toolbar or the composer.</li>
+          <li>Display as a popover, sheet, side panel, page or inline view.</li>
+          <li>Read and update tasks, send messages and register <code>/</code> commands.</li>
+          <li>Describe a plugin in Add Plugin mode and an agent writes it for you.</li>
+        </ul>
+        <a class="text-link reveal" style="--d:220ms" href="https://github.com/Niryo/Playhouse/blob/master/Playhouse/App/Plugins/README.md">Plugin guide →</a>
+      </div>
+      <div class="pillar-visual reveal" style="--d:120ms">
+        <div class="plugin-stage">
+          <div class="code-window">
+            <div class="window-bar"><i></i><i></i><i></i><span>release-train/index.js</span></div>
+<pre class="code"><code><span class="k">function</span> <span class="f">ReleaseTrain</span>() {
+  <span class="k">var</span> props = Playhouse.<span class="f">useProps</span>();
+  <span class="k">var</span> running = props.agents.runningTasks;
+  <span class="k">return</span> <span class="f">h</span>(Stack, { spacing: <span class="n">6</span> },
+    <span class="f">h</span>(Text, { weight: <span class="s">"bold"</span> }, <span class="s">"v2.8 · Storefront"</span>),
+    <span class="f">h</span>(Meter, { fraction: <span class="n">17</span> / <span class="n">25</span> }),
+    <span class="f">h</span>(Text, { color: <span class="s">"secondary"</span> },
+      <span class="s">"Agents running: "</span>,
+      String(running.claude + running.codex)));
+}
+Playhouse.<span class="f">render</span>(<span class="f">h</span>(ReleaseTrain));</code></pre>
+          </div>
+          <div class="plugin-result">
+            <img src="images/plugin.png" alt="A Release Train plugin in the board sidebar showing release progress and running agents" width="216" height="150">
+            <span class="plugin-tag">Rendered as native SwiftUI</span>
+          </div>
+          <div class="placements" aria-label="Plugin placements">
+            <span>Main sidebar</span>
+            <span>Sidebar bottom</span>
+            <span>Task card</span>
+            <span>Conversation sidebar</span>
+            <span>Sidebar toolbar</span>
+            <span>Chat input actions</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Pillar 3: visibility -->
+    <section class="pillar" id="visibility">
+      <div class="pillar-copy">
+        <span class="pillar-num reveal">03</span>
+        <h3 class="reveal" style="--d:60ms">See what every agent is doing</h3>
+        <p class="reveal" style="--d:120ms">
+          Each task card shows the information you need to monitor and control its agent.
+        </p>
+        <ul class="ticks reveal" style="--d:180ms">
+          <li><b>Progress</b>: the agent's current step.</li>
+          <li><b>Tokens</b>: usage per task, with a breakdown of input, cached and output tokens.</li>
+          <li><b>CPU</b>: a meter showing the load the task puts on your machine.</li>
+          <li><b>Rate limits</b>: session and weekly limits per Claude and Codex account.</li>
+          <li><b>Status</b>: the reason a task is blocked or waiting for you.</li>
+        </ul>
+      </div>
+      <div class="pillar-visual reveal" style="--d:120ms">
+        <div class="telemetry" data-telemetry>
+          <div class="mock-card tele-card">
+            <div class="tele-head">
+              <span class="chip chip-orange sm">In Progress</span>
+              <span class="tele-time" data-clock>0:22</span>
+            </div>
+            <div class="mock-title">Add rate limiting to the public API</div>
+            <div class="mock-line"><span class="spinner"></span><span data-activity>Testing rateLimit.test.ts: 429 after limit, headers</span></div>
+            <div class="tele-stats">
+              <div class="stat">
+                <span class="stat-label">Tokens</span>
+                <span class="stat-value mono" data-count-to="48600" data-format="k">0</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">CPU</span>
+                <div class="meter"><i data-cpu></i></div>
+                <span class="stat-value mono" data-cpu-label>0%</span>
+              </div>
+            </div>
+            <div class="mock-row end">
+              <span class="mini-chip">Green ›</span>
+              <span class="mini-chip pr-text">#517</span>
+            </div>
+          </div>
+          <div class="mock-card limits-card">
+            <div class="limits-head"><b>Codex</b><span>Plus</span></div>
+            <div class="limit"><span>5h</span><span class="mono">30%</span></div>
+            <div class="bar"><i style="--v:30%"></i></div>
+            <div class="limit-sub">Resets in 2h 13m</div>
+            <div class="limit"><span>Weekly</span><span class="mono">62%</span></div>
+            <div class="bar"><i style="--v:62%"></i></div>
+            <div class="limit-sub">Resets in 3d 23h</div>
+          </div>
+          <div class="mock-card alert-card">
+            <span class="dot dot-red"></span>
+            <div>
+              <div class="alert-title">Blocked</div>
+              <div class="alert-text">Needs rds:RestoreDBInstanceFromDBSnapshot on the staging snapshot</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section id="features" class="section-head">
+      <h2 class="reveal">Features</h2>
+    </section>
+
+    <section class="showcase">
+      <article class="show reveal">
+        <div class="show-copy">
+          <h4>Task conversations</h4>
+          <p>Each task is a conversation with an agent. When the work is done, the task moves to Review.</p>
+        </div>
+        <button class="shot" data-zoom><img src="images/conversation.png" alt="A task conversation explaining the root cause of a flaky Safari test" loading="lazy"></button>
+      </article>
+      <article class="show show-flip reveal">
+        <div class="show-copy">
+          <h4>Diffs and terminal</h4>
+          <p>The Changes panel lists the files the agent edited, with a side-by-side diff for each. A terminal opens in the task's worktree.</p>
+        </div>
+        <button class="shot" data-zoom><img src="images/diff.png" alt="Side-by-side diff of the agent's fix" loading="lazy"></button>
+      </article>
+      <article class="show reveal">
+        <div class="show-copy">
+          <h4>Side chats</h4>
+          <p>Select text in a reply and ask a question about it. The side chat doesn't affect the main conversation or the agent's context.</p>
+        </div>
+        <button class="shot" data-zoom><img src="images/side-chat.png" alt="A side chat open beside a selected passage of an agent's reply" loading="lazy"></button>
+      </article>
+      <article class="show show-flip reveal">
+        <div class="show-copy">
+          <h4>Questions and blockers</h4>
+          <p>When an agent needs a decision, the task moves to Waiting Response and shows the question.</p>
+        </div>
+        <button class="shot" data-zoom><img src="images/waiting.png" alt="An agent asking whether to confirm Stripe payments on the client or the server" loading="lazy"></button>
+      </article>
+    </section>
+
+    <section class="modes reveal">
+      <div class="modes-copy">
+        <h4>Pull request modes</h4>
+        <p>Before a task moves to Review, its changes are committed and pushed. Each task's mode sets what happens next.</p>
+      </div>
+      <ol class="modes-steps">
+        <li><b>Manual</b><span>You open the pull request yourself.</span></li>
+        <li><b>PR</b><span>Opens the pull request when the task reaches Review.</span></li>
+        <li><b>Green</b><span>Fixes failing checks and review comments until it's green.</span></li>
+        <li><b>Merge</b><span>Like Green, then merges once it's green.</span></li>
+      </ol>
+    </section>
+
+    <section class="grid">
+      <div class="tile reveal">
+        <div class="tile-icon">⇄</div>
+        <h5>Claude Code and Codex</h5>
+        <p>Choose a provider per task and switch during a conversation. The transcript carries over.</p>
+        <img class="tile-img" src="images/providers.png" alt="The provider menu in the composer" loading="lazy">
+      </div>
+      <div class="tile reveal" style="--d:60ms">
+        <div class="tile-icon">◷</div>
+        <h5>Schedules</h5>
+        <p>Run a task once at a set time, or hourly, daily, on weekdays or weekly.</p>
+      </div>
+      <div class="tile reveal" style="--d:120ms">
+        <div class="tile-icon">✦</div>
+        <h5>Skills, rules and MCP</h5>
+        <p>Manage skills, rules and MCP servers for both providers.</p>
+      </div>
+      <div class="tile reveal">
+        <div class="tile-icon">◎</div>
+        <h5>Plan mode</h5>
+        <p>Review a plan before the agent changes any code.</p>
+      </div>
+      <div class="tile reveal" style="--d:60ms">
+        <div class="tile-icon">☰</div>
+        <h5>Standalone chat</h5>
+        <p>A conversation that isn't attached to a task.</p>
+      </div>
+      <div class="tile reveal" style="--d:120ms">
+        <div class="tile-icon mono">&gt;_</div>
+        <h5>CLI</h5>
+        <p>App actions are also available through the bundled <code>playhouse-cli</code>.</p>
+      </div>
+    </section>
+
+    <!-- Getting started -->
+    <section id="start" class="start">
+      <h2 class="reveal">Install</h2>
+      <p class="lede reveal" style="--d:80ms">Install the latest Apple Silicon release into <code>/Applications</code>:</p>
+      <div class="terminal reveal" style="--d:200ms">
+        <div class="window-bar"><i></i><i></i><i></i><span>Terminal</span></div>
+        <div class="terminal-body">
+          <span class="prompt">$</span>
+          <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/Niryo/Playhouse/master/scripts/install-release.sh | bash</code>
+          <button class="copy" type="button" data-copy="#install-cmd" aria-label="Copy install command">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" d="M9 9h10v10H9zM5 15V5h10"/></svg>
+            <span>Copy</span>
+          </button>
+        </div>
+      </div>
+      <div class="reqs reveal" style="--d:260ms">
+        <div><b>macOS 14+</b><span>Apple Silicon</span></div>
+        <div><b>Claude Code or Codex</b><span>CLI, signed in</span></div>
+        <div><b>GitHub CLI</b><span><code>gh</code>, for pull requests</span></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="brand"><img src="images/icon.png" alt="" width="22" height="22"><span>Playhouse</span></div>
+    <p>Free software under the <a href="https://github.com/Niryo/Playhouse/blob/master/LICENSE">GNU GPL v3</a>.</p>
+    <a href="https://github.com/Niryo/Playhouse">github.com/Niryo/Playhouse</a>
+  </footer>
+
+  <div class="lightbox" id="lightbox" hidden><img alt=""></div>
+  <script src="assets/site.js"></script>
+</body>
+</html>

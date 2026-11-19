@@ -631,4 +631,119 @@ extension PlayhouseUITests {
         XCTAssertEqual(accessibleLabelOrValue(of: branchValue), secondBranch, "The conversation should show the second task's suffixed branch.")
         attachScreenshot(named: "A task keeps its resolved branch when another task already used the slug")
     }
+
+    // case-contract: test_cli_help_lists_commands_by_group_and_audience | The CLI's help is printed from its single command catalog, which the parser also requires: help, help <group> and <group> --help print that group's declared commands with their usage and a one-line description, and --for <audience> narrows them to one agent. The standalone chat's help lists the board commands, task create and every schedule command but no internal command (schedule tick) and no task-only command (task outcome, task progress publish, task pr autopilot, task move to Done --discard-changes); the task agent's help lists those task commands and still no internal one; the side chat's help lists only the read-only board commands its hook lets it run, the same list it is refused with, and never the option that starts a task; the plugin editor's help lists plugin render and no task or schedule command. The full help lists everything, internal commands marked. An unknown group or audience and an undeclared command or operation are refused as invalid_argument, pointing at help. Following the chat's help, a new task is created and scheduled once for tomorrow at 09:00 with schedule set, and it is in schedule list and in the Scheduled Tasks popover with that run time. The help reads only the CLI's own catalog and the schedule goes through the shared board manager, so provider selection cannot change either; no provider runs.
+    func test_cli_help_lists_commands_by_group_and_audience() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        /// The CLI's help: plain text, not a JSON response.
+        func helpText(_ arguments: [String]) throws -> String {
+            let process = Process()
+            process.executableURL = cliURL
+            process.arguments = arguments
+            var environment = ProcessInfo.processInfo.environment
+            environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
+            environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
+            process.environment = environment
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = output
+            try process.run()
+            let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0, "\(arguments): \(text)")
+            return text
+        }
+        func commands(_ text: String) -> [String] {
+            text.components(separatedBy: "\n").filter { $0.hasPrefix("  playhouse ") }.map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+        func refused(_ arguments: [String]) throws -> String {
+            let response = try runCLI(arguments, expectedStatus: 2)
+            assertCLIError(response, code: "invalid_argument")
+            let message = ((response["error"] as? [String: Any])?["message"] as? String) ?? ""
+            XCTAssertTrue(message.contains("help"), "\(arguments) should point at help: \(message)")
+            return message
+        }
+
+        let full = try helpText(["help"])
+        XCTAssertTrue(full.contains("`playhouse` stands for this CLI: \(cliURL.path)"), full)
+        XCTAssertEqual(try helpText([]), full, "Running the CLI with no arguments prints the full help.")
+        XCTAssertTrue(full.contains("  playhouse schedule tick [--now <ISO8601>]"))
+        XCTAssertTrue(full.contains("each minute. (internal)"), "The full help marks internal commands.")
+        XCTAssertTrue(full.contains("  playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>]"))
+
+        // One group, asked either way, lists only its own commands, each with a description.
+        let schedule = try helpText(["help", "schedule"])
+        XCTAssertEqual(try helpText(["schedule", "--help"]), schedule)
+        XCTAssertFalse(commands(schedule).isEmpty)
+        XCTAssertTrue(commands(schedule).allSatisfy { $0.hasPrefix("playhouse schedule ") }, schedule)
+        XCTAssertTrue(commands(schedule).contains("playhouse schedule set <task-id> --prompt <text> --once <ISO8601> [--title <title>] [--image <path>...] [--mode default|plan] [--model <id>]"))
+        XCTAssertTrue(schedule.contains("      Schedule a task to start once with this prompt"))
+        XCTAssertTrue(commands(try helpText(["task", "--help"])).contains("playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]"))
+        XCTAssertEqual(try helpText(["task", "pr", "--help"]), try helpText(["help", "task", "pr"]))
+        XCTAssertTrue(commands(try helpText(["help", "task", "pr"])).allSatisfy { $0.hasPrefix("playhouse task pr ") })
+
+        let chat = try helpText(["help", "--for", "chat"])
+        for line in ["playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]",
+                     "playhouse schedule list", "playhouse schedule clear|pause|resume|run-now <task-id>",
+                     "playhouse workspace repos list", "playhouse plugin mode [--on|--off]"] {
+            XCTAssertTrue(commands(chat).contains(line), "The chat's help should list \(line).")
+        }
+        XCTAssertTrue(commands(chat).contains { $0.hasPrefix("playhouse schedule set <task-id> --prompt <text> --once ") })
+        for hidden in ["schedule tick", "task outcome", "task progress publish", "task pr autopilot", "--discard-changes", "(internal)", "chat page new"] {
+            XCTAssertFalse(chat.contains(hidden), "The chat's help must not list \(hidden).")
+        }
+        XCTAssertEqual(try helpText(["schedule", "--help", "--for", "chat"]), try helpText(["help", "schedule", "--for", "chat"]))
+        XCTAssertFalse(try helpText(["help", "schedule", "--for", "chat"]).contains("schedule tick"))
+
+        let task = try helpText(["help", "--for", "task"])
+        for line in ["playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>]",
+                     "playhouse task move <task-id> Done --discard-changes", "playhouse task repository add <task-id> --repo <path>",
+                     "playhouse task repository add-worktree <task-id> --repo <path> [--branch <name>] [--branch-from <ref>]",
+                     "playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>"] {
+            XCTAssertTrue(commands(task).contains(line), "The task agent's help should list \(line).")
+        }
+        XCTAssertTrue(commands(task).contains { $0.hasPrefix("playhouse task progress publish ") })
+        XCTAssertTrue(commands(task).contains { $0.hasPrefix("playhouse task pr autopilot ") })
+        XCTAssertFalse(task.contains("schedule tick"))
+        XCTAssertFalse(task.contains("(internal)"))
+
+        let side = Set(commands(try helpText(["help", "--for", "side-chat"])).map { line in
+            String(line.components(separatedBy: " <")[0].components(separatedBy: " --")[0].components(separatedBy: " [")[0])
+        })
+        XCTAssertEqual(side.sorted(), [
+            "playhouse help", "playhouse task create", "playhouse task get|show", "playhouse task list", "playhouse task prompt",
+            "playhouse task rename", "playhouse version", "playhouse workspace repos list",
+        ])
+
+        XCTAssertFalse(try helpText(["help", "--for", "side-chat"]).contains("--submitted"), "A read-only side chat can't start a task.")
+        let editor = commands(try helpText(["help", "--for", "plugin-editor"]))
+        XCTAssertTrue(editor.contains { $0.hasPrefix("playhouse plugin render ") }, "\(editor)")
+        XCTAssertFalse(editor.contains { $0.hasPrefix("playhouse task ") || $0.hasPrefix("playhouse schedule ") }, "\(editor)")
+
+        XCTAssertTrue(try refused(["help", "nosuch"]).contains("Groups: help, status"))
+        XCTAssertTrue(try refused(["help", "--for", "nobody"]).contains("chat, side-chat, task, plugin-editor"))
+        XCTAssertTrue(try refused(["task", "bogus"]).contains("playhouse help task"))
+        XCTAssertTrue(try refused(["frobnicate"]).contains("playhouse help"))
+
+        // An agent that follows the chat's help can schedule a task for tomorrow at 09:00.
+        let once = try XCTUnwrap(commands(chat).first { $0.hasPrefix("playhouse schedule set <task-id> --prompt <text> --once ") })
+        XCTAssertTrue(once.contains("--once <ISO8601>"))
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Write the release notes", "--prompt", "Write the release notes for the next version.",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        let calendar = Calendar.current
+        let tomorrow = try XCTUnwrap(calendar.date(bySettingHour: 9, minute: 0, second: 0, of: try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: Date()))))
+        _ = try runCLI(["schedule", "set", taskID, "--prompt", "Write the release notes.", "--once", scheduleISO(tomorrow)])
+        let listed = try XCTUnwrap((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
+        XCTAssertEqual(listed.compactMap { $0["id"] as? String }, [taskID])
+        XCTAssertEqual(scheduleDate((listed.first?["schedule"] as? [String: Any])?["scheduledAt"] as? String), tomorrow)
+
+        openScheduledTasksPopover()
+        let surface = element("plugin-surface-scheduled-tasks")
+        XCTAssertTrue(element("scheduled-task-row-\(taskID)").waitToExist(timeout: 10), "The scheduled task should be in the Scheduled Tasks popover.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("scheduled-task-title-\(taskID)")), "Write the release notes")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("scheduled-task-summary-\(taskID)")), "Tomorrow 09:00")
+        attachScreenshot(named: "A task scheduled through the chat's help is in Scheduled Tasks")
+        attachElementScreenshot(surface, named: "Scheduled Tasks popover with the task scheduled for tomorrow at 09:00")
+    }
 }

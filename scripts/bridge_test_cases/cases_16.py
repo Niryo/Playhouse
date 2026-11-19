@@ -28,7 +28,7 @@ class BridgeTestCases16:
         (generated / "file-1000.txt").unlink()
         response, _ = self.call_cli("task", "changes", "list", task_id)
         self.assertEqual(len(self.assert_success(response)["unviewed"]), 1000)
-    # case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it.
+    # case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history, the answer once and as the final answer. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it.
     def test_claude_nudged_turn_work_stays_in_conversation(self):
         env = self.install_claude_fixture("claude-fixture-nudged-work")
         executable = Path(env["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
@@ -90,6 +90,8 @@ class BridgeTestCases16:
             self.assertIn(race_report, assistant, f"{label}: the report that arrived right after the answer should be kept.")
             tail = [entry for entry in assistant if entry != race_report][-len(expected_tail):]
             self.assertEqual(tail, expected_tail, f"{label}: the nudged turn's work should be in order.")
+            self.assertEqual([entry for entry in assistant if entry[1] == stale_answer], [("final_answer", stale_answer)],
+                             f"{label}: the answer recorded before the review's report is kept once, as the final answer.")
             serialized = json.dumps(messages)
             self.assertEqual(sum(1 for m in messages if m["role"] == "user" and "Playhouse internal outcome nudge:" in m["text"]), 1,
                              f"{label}: the nudge Playhouse sent is shown once, as its own message.")

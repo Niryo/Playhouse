@@ -137,7 +137,15 @@ class BridgeTestCases02:
         chat_instructions = chat_fixture_history.get("threadStartDeveloperInstructions") or ""
         self.assertIn("task create", chat_instructions, "The chat must be taught the Playhouse task CLI.")
         self.assertIn("they always mean Playhouse", chat_instructions)
-        self.assertIn('task create --title "<title>" --prompt', chat_instructions, "The chat must create tasks with a full description.")
+        self.assertIn("`task create` requires --prompt", chat_instructions, "The chat must create tasks with a full description.")
+        # Its capabilities come from the CLI's own help, never from a copied command list that
+        # drifts from the CLI, and it may call something impossible only after checking help.
+        self.assertIn(f"'{self.cli}' help --for chat", chat_instructions)
+        self.assertIn("Say that something isn't possible only after its help shows no command for it.", chat_instructions)
+        self.assertNotIn('task create --title "<title>"', chat_instructions)
+        self.assertNotIn("say so plainly", chat_instructions)
+        self.assertIn("Never start, move or schedule a task unless the user asks you to", chat_instructions)
+        self.assertIn("Before you delete anything, such as a task, skill, rule or MCP server, confirm with the user.", chat_instructions)
         # Page titles reach the user as transcript separators, parsed from close-turn.
         # Assert the prohibition positively too: pinning only the old wording would let the
         # instruction come back phrased differently.

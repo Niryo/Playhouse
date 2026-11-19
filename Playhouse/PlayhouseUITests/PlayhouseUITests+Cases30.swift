@@ -993,8 +993,11 @@ extension PlayhouseUITests {
         let repositoryPath = try XCTUnwrap(first["repositoryPath"] as? String)
         XCTAssertTrue(instructions.contains("\(repositoryPath) -> \(firstPath)"))
         XCTAssertTrue(instructions.contains("\(repositoryPath) -> \(secondPath)"))
-        XCTAssertTrue(instructions.contains("task repository add-worktree \(taskID) --repo <path>"))
-        XCTAssertTrue(instructions.contains("task pr link \(taskID) --worktree <path> --url <pr-url>"))
+        // The rules name the commands; their usage is in the task agent's help, with this task's ID given.
+        XCTAssertTrue(instructions.contains("create one with task repository add-worktree and work in its returned worktreePath"))
+        XCTAssertTrue(instructions.contains("register it right away with task pr link from that worktree's branch"))
+        XCTAssertTrue(instructions.contains("This task's ID is \(taskID)."))
+        XCTAssertTrue(instructions.contains("\(cliURL.path)' help --for task"))
         XCTAssertTrue(instructions.contains("Never switch the branch checked out in a task worktree"))
 
         // A new task can list one repository twice: each gets its own chip and, once started, its own branch.

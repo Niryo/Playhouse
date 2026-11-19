@@ -299,10 +299,14 @@ enum BridgeFraming {
 enum SideChatReadOnlyPolicy {
     static let hookSubcommand = ["hook", "side-chat-pre-tool-use"]
     static let deniedTools = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
-    /// The CLI commands the side chat instructions list; never a turn, outcome, progress or
-    /// repository command, which belong to the task's own conversation.
-    static let allowedCLICommands = ["task list", "task get", "task create", "task rename", "task prompt", "workspace repos list"]
-    static let denialMessage = "This side chat is read-only: it can read files and run the Playhouse CLI's board commands (task list, get, create, rename, prompt and workspace repos list), one per shell call, but it can't change files or run other commands."
+    /// The CLI commands of the side chat's audience, which its help lists: `help` and the
+    /// read-only board commands, never a turn, outcome, progress or repository command, which
+    /// belong to the task's own conversation.
+    static let allowedCLICommands = CLICommandCatalog.commands
+        .filter { $0.audiences.contains(.sideChat) }
+        .flatMap(\.expandedPaths)
+        .reduce(into: [String]()) { paths, path in if !paths.contains(path) { paths.append(path) } }
+    static let denialMessage = "This side chat is read-only: it can read files and run the Playhouse CLI's board commands (\(allowedCLICommands.joined(separator: ", "))), one per shell call, but it can't change files or run other commands."
 
     /// `cliPaths` are the forms of the CLI's path a command may start with (as given and with
     /// symlinks such as /tmp resolved).
@@ -316,6 +320,8 @@ enum SideChatReadOnlyPolicy {
         let invocations = paths.flatMap { [$0, "'\($0)'", "\"\($0)\""] }
         guard let invocation = invocations.first(where: { command.hasPrefix($0 + " ") }) else { return false }
         let subcommand = command.dropFirst(invocation.count + 1).trimmingCharacters(in: .whitespaces)
+        // As `allowsSandboxedRequest` does for Codex, a saved prompt can't also move or start its task.
+        if subcommand.hasPrefix("task prompt "), subcommand.contains("--status") || subcommand.contains("--submitted") { return false }
         return allowedCLICommands.contains { subcommand == $0 || subcommand.hasPrefix($0 + " ") }
     }
 

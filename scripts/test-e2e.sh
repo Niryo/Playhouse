@@ -102,6 +102,22 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/transcript-row-anchors-tests.swift" \
   -o "${transcript_row_anchor_tests}"
 "${transcript_row_anchor_tests}"
+# The CLI's command catalog against its parser: no handled command without a help entry, and
+# no declared command without a handler. Built from the CLI's sources minus its entry point.
+cli_command_catalog_tests="${test_output_dir}/cli-command-catalog-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -Onone \
+  "${repository_root}/Playhouse/Bridge/BridgeContract.swift" \
+  "${repository_root}/Playhouse/Bridge/CLICommandCatalog.swift" \
+  "${repository_root}/Playhouse/Bridge/BridgeSocket.swift" \
+  "${repository_root}/Playhouse/Bridge/UpdateCore.swift" \
+  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift" \
+  "${repository_root}/Playhouse/CLI/BridgeClient.swift" \
+  "${repository_root}/Playhouse/CLI/PlayhouseCLIParsing.swift" \
+  "${repository_root}/Playhouse/CLI/PlayhouseCLIUtilities.swift" \
+  "${repository_root}/scripts/unit/cli-command-catalog-tests.swift" \
+  -o "${cli_command_catalog_tests}"
+"${cli_command_catalog_tests}" "${repository_root}/Playhouse/CLI/PlayhouseCLIParsing.swift" \
+  "${repository_root}/Playhouse/App/CodexTaskInstructions.swift"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1

@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks, and never rule files; before anything was mentioned, an empty query shows that whole list, grouped under a header per kind. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
+    // case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then the other tasks on the board, never Done ones, and never rule files; before anything was mentioned, an empty query shows that whole list, grouped under a header per kind. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. A task moved to Done leaves the list, its query matches and the recent mentions, and a mention of it is sent as typed. Listing mentions without a task is a usage error, and for an unknown task is not_found.
     func test_mentions_menu_lists_expands_and_remembers_recent() throws {
         let repository = try makeSkillRepository("mention-repo", skills: [
             "AGENTS.md": "# Mention repo rules\nKeep it tidy.\n",
@@ -32,7 +32,18 @@ extension PlayhouseUITests {
         try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
         codexFixtureExecutable = codex.path
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Other mention task", roots: [])
+        // A Claude task, so its send below reaches the Claude fixture rather than the held Codex one.
+        let otherID = try XCTUnwrap((try runCLI(["task", "create", "--title", "Other mention task", "--prompt", "Fixture task description.",
+                                                 "--provider", "claude"])["result"] as? [String: Any])?["id"] as? String)
+        // A task mentioned while on the board, then moved to Done, leaves the menu and the recent mentions.
+        let reviewedID = try XCTUnwrap((try runCLI(["task", "create", "--title", "Reviewed mention task", "--prompt", "Fixture task description.",
+                                                    "--provider", "claude"])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", otherID, "--message", "Look at @Reviewed-mention-task."])
+        XCTAssertEqual((try runCLI(["mentions", "list", "--task", otherID])["result"] as? [String: Any])?["recentIDs"] as? [String],
+                       ["task:\(reviewedID)"], "A board task's mention becomes recent.")
+        // A turn leaves it Waiting Response, from which it can move to Done.
+        _ = try runCLI(["conversation", "send", reviewedID, "--message", "Review it."])
+        XCTAssertEqual((try runCLI(["task", "move", reviewedID, "Done"])["result"] as? [String: Any])?["status"] as? String, "Done")
         let task = try createSkillsTask("Mention task", repositories: [repository], provider: "claude")
         let taskID = try XCTUnwrap(task["id"] as? String)
         let worktree = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
@@ -53,6 +64,8 @@ extension PlayhouseUITests {
         let handles = items.compactMap { $0["handle"] as? String }
         XCTAssertEqual(items.first?["kind"] as? String, "skill", "Skills come first.")
         XCTAssertFalse(items.contains { ($0["id"] as? String ?? "").hasPrefix("rule:") }, "Rules are not mentionable.")
+        XCTAssertFalse(items.contains { $0["id"] as? String == "task:\(reviewedID)" }, "A Done task is off the board and not listed.")
+        XCTAssertEqual(try mentions()["recentIDs"] as? [String], [], "A recent mention of a task now Done is dropped.")
 
         openTask(named: "Mention task")
         let composer = element("message-composer")
@@ -91,6 +104,7 @@ extension PlayhouseUITests {
         for row in ["mention-skill", "docs-server", "reviewer", "mention-repo", "Other-mention-task"] {
             XCTAssertTrue(rows.contains(row), "The menu lists \(row).")
         }
+        XCTAssertFalse(element("mention-item-Reviewed-mention-task").exists, "The Done task is not listed, though the board's tasks are.")
         XCTAssertEqual(highlightedRow(), rows.first)
         composer.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(waitUntil({ highlightedRow() == rows[1] }, timeout: 5), "Down moves the highlight to the next row.")
@@ -105,6 +119,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ menuRows().first == "reviewer" && highlightedRow() == "reviewer" }, timeout: 5),
                       "Typing after @ filters, handle prefixes first, and highlights the first match.")
         XCTAssertFalse(element("mention-item-mention-skill").exists, "Rows that don't match the query are filtered out.")
+        XCTAssertFalse(element("mention-item-Reviewed-mention-task").exists, "A Done task matching the query is not suggested.")
         XCTAssertEqual(element("mention-menu-title").value as? String, "Mention matching “rev”")
         XCTAssertFalse(element("mention-section-agent").exists, "A query's matches are one list under one header.")
         attachElementScreenshot(menu, named: "Mention menu filtered by the typed query")
@@ -253,6 +268,16 @@ extension PlayhouseUITests {
         let agentLine = try XCTUnwrap(steered.components(separatedBy: "\n").first { $0.hasPrefix("- @reviewer (agent): ") })
         XCTAssertLessThan(try XCTUnwrap(agentLine.range(of: "Codex agent `reviewer`")).lowerBound,
                           try XCTUnwrap(agentLine.range(of: "Claude Code subagent")).lowerBound, "A Codex task names Codex's agent file first.")
+
+        let doneMessage = "Ping @Reviewed-mention-task again."
+        _ = try runCLI(["conversation", "send", taskID, "--message", doneMessage])
+        func doneSent() -> String? {
+            guard let data = try? Data(contentsOf: historyURL),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return (history["turns"] as? [[String: Any]] ?? []).compactMap { $0["userText"] as? String }.first { $0.hasPrefix(doneMessage) }
+        }
+        XCTAssertTrue(waitUntil({ doneSent() != nil }, timeout: 20))
+        XCTAssertEqual(doneSent(), doneMessage, "A mention of a Done task is sent as typed, without a mention block.")
 
         XCTAssertEqual(try runCLI(["mentions", "list", "--task", UUID().uuidString], expectedStatus: 3)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "not_found")
         XCTAssertEqual(try runCLI(["mentions", "list"], expectedStatus: 2)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "invalid_argument")

@@ -557,6 +557,9 @@ extension PlayhouseUITests {
         let instructions = try XCTUnwrap(turn["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
+        // The task agent finds every other command in its audience's help.
+        XCTAssertTrue(instructions.contains("\(cliURL.path)' help --for task"))
+        XCTAssertFalse(instructions.contains("Repository context commands for this task"))
         XCTAssertTrue(instructions.contains("hidden from the conversation"))
         XCTAssertTrue(instructions.contains("at least every 30 seconds"))
         XCTAssertTrue(instructions.contains("starting or finishing a substantial tool call"))

@@ -131,28 +131,25 @@ extension PlayhouseUITests {
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-",
             "Answers received: Test and verify: Yes, update paired tests and run required verification"
         )).firstMatch
-        XCTAssertTrue(response.waitToExist(timeout: 10))
+        // Playhouse's outcome nudge can follow at once and push the reply out of the rendered rows.
+        XCTAssertTrue(response.waitToExist(timeout: 10) || transcriptScan { response.exists }, "The steered answer should be in the transcript.")
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Keep the draft intact."))
-        XCTAssertTrue(card.exists)
-        XCTAssertTrue(app.staticTexts["Answered"].exists)
+        XCTAssertTrue(transcriptScan { card.exists && card.staticTexts["Answered"].exists }, "The answered card should stay in the transcript.")
         XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
         let laterCard = element("async-question-item_playhouse_async_later_question")
-        XCTAssertTrue(laterCard.waitToExist(timeout: 10))
-        let idleDeadline = Date().addingTimeInterval(10)
-        while !element("send-message-button").isEnabled && Date() < idleDeadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
-        XCTAssertTrue(element("send-message-button").isEnabled, "The later answer must be submitted after the first turn completes.")
+        XCTAssertTrue(laterCard.waitToExist(timeout: 10) || transcriptScan { laterCard.exists }, "The later question should be in the transcript.")
+        // The unsent draft shows Send in Stop's place while the turn runs, so wait on the runtime.
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The later answer must be submitted after the first turn completes.")
         let laterAnswer = element("async-question-answer-item_playhouse_async_later_question-0")
         // Later replies below the card can carry its field out of view; bring it back before typing.
         XCTAssertTrue(revealInConversation(laterAnswer), "The later question's answer field should scroll into view.")
         laterAnswer.click()
         laterAnswer.typeText("Finish after the turn.")
         element("submit-async-questions-item_playhouse_async_later_question").click()
-        // Hidden outcome reminders take turn numbers, so match the reply by its answer.
+        // Stored replies carry Playhouse's own turn IDs, so match the reply by its answer.
         let completedResponse = app.groups.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Finish after the turn."
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Answers received: One more check: Finish after the turn."
         )).firstMatch
         XCTAssertTrue(completedResponse.waitToExist(timeout: 10),
                       "A question answered after its original turn must refresh the visible conversation.")

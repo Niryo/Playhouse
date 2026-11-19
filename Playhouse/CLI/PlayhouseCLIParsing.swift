@@ -117,8 +117,11 @@ extension PlayhouseCLI {
         }
     }
 
+    /// The bridge request for `args`. Only a command `CLICommandCatalog` declares gets here,
+    /// so every command this accepts has a help entry; a declared command this switch doesn't
+    /// handle throws `CLIError.unknownCommand`, which the CLI's unit checks look for.
     static func parse(_ args: [String]) throws -> BridgeRequest {
-        guard let group = args.first else { throw CLIError.usage("Missing command group.") }
+        guard let group = args.first, CLICommandCatalog.command(matching: args) != nil else { throw CLIError.unknownCommand(args) }
         let rest = Array(args.dropFirst())
         switch group {
         case "status":
@@ -199,14 +202,15 @@ extension PlayhouseCLI {
                     "allowDiscardingUncommittedChanges": .boolean(flags.contains("--discard-changes"))
                 ])
             case "pr":
+                let prUsage = "Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr create <task-id> [--if-needed] [--title <title>] [--body <text>], playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>, playhouse task pr status <task-id> [--review-threads] [--shared], or playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]"
                 guard tail.count >= 2 else {
                     throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [action]")
                 }
                 switch tail[0] {
                 // One pass of the `pull-request-mode` plugin's Green mode, or Merge with `--merge`.
                 // `--confirm-with <plugin-id>` asks that plugin's service again before a merge or fix turn.
-                case "autopilot" where Self.autopilotOptions(tail.dropFirst(2)) != nil:
-                    let options = Self.autopilotOptions(tail.dropFirst(2)) ?? (false, false, nil)
+                case "autopilot":
+                    guard let options = Self.autopilotOptions(tail.dropFirst(2)) else { throw CLIError.usage(prUsage) }
                     var arguments: [String: BridgeValue] = [
                         "taskID": .string(tail[1]),
                         "merge": .boolean(options.merge),
@@ -227,9 +231,11 @@ extension PlayhouseCLI {
                     arguments["taskID"] = .string(tail[1])
                     arguments["url"] = .string(try requiredFlag("--url", flags: flags).first!)
                     return BridgeRequest(command: "task.pr.link", arguments: arguments)
-                case "conflicts" where tail.count == 2:
+                case "conflicts":
+                    guard tail.count == 2 else { throw CLIError.usage(prUsage) }
                     return BridgeRequest(command: "task.pr.conflicts", arguments: ["taskID": .string(tail[1])])
-                case "status" where Set(tail.dropFirst(2)).isSubset(of: ["--review-threads", "--shared"]):
+                case "status":
+                    guard Set(tail.dropFirst(2)).isSubset(of: ["--review-threads", "--shared"]) else { throw CLIError.usage(prUsage) }
                     return BridgeRequest(command: "task.pr.status", arguments: [
                         "taskID": .string(tail[1]),
                         "reviewThreads": .boolean(tail.contains("--review-threads")),
@@ -237,14 +243,17 @@ extension PlayhouseCLI {
                         // Every recorded pull request, closed and retired ones included.
                         "all": .boolean(true)
                     ])
-                case "verify" where tail.count == 2:
+                case "verify":
+                    guard tail.count == 2 else { throw CLIError.usage(prUsage) }
                     return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
-                case "resolve" where tail.count == 3:
+                case "resolve":
+                    guard tail.count == 3 else { throw CLIError.usage(prUsage) }
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
-                case "sync" where tail.count == 2:
+                case "sync":
+                    guard tail.count == 2 else { throw CLIError.usage(prUsage) }
                     return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr create <task-id> [--if-needed] [--title <title>] [--body <text>], playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>, playhouse task pr status <task-id> [--review-threads] [--shared], or playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]")
+                    throw CLIError.unknownCommand(args)
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: playhouse task progress publish|custom|clear <task-id> ...") }
@@ -272,7 +281,7 @@ extension PlayhouseCLI {
                     guard values.count == 1 else { throw CLIError.usage("Use: playhouse task progress clear <task-id>") }
                     return BridgeRequest(command: "task.progress.clear", arguments: ["taskID": .string(values[0])])
                 default:
-                    throw CLIError.usage("Unknown task progress operation '\(action)'.")
+                    throw CLIError.unknownCommand(args)
                 }
             case "outcome":
                 let usage = "Use: playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>] (blocked requires --reason)"
@@ -353,7 +362,7 @@ extension PlayhouseCLI {
                     arguments["mergeTarget"] = .string(mergeTarget)
                     return BridgeRequest(command: "task.repository.edit", arguments: arguments)
                 default:
-                    throw CLIError.usage("Use: playhouse task repository add|add-batch|add-worktree|replace|edit|remove|renew|recent <task-id> ...")
+                    throw CLIError.unknownCommand(args)
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
@@ -417,7 +426,7 @@ extension PlayhouseCLI {
                 if action == "get" {
                     return BridgeRequest(command: "task.roots.get", arguments: ["taskID": .string(id)])
                 }
-                guard action == "set" else { throw CLIError.usage("Unknown roots operation '\(action)'.") }
+                guard action == "set" else { throw CLIError.unknownCommand(args) }
                 let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--root"])
                 return BridgeRequest(command: "task.roots.set", arguments: [
                     "taskID": .string(id), "roots": .array((flags["--root"] ?? []).map(BridgeValue.string))
@@ -467,10 +476,10 @@ extension PlayhouseCLI {
                     guard tail.count == 2 else { throw CLIError.usage("Use: playhouse task changes mark-all-viewed <task-id>") }
                     return BridgeRequest(command: "task.changes.mark-all-viewed", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Unknown task changes operation '\(action)'.")
+                    throw CLIError.unknownCommand(args)
                 }
             default:
-                throw CLIError.usage("Unknown task operation '\(operation)'.")
+                throw CLIError.unknownCommand(args)
             }
         case "chat":
             if rest == ["open"] {
@@ -479,9 +488,7 @@ extension PlayhouseCLI {
             if rest == ["status"] {
                 return BridgeRequest(command: "chat.status")
             }
-            guard rest.first == "page", rest.count >= 2 else {
-                throw CLIError.usage("Use: playhouse chat open or playhouse chat page list|search|read|new|close-turn ...")
-            }
+            guard rest.first == "page", rest.count >= 2 else { throw CLIError.unknownCommand(args) }
             let tail = Array(rest.dropFirst(2))
             switch rest[1] {
             case "list":
@@ -517,15 +524,13 @@ extension PlayhouseCLI {
                 if let summaryHint = flags["--summary-hint"]?.first { arguments["summaryHint"] = .string(summaryHint) }
                 return BridgeRequest(command: "chat.page.close-turn", arguments: arguments)
             default:
-                throw CLIError.usage("Unknown chat page operation '\(rest[1])'.")
+                throw CLIError.unknownCommand(args)
             }
         case "workspace":
             if rest == ["repos", "list"] {
                 return BridgeRequest(command: "workspace.repositories.list")
             }
-            guard rest.first == "suggest" else {
-                throw CLIError.usage("Use: playhouse workspace repos list or workspace suggest --parent <path>")
-            }
+            guard rest.first == "suggest" else { throw CLIError.unknownCommand(args) }
             let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--parent"])
             return BridgeRequest(command: "workspace.suggest", arguments: [
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
@@ -587,7 +592,7 @@ extension PlayhouseCLI {
             case "render":
                 break
             default:
-                throw CLIError.usage(usage)
+                throw CLIError.unknownCommand(args)
             }
             let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--plugin", "--task", "--props", "--event", "--advance"])
             guard [flags["--file"], flags["--page"], flags["--plugin"]].compactMap({ $0 }).count == 1 else { throw CLIError.usage(renderUsage) }
@@ -620,7 +625,7 @@ extension PlayhouseCLI {
                 guard rest.count == 2 else { throw CLIError.usage("Use: playhouse usage \(rest[0]) <codex|claude>") }
                 return BridgeRequest(command: "usage.\(rest[0])", arguments: ["provider": .string(rest[1])])
             default:
-                throw CLIError.usage("Use: playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>")
+                throw CLIError.unknownCommand(args)
             }
         case "skills":
             guard let operation = rest.first else { throw CLIError.usage("Missing skills operation.") }
@@ -703,7 +708,7 @@ extension PlayhouseCLI {
                 if let message = flags["--message"]?.first { arguments["message"] = .string(message) }
                 return BridgeRequest(command: "skills.bridge", arguments: arguments)
             default:
-                throw CLIError.usage("Unknown skills operation \(operation).")
+                throw CLIError.unknownCommand(args)
             }
         case "mcp":
             guard let operation = rest.first else { throw CLIError.usage("Missing mcp operation.") }
@@ -783,7 +788,7 @@ extension PlayhouseCLI {
                 arguments["name"] = .string(try requiredFlag("--name", flags: flags).first!)
                 return BridgeRequest(command: operation == "authenticate" ? "mcp.authenticate" : "mcp.authenticate.wait", arguments: arguments)
             default:
-                throw CLIError.usage("Unknown mcp operation \(operation).")
+                throw CLIError.unknownCommand(args)
             }
         case "rules":
             guard let operation = rest.first else { throw CLIError.usage("Missing rules operation.") }
@@ -837,7 +842,7 @@ extension PlayhouseCLI {
                 guard arguments["taskID"] != nil else { throw CLIError.usage("Use: playhouse rules bridge --task <task-id>") }
                 return BridgeRequest(command: "rules.bridge", arguments: arguments)
             default:
-                throw CLIError.usage("Unknown rules operation \(operation).")
+                throw CLIError.unknownCommand(args)
             }
         case "mentions":
             guard rest.first == "list" else { throw CLIError.usage("Use: playhouse mentions list --task <task-id> [--query <text>]") }
@@ -905,7 +910,7 @@ extension PlayhouseCLI {
                 if let now = flags["--now"]?.first { arguments["now"] = .string(now) }
                 return BridgeRequest(command: "schedule.tick", arguments: arguments)
             default:
-                throw CLIError.usage("Unknown schedule operation '\(operation)'.")
+                throw CLIError.unknownCommand(args)
             }
         case "update":
             let usage = "Use: playhouse update status|check [--automatic true]|download|cancel|install [--when-idle true]|set-auto-check <on|off>|launched|dismiss-notice"
@@ -925,7 +930,7 @@ extension PlayhouseCLI {
                 guard tail.count == 1, tail[0] == "on" || tail[0] == "off" else { throw CLIError.usage(usage) }
                 return BridgeRequest(command: "update.set-auto-check", arguments: ["enabled": .boolean(tail[0] == "on")])
             default:
-                throw CLIError.usage(usage)
+                throw CLIError.unknownCommand(args)
             }
         case "settings":
             guard let operation = rest.first else { throw CLIError.usage("Missing settings operation.") }
@@ -976,7 +981,7 @@ extension PlayhouseCLI {
                 return BridgeRequest(command: "settings.set-last-repositories", arguments: [
                     "repositories": .array((flags["--repo"] ?? []).map(BridgeValue.string))
                 ])
-            default: throw CLIError.usage("Unknown settings operation '\(operation)'.")
+            default: throw CLIError.unknownCommand(args)
             }
         case "conversation":
             guard let operation = rest.first else { throw CLIError.usage("Missing conversation operation.") }
@@ -1185,10 +1190,10 @@ extension PlayhouseCLI {
                 }
                 if options.contains("--defer-images") { sendArguments["deferImages"] = .boolean(true) }
                 return BridgeRequest(command: "conversation.send", arguments: sendArguments)
-            default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
+            default: throw CLIError.unknownCommand(args)
             }
         default:
-            throw CLIError.usage("Unknown command group '\(group)'.")
+            throw CLIError.unknownCommand(args)
         }
     }
 }

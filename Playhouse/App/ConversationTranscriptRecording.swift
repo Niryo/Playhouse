@@ -8,7 +8,7 @@ extension ConversationManager {
     /// Records a message of a local turn as its provider streamed it.
     func recordTurnMessage(
         taskID: UUID, turnID: String, provider: ConversationProvider = .claude,
-        modelID: String? = nil, _ message: ConversationMessage
+        modelID: String? = nil, replacingID: String? = nil, _ message: ConversationMessage
     ) {
         do {
             try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
@@ -27,7 +27,13 @@ extension ConversationManager {
                 // Stored order is the timeline; a provider's own item order would only
                 // mark the message as positioned.
                 message.timelineOrder = nil
-                if let existing = transcript.turns[index].messages.firstIndex(where: { $0.id == message.id }) {
+                // A message that replaces another, such as a final answer already recorded as
+                // progress, takes its place in the timeline.
+                if let replacingID,
+                   let replaced = transcript.turns[index].messages.firstIndex(where: { $0.id == replacingID }) {
+                    message.createdAt = message.createdAt ?? transcript.turns[index].messages[replaced].createdAt
+                    transcript.turns[index].messages[replaced] = message
+                } else if let existing = transcript.turns[index].messages.firstIndex(where: { $0.id == message.id }) {
                     message.createdAt = message.createdAt ?? transcript.turns[index].messages[existing].createdAt
                     transcript.turns[index].messages[existing] = message
                 } else {
@@ -299,23 +305,29 @@ extension ConversationManager {
     ) -> ConversationTurnCallbacks {
         let streamTurnUpdate = onUpdate
         let approvalNotice = "\(provider.displayName) requested an approval. Playhouse denied it because approval prompts are disabled."
+        // `recordedID` names the progress item a final answer settles, when the provider had
+        // to record the answer before its turn could end; the final takes that item's place.
+        let recordFinal: (String, String?) -> Void = { answer, recordedID in
+            let split = LeakedTurnOutcome.split(answer)
+            if split.taskID == taskID { recording.leakedOutcome = split.outcome }
+            let message = split.text
+            // An answer that was only the echo still replaces the streamed text.
+            if !message.isEmpty {
+                recording.finalMessageCount += 1
+                self.recordTurnMessage(
+                    taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, replacingID: recordedID,
+                    ConversationMessage(
+                        id: "\(localTurnID)-final-\(recording.finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
+                    )
+                )
+            }
+            streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message, itemID: message.isEmpty ? nil : recordedID))
+        }
         return ConversationTurnCallbacks(
             onDelta: { delta in
                 onUpdate(ConversationUpdate(type: "text_delta", text: delta))
             },
-            onFinalMessage: { answer in
-                let split = LeakedTurnOutcome.split(answer)
-                if split.taskID == taskID { recording.leakedOutcome = split.outcome }
-                let message = split.text
-                // An answer that was only the echo still replaces the streamed text.
-                if !message.isEmpty {
-                    recording.finalMessageCount += 1
-                    self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, ConversationMessage(
-                        id: "\(localTurnID)-final-\(recording.finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
-                    ))
-                }
-                streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message))
-            },
+            onFinalMessage: { answer in recordFinal(answer, nil) },
             onActivity: { activity in
                 switch recording.activityWrite(activity) {
                 case .now:
@@ -486,7 +498,8 @@ extension ConversationManager {
                         PlayhouseDiagnostics.record("task.token_usage.record_failed", fields: fields)
                     }
                 }
-            }
+            },
+            onRecordedFinalMessage: { answer, recordedID in recordFinal(answer, recordedID) }
         )
     }
 

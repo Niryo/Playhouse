@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases19:
-    # case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks, and never rule files; before anything was mentioned, an empty query shows that whole list, grouped under a header per kind. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
+    # case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then the other tasks on the board, never Done ones, and never rule files; before anything was mentioned, an empty query shows that whole list, grouped under a header per kind. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. A task moved to Done leaves the list, its query matches and the recent mentions, and a mention of it is sent as typed. Listing mentions without a task is a usage error, and for an unknown task is not_found.
     def test_mentions_menu_lists_expands_and_remembers_recent(self):
         repository = self.make_skill_repository("mention-repo", {
             "AGENTS.md": "# Mention repo rules\nKeep it tidy.\n",
@@ -15,7 +15,15 @@ class BridgeTestCases19:
         })
         environment = self.install_claude_fixture("claude-fixture-mentions")
         history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
-        other = self.create_task("Other mention task", roots=[])
+        other = self.create_task("Other mention task", roots=[], provider="claude")
+        # A task mentioned while on the board, then moved to Done, leaves the menu and the recent mentions.
+        reviewed = self.create_task("Reviewed mention task", roots=[], provider="claude")
+        self.assert_success(self.call_cli("conversation", "send", other["id"], "--message", "Look at @Reviewed-mention-task.",
+                                          extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("mentions", "list", "--task", other["id"])[0])["recentIDs"],
+                         [f"task:{reviewed['id']}"], "A board task's mention becomes recent.")
+        self.assert_success(self.call_cli("conversation", "send", reviewed["id"], "--message", "Review it.", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "move", reviewed["id"], "Done")[0])["status"], "Done")
         task = self.create_skills_task("Mention task", [repository], provider="claude")
         task_id = task["id"]
         worktree = task["repositoryWorktrees"][0]["worktreePath"]
@@ -48,12 +56,17 @@ class BridgeTestCases19:
         self.assertEqual(by_handle["primary"]["kind"], "repository", "Repositories under the repository root are listed too.")
         self.assertEqual(by_handle["Other-mention-task"]["id"], f"task:{other['id']}")
         self.assertNotIn("Mention-task", by_handle, "The task never mentions itself.")
-        self.assertEqual(listed["recentIDs"], [])
+        self.assertFalse(any(item["id"] == f"task:{reviewed['id']}" for item in items), "A Done task is off the board and not listed.")
+        self.assertEqual([item["handle"] for item in self.assert_success(
+            self.call_cli("mentions", "list", "--task", task_id, "--query", "mention-task")[0])["suggestions"]], ["Other-mention-task"],
+            "Of two tasks matching the query, only the one on the board is suggested.")
+        self.assertEqual(listed["recentIDs"], [], "A recent mention of a task now Done is dropped.")
         self.assertEqual([item["id"] for item in listed["suggestions"]], [item["id"] for item in items],
                          "Before anything was mentioned, an empty query shows the whole list.")
         searched = self.assert_success(self.call_cli("mentions", "list", "--task", task_id, "--query", "rev")[0])["suggestions"]
         self.assertEqual(searched[0]["handle"], "reviewer", "A handle that starts with the query comes first.")
         self.assertTrue(all("rev" in (item["handle"] + item["title"] + item["detail"]).lower() for item in searched))
+        self.assertNotIn("Reviewed-mention-task", [item["handle"] for item in searched], "A Done task never matches a query.")
         self.assertEqual(self.assert_success(self.call_cli("mentions", "list", "--task", task_id, "--query", "zzz-nothing")[0])["suggestions"], [])
 
         message = "Ask @reviewer to check @mention-repo, then mail me@example.com about @unknown."
@@ -85,6 +98,11 @@ class BridgeTestCases19:
                                           extra_environment=environment)[0])
         recent = self.assert_success(self.call_cli("mentions", "list", "--task", task_id)[0])["recentIDs"]
         self.assertEqual(recent, [by_handle[handle]["id"] for handle in many[:10]], "At most ten recent mentions are kept, newest first.")
+        done_message = "Ping @Reviewed-mention-task again."
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", done_message, extra_environment=environment)[0])
+        done_turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+                         if (turn.get("userText") or "").startswith(done_message))
+        self.assertEqual(done_turn["userText"], done_message, "A mention of a Done task is sent as typed, without a mention block.")
 
         # Steering a Codex turn expands its mentions too, the running provider's agent file first;
         # a steer that misses its turn is queued as typed and expanded once when it is sent.
@@ -507,7 +525,7 @@ class BridgeTestCases19:
         rules_section = instructions[instructions.index("# Rules Playhouse shares with you"):]
         resumed = history["threadResumeDeveloperInstructions"][-1]
         self.assertEqual(resumed[resumed.index("# Rules Playhouse shares with you"):], rules_section, "The resumed thread gets the same rules.")
-    # case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name led by one icon for the agents that start it in Playhouse sessions (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider icon: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
+    # case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name led by one icon for the agents that start it in Playhouse sessions (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
     def test_mcp_catalog_lists_repo_global_and_managed_servers(self):
         working = self.make_skill_repository("mcp-catalog-repo", {
             ".mcp.json": json.dumps({"mcpServers": {

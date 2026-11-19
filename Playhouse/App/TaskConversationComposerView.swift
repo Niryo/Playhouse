@@ -10,10 +10,15 @@ extension TaskConversationView {
             let label = isExistingConversation ? "Schedule message" : "Schedule task"
             primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? label, label: label, value: composerSchedule?.summary() ?? "", testID: "send-message-button")
         // Stop works from the moment a message is sent: a turn that is still launching is
-        // stopped before it starts. Once clicked it gives way to Continue at once.
+        // stopped before it starts. Once clicked it gives way to Continue at once. While the
+        // draft has content, Send takes Stop's place and does what Return does.
         } else if !isPausingResponse, isDisplayingActiveResponse
             || (providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
-            primary = .init(kind: "stop", disabled: false, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
+            if hasSubmittableDraft {
+                primary = .init(kind: "send", disabled: false, help: isResponding ? "Queue this follow-up for after the current turn" : "Send message", label: "Send message", value: "", testID: "send-message-button")
+            } else {
+                primary = .init(kind: "stop", disabled: false, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
+            }
         } else if hasPausedResponse {
             primary = .init(kind: "continue", disabled: isStopLandingOnOwnSend, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
         } else if composerSchedule != nil, canSchedule {
@@ -144,15 +149,7 @@ extension TaskConversationView {
     var composerActions: ComposerActions {
         ComposerActions(
             change: { draft = $0 },
-            submit: {
-                if composerSchedule != nil, canSchedule {
-                    confirmSchedule()
-                } else if isResponding {
-                    queueDraftForAfterTurn()
-                } else {
-                    sendOrSchedule()
-                }
-            },
+            submit: submitDraft,
             steer: {
                 // A turn that is still launching takes the steer as soon as it starts.
                 if isResponding {
@@ -217,10 +214,26 @@ extension TaskConversationView {
                 case "stop": pauseResponse()
                 case "continue": continueResponse()
                 case "schedule": confirmSchedule()
-                default: sendOrSchedule()
+                default: submitDraft()
                 }
             }
         )
+    }
+
+    /// Whether the draft has something Return or Send would hand off.
+    var hasSubmittableDraft: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingImages.isEmpty
+    }
+
+    /// Return and the Send button: a running turn queues the draft as a follow-up.
+    func submitDraft() {
+        if composerSchedule != nil, canSchedule {
+            confirmSchedule()
+        } else if isResponding {
+            queueDraftForAfterTurn()
+        } else {
+            sendOrSchedule()
+        }
     }
 
 
@@ -393,7 +406,7 @@ extension TaskConversationView {
     }
 
     /// The Skills modal's width: a narrow column centered over the conversation.
-    static let skillsPageWidth: CGFloat = 336
+    static let skillsPageWidth: CGFloat = 403
     static let skillsPageMaxHeight: CGFloat = 760
 
     /// Summarizes how the selected provider's native configuration differs, so a

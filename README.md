@@ -14,12 +14,31 @@
   <img src="https://img.shields.io/badge/macOS-14%2B-black?logo=apple" alt="macOS 14+">
   <img src="https://img.shields.io/badge/Swift-SwiftUI-F05138?logo=swift&logoColor=white" alt="SwiftUI">
   <img src="https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex-8A63D2" alt="Claude Code and Codex">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue" alt="License: GPLv3"></a>
+</p>
+
+<p align="center">
+  <a href="https://niryo.github.io/Playhouse/"><b>niryo.github.io/Playhouse</b></a>
 </p>
 
 <p align="center">
   <img src="docs/images/board.png" alt="The Playhouse board with tasks in Blocked, Waiting Response, In Progress and Review">
 </p>
+
+## Getting started
+
+**Install**
+
+Releases are Apple Silicon builds published to GitHub. Install the latest into `/Applications` with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Niryo/Playhouse/master/scripts/install-release.sh | bash
+```
+
+**Requirements**
+
+- macOS 14 or later
+- The [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI and/or the [Codex](https://github.com/openai/codex) CLI, signed in
+- The [GitHub CLI](https://cli.github.com) (`gh`) for pull request features
 
 ## Features
 
@@ -55,7 +74,7 @@ The Changes panel lists every file the agent touched. Click one to open a side-b
 Select any part of a reply and ask a quick question about it in a side chat. The answer stays next to the selection and never derails the main conversation or the agent's context.
 
 <p align="center">
-  <img src="docs/images/side-chat.png" width="544" alt="A side chat asking why only Safari fires the change event early">
+  <img src="docs/images/side-chat.png" alt="A side chat open over a task conversation, answering a question about the selected root-cause paragraph">
 </p>
 
 ### Switch providers seamlessly
@@ -76,7 +95,7 @@ When an agent needs a decision, the task moves to **Waiting Response** and tells
 
 ### Plugins
 
-Extend Playhouse with JavaScript plugins built from the same native atoms as the app itself. Add a sidebar section, a composer action, a control on every task card, or a tool in the task sidebar. Plugins get live app state (running agents, tasks, usage) and render as real SwiftUI. Several built-in features, like the pull request modes, are plugins themselves. See the [plugin guide](Playhouse/App/Plugins/README.md).
+Extend Playhouse with plugins. Add a sidebar section, a composer action, a control on every task card, or a tool in the task sidebar. Plugins get live app state (running agents, tasks, usage) and render as real SwiftUI. Several built-in features, like the pull request modes, are plugins themselves. See the [plugin guide](Playhouse/App/Plugins/README.md).
 
 <p align="center">
   <img src="docs/images/plugin.png" width="216" alt="A Release Train plugin in the sidebar showing release progress and running agents">
@@ -90,58 +109,9 @@ Extend Playhouse with JavaScript plugins built from the same native atoms as the
 - **Usage at a glance**: per-account rate limits and token stats for Claude and Codex.
 - **Scriptable**: every action in the app is also available from the bundled `playhouse-cli`.
 
-## Getting started
 
-**Requirements**
 
-- macOS 14 or later, and Xcode 26.5 or later to build
-- The [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI and/or the [Codex](https://github.com/openai/codex) CLI, signed in
-- The [GitHub CLI](https://cli.github.com) (`gh`) for pull request features
 
-**Install a release**
-
-Releases are Apple Silicon builds published to GitHub. Install the latest into `/Applications` with:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Niryo/Playhouse/master/scripts/install-release.sh | bash
-```
-
-Installed releases check for updates once a day and show an Update button in the window's title bar. Releases are signed with a self-signed certificate and are not notarized. If you download the zip in a browser instead, allow it once in System Settings → Privacy & Security → Open Anyway. Maintainers publish releases with `scripts/release.sh`; see [docs/release-system.md](docs/release-system.md).
-
-**Build and run**
-
-```sh
-git clone https://github.com/Niryo/Playhouse.git
-cd Playhouse
-./scripts/run.sh
-```
-
-Or open `Playhouse.xcodeproj` in Xcode and run the `Playhouse` scheme. Tasks are stored locally with SwiftData.
-
-## Command line
-
-Playhouse bundles `playhouse-cli`, which talks to a background daemon over a Unix socket and uses the same managers as the app. Everything you can do in the window, you can script:
-
-```sh
-./scripts/playhouse.sh task create --title "Add rate limiting to the public API" \
-  --prompt "600 requests a minute per API key, with RateLimit headers" --repo ~/Developer/storefront-api
-./scripts/playhouse.sh conversation send <task-id> --message "Use Redis for the counters"
-./scripts/playhouse.sh board list
-```
-
-See [docs/bridge.md](docs/bridge.md) for every command and its JSON output.
-
-## Development
-
-Playhouse has two paired end-to-end suites that run against the real app, daemon and persistence, with scripted Claude and Codex fixtures, so no sign-in is needed:
-
-```sh
-./scripts/test-e2e.sh                     # headless CLI suite
-./scripts/setup-ui-tart-vm.sh             # one-time: create the Tart macOS VM for UI tests
-./scripts/test-ui-tart.sh --case <case>   # visible UI case, run in the VM
-```
-
-Read [AGENTS.md](AGENTS.md) for the testing, verification and contribution rules. It applies to humans and agents alike.
 
 ## License
 

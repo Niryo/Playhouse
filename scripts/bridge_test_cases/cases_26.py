@@ -82,8 +82,11 @@ class BridgeTestCases26:
         instructions = "\n".join(item for item in [history.get("threadStartDeveloperInstructions"), *history.get("threadResumeDeveloperInstructions", [])] if item)
         self.assertIn(f"{first['repositoryPath']} -> {first['worktreePath']}", instructions)
         self.assertIn(f"{first['repositoryPath']} -> {second['worktreePath']}", instructions)
-        self.assertIn(f"task repository add-worktree {task['id']} --repo <path>", instructions)
-        self.assertIn(f"task pr link {task['id']} --worktree <path> --url <pr-url>", instructions)
+        # The rules name the commands; their usage is in the task agent's help, with this task's ID given.
+        self.assertIn("create one with task repository add-worktree and work in its returned worktreePath", instructions)
+        self.assertIn("register it right away with task pr link from that worktree's branch", instructions)
+        self.assertIn(f"This task's ID is {task['id']}.", instructions)
+        self.assertIn(f"'{self.cli}' help --for task", instructions)
         self.assertIn("Never switch the branch checked out in a task worktree", instructions)
 
         # A new task can list one repository twice: each gets its own worktree on its own branch.

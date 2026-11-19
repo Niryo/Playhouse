@@ -345,7 +345,7 @@ function Demo() {
       }
     }
   };
-  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14, width: 336, height: 520, padding: 0, testID: model.prefix + "skills-page" },
+  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 14, width: 403, height: 520, padding: 0, testID: model.prefix + "skills-page" },
     h(Header, { model: model, on: on }),
     h(Divider),
     model.kind === "skills" ? h(Gallery, { model: model, on: on })
