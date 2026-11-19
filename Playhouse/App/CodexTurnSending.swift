@@ -263,6 +263,8 @@ extension CodexAppServerClient {
         onMessageTimestamp: @escaping (String, Date) -> Void = { _, _ in },
         onTurnStarted: @escaping (String) -> Void,
         onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in },
+        // Codex records each answer when its item completes, never early, so it has none.
+        onRecordedFinalMessage: ((String, String) -> Void)? = nil,
         sensitiveUserInputAnswerValues: [String] = [],
         hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {

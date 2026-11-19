@@ -894,7 +894,12 @@ extension TaskConversationView {
             guard let text = update.text else { return }
             // A reply that streamed before a steer finishes where it streamed; any other reply
             // above a newer user message, such as a steer, is not the one finishing.
-            if let earlierIndex = takeStreamedReplyAboveSteer(stream: streamID, settling: text) {
+            if let itemID = update.itemID, let recordedIndex = messages.firstIndex(where: { $0.id == itemID }) {
+                // An answer already recorded as progress, because the provider ended its part
+                // of the turn before the turn settled, is the turn's final answer where it stands.
+                messages[recordedIndex].text = text
+                messages[recordedIndex].phase = "final_answer"
+            } else if let earlierIndex = takeStreamedReplyAboveSteer(stream: streamID, settling: text) {
                 messages[earlierIndex].text = text
                 messages[earlierIndex].phase = "final_answer"
                 // Whatever of it streamed on after the steer is now part of that answer.

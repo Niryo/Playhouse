@@ -874,6 +874,29 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
             commands.append({"command": outcome,
                              "output": runtime.run_tool("toolu_slow_woken_outcome", "Bash", {"command": outcome}, outcome)})
         runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+    elif "answer, report progress, await steering" in user_text.lower():
+        # Claude answers and then publishes a Playhouse progress report, which does not close
+        # that answer, and takes a steer at the report's tool boundary. Its reply streams below
+        # the steer before its message arrives and closes the earlier answer, after the steer.
+        runtime.run_tool("toolu_reported_check", "Bash", {"command": "echo REPORTED CHECK"}, "echo REPORTED CHECK")
+        runtime.text("msg_reported_answer", "REPORTED ANSWER")
+        progress_clear = runtime.report_command(instructions, " task progress clear ")
+        if progress_clear:
+            commands.append({"command": progress_clear,
+                             "output": runtime.run_tool("toolu_reported_progress", "Bash", {"command": progress_clear}, progress_clear)})
+        runtime.Path(str(runtime.sys.argv[0]) + ".reported-steer-ready").write_text(
+            "The answer and its progress report are out; the turn waits for a steer.\n", encoding="utf-8"
+        )
+        steered, steered_uuid = runtime.read_steered_input("the reported progress turn")
+        runtime.parent_request_started("msg_reported_steer_reply")
+        runtime.text("msg_reported_steer_reply", f"STEER REPLY: {steered}")
+        runtime.wait_for_release("steer-reply", "The reply to the steer arrived; its result has not.")
+        outcome = runtime.report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome,
+                             "output": runtime.run_tool("toolu_reported_outcome", "Bash", {"command": outcome}, outcome)})
+        runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        runtime.complete_command(steered_uuid)
     elif "parked background shell" in user_text.lower():
         # Mirrors a turn Claude Code has already answered while a background
         # shell keeps running: the parent result is out, no notification has
@@ -907,6 +930,9 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.parent_request_started("msg_parked_steered_answer")
         runtime.text("msg_parked_steered", f"STEERED: {steered}")
         runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        # The shell still holds the turn open, so nothing settles it yet; the answer
+        # to the steer must already be in the conversation, not only streamed.
+        runtime.wait_for_release("steered-answer", "The steered answer's result is out while the shell still runs.")
         runtime.write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
                "patch": {"status": "completed", "end_time": 0}})
         runtime.write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
@@ -915,7 +941,6 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
         runtime.parent_request_started("msg_parked_final", woken=True)
         runtime.text("msg_parked_final", "PARKED HANDLED")
-        runtime.wait_for_release("steered-answer", "The steered answer is visible while the woken parent result is pending.")
         runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
         runtime.complete_command(steered_uuid)
     elif "background shell" in user_text.lower():

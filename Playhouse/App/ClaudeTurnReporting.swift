@@ -43,13 +43,12 @@ extension ClaudeSessionRunner {
                 if let pending = pendingAssistantText, pendingTextSpansOutcomeReport {
                     // Claude often answers, reports the outcome, then adds a closing
                     // line; the answer must not be demoted to commentary.
-                    pendingAssistantText = (pending.id, pending.text + "\n\n" + text)
+                    pendingAssistantText = (pending.id, pending.text + "\n\n" + text, false)
                     pendingTextSpansOutcomeReport = false
                     continue
                 }
-                if let pending = pendingAssistantText { emitProgress(id: pending.id, text: pending.text) }
-                pendingAssistantText = ("\(messageID)-\(index)", text)
-                pendingTextSpansOutcomeReport = false
+                closePendingAssistantText()
+                pendingAssistantText = ("\(messageID)-\(index)", text, false)
             case "tool_use":
                 guard let toolID = block["id"] as? String, let name = block["name"] as? String else { continue }
                 if let parentToolID {
@@ -62,12 +61,11 @@ extension ClaudeSessionRunner {
                 // bookkeeping, not work, so they don't turn the answer written
                 // before them into commentary.
                 let report = ClaudeCodeClient.reportCommand(name: name, input: input)
-                if pendingAssistantText != nil, let report {
-                    if report == .outcome { pendingTextSpansOutcomeReport = true }
-                } else if let pending = pendingAssistantText {
-                    emitProgress(id: pending.id, text: pending.text)
-                    pendingAssistantText = nil
-                    pendingTextSpansOutcomeReport = false
+                if let pending = pendingAssistantText, let report {
+                    // An answer a result or a steer already closed is not extended by later text.
+                    if report == .outcome, !pending.recorded { pendingTextSpansOutcomeReport = true }
+                } else {
+                    closePendingAssistantText()
                 }
                 activityStartedAtUptime[toolID] = DispatchTime.now().uptimeNanoseconds
                 if ["Task", "Agent", "Bash"].contains(name), input["run_in_background"] as? Bool == true {
@@ -104,7 +102,7 @@ extension ClaudeSessionRunner {
         if let pending = pendingAssistantText {
             pendingAssistantText = nil
             pendingTextSpansOutcomeReport = false
-            finalMessageHandler?(pending.text)
+            emitFinal(pending)
         }
         // The event's own ID keeps a replayed run from recording the notice twice.
         let id = "claude-notice-\((message["uuid"] as? String) ?? UUID().uuidString.lowercased())"
@@ -338,7 +336,41 @@ extension ClaudeSessionRunner {
             turnCompletion.resultReceived = true
         }
         turnCompletion.resultCount += 1
+        if !isError, !isTurnSettled { recordHeldAnswer() }
         completeTurnIfSettled()
+    }
+
+    /// A result ends Claude Code's provider turn, so the text before it is that turn's whole
+    /// answer. When background work or steered input keeps the Playhouse turn open, the answer
+    /// is recorded now rather than when the turn settles, which can be long after, or never if
+    /// the turn fails; a steered message's answer would otherwise appear only in Claude Code's
+    /// own transcript. A steer closes what was written before it the same way, so that answer is
+    /// recorded above the steer rather than after Claude's reply to it. The answer stays held,
+    /// so if nothing follows it still becomes the final answer.
+    func recordHeldAnswer() {
+        guard let pending = pendingAssistantText, !pending.recorded else { return }
+        emitProgress(id: pending.id, text: pending.text)
+        pendingAssistantText = (pending.id, pending.text, true)
+        // Text after it starts a new answer.
+        pendingTextSpansOutcomeReport = false
+    }
+
+    /// Delivers the held answer as the final answer. One already recorded as progress carries
+    /// its ID, so a turn recorder settles it where it stands, once; a caller that only takes
+    /// final answers, such as a side chat, still receives it.
+    func emitFinal(_ pending: (id: String, text: String, recorded: Bool)) {
+        if pending.recorded, let recordedFinalHandler {
+            recordedFinalHandler(pending.text, pending.id)
+        } else {
+            finalMessageHandler?(pending.text)
+        }
+    }
+
+    /// Closes the held answer as commentary: the turn went on to other work after it.
+    func closePendingAssistantText() {
+        if let pending = pendingAssistantText, !pending.recorded { emitProgress(id: pending.id, text: pending.text) }
+        pendingAssistantText = nil
+        pendingTextSpansOutcomeReport = false
     }
 
     /// Claude Code reports a turn's token cost on its `result` message. A logical
@@ -432,7 +464,7 @@ extension ClaudeSessionRunner {
         }
         if let pending = pendingAssistantText {
             pendingAssistantText = nil
-            finalMessageHandler?(pending.text)
+            emitFinal(pending)
         }
         // A completed turn has no running tools left to observe.
         for (id, var activity) in toolActivities where activity.isActive {

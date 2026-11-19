@@ -94,7 +94,10 @@ final class ClaudeSessionRunner {
     var turnCompletion = TurnCompletion()
     var turnWaiter: CheckedContinuation<Void, Error>?
     var planWasPresented = false
-    var pendingAssistantText: (id: String, text: String)?
+    /// The latest answer text, held so the turn's last one becomes its final answer.
+    /// `recorded` means it is already in the transcript as progress: a result came
+    /// while background work or steered input kept the turn open.
+    var pendingAssistantText: (id: String, text: String, recorded: Bool)?
     /// Set when the pending answer text was followed only by Playhouse's
     /// end-of-turn call — a task outcome, or a standalone chat's page
     /// close-turn — so text Claude writes after it extends the same answer.
@@ -147,6 +150,9 @@ final class ClaudeSessionRunner {
 
     var deltaHandler: ((String) -> Void)?
     var finalMessageHandler: ((String) -> Void)?
+    /// Receives a final answer already recorded as progress, with that item's ID, so it settles
+    /// in place. Without it the answer goes to `finalMessageHandler` like any other.
+    var recordedFinalHandler: ((String, String) -> Void)?
     var progressMessageHandler: ((ConversationMessage) -> Void)?
     var steerMessageHandler: ((String, [String]) -> Void)?
     /// Called once the turn's message is with Claude Code, when the turn takes an interrupt or a steer.
