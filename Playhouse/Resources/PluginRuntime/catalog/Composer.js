@@ -36,6 +36,11 @@ function ModeToggles(props) {
       key: "plan", toggle: model.plan, testID: prefix + "conversation-plan-button", label: "Plan mode", onPress: on.togglePlan,
       icon: function (color) { return h(Icon, { name: "lightbulb.max", size: 13, weight: "medium", color: color }); }
     }),
+    model.optimizedContext != null ? h(ModeToggle, {
+      key: "optimized", toggle: model.optimizedContext, testID: prefix + "conversation-optimized-context-button", label: "Optimized context",
+      onPress: on.toggleOptimizedContext,
+      icon: function (color) { return h(Icon, { name: "gauge.open.with.lines.needle.33percent.and.arrowtriangle.from.0percent.to.50percent", size: 14, weight: "medium", color: color }); }
+    }) : null,
     model.goal != null ? h(ModeToggle, {
       key: "goal", toggle: model.goal, testID: prefix + "conversation-goal-button", label: "Goal", onPress: on.toggleGoal,
       icon: function (color) { return h(Icon, { asset: "GoalIcon", color: color, width: 15, height: 15 }); }
@@ -166,6 +171,7 @@ function Demo() {
   var pickerOpen = React.useState(false);
   var scheduleOpen = React.useState(false);
   var last = React.useState("none");
+  var optimized = React.useState(false);
 
   var picked = sample.model.models.filter(function (option) { return option.id === modelID[0]; })[0];
   var effortChoice = sample.model.effortChoices.filter(function (choice) { return choice.value === effort[0]; })[0];
@@ -178,6 +184,7 @@ function Demo() {
     draft: draft[0],
     placeholder: goal ? "Set a goal to keep pursuing" : sample.placeholder,
     plan: Object.assign({}, sample.plan, { on: plan }),
+    optimizedContext: Object.assign({}, sample.optimizedContext, { on: optimized[0] }),
     goal: Object.assign({}, sample.goal, { on: goal }),
     startImplementing: plan ? sample.startImplementing : undefined,
     provider: Object.assign({}, sample.provider, {
@@ -200,6 +207,7 @@ function Demo() {
     openSkills: function () { last[1]("skills"); },
     attach: function () { last[1]("attach"); },
     togglePlan: function () { mode[1](plan ? "default" : "plan"); last[1](plan ? "plan off" : "plan on"); },
+    toggleOptimizedContext: function () { optimized[1](!optimized[0]); last[1](optimized[0] ? "optimized context off" : "optimized context on"); },
     toggleGoal: function () {
       mode[1](goal ? "default" : "goal");
       if (!goal) draft[1]("");

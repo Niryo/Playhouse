@@ -145,6 +145,104 @@ extension PlayhouseUITests {
         let waitingColumn = element("column-waiting-response")
         XCTAssertTrue(waitingColumn.buttons["task-card-\(taskID.uppercased())"].waitToExist(timeout: 8), "The visible board should show the naturally completed task awaiting review.")
     }
+    /// Deletes a task while its turn waits on a question, then one while its turn runs and
+    /// ignores its interrupt. Each card leaves the board as soon as the delete is confirmed, and
+    /// the daemon stops the turn and deletes the task within seconds, without an error.
+    func exerciseDeleteDuringLiveTurns(provider: String) throws {
+        let display = provider == "codex" ? "Codex" : "Claude"
+        let scenarios: [(name: String, fixture: String, message: String)] = [
+            ("question", provider == "codex" ? "codex-fixture-progress-question" : "claude-fixture-ui", "Ask a structured question."),
+            ("running", provider == "codex" ? "codex-fixture-hold-interrupt" : "claude-fixture-ui", "Hold until stopped."),
+        ]
+        for (index, scenario) in scenarios.enumerated() {
+            let executable = WorkspaceFixture.root.appendingPathComponent(scenario.fixture).path
+            for suffix in [".interrupt-ready", ".interrupt-received", ".interrupt-release", ".turn-active", ".turn-release"] {
+                try? FileManager.default.removeItem(atPath: executable + suffix)
+            }
+            if provider == "codex" {
+                // Earlier cases share this fixture; its saved turns would renumber this turn's items.
+                try? FileManager.default.removeItem(atPath: executable + ".history")
+                // The Codex question fixture asks its question once this marker exists.
+                if scenario.name == "question" { try Data("ask at once\n".utf8).write(to: URL(fileURLWithPath: executable + ".turn-release")) }
+                codexFixtureExecutable = executable
+            } else {
+                claudeFixtureExecutable = executable
+            }
+            if index == 0 { launchApp(defaultParent: fixture.parent.path) } else if provider == "codex" { relaunchApp() }
+            defer { try? Data("release\n".utf8).write(to: URL(fileURLWithPath: executable + ".interrupt-release")) }
+
+            let title = "\(display) delete during \(scenario.name)"
+            _ = try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--provider", provider])
+            let taskID = try taskID(named: title)
+            openTask(named: title)
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitToExist(timeout: 10))
+            composer.click()
+            composer.typeText(scenario.message)
+            element("send-message-button").click()
+            if scenario.name == "question" {
+                XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 20),
+                              "The \(display) turn should wait on its question before the delete.")
+            } else {
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".interrupt-ready") }, timeout: 20),
+                              "The \(display) turn should be running before the delete.")
+            }
+            let live = try XCTUnwrap(try taskRecord(id: taskID))
+            let worktreePath = try XCTUnwrap((live["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath), "The turn should run in the task's own worktree.")
+            XCTAssertTrue(ConversationTurnLockBarrier.isHeldByAnotherProcess(dataDirectory: dataDirectory, taskID: taskID),
+                          "The live \(display) turn holds the task's turn reservation.")
+            attachAppWindowScreenshot(named: "\(display) turn live (\(scenario.name)) before the delete")
+            element("back-to-board-button").click()
+            XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+            let card = app.buttons["task-card-\(taskID.uppercased())"]
+            XCTAssertTrue(card.waitToExist(timeout: 5))
+            if scenario.name == "running" {
+                // A follow-up queued behind the running turn is dropped with the task.
+                _ = try runCLI(["conversation", "queue", taskID, "--message", "Queued before the delete."])
+            }
+            deleteTaskFromContextMenu(title)
+            let confirm = element("confirm-delete-task-button")
+            XCTAssertTrue(confirm.waitToExist(timeout: 5))
+            confirm.click()
+            XCTAssertTrue(waitUntil({ !card.exists }, timeout: 2), "The card should leave the board as soon as the delete is confirmed.")
+            if scenario.name == "running" {
+                XCTAssertNotNil(try taskRecord(id: taskID), "The card leaves before the daemon has stopped a turn that ignores its interrupt.")
+            }
+            attachAppWindowScreenshot(named: "\(display) card leaves the board at once (\(scenario.name))")
+            XCTAssertTrue(waitUntil({
+                (try? self.diagnosticEvents().contains {
+                    $0["event"] as? String == "task.delete.succeeded" && $0["taskID"] as? String == taskID
+                }) ?? false
+            }, timeout: 15), "Deleting a task with a live \(display) turn should finish within seconds instead of waiting for the agent.")
+            assertCLIError(try runCLI(["task", "get", taskID], expectedStatus: 3), code: "not_found")
+            XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: worktreePath) }, timeout: 5), "The delete removes the turn's worktree.")
+            XCTAssertFalse(ConversationTurnLockBarrier.isHeldByAnotherProcess(dataDirectory: dataDirectory, taskID: taskID),
+                           "The stopped turn gives up the task's turn reservation.")
+            let events = try diagnosticEvents().filter { $0["taskID"] as? String == taskID }.compactMap { $0["event"] as? String }
+            XCTAssertTrue(events.contains("task.delete.stopping_turn"))
+            XCTAssertTrue(events.contains("task.delete.turn_stopped"))
+            if scenario.name == "running" {
+                XCTAssertTrue(events.contains("task.delete.turn_force_killed"), "A turn that ignores its interrupt is force-stopped.")
+            } else {
+                XCTAssertFalse(events.contains("task.delete.turn_force_killed"), "Declining the question ends the turn without force.")
+            }
+            XCTAssertFalse(events.contains("task.delete.failed"))
+            if scenario.name == "running" {
+                let queueFile = dataDirectory.appendingPathComponent("queued-conversation-messages.json")
+                let queued = (try? JSONSerialization.jsonObject(with: Data(contentsOf: queueFile))) as? [String: Any] ?? [:]
+                XCTAssertNil(queued[taskID.uppercased()], "Deleting the task removes its queued follow-ups.")
+                XCTAssertEqual(try diagnosticEvents().filter {
+                    $0["event"] as? String == "conversation.send.accepted" && $0["taskID"] as? String == taskID
+                }.count, 1, "The queued follow-up never runs as a turn of its own.")
+            }
+            // A spurious error from the stopped turn's teardown would arrive shortly after the delete.
+            XCTAssertFalse(element("dismiss-delete-error-button").waitToExist(timeout: 2), "A delete that stopped the turn should not show an error.")
+            XCTAssertFalse(app.sheets.firstMatch.exists, "A delete that stopped the turn should not show any error.")
+            XCTAssertFalse(card.exists, "The deleted task's card stays off the board.")
+            attachAppWindowScreenshot(named: "\(display) task deleted (\(scenario.name)) with no error")
+        }
+    }
     func openSideChatOnReply(
         title: String, beforeOpening: (String) throws -> Void = { _ in }
     ) throws -> (taskID: String, reply: XCUIElement, bubble: XCUIElement) {

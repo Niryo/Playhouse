@@ -1110,6 +1110,36 @@ extension PlayhouseCLI {
                     ])
                 }
                 throw CLIError.usage("Use: playhouse conversation effort <task-id> [set <low|medium|high|xhigh>]")
+            case "context-mode":
+                let modeArguments = Array(tail.dropFirst())
+                if modeArguments.isEmpty {
+                    return BridgeRequest(command: "conversation.context-mode.get", arguments: ["taskID": .string(id)])
+                }
+                if modeArguments.count == 2, modeArguments[0] == "set" {
+                    return BridgeRequest(command: "conversation.context-mode.set", arguments: [
+                        "taskID": .string(id), "mode": .string(modeArguments[1]),
+                    ])
+                }
+                throw CLIError.usage("Use: playhouse conversation context-mode <task-id> [set <full|optimized>]")
+            case "outline":
+                guard tail.count == 1 else { throw CLIError.usage("Use: playhouse conversation outline <task-id>") }
+                return BridgeRequest(command: "conversation.outline", arguments: ["taskID": .string(id)])
+            case "read":
+                let options = Array(tail.dropFirst())
+                let flags = try parseFlags(options.filter { $0 != "--include-tools" }, valueFlags: ["--at", "--from", "--to", "--kinds"])
+                func list(_ flag: String) -> [String] {
+                    (flags[flag] ?? []).flatMap { $0.split(separator: ",") }
+                        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                }
+                var arguments: [String: BridgeValue] = ["taskID": .string(id)]
+                let positions = list("--at")
+                if !positions.isEmpty { arguments["at"] = .array(positions.map(BridgeValue.string)) }
+                if let from = flags["--from"]?.first { arguments["from"] = .string(from) }
+                if let to = flags["--to"]?.first { arguments["to"] = .string(to) }
+                let kinds = list("--kinds")
+                if !kinds.isEmpty { arguments["kinds"] = .array(kinds.map(BridgeValue.string)) }
+                if options.contains("--include-tools") { arguments["includeTools"] = .boolean(true) }
+                return BridgeRequest(command: "conversation.read", arguments: arguments)
             case "model":
                 let modelArguments = Array(tail.dropFirst())
                 if modelArguments.isEmpty {

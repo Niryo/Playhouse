@@ -964,6 +964,8 @@ extension ConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void
     ) async {
+        // A task being deleted takes no more turns.
+        guard !TaskDeletion.isDeleting(taskID) else { return }
         // A task without a conversation can only hold follow-ups queued while its first message
         // was starting; they have no conversation ID, and the first one sent starts it.
         guard let threadID = try? tasks.conversationSubject(taskID).activeConversationID ?? "" else { return }
@@ -977,7 +979,10 @@ extension ConversationManager {
         while true {
             while true {
                 let item: QueuedConversationMessage?
-                do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: threadID, messageID: messageIDFilter) }
+                // Read the conversation per claim: an optimized follow-up starts a new session
+                // and moves the rest of the queue onto it.
+                let currentThreadID = (try? tasks.conversationSubject(taskID).activeConversationID) ?? threadID
+                do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: currentThreadID, messageID: messageIDFilter) }
                 catch { break }
                 guard let item else { break }
                 // Windows hide a follow-up while it is claimed, so announce the claim

@@ -41,6 +41,13 @@ extension TaskConversationView {
             skills: !hasTaskSidebar,
             attach: .init(disabled: isReadOnly || isPreparingSubmittedMessage, help: "Attach images"),
             plan: .init(on: conversationMode == .plan, help: conversationMode == .plan ? "Turn off Plan mode" : "Plan before making changes"),
+            // The standalone chat already pages its own context.
+            optimizedContext: task.isStandaloneChat ? nil : .init(
+                on: conversationContextMode == .optimized,
+                help: conversationContextMode == .optimized
+                    ? "Turn off optimized context: follow-ups resume the whole conversation"
+                    : "Optimized context: each follow-up starts a fresh session with your messages, the last plan and the last answer, and the agent reads more on demand"
+            ),
             goal: provider.supportsGoals
                 ? .init(on: isEnteringGoal, help: isEnteringGoal ? "Stop entering a goal" : "Set a goal to keep pursuing")
                 : nil,
@@ -167,6 +174,7 @@ extension TaskConversationView {
             togglePlan: {
                 if conversationMode == .plan { setConversationMode(.code) } else { enterPlanMode() }
             },
+            toggleOptimizedContext: { if !isReadOnly { toggleOptimizedContext() } },
             toggleGoal: {
                 if isEnteringGoal {
                     isEnteringGoal = false

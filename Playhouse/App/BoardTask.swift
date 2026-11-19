@@ -179,6 +179,8 @@ final class BoardTask {
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
+    /// Nil for tasks that never chose; those resume their full conversation.
+    var conversationContextModeRawValue: String?
     // Retained for one-time migration to the global provider model preference.
     var conversationModelIDsData: Data?
     /// The unsent composer draft when `hasUnsentDraft` is true; otherwise the last prompt

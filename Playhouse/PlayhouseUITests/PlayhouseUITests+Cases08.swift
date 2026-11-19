@@ -321,7 +321,7 @@ extension PlayhouseUITests {
         apiReservationReleased = true
         XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: apiWorktreePath) }, timeout: 10), "API removal should clean up the worktree after the active reservation releases.")
     }
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Deleting a task also removes its per-task preferences and any left by already-deleted tasks, while another task's preferences remain.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion removes the card from the board at once and waits briefly for a conversation-turn reservation another process holds; when that reservation stays held past the stop timeout the delete fails with a clear error and the task and its card come back, and with no turn to stop a task lock another process keeps holding fails the delete the same way after the lock timeout, recording the lock it waited for; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Deleting a task also removes its per-task preferences and any left by already-deleted tasks, while another task's preferences remain.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         // Left by a task deleted before per-task preference cleanup existed.
@@ -364,8 +364,10 @@ extension PlayhouseUITests {
             if !conversationReservationReleased { try? conversationReservation.release() }
         }
         element("confirm-delete-task-button").click()
+        XCTAssertTrue(waitUntil({ !self.app.buttons[pendingTitle].exists }, timeout: 2), "The card should leave the board as soon as the delete is confirmed.")
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(try taskRecord(id: pendingID)?["id"] as? String, pendingID)
+        attachAppWindowScreenshot(named: "Deleted card leaves the board while its delete waits")
         try conversationReservation.release()
         conversationReservationReleased = true
         var pendingDeleteEvent: [String: Any]?
@@ -387,6 +389,45 @@ extension PlayhouseUITests {
             return !keys.contains(pendingPreference) && !keys.contains(orphanedPreference)
         }, timeout: 10), "Deleting a task must remove its preferences and those left by already-deleted tasks.")
         XCTAssertTrue(isolatedPreferenceKeys().contains(keptPreference), "Another task's preferences must survive a delete.")
+        // A reservation another process keeps holding fails the delete after the stop timeout
+        // with a visible error, and the card comes back.
+        let heldReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: keptID)
+        var heldReservationReleased = false
+        defer { if !heldReservationReleased { try? heldReservation.release() } }
+        deleteTaskFromContextMenu(keptTitle)
+        XCTAssertTrue(element("confirm-delete-task-button").waitToExist(timeout: 5))
+        element("confirm-delete-task-button").click()
+        XCTAssertTrue(waitUntil({ !self.app.buttons[keptTitle].exists }, timeout: 2), "The card should leave the board while its delete runs.")
+        let deleteError = element("dismiss-delete-error-button")
+        XCTAssertTrue(deleteError.waitToExist(timeout: 25), "A delete that can't stop the turn should fail visibly instead of hanging.")
+        XCTAssertTrue(element(containingAccessibilityText: "wasn't deleted").exists, app.debugDescription)
+        attachAppWindowScreenshot(named: "Delete that couldn't stop the turn reports an error")
+        deleteError.click()
+        XCTAssertTrue(app.buttons[keptTitle].waitToExist(timeout: 5), "The card comes back when its delete fails.")
+        attachAppWindowScreenshot(named: "Card back on the board after its delete failed")
+        XCTAssertEqual(try taskRecord(id: keptID)?["id"] as? String, keptID)
+        try heldReservation.release()
+        heldReservationReleased = true
+        // With no turn to stop, a task lock another process keeps holding fails the delete after
+        // the lock timeout, again with a visible error and the card back.
+        let heldOperation = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: keptID)
+        var heldOperationReleased = false
+        defer { if !heldOperationReleased { try? heldOperation.release() } }
+        deleteTaskFromContextMenu(keptTitle)
+        XCTAssertTrue(element("confirm-delete-task-button").waitToExist(timeout: 5))
+        element("confirm-delete-task-button").click()
+        XCTAssertTrue(waitUntil({ !self.app.buttons[keptTitle].exists }, timeout: 2), "The card should leave the board while its delete runs.")
+        let lockError = element("dismiss-delete-error-button")
+        XCTAssertTrue(lockError.waitToExist(timeout: 25), "A delete that times out on a task lock should fail visibly instead of hanging.")
+        XCTAssertTrue(element(containingAccessibilityText: "didn't finish within").exists, app.debugDescription)
+        lockError.click()
+        XCTAssertTrue(app.buttons[keptTitle].waitToExist(timeout: 5), "The card comes back when its delete times out.")
+        XCTAssertTrue(try diagnosticEvents().contains {
+            $0["event"] as? String == "task.delete.failed" && $0["taskID"] as? String == keptID
+                && $0["phase"] as? String == "lock-wait" && $0["lock"] as? String == "task-operation"
+        }, "A delete that timed out on a lock is recorded with the lock it waited for.")
+        try heldOperation.release()
+        heldOperationReleased = true
         XCTAssertEqual((try runCLI(["task", "delete", keptID])["result"] as? [String: Any])?["deleted"] as? Bool, true)
         XCTAssertTrue(waitUntil({ !self.isolatedPreferenceKeys().contains(keptPreference) }, timeout: 10))
 
@@ -459,6 +500,14 @@ extension PlayhouseUITests {
         assertCLIError(try runCLI(["task", "get", dirtyID], expectedStatus: 3), code: "not_found")
         XCTAssertEqual(try tasksFromBoardList().count, 0)
         attachScreenshot(named: "Deleted task removed from the board")
+    }
+    // case-contract: test_claude_delete_stops_live_turn_immediately | Deleting a task whose Claude turn waits on an AskUserQuestion, and one whose Claude turn is running and ignores its interrupt, removes the task within seconds instead of waiting for the agent: the delete declines the pending question, which ends that turn without force, asks Claude to interrupt a running turn, and force-stops the Claude Code process when the turn hasn't ended within the interrupt timeout, and records task.delete.stopping_turn, task.delete.turn_force_killed and task.delete.turn_stopped. Afterwards the Claude process is gone, the turn reservation is free, the task's worktree is removed, the daemon no longer reports the turn live, the stopped send ends, and no transcript rows come back. A follow-up queued behind the running turn is removed with the task and never runs, and a send waiting for that turn fails with task_deleting instead of starting a turn. A second delete sent while the first runs shares its result and a later one reports not found. In the window the card leaves the board as soon as the delete is confirmed, and no error appears.
+    func test_claude_delete_stops_live_turn_immediately() throws {
+        try exerciseDeleteDuringLiveTurns(provider: "claude")
+    }
+    // case-contract: test_codex_delete_stops_live_turn_immediately | Deleting a task whose Codex turn waits on a blocking question, and one whose Codex turn is running and ignores its turn/interrupt, removes the task within seconds instead of waiting for the agent: the delete declines the pending question, which ends that turn without force, asks Codex to interrupt a running turn, and, when the turn hasn't ended within the interrupt timeout, fails the turn in Playhouse without waiting for the shared app-server, and records task.delete.stopping_turn, task.delete.turn_force_killed and task.delete.turn_stopped. Afterwards the turn reservation is free, the task's worktree is removed, the daemon no longer reports the turn live, the stopped send ends, and no transcript rows come back, even after the app-server ends the stopped turn. A follow-up queued behind the running turn is removed with the task and never runs, and a send waiting for that turn fails with task_deleting instead of starting a turn. A second delete sent while the first runs shares its result and a later one reports not found. In the window the card leaves the board as soon as the delete is confirmed, and no error appears.
+    func test_codex_delete_stops_live_turn_immediately() throws {
+        try exerciseDeleteDuringLiveTurns(provider: "codex")
     }
     // case-contract: test_task_delete_reports_real_worktree_failure_and_allows_retry | A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details, including bounded NSError user-info keys and values, without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored.
     func test_task_delete_reports_real_worktree_failure_and_allows_retry() throws {

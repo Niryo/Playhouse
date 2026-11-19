@@ -259,6 +259,11 @@ extension ConversationSubject {
         set { conversationEffortRawValue = newValue }
     }
 
+    /// Only a board task chooses; the standalone chat already pages its own context.
+    var conversationContextMode: ConversationContextMode {
+        (self as? BoardTask)?.conversationContextModeRawValue.flatMap(ConversationContextMode.init(rawValue:)) ?? .full
+    }
+
     var conversationModelID: String? {
         get {
             guard let conversationModelIDsData,
@@ -499,4 +504,14 @@ enum PersistedAnnotations {
         result.append(contentsOf: pending)
         return result
     }
+}
+
+/// How much of a board task's conversation a follow-up carries. Kept with the
+/// models, which some tools compile on their own. `full` resumes the
+/// provider session, as always. `optimized` starts every follow-up (not a steer) in a
+/// fresh provider session seeded only with the user's messages, the last plan, the last
+/// final answer and a positional outline, and lets the agent read the rest on demand.
+enum ConversationContextMode: String, CaseIterable, Hashable, Codable {
+    case full
+    case optimized
 }

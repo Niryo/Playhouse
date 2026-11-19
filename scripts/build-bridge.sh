@@ -117,6 +117,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/McpCatalog.swift"
   "${repository_root}/Playhouse/App/CodexConfigTOML.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"
+  "${repository_root}/Playhouse/App/BoundedWaits.swift"
   "${repository_root}/Playhouse/App/TaskSchedule.swift"
   "${repository_root}/Playhouse/App/Plugins/Services/PluginServiceHost.swift"
   "${repository_root}/Playhouse/App/Plugins/Services/PullRequestModeService.swift"

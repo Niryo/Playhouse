@@ -15,6 +15,8 @@ def start_turn(runtime, _session_state, message):
     if "-single-server" in _session_state.mode:
         runtime.THREAD_ID = message["params"]["threadId"]
         runtime.TURN_ID = f"turn-{runtime.uuid.uuid4()}"
+    if "-fresh-threads-" in _session_state.mode:
+        runtime.THREAD_ID = message["params"]["threadId"]
     if "-question-isolation-" in _session_state.mode:
         runtime.THREAD_ID = message["params"]["threadId"]
         runtime.TURN_ID = f"turn-{runtime.uuid.uuid4()}"
@@ -122,6 +124,7 @@ def start_turn(runtime, _session_state, message):
         "cwd": message.get("params", {}).get("cwd"),
         "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
         "skillInputs": [item for item in _session_state.turn_input if item.get("type") == "skill"],
+        "turnThreadID": message.get("params", {}).get("threadId"),
     }
     if _session_state.serial_mode:
         _session_state.saved_history = _session_state.serial_history()

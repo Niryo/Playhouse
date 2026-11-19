@@ -465,7 +465,9 @@ final class PlayhouseBridgeRuntime {
                  "task.changes.mark-unviewed", "task.changes.diff", "workspace.suggest", "workspace.repositories.list":
                 result = try await taskWorkspaceOperation(request, taskManager: taskManager, workspaces: workspaces, settings: settings)
             case "task.delete":
-                try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())
+                let clients = conversationClients()
+                let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings)
+                try await conversations.deleteTask(request.requiredUUID("taskID"), diagnostics: clients.codex.diagnosticFields())
                 result = .object(["deleted": .boolean(true)])
             case "task.delete.requires-confirmation":
                 let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))
@@ -533,6 +535,29 @@ final class PlayhouseBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let task = try await conversations.setEffort(taskID: taskID, effort: effort)
                 result = try Self.value(task)
+            case "conversation.context-mode.get":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .object(["mode": .string(try conversations.contextMode(taskID: request.requiredUUID("taskID")).rawValue)])
+            case "conversation.context-mode.set":
+                let taskID = try request.requiredUUID("taskID")
+                guard let mode = ConversationContextMode(rawValue: try request.requiredString("mode")) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Context mode must be one of: full, optimized.")
+                }
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try await conversations.setContextMode(taskID: taskID, mode: mode))
+            case "conversation.outline":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try conversations.outline(taskID: request.requiredUUID("taskID")))
+            case "conversation.read":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try conversations.read(
+                    taskID: request.requiredUUID("taskID"),
+                    positions: request.arguments["at"]?.strings ?? [],
+                    from: request.arguments["from"]?.string,
+                    to: request.arguments["to"]?.string,
+                    kinds: request.arguments["kinds"]?.strings ?? [],
+                    includesTools: request.arguments["includeTools"]?.bool ?? false
+                ))
             case "conversation.model.get":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 result = .object(["modelID": try conversations.modelID(taskID: request.requiredUUID("taskID")).map(BridgeValue.string) ?? .null])

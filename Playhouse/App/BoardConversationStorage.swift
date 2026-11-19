@@ -40,6 +40,37 @@ extension BoardTaskManager {
                 }
                 throw error
             }
+            // Follow-ups queued on the replaced conversation belong to its successor.
+            if let existing, !task.isStandaloneChat {
+                try? mutateQueuedMessages(taskID: id) { items in
+                    for index in items.indices where items[index].threadID == existing {
+                        items[index].threadID = conversationID
+                    }
+                }
+            }
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Whether the task's follow-ups resume the whole conversation or start fresh,
+    /// seeded sessions. Only a board task chooses: the standalone chat pages itself.
+    func setConversationContextMode(_ id: UUID, mode: ConversationContextMode) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            guard let boardTask = task as? BoardTask else {
+                throw BridgeCommandError(
+                    code: "invalid_argument",
+                    message: "The standalone chat already splits its context into pages, so it has no context mode."
+                )
+            }
+            let previous = boardTask.conversationContextModeRawValue
+            boardTask.conversationContextModeRawValue = mode.rawValue
+            do {
+                try await saveTaskContext(taskID: id)
+            } catch {
+                boardTask.conversationContextModeRawValue = previous
+                throw error
+            }
             return BoardTaskRecord(task: task)
         }
     }

@@ -440,36 +440,6 @@ enum RepositoryAllocationLock {
     }
 }
 
-@MainActor
-enum TaskOperationLockGate {
-    private static var heldKeys: Set<String> = []
-    private static var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-
-    static func acquire(_ key: String) async {
-        guard !heldKeys.contains(key) else {
-            await withCheckedContinuation { continuation in
-                waiters[key, default: []].append(continuation)
-            }
-            return
-        }
-        heldKeys.insert(key)
-    }
-
-    static func isHeld(_ key: String) -> Bool {
-        heldKeys.contains(key)
-    }
-
-    static func release(_ key: String) {
-        guard var pending = waiters[key], !pending.isEmpty else {
-            heldKeys.remove(key)
-            return
-        }
-        let next = pending.removeFirst()
-        waiters[key] = pending.isEmpty ? nil : pending
-        next.resume()
-    }
-}
-
 struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let id: UUID
     var title: String
@@ -483,6 +453,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let claudeSessionID: String?
     let conversationProvider: String
     let conversationEffort: String
+    /// full or optimized; absent from records older than the setting.
+    let conversationContextMode: String?
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
     let hasUnsentDraft: Bool
@@ -527,6 +499,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         claudeSessionID = task.claudeSessionID
         conversationProvider = task.conversationProvider.rawValue
         conversationEffort = task.conversationEffort
+        conversationContextMode = task.conversationContextMode.rawValue
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
         hasUnsentDraft = task.hasUnsentDraft
@@ -614,7 +587,7 @@ struct QueuedConversationMessage: Codable, Equatable, Identifiable {
     enum State: String, Codable { case queued, dispatching, needsAction }
     let id: UUID
     let taskID: UUID
-    let threadID: String
+    var threadID: String
     let text: String
     var imageDataURLs: [String]? = []
     var state: State

@@ -3,591 +3,377 @@ from test_bridge_support import __file__
 
 
 class BridgeTestCases28:
-    """Script plugins' background halves: services, mcp.call and agent.run."""
+    def optimized_claude_fixture(self, name, report_outcome=False):
+        executable = self.data_directory / name
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        if report_outcome:
+            environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
+        return executable, environment
 
-    # One index.js with both halves: the popover shows what the service saved.
-    SERVICE_PLUGIN_SOURCE = r"""
-function Panel() {
-  var props = Playhouse.useProps();
-  var state = props.state || {};
-  return h(Stack, { spacing: 4 },
-    h(Text, { testID: "service-focused" }, "focused " + (state.focused || 0)),
-    h(Text, { testID: "service-heard" }, "heard " + (state.heard || []).join(",")),
-    h(Text, { testID: "service-active" }, "service " + Playhouse.service.active));
-}
-Playhouse.service.on("app.focus", async function (event) {
-  var state = Playhouse.props.state || {};
-  await Playhouse.setState("focused", (state.focused || 0) + 1);
-});
-// No guard against its own writes: a service never hears those, so this can't loop.
-Playhouse.service.on("plugin.stateChanged", async function (event) {
-  var heard = (Playhouse.props.state || {}).heard || [];
-  await Playhouse.setState("heard", heard.concat([event.payload.pluginID + ":" + event.key]));
-});
-Playhouse.render(h(Panel));
-"""
+    def claude_fixture_turns(self, executable):
+        history = Path(str(executable) + ".history")
+        turns = json.loads(history.read_text(encoding="utf-8"))["turns"] if history.is_file() else []
+        return [turn for turn in turns if not (turn.get("userText") or "").startswith("Write a concise task title")]
 
-    # Listens for app.focus in its script but its manifest lists only task moves.
-    QUIET_PLUGIN_SOURCE = r"""
-Playhouse.service.on("app.focus", function () { return Playhouse.setState("focused", true); });
-Playhouse.service.on("task.statusChanged", function (event) { return Playhouse.setState("moved", event.to); });
-Playhouse.service.on("plugin.stateChanged", function (event) {
-  if (event.key !== "heard") return Playhouse.setState("heard", event.payload.pluginID + ":" + event.key);
-});
-"""
+    def claude_turn_ending(self, executable, message):
+        matches = [turn for turn in self.claude_fixture_turns(executable) if (turn.get("userText") or "").endswith(message)]
+        self.assertTrue(matches, f"The Claude fixture never received a turn ending with {message!r}.")
+        return matches[-1]
 
-    HEADLESS_HANDLERS_SOURCE = r"""
-Playhouse.service.on("app.focus", async function () {
-  var tasks = await Playhouse.bridge("task.list", {});
-  await Playhouse.setState("tasks", tasks.tasks.length);
-  try { await Playhouse.ui.close(); } catch (error) { await Playhouse.setState("ui", error.code); }
-  try { await Playhouse.bridge("plugin.services", {}); } catch (error) { await Playhouse.setState("internal", error.code); }
-  try {
-    var answer = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_user_profile", { user: "U1" });
-    await Playhouse.setState("mcp", answer.content[0].text);
-  } catch (error) { await Playhouse.setState("mcp", error.code); }
-  try {
-    var run = await Playhouse.agent.run({ prompt: "Summarize", context: { kind: "probe" } });
-    await Playhouse.setState("run", run.runID);
-  } catch (error) { await Playhouse.setState("run", error.code); }
-});
-Playhouse.service.on("agent.finished", async function (e) {
-  await Playhouse.setState("finished", { status: e.status, kind: e.context.kind, title: e.result.title, runID: e.runID, same: e.payload.runID === e.runID });
-});
-Playhouse.service.on("task.statusChanged", function () { throw new Error("The move handler broke."); });
-Playhouse.render(h(Text, { testID: "never" }, "never rendered"));
-"""
+    # case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, carries the latest plan in full, states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
+    def test_claude_optimized_follow_up_starts_fresh_seeded_session(self):
+        executable, environment = self.optimized_claude_fixture("claude-fixture-optimized-follow-up")
+        task_id = self.create_task(title="Optimized Claude follow-up", provider="claude")["id"]
 
-    POPOVER_CALLS_SOURCE = r"""
-function Calls() {
-  var result = React.useState("idle");
-  function call() {
-    Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_user_profile", {}).then(
-      function (answer) { result[1]("mcp " + answer.content[0].text); },
-      function (error) { result[1]("mcp " + error.code); });
-  }
-  function run() {
-    Playhouse.agent.run({ prompt: "Go", context: { kind: "ui" } }).then(
-      function (answer) { result[1]("run " + answer.runID); },
-      function (error) { result[1]("run " + error.code); });
-  }
-  var off = Playhouse.service.on("app.focus", function () { result[1]("service handler ran in the UI"); });
-  return h(Stack, {},
-    h(Button, { testID: "call-mcp", onPress: call }, h(Text, {}, "MCP")),
-    h(Button, { testID: "call-agent", onPress: run }, h(Text, {}, "Agent")),
-    h(Text, { testID: "call-result" }, result[0] + (Playhouse.service.active ? " (service)" : "")));
-}
-Playhouse.render(h(Calls));
-"""
+        def send(message, *extra):
+            return self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", message, *extra, extra_environment=environment
+            )[0])
 
-    MCP_SERVICE_SOURCE = r"""
-Playhouse.service.on("app.focus", async function () {
-  var answer = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_search_public_and_private", { query: "to:me", channel_types: "im" });
-  await Playhouse.setState("people", answer.content.map(function (block) { return block.text; }));
-  // Not in the manifest's mcpTools: refused before Claude Code is asked.
-  try { await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_user_profile", {}); } catch (error) { await Playhouse.setState("denied", error.code); }
-});
-function People() {
-  var people = (Playhouse.useProps().state || {}).people || [];
-  return h(Text, { testID: "mcp-people" }, people.length ? people.join(", ") : "nobody yet");
-}
-Playhouse.render(h(People));
-"""
+        first_message = "Inspect the readme and plan the change."
+        send(first_message, "--mode", "plan")
+        first = self.claude_turn_ending(executable, first_message)
+        original_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+        self.assertEqual(first["sessionID"], original_session)
+        self.assertFalse(first["resumed"])
+        self.assertNotIn("This task uses optimized context", first["arguments"][first["arguments"].index("--append-system-prompt") + 1],
+                         "A task on full context never gets the optimized-context guidance.")
 
-    # The Slack reader's background half on Codex.
-    CODEX_MCP_SERVICE_SOURCE = r"""
-Playhouse.service.on("app.focus", async function () {
-  var answer = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_search_public_and_private", { query: "to:me" }, { provider: "codex" });
-  await Playhouse.setState("people", answer.content.map(function (block) { return block.text; }));
-});
-function People() {
-  var people = (Playhouse.useProps().state || {}).people || [];
-  return h(Text, { testID: "mcp-people" }, people.length ? people.join(", ") : "nobody yet");
-}
-Playhouse.render(h(People));
-"""
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id)[0])["mode"], "full",
+                         "A task that never chose resumes its whole conversation.")
+        updated = self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        self.assertEqual(updated["conversationContextMode"], "optimized")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id)[0])["mode"], "optimized")
 
-    # Waits on a slow MCP tool when a task moves, writing before and after it.
-    SLOW_SERVICE_SOURCE = r"""
-Playhouse.service.on("task.statusChanged", async function (event) {
-  await Playhouse.setState("before", event.to);
-  await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_channel", { channel_id: "D1" });
-  await Playhouse.setState("after", event.to);
-});
-"""
+        second_message = "Second request: keep the summary short."
+        send(second_message)
+        second = self.claude_turn_ending(executable, second_message)
+        second_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+        self.assertNotEqual(second_session, original_session, "An optimized follow-up starts a session of its own.")
+        self.assertEqual(second["sessionID"], second_session, "The fresh session becomes the task's session.")
+        self.assertFalse(second["resumed"], "An optimized follow-up launches with --session-id, never --resume.")
+        self.assertNotIn("--resume", second["arguments"])
+        prompt = second["userText"]
+        self.assertTrue(prompt.startswith("<playhouse-handoff-context>"), prompt[:200])
+        self.assertIn("Playhouse optimized context, not part of the user's message.", prompt)
+        self.assertIn(f"Read anything else of task {task_id.upper()} with conversation read", prompt)
+        self.assertIn("run help conversation --for task for its options", prompt,
+                      "The seed points at help for the command's options instead of copying them.")
+        self.assertIn(f"@1: {first_message}", prompt, "The seed lists the user's messages with their positions.")
+        self.assertIn("- Turn 1 (Plan mode): user @1; 1 agent message, 1 tool call; plan @3; ends @3", prompt,
+                      "The outline places the plan turn's user message, its work and its plan by position.")
+        self.assertIn("The latest plan (@3):\n\nInspection done: the workspace is ready.", prompt)
+        self.assertNotIn("I'll inspect the workspace first.", prompt, "The agent's commentary is not seeded; it is read on demand.")
+        self.assertTrue(prompt.endswith(f"</playhouse-handoff-context>\n\n{second_message}"))
+        instructions = second["arguments"][second["arguments"].index("--append-system-prompt") + 1]
+        self.assertIn("This task uses optimized context.", instructions)
+        self.assertIn("It is a summary, not the whole conversation", instructions)
+        self.assertIn(" conversation read ", instructions)
+        self.assertIn(" conversation outline ", instructions)
 
-    # Another plugin listening for agent results; it must never hear slack-dms's.
-    LISTENER_SOURCE = r"""
-Playhouse.service.on("agent.finished", function (e) { return Playhouse.setState("finished", e.runID); });
-"""
+        nudges = [turn for turn in self.claude_fixture_turns(executable)
+                  if "playhouse internal outcome nudge:" in (turn.get("userText") or "").lower()]
+        self.assertTrue(nudges, "Turns that report no outcome get Playhouse's nudge.")
+        for nudge in nudges:
+            self.assertTrue(nudge["resumed"], "A Playhouse nudge resumes the session it nudges.")
+            self.assertIn(nudge["sessionID"], {original_session, second_session})
+            self.assertNotIn("<playhouse-handoff-context>", nudge["userText"])
 
-    AGENT_PLUGIN_SOURCE = r"""
-var TASK_SCHEMA = { type: "object", properties: { title: { type: "string" }, prompt: { type: "string" }, nothingNew: { type: "boolean" } }, required: ["title", "prompt", "nothingNew"] };
-function onCreate(userId) {
-  var jobs = (Playhouse.props.state || {}).jobs || {};
-  // The plugin's "provider" setting picks the agent; each has its own model names.
-  var provider = (Playhouse.props.state || {}).provider;
-  Playhouse.agent.run({ prompt: "Read the DMs of " + userId + " and draft a task.", provider: provider, model: provider === "codex" ? "gpt-5.5" : "opus",
-    allowedTools: ["mcp__claude_ai_Slack__slack_read_channel", "mcp__claude_ai_Slack__slack_read_thread"],
-    jsonSchema: TASK_SCHEMA, context: { kind: "slack-task", userId: userId } })
-    .then(function (r) { var next = Object.assign({}, jobs); next[userId] = r.runID; return Playhouse.setState("jobs", next); });
-}
-function DMs() {
-  var state = Playhouse.useProps().state || {};
-  var finished = state.finished;
-  return h(Stack, { spacing: 6 },
-    h(Button, { style: "bordered", testID: "dm-create-U7", onPress: function () { onCreate("U7"); } }, h(Text, {}, "Create task for Dana")),
-    h(Text, { testID: "dm-job" }, (state.jobs || {}).U7 ? "running" : "no job"),
-    h(Text, { testID: "dm-finished" }, finished ? finished.status + " " + finished.userId + " " + (finished.error || finished.title || "") : "not finished"));
-}
-Playhouse.service.on("agent.finished", async function (e) {
-  if (e.context.kind !== "slack-task") return;
-  var title = null;
-  if (e.status === "done" && !e.result.nothingNew) {
-    var created = await Playhouse.bridge("task.create", { title: e.result.title, prompt: e.result.prompt, roots: [], repositories: [] });
-    title = created.title;
-  } else if (e.status !== "done") {
-    // A run that didn't finish is put on the board, so the user sees it.
-    await Playhouse.bridge("task.create", { title: "Slack task " + e.status + " for " + e.context.userId + (e.error ? ": " + e.error : ""),
-      prompt: "Draft the Slack task for " + e.context.userId + " again.", roots: [], repositories: [] });
-  }
-  var jobs = Object.assign({}, (Playhouse.props.state || {}).jobs || {});
-  if (jobs[e.context.userId] === e.runID) delete jobs[e.context.userId];
-  await Playhouse.setState("jobs", jobs);
-  await Playhouse.setState("finished", { status: e.status, userId: e.context.userId, runID: e.runID, error: e.error, title: title });
-});
-Playhouse.render(h(DMs));
-"""
+        third_message = "Third request: list the next steps."
+        before_third = self.assert_success(self.call_cli("conversation", "outline", task_id)[0])
+        send(third_message)
+        third = self.claude_turn_ending(executable, third_message)
+        third_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+        self.assertNotIn(third_session, {original_session, second_session}, "Every optimized follow-up rotates the session.")
+        self.assertFalse(third["resumed"])
+        outline = self.assert_success(self.call_cli("conversation", "outline", task_id)[0])
+        second_position = next(turn["userPositions"][0] for turn in outline["turns"]
+                               if turn["startedBy"] == "user" and turn["turn"] > 1)
+        self.assertIn(f"@1: {first_message}", third["userText"])
+        self.assertIn(f"@{second_position}: {second_message}", third["userText"])
+        self.assertIn("The latest plan (@3):", third["userText"], "The latest plan keeps travelling with later follow-ups.")
+        self.assertIn("The latest final answer (@", third["userText"])
 
-    def plugin_state(self, plugin_id, environment=None):
-        return self.assert_success(self.call_cli("plugin", "state", "--id", plugin_id, extra_environment=environment)[0])["state"]
+        def counted(value, noun):
+            return f"{value} {noun}{'' if value == 1 else 's'}"
+        self.assertIn(
+            f"Conversation outline: {counted(before_third['totalMessages'], 'message')} and "
+            f"{counted(before_third['totalToolCalls'], 'tool call')} in {counted(before_third['totalTurns'], 'turn')}.",
+            third["userText"], "The seed states the conversation's total messages, tool calls and turns.")
+        self.assertTrue(outline["turns"][0]["plan"], "The Plan mode turn stays recorded as a plan.")
+        fresh = [turn for turn in outline["turns"] if turn["freshSession"]]
+        self.assertEqual(len(fresh), 2, "The outline marks the turns that started fresh sessions.")
 
-    def write_service_file(self, source):
-        path = self.data_directory / f"service-{uuid.uuid4().hex[:8]}.js"
-        path.write_text(source, encoding="utf-8")
-        return path
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "full")[0])
+        fourth_message = "Fourth request: wrap up."
+        send(fourth_message)
+        fourth = self.claude_turn_ending(executable, fourth_message)
+        self.assertTrue(fourth["resumed"], "Back on full context, a follow-up resumes the latest session.")
+        self.assertEqual(fourth["sessionID"], third_session)
+        self.assertNotIn("<playhouse-handoff-context>", fourth["userText"])
 
-    # case-contract: test_plugin_service_events_targeting_and_state | A plugin.json may list "events" (app events from PluginEvent's names, agent.finished included) for a background half next to any presentation, and a headless plugin is valid with only events; an unknown or repeated event, an mcpTools entry that isn't mcp__<server>__<tool>, or a headless plugin with neither commands nor events is reported in its errors. `plugin service --file` runs the script's Playhouse.service.on handlers headlessly in a fresh service runtime per event, where Playhouse.render does nothing: bridge calls are answered, ui calls are refused as unavailable, plugin.services is refused as invalid_argument, mcp.call and agent.run are unavailable unless --mock answers them (also by tool), agent.finished is injected with a fake result whose fields and context reach the handler beside payload, an unknown event is invalid_argument, and the report lists each event's handler count, the bridge calls, the state written and a throwing handler's error (exit 1). In a mounted UI (plugin render) Playhouse.service.on does nothing and mcp.call or agent.run is unavailable unless mocked. In the daemon, app.focus (from the window's activation or plugin event) wakes only the enabled plugins whose manifest lists it, collapsing quick repeats into one trailing run after the cooldown; a plugin's state change is targeted at it, so its own service hears a change made elsewhere while another plugin's service doesn't, and a service never hears its own writes, so a handler that saves on every change doesn't loop; the service writes state that the popover shows from its props, and a disabled plugin's service isn't woken by a focus that still reaches an enabled one.
-    def test_plugin_service_events_targeting_and_state(self):
-        # Manifest validation.
-        self.write_installed_plugin("bad-events", self.QUIET_PLUGIN_SOURCE, placement="composerActions", presentation="headless",
-                                    manifest={"events": ["app.focus", "app.focus", "nope"], "mcpTools": ["slack_read"]})
-        self.write_installed_plugin("bare-headless", self.QUIET_PLUGIN_SOURCE, placement="composerActions", presentation="headless")
-        self.write_installed_plugin("headless-service", self.QUIET_PLUGIN_SOURCE, placement="composerActions", presentation="headless",
-                                    manifest={"events": ["task.statusChanged", "agent.finished"], "mcpTools": ["mcp__claude_ai_Slack__slack_read_channel"]})
-        listed = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"]}
-        bad = listed["bad-events"]
-        self.assertFalse(bad["valid"])
-        self.assertTrue(any('Unknown event "nope"' in error for error in bad["errors"]), bad["errors"])
-        self.assertTrue(any("app.focus is listed twice" in error for error in bad["errors"]), bad["errors"])
-        self.assertTrue(any('"slack_read" in "mcpTools"' in error for error in bad["errors"]), bad["errors"])
-        self.assertFalse(listed["bare-headless"]["valid"])
-        self.assertTrue(any('an event in "events"' in error for error in listed["bare-headless"]["errors"]), listed["bare-headless"]["errors"])
-        service = listed["headless-service"]
-        self.assertTrue(service["valid"], service["errors"])
-        self.assertEqual((service["events"], service["mcpTools"]), (["task.statusChanged", "agent.finished"], ["mcp__claude_ai_Slack__slack_read_channel"]))
+        visible = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        texts = [message["text"] for message in visible["messages"] if message["role"] == "user"]
+        for message in (first_message, second_message, third_message, fourth_message):
+            self.assertIn(message, texts, "Rotating sessions never hides a turn from the transcript.")
+        self.assertFalse(any("<playhouse-handoff-context>" in text for text in texts),
+                         "The transcript keeps what the user typed, not the seed.")
 
-        # Headless runs of a file: real bridge calls, refused ui calls, faked provider calls.
-        path = self.write_service_file(self.HEADLESS_HANDLERS_SOURCE)
-        finished = json.dumps({"runID": "run-1", "status": "done", "result": {"title": "Reply to Dana"}, "error": None, "context": {"kind": "slack-task", "userId": "U7"}})
-        report = self.assert_success(self.call_cli("plugin", "service", "--file", path, "--event", "app.focus", "--event", f"agent.finished:{finished}")[0])
-        self.assertEqual(report["errors"], [])
-        self.assertEqual([(event["name"], event["handlers"]) for event in report["events"]], [("app.focus", 1), ("agent.finished", 1)])
-        calls = {(call["kind"], call["name"]): call for call in report["hostCalls"]}
-        self.assertTrue(calls[("bridge", "task.list")]["ok"], "A bridge call reaches the real bridge.")
-        self.assertEqual(calls[("ui", "close")]["error"]["code"], "unavailable", "A background half has no window.")
-        self.assertEqual(calls[("bridge", "mcp.call")]["error"]["code"], "unavailable", "mcp.call is faked headlessly.")
-        self.assertEqual(calls[("bridge", "mcp.call")]["arguments"]["tool"], "mcp__claude_ai_Slack__slack_read_user_profile")
-        self.assertEqual(calls[("bridge", "agent.run")]["error"]["code"], "unavailable")
-        self.assertEqual(report["state"]["tasks"], 0)
-        self.assertEqual((report["state"]["ui"], report["state"]["mcp"], report["state"]["run"]), ("unavailable", "unavailable", "unavailable"))
-        self.assertEqual(report["state"]["internal"], "invalid_argument", "Only the daemon delivers events to background halves.")
-        self.assertEqual(report["state"]["finished"], {"status": "done", "kind": "slack-task", "title": "Reply to Dana", "runID": "run-1", "same": True},
-                         "An injected agent.finished reaches the handler with its fields beside payload.")
-        self.assertIn({"key": "mcp", "value": "unavailable"}, report["stateWritten"])
-        mocked = self.assert_success(self.call_cli(
-            "plugin", "service", "--file", path, "--event", "app.focus",
-            "--mock", 'mcp.call:mcp__claude_ai_Slack__slack_read_user_profile={"content":[{"type":"text","text":"Nir"}]}',
-            "--mock", 'agent.run={"runID":"run-mocked"}',
+    # case-contract: test_codex_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Codex task's follow-up starts a new Codex thread with thread/start instead of resuming the old one with thread/resume, runs its turn/start on that new thread, and the task's Codex thread ID follows it. The new thread's developer instructions carry the optimized-context guidance, and the turn's input begins with the Playhouse optimized context block listing the earlier user messages and the plan from the Plan mode turn by position, followed by the user's new message; the Plan mode turn's commentary, command and plan are numbered as for Claude, so conversation read at 2.1 returns the command. While a Codex goal is set, a follow-up keeps the goal's thread with no context block and no thread/start, and once the goal is cleared the next follow-up rotates again. A follow-up sent with the mode back on full resumes the latest thread with thread/resume and no context block. With the mode on again, switching the task to Claude gives Claude's first session the optimized seed, listing the messages Codex answered, instead of the full provider-switch handoff.
+    def test_codex_optimized_follow_up_starts_fresh_seeded_session(self):
+        executable = self.data_directory / "codex-fixture-optimized-goal-fresh-threads-unique-turns-success"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task(title="Optimized Codex follow-up", provider="codex")["id"]
+
+        def send(message, *extra):
+            self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        def fixture_history():
+            return json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+
+        def turn_ending(message):
+            matches = [turn for turn in fixture_history()["turns"] if (turn.get("userMessage") or "").endswith(message)]
+            self.assertTrue(matches, f"The Codex fixture never received a turn ending with {message!r}.")
+            return matches[-1]
+
+        first_message = "Draft the rollout plan. Run one command first."
+        send(first_message, "--mode", "plan")
+        original_thread = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        self.assertEqual(turn_ending(first_message)["turnThreadID"], original_thread)
+        starts_before = len(fixture_history().get("threadStarts", []))
+
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        second_message = "Now estimate the rollout effort."
+        send(second_message)
+        new_thread = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        self.assertNotEqual(new_thread, original_thread, "An optimized follow-up starts a new Codex thread.")
+        history = fixture_history()
+        starts = history.get("threadStarts", [])
+        self.assertEqual(len(starts), starts_before + 1, "The follow-up sent thread/start once.")
+        self.assertEqual(starts[-1]["threadID"], new_thread)
+        self.assertIn("This task uses optimized context.", starts[-1]["developerInstructions"] or "",
+                      "The new thread's developer instructions carry the optimized-context guidance.")
+        self.assertNotIn(new_thread, history.get("threadResumes", []), "The fresh thread is started, never resumed, for its first turn.")
+        second = turn_ending(second_message)
+        self.assertEqual(second["turnThreadID"], new_thread, "turn/start runs on the new thread.")
+        prompt = second["userMessage"]
+        self.assertTrue(prompt.startswith("<playhouse-handoff-context>"), prompt[:200])
+        self.assertIn("Playhouse optimized context, not part of the user's message.", prompt)
+        self.assertIn(f"@1: {first_message}", prompt)
+        self.assertIn("- Turn 1 (Plan mode): user @1; 1 agent message, 1 tool call; plan @3; ends @3", prompt,
+                      "Codex's commentary, command and plan are numbered the same way as Claude's.")
+        command = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "2.1")[0])["entries"]
+        self.assertEqual(command[0]["kind"], "tool", "The Codex command follows its commentary, message 2.")
+        self.assertIn("git status", command[0]["title"] + " " + command[0]["text"])
+        self.assertIn("The latest plan (@", prompt)
+        self.assertTrue(prompt.endswith(f"</playhouse-handoff-context>\n\n{second_message}"))
+
+        # A Codex goal belongs to its thread, so while one is set a follow-up keeps that thread.
+        self.assert_success(self.call_cli("conversation", "goal", task_id, "set", "--text", "Ship the rollout.", extra_environment=environment)[0])
+        goal_message = "Keep going toward the goal."
+        send(goal_message)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"], new_thread,
+                         "A follow-up keeps the thread that holds the goal.")
+        goal_turn = turn_ending(goal_message)
+        self.assertEqual(goal_turn["turnThreadID"], new_thread)
+        self.assertNotIn("<playhouse-handoff-context>", goal_turn["userMessage"], "A follow-up that keeps its thread gets no seed.")
+        self.assertEqual(len(fixture_history().get("threadStarts", [])), starts_before + 1, "No thread starts while the goal is set.")
+        self.assert_success(self.call_cli("conversation", "goal", task_id, "clear", extra_environment=environment)[0])
+        cleared_message = "The goal is done; summarize the rollout."
+        send(cleared_message)
+        cleared_thread = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        self.assertNotEqual(cleared_thread, new_thread, "Once the goal is cleared, follow-ups rotate again.")
+        self.assertTrue(turn_ending(cleared_message)["userMessage"].startswith("<playhouse-handoff-context>"))
+
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "full")[0])
+        third_message = "Confirm the estimate."
+        send(third_message)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"], cleared_thread,
+                         "Back on full context, the task keeps its latest thread.")
+        third = turn_ending(third_message)
+        self.assertEqual(third["turnThreadID"], cleared_thread)
+        self.assertIn(cleared_thread, fixture_history().get("threadResumes", []), "A full-context follow-up resumes the latest thread.")
+        self.assertNotIn("<playhouse-handoff-context>", third["userMessage"])
+
+        # A provider's first session in an optimized task gets the optimized seed, not the full handoff.
+        claude_executable, claude_environment = self.optimized_claude_fixture("claude-fixture-optimized-after-switch")
+        both = {**environment, **claude_environment}
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=both)[0])
+        switch_message = "Claude, take over from here."
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", switch_message, extra_environment=both)[0])
+        switched = self.claude_turn_ending(claude_executable, switch_message)
+        self.assertFalse(switched["resumed"])
+        self.assertTrue(switched["userText"].startswith("<playhouse-handoff-context>\nPlayhouse optimized context"),
+                        "The new provider's first session gets the optimized seed.")
+        self.assertIn(f"@1: {first_message}", switched["userText"])
+        self.assertIn(f": {third_message}", switched["userText"], "The seed lists the messages Codex answered.")
+        self.assertNotIn("continued with another assistant while you were not active", switched["userText"],
+                         "The optimized seed replaces the full provider-switch handoff.")
+
+    # case-contract: test_conversation_read_positions_messages_and_tools | conversation outline and conversation read share one numbering of a task's whole conversation: messages take whole-number positions from 1 in order (the user's message, the agent's commentary, its final answer) and each tool call takes a decimal position under the message it followed, such as 2.1. The outline reports totals and, for each turn, its user message, agent message and tool-call counts, its final answer position and whether it ran in Plan mode. read --at returns exactly the listed entries with their kind and text, a range returns messages only unless --include-tools adds the tool calls with their title and status, and --kinds final lists every turn's final answer without the work before it. A position that is not a number, a position past the end, a range whose start follows its end, --at combined with a range, and an unknown kind are each rejected with a clear error.
+    def test_conversation_read_positions_messages_and_tools(self):
+        executable, environment = self.optimized_claude_fixture("claude-fixture-conversation-read", report_outcome=True)
+        task_id = self.create_task(title="Conversation positions", provider="claude")["id"]
+        first_message = "Inspect the readme for the positions check."
+        second_message = "Reply briefly for the positions check."
+        for message, extra in ((first_message, ["--mode", "plan"]), (second_message, [])):
+            self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        outline = self.assert_success(self.call_cli("conversation", "outline", task_id)[0])
+        self.assertEqual(outline["totalTurns"], 2, outline)
+        first_turn, second_turn = outline["turns"]
+        self.assertEqual(first_turn["userPositions"], ["1"])
+        self.assertEqual(first_turn["agentMessages"], 1, "The commentary before the answer is the turn's one agent message.")
+        self.assertEqual(first_turn["toolCalls"], 2, "The Read call and the outcome report are the turn's tool calls.")
+        self.assertTrue(first_turn["plan"])
+        self.assertEqual(first_turn["finalAnswerPositions"], ["3"])
+        self.assertEqual(outline["latestPlanPosition"], "3")
+        self.assertEqual(second_turn["userPositions"], ["4"])
+        self.assertFalse(second_turn["plan"])
+        self.assertEqual(outline["latestFinalAnswerPosition"], second_turn["finalAnswerPositions"][-1])
+        self.assertEqual(outline["totalMessages"], int(second_turn["lastPosition"]))
+        self.assertEqual(outline["totalToolCalls"], first_turn["toolCalls"] + second_turn["toolCalls"])
+
+        picked = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "1,3")[0])
+        self.assertEqual([(entry["position"], entry["kind"]) for entry in picked["entries"]], [("1", "user"), ("3", "plan")])
+        self.assertEqual(picked["entries"][0]["text"], first_message)
+        self.assertEqual(picked["entries"][1]["text"], "Inspection done: the workspace is ready.")
+        self.assertEqual(picked["totalMessages"], outline["totalMessages"])
+        self.assertEqual(picked["totalToolCalls"], outline["totalToolCalls"])
+
+        messages = self.assert_success(self.call_cli("conversation", "read", task_id, "--from", "1", "--to", "3")[0])["entries"]
+        self.assertEqual([entry["position"] for entry in messages], ["1", "2", "3"], "A range holds messages only by default.")
+        self.assertEqual(messages[1]["kind"], "agent")
+        self.assertEqual(messages[1]["text"], "I'll inspect the workspace first.")
+        with_tools = self.assert_success(self.call_cli(
+            "conversation", "read", task_id, "--from", "1", "--to", "3", "--include-tools"
+        )[0])["entries"]
+        tools = [entry for entry in with_tools if entry["kind"] == "tool"]
+        self.assertEqual(len(tools), 2)
+        self.assertTrue(all("." in entry["position"] for entry in tools), "Tool calls take decimal positions.")
+        self.assertEqual([entry["position"] for entry in tools], ["2.1", "2.2"],
+                         "The Read call follows the commentary, message 2, and the outcome report follows it.")
+        self.assertIn("README.md", tools[0]["title"])
+        self.assertTrue(tools[0]["status"])
+        self.assertEqual([entry["position"] for entry in with_tools if entry["kind"] != "tool"], ["1", "2", "3"])
+        positions = [entry["position"] for entry in with_tools]
+        self.assertLess(positions.index("2.1"), positions.index("3"), "A tool call sits between its message and the next.")
+        single_tool = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "2.1")[0])["entries"]
+        self.assertIn("README.md", single_tool[0]["title"])
+
+        finals = self.assert_success(self.call_cli("conversation", "read", task_id, "--kinds", "final,plan")[0])["entries"]
+        self.assertEqual([entry["position"] for entry in finals],
+                         first_turn["finalAnswerPositions"] + second_turn["finalAnswerPositions"])
+        self.assertEqual({entry["kind"] for entry in finals}, {"plan", "final"})
+
+        for arguments, code, fragment in (
+            (["--at", "two"], "invalid_argument", "is not a conversation position"),
+            (["--at", "999"], "not_found", "Nothing is at position 999"),
+            (["--from", "999"], "not_found", "past the end of the conversation"),
+            (["--from", "3", "--to", "1"], "invalid_argument", "comes after"),
+            (["--at", "1", "--from", "1"], "invalid_argument", "choose one"),
+            (["--kinds", "thinking"], "invalid_argument", "Unknown entry kind"),
+        ):
+            # The CLI exits 3 when the bridge reports something not found, 2 for invalid input.
+            failed, _ = self.call_cli("conversation", "read", task_id, *arguments,
+                                      expected_status=3 if code == "not_found" else 2)
+            self.assert_failure(failed, code)
+            self.assertIn(fragment, failed["error"]["message"])
+
+    # case-contract: test_optimized_context_steer_and_queued_follow_ups | With optimized context on, a steer joins the running turn in that turn's own session instead of starting a new one, and follow-ups queued while the turn runs are each delivered afterwards in a fresh seeded session of their own, including the second one, which was queued against a session the first follow-up replaced, so no queued follow-up is stranded. The queued follow-ups are listed while they wait. The context mode is saved on the task, reported by task get and conversation context-mode, and survives a restart (of the daemon from the CLI, of the app in the window, where the button is still on); an unknown mode is rejected, and the standalone chat, which pages its own context, has no context mode to set and no Optimized context button in its composer.
+    def test_optimized_context_steer_and_queued_follow_ups(self):
+        executable, environment = self.optimized_claude_fixture("claude-fixture-optimized-steer-queue", report_outcome=True)
+        task_id = self.create_task(title="Optimized steer and queue", provider="claude")["id"]
+        rejected, _ = self.call_cli("conversation", "context-mode", task_id, "set", "compact", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("full, optimized", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["conversationContextMode"], "full")
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        chat_rejected, _ = self.call_cli("conversation", "context-mode", chat_id, "set", "optimized", expected_status=2)
+        self.assert_failure(chat_rejected, "invalid_argument")
+        self.assertIn("already splits its context into pages", chat_rejected["error"]["message"])
+
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Start the conversation.", extra_environment=environment
         )[0])
-        self.assertEqual((mocked["state"]["mcp"], mocked["state"]["run"]), ("Nir", "run-mocked"), "A mock answers by tool or by command.")
-        broken, _ = self.call_cli("plugin", "service", "--file", path, "--event", 'task.statusChanged:{"taskID":"t","from":"Backlog","to":"Review"}', expected_status=1)
-        self.assertTrue(any("The move handler broke." in error for error in self.assert_success(broken)["errors"]), broken)
-        self.assert_failure(self.call_cli("plugin", "service", "--file", path, "--event", "app.nope", expected_status=2)[0], "invalid_argument")
+        self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["conversationContextMode"], "optimized")
 
-        # A mounted UI: service.on does nothing, provider calls need a mock.
-        rendered = self.assert_success(self.render_plugin(self.POPOVER_CALLS_SOURCE, "--event", "call-mcp:onPress", "--event", "@app.focus"))
-        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "call-result")), "mcp unavailable")
-        rendered = self.assert_success(self.render_plugin(self.POPOVER_CALLS_SOURCE, "--event", "call-agent:onPress",
-                                                          "--mock", 'agent.run={"runID":"run-ui"}'))
-        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "call-result")), "run run-ui")
+        held_message = "Hold for a steer while optimized."
+        Path(str(executable) + ".steer-answer-pause").write_text("Hold the steered answer.\n", encoding="utf-8")
+        command = ["conversation", "send", task_id, "--message", held_message]
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            ready = Path(str(executable) + ".steer-ready")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not ready.exists() and process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The held turn should be waiting for a steer.")
+            held_session = self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"]
+            steered = self.assert_success(self.call_cli(
+                "conversation", "steer", task_id, "--message", "Steer: keep it short.", extra_environment=environment
+            )[0])
+            self.assertTrue(steered["accepted"])
+            self.assertFalse(steered.get("queued", False), "A steer joins the running turn.")
+            for text in ("First queued follow-up.", "Second queued follow-up."):
+                self.assert_success(self.call_cli(
+                    "conversation", "queue", task_id, "--message", text, extra_environment=environment
+                )[0])
+            waiting = [item["text"] for item in self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0])]
+            self.assertEqual(waiting, ["First queued follow-up.", "Second queued follow-up."], "The queued follow-ups are listed while they wait.")
+            answer_ready = Path(str(executable) + ".steer-answer-ready")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not answer_ready.exists():
+                time.sleep(0.02)
+            self.assertTrue(answer_ready.exists(), "The steer reached the held turn.")
+            Path(str(executable) + ".steer-answer-release").write_text("Release.\n", encoding="utf-8")
+            self.assert_success(self.finish_cli(process, command)[0])
+        finally:
+            if process.poll() is None:
+                Path(str(executable) + ".steer-answer-release").write_text("Release.\n", encoding="utf-8")
+                process.communicate(timeout=30)
 
-        # The daemon wakes only the plugins an event is for.
-        environment = {"PLAYHOUSE_E2E_PLUGIN_SERVICE_COOLDOWN_SECONDS": "5"}
-        self.write_installed_plugin("focus-service", self.SERVICE_PLUGIN_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["app.focus", "plugin.stateChanged"]})
-        self.write_installed_plugin("other-service", self.QUIET_PLUGIN_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["plugin.stateChanged", "task.statusChanged"]})
-        self.write_installed_plugin("focus-control", self.SERVICE_PLUGIN_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["app.focus"]})
-        services = self.assert_success(self.call_cli("plugin", "services")[0])["services"]
-        self.assertEqual({entry["pluginID"]: entry["events"] for entry in services}, {
-            "focus-service": ["app.focus", "plugin.stateChanged"], "other-service": ["plugin.stateChanged", "task.statusChanged"],
-            "focus-control": ["app.focus"],
-            "headless-service": ["task.statusChanged", "agent.finished"],
-        }, "Only valid, enabled plugins with events have a background half.")
-        self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=environment)[0])
-        self.wait_for(lambda: self.plugin_state("focus-service").get("focused") == 1, "The focus service saves its state.")
-        self.assertNotIn("focused", self.plugin_state("other-service"), "A plugin whose manifest doesn't list app.focus isn't woken by it.")
-        self.assertNotIn("focused", self.plugin_state("headless-service"))
-        # Quick repeats collapse into one trailing run once the cooldown is over.
-        self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=environment)[0])
-        self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=environment)[0])
-        self.wait_for(lambda: self.plugin_state("focus-service").get("focused") == 2, "The repeats run once after the cooldown.", timeout=15)
-        time.sleep(1.5)
-        self.assertEqual(self.plugin_state("focus-service")["focused"], 2, "Two focus events in one cooldown run once.")
-        # A state change is targeted at its plugin.
-        self.assert_success(self.call_cli("plugin", "state", "--id", "focus-service", "--key", "note", "--value", '"hello"')[0])
-        self.wait_for(lambda: self.plugin_state("focus-service").get("heard") == ["focus-service:note"], "Its own service hears its state change.")
-        time.sleep(1)
-        self.assertEqual(self.plugin_state("focus-service")["heard"], ["focus-service:note"], "A service never hears its own writes, so it doesn't loop.")
-        self.assertNotIn("heard", self.plugin_state("other-service"), "Another plugin's state change doesn't wake this service.")
-        rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "focus-service")[0])
-        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "service-focused")), "focused 2", "The popover shows what its service saved.")
-        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "service-active")), "service false")
-        # A move reaches the plugins that list it, as each one's own event.
-        self.assert_success(self.call_cli("plugin", "event", "task.statusChanged", "--payload", json.dumps({"taskID": "t-1", "from": "Backlog", "to": "Review"}))[0])
-        self.wait_for(lambda: self.plugin_state("other-service").get("moved") == "Review", "A listed event reaches the service.")
-        self.wait_for(lambda: self.plugin_state("headless-service").get("moved") == "Review", "A headless plugin's service hears its events too.")
-        # Disabled, a plugin's service isn't woken.
-        self.assert_success(self.call_cli("plugin", "disable", "--id", "focus-service")[0])
-        self.assertNotIn("focus-service", [entry["pluginID"] for entry in self.assert_success(self.call_cli("plugin", "services")[0])["services"]])
-        control = self.plugin_state("focus-control").get("focused", 0)
-        time.sleep(5.5)
-        self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=environment)[0])
-        self.wait_for(lambda: self.plugin_state("focus-control").get("focused", 0) > control, "The same focus reaches an enabled plugin.", timeout=15)
-        time.sleep(1)
-        self.assertEqual(self.plugin_state("focus-service")["focused"], 2, "A disabled plugin's service isn't woken.")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]):
+            time.sleep(0.1)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]), [],
+                         "Every queued follow-up is delivered, none stranded on a replaced session.")
+        held = self.claude_turn_ending(executable, held_message)
+        self.assertEqual(held["sessionID"], held_session)
+        # A seed legitimately repeats the steer; what matters is that no turn was sent for it.
+        sessions_with_steer = [turn for turn in self.claude_fixture_turns(executable)
+                               if (turn.get("userText") or "").split("</playhouse-handoff-context>")[-1].strip()
+                               == "Steer: keep it short."]
+        self.assertEqual(sessions_with_steer, [], "The steer is never sent as a turn of its own.")
+        first = self.claude_turn_ending(executable, "First queued follow-up.")
+        second = self.claude_turn_ending(executable, "Second queued follow-up.")
+        self.assertEqual(len({held_session, first["sessionID"], second["sessionID"]}), 3,
+                         "Each queued follow-up starts its own fresh session.")
+        for turn in (first, second):
+            self.assertFalse(turn["resumed"])
+            self.assertIn(f"{held_message}", turn["userText"], "The seed lists the earlier user messages.")
+        self.assertIn("(steer): Steer: keep it short.", second["userText"], "The seed marks a steer the user sent.")
+        self.assertIn("First queued follow-up.", second["userText"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["claudeSessionID"], second["sessionID"])
 
-    # case-contract: test_plugin_mcp_call_warm_session_and_allowlist | mcp.call (CLI mcp call, Playhouse.mcp.call) calls a fully qualified MCP tool through Claude Code's mcp_call control request with result_not_for_model and no model turn, answering the tool's {content, structuredContent, isError}; a burst of calls reuses one warm Claude Code session, which shuts down once idle, so the next call starts another. A tool Claude Code can't reach fails as tool_failed with its message, a tool slower than the call's timeout as timeout, a name that isn't mcp__<server>__<tool> is invalid_argument, a Claude Code that doesn't advertise mcp_call_result_not_for_model_v1 or no Claude Code at all is unavailable, and a plugin whose manifest lists mcpTools is refused any other tool as permission_denied, both from the CLI and from its own Playhouse.mcp.call, which sends its plugin id. An installed plugin's background half calls mcp.call on app.focus in the daemon and saves the result in its state, which its popover shows. A task move doesn't wait for a script handler stuck on a slow tool, which still finishes; a handler past the service timeout is given up on with its runtime and reported in diagnostics.
-    def test_plugin_mcp_call_warm_session_and_allowlist(self):
-        environment = self.install_claude_fixture("claude-fixture-mcp")
-        executable = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
-        profile, search = "mcp__claude_ai_Slack__slack_read_user_profile", "mcp__claude_ai_Slack__slack_search_public_and_private"
-        Path(f"{executable}.mcp-results").write_text(json.dumps({
-            profile: {"content": [{"type": "text", "text": "Nir Yosef"}]},
-            search: {"content": [{"type": "text", "text": "Dana"}, {"type": "text", "text": "Omri"}], "structuredContent": {"count": 2}, "isError": False},
-        }), encoding="utf-8")
-        sessions = lambda: Path(f"{executable}.sessions").read_text(encoding="utf-8").count("initialize") if Path(f"{executable}.sessions").exists() else 0
-        first = self.assert_success(self.call_cli("mcp", "call", "--tool", profile, "--arguments", '{"user":"U1"}', extra_environment=environment)[0])
-        self.assertEqual(first, {"content": [{"type": "text", "text": "Nir Yosef"}]})
-        second = self.assert_success(self.call_cli("mcp", "call", "--tool", search, extra_environment=environment)[0])
-        self.assertEqual((second["structuredContent"], second["isError"]), ({"count": 2}, False))
-        calls = self.jsonl(f"{executable}.mcp-calls")
-        self.assertEqual([(call["tool"], call["arguments"], call["resultNotForModel"]) for call in calls],
-                         [(profile, {"user": "U1"}, True), (search, {}, True)], "Each call is an mcp_call request for the model-free result.")
-        self.assertEqual(len({call["pid"] for call in calls}), 1, "A burst of calls reuses one warm Claude Code session.")
-        self.assertEqual(sessions(), 1, "Claude Code started once for the burst.")
-        history = Path(f"{executable}.history")
-        self.assertFalse(history.exists() and json.loads(history.read_text(encoding="utf-8")).get("turns"), "No model turn ran.")
-
-        failed = self.call_cli("mcp", "call", "--tool", "mcp__linear__list_issues", extra_environment=environment, expected_status=1)[0]
-        self.assert_failure(failed, "tool_failed")
-        self.assertIn("MCP server not connected: linear", failed["error"]["message"])
-        self.assert_failure(self.call_cli("mcp", "call", "--tool", "slack_read", extra_environment=environment, expected_status=2)[0], "invalid_argument")
-
-        # A plugin's mcpTools catch a tool it didn't mean to call.
-        self.write_installed_plugin("slack-reader", self.MCP_SERVICE_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["app.focus"], "mcpTools": [search]})
-        denied = self.call_cli("mcp", "call", "--tool", profile, "--plugin", "slack-reader", extra_environment=environment, expected_status=1)[0]
-        self.assert_failure(denied, "permission_denied")
-        self.assertIn("mcpTools", denied["error"]["message"])
-        self.assert_success(self.call_cli("mcp", "call", "--tool", search, "--plugin", "slack-reader", extra_environment=environment)[0])
-        self.write_installed_plugin("slow-service", self.SLOW_SERVICE_SOURCE, placement="composerActions", presentation="headless",
-                                    manifest={"events": ["task.statusChanged"]})
-
-        # The background half refreshes on focus through the same warm session.
-        self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=environment)[0])
-        self.wait_for(lambda: self.plugin_state("slack-reader").get("people") == ["Dana", "Omri"], "The service saves the tool's result.")
-        rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "slack-reader")[0])
-        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "mcp-people")), "Dana, Omri")
-        self.assertEqual(sessions(), 1, "The service's call reused the warm session.")
-        self.wait_for(lambda: self.plugin_state("slack-reader").get("denied") == "permission_denied",
-                      "Playhouse.mcp.call sends the plugin's id, so its mcpTools refuse an unlisted tool.")
-
-        # Idle, the session shuts down; the next call starts Claude Code again.
-        idle = {**environment, "PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS": "1"}
-        self.assert_success(self.call_cli("mcp", "call", "--tool", profile, extra_environment=idle)[0])
-        pid = self.jsonl(f"{executable}.mcp-calls")[-1]["pid"]
-        self.wait_for(lambda: not self.process_is_running(pid), "The idle session's Claude Code exits.", timeout=15)
-        self.assert_success(self.call_cli("mcp", "call", "--tool", profile, extra_environment=environment)[0])
-        self.assertEqual(sessions(), 2, "After the idle shutdown, a call starts a new session.")
-
-        # A slow tool: mcp.call's timeout, a move that doesn't wait for script handlers, and the handlers' own timeout.
-        channel = "mcp__claude_ai_Slack__slack_read_channel"
-        Path(f"{executable}.mcp-results").write_text(json.dumps({
-            profile: {"content": [{"type": "text", "text": "Nir Yosef"}]}, channel: {"content": [{"type": "text", "text": "hi"}]},
-        }), encoding="utf-8")
-        Path(f"{executable}.mcp-call-delay").write_text(json.dumps({channel: 4}), encoding="utf-8")
-        timed_out = self.call_cli("mcp", "call", "--tool", channel, "--timeout", "1", extra_environment=environment, expected_status=1)[0]
-        self.assert_failure(timed_out, "timeout")
-        task_id = self.create_task(title="Slow plugin move")["id"]
-        started = time.monotonic()
-        self.assert_success(self.call_cli("plugin", "event", "task.statusChanged", "--payload",
-                                          json.dumps({"taskID": task_id, "from": "In Progress", "to": "Review"}), extra_environment=environment)[0])
-        self.assertLess(time.monotonic() - started, 3, "A move waits for the built-ins' reactions, not for script handlers.")
-        self.wait_for(lambda: self.plugin_state("slow-service").get("after") == "Review", "The slow handler still finishes.", timeout=30)
-        short = {**environment, "PLAYHOUSE_E2E_PLUGIN_SERVICE_TIMEOUT_SECONDS": "1"}
-        self.assert_success(self.call_cli("plugin", "event", "task.statusChanged", "--payload",
-                                          json.dumps({"taskID": task_id, "from": "Review", "to": "Done"}), extra_environment=short)[0])
-        self.wait_for(lambda: self.plugin_state("slow-service").get("before") == "Done", "The handler starts.")
-        self.wait_for(lambda: any(event.get("event") == "plugin.service.failed" and "didn't finish within 1 seconds" in event.get("errors", "")
-                                  for event in self.diagnostic_events()), "The timed-out handlers are reported in diagnostics.", timeout=15)
-        time.sleep(5)
-        self.assertEqual(self.plugin_state("slow-service")["after"], "Review", "A handler past its timeout is given up on, with its runtime.")
-
-        # Claude Code that can't call tools directly, or none at all.
-        unsupported = self.install_claude_fixture("claude-fixture-no-mcp-call")
-        refused = self.call_cli("mcp", "call", "--tool", profile, extra_environment=unsupported, expected_status=1)[0]
-        self.assert_failure(refused, "unavailable")
-        self.assertIn("can't call MCP tools directly", refused["error"]["message"])
-        self.assert_failure(self.call_cli("mcp", "call", "--tool", profile, expected_status=1)[0], "unavailable")
-
-    # case-contract: test_plugin_agent_run_finishes_and_recovers | agent.run (CLI agent run, Playhouse.agent.run from the popover, which fills pluginID from props and passes its model, allowed tools, JSON schema and context) starts a non-persisted Claude Code run in the daemon with the given prompt, model, allowed tools and JSON schema and returns its runID at once; agent runs lists it as running, and nothing is heard while it runs. When it ends, only that plugin's background half hears agent.finished with {runID, status, result, error, context}, never another plugin that listens for agent.finished: done with the schema's structured output as result, which the plugin's handler uses to create a board task, failed with Claude Code's error or after the run timeout, or cancelled after agent cancel (an unknown run is not_found); the run then leaves agent runs. A run cut off by its daemon dying, which it outlives, is reported failed with the error "interrupted" by the next daemon, with its context intact, and its orphaned Claude Code process is stopped; deleting a plugin stops its runs with no event. agent.run is refused for a plugin that doesn't list agent.finished or a missing prompt (invalid_argument), an unknown plugin (not_found) and a disabled plugin (unavailable).
-    def test_plugin_agent_run_finishes_and_recovers(self):
-        executable = self.install_provider_fixture("claude", "claude-fixture-agent")
-        environment = self.restart_service_environment("claude", executable)
-        Path(f"{executable}.agent-output").write_text(json.dumps({"title": "Reply to Dana", "prompt": "Answer Dana's question.", "nothingNew": False}), encoding="utf-8")
-        hold = Path(f"{executable}.agent-hold")
-        self.addCleanup(lambda: hold.unlink(missing_ok=True))
-        self.write_installed_plugin("slack-dms", self.AGENT_PLUGIN_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["agent.finished"]})
-        self.write_installed_plugin("deaf-plugin", self.AGENT_PLUGIN_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["app.focus"]})
-        self.write_installed_plugin("listener-plugin", self.LISTENER_SOURCE, placement="composerActions", presentation="headless",
-                                    manifest={"events": ["agent.finished"]})
-        schema = json.dumps({"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]})
-        def run(*extra, plugin="slack-dms", user="U7", expected_status=0, environment=environment):
-            return self.call_cli("agent", "run", "--plugin", plugin, "--prompt", f"Draft a task for {user}.", "--model", "opus",
-                                 "--allowed-tool", "mcp__claude_ai_Slack__slack_read_channel", "--allowed-tool", "mcp__claude_ai_Slack__slack_read_thread",
-                                 "--json-schema", schema, "--context", json.dumps({"kind": "slack-task", "userId": user}), *extra,
-                                 extra_environment=environment, expected_status=expected_status)[0]
-        def finished():
-            return self.plugin_state("slack-dms", environment).get("finished")
-
-        self.assert_failure(run(plugin="deaf-plugin", expected_status=2), "invalid_argument")
-        self.assert_failure(run(plugin="no-such-plugin", expected_status=3), "not_found")
-        self.assert_failure(self.call_cli("agent", "run", "--plugin", "slack-dms", "--prompt", "  ", extra_environment=environment, expected_status=2)[0], "invalid_argument")
-        self.assert_success(self.call_cli("plugin", "disable", "--id", "deaf-plugin", extra_environment=environment)[0])
-        self.assert_failure(run(plugin="deaf-plugin", expected_status=1), "unavailable")
-        # The popover's Playhouse.agent.run fills its plugin id and passes every option.
-        pressed = self.assert_success(self.call_cli("plugin", "render", "--plugin", "slack-dms", "--event", "dm-create-U7:onPress",
-                                                    "--mock", 'agent.run={"runID":"run-popover"}', extra_environment=environment)[0])
-        call = next(call for call in pressed["hostCalls"] if call["name"] == "agent.run")
-        self.assertEqual((call["arguments"]["pluginID"], call["arguments"]["model"], call["arguments"]["allowedTools"], call["arguments"]["context"]),
-                         ("slack-dms", "opus", ["mcp__claude_ai_Slack__slack_read_channel", "mcp__claude_ai_Slack__slack_read_thread"], {"kind": "slack-task", "userId": "U7"}))
-        self.assertEqual(call["arguments"]["jsonSchema"]["required"], ["title", "prompt", "nothingNew"])
-        def board_titles():
-            return [task["title"] for task in self.assert_success(self.call_cli("task", "list", extra_environment=environment)[0])["tasks"]]
-
-        # A run returns at once and is listed until it ends.
-        hold.touch()
-        run_id = self.assert_success(run())["runID"]
-        runs = self.assert_success(self.call_cli("agent", "runs", extra_environment=environment)[0])["runs"]
-        self.assertEqual([(entry["runID"], entry["pluginID"], entry["running"], entry["context"]) for entry in runs],
-                         [(run_id, "slack-dms", True, {"kind": "slack-task", "userId": "U7"})])
-        self.wait_for(lambda: self.jsonl(f"{executable}.agent-runs"), "The agent started.")
-        launched = self.jsonl(f"{executable}.agent-runs")[-1]
-        self.assertEqual((launched["model"], launched["allowedTools"], launched["jsonSchema"], launched["persisted"]),
-                         ("opus", "mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Slack__slack_read_thread", json.loads(schema), False))
-        self.assertEqual(launched["prompt"], "Draft a task for U7.")
-        self.assertIsNone(finished(), "Nothing is heard while the agent runs.")
-        hold.unlink()
-        self.wait_for(lambda: (finished() or {}).get("status") == "done", "The plugin's service hears agent.finished.", timeout=30)
-        self.assertEqual(finished(), {"status": "done", "userId": "U7", "runID": run_id, "error": None, "title": "Reply to Dana"})
-        self.assertIn("Reply to Dana", board_titles(), "The service created the task from the structured result.")
-        self.assertEqual(self.assert_success(self.call_cli("agent", "runs", extra_environment=environment)[0])["runs"], [])
-
-        # A failed run, and a cancelled one.
-        Path(f"{executable}.agent-fail").touch()
-        failed_id = self.assert_success(run(user="U8"))["runID"]
-        self.wait_for(lambda: (finished() or {}).get("runID") == failed_id, "The failed run is reported.", timeout=30)
-        self.assertEqual((finished()["status"], finished()["error"]), ("failed", "The fixture agent failed on purpose."))
-        self.assertIn("Slack task failed for U8: The fixture agent failed on purpose.", board_titles())
-        Path(f"{executable}.agent-fail").unlink()
-        hold.touch()
-        cancelled_id = self.assert_success(run(user="U9"))["runID"]
-        self.assert_failure(self.call_cli("agent", "cancel", "--plugin", "slack-dms", "--run", "agent-run-nope", extra_environment=environment, expected_status=3)[0], "not_found")
-        self.assert_success(self.call_cli("agent", "cancel", "--plugin", "slack-dms", "--run", cancelled_id, extra_environment=environment)[0])
-        self.wait_for(lambda: (finished() or {}).get("runID") == cancelled_id, "The cancelled run is reported.", timeout=30)
-        self.assertEqual(finished()["status"], "cancelled")
-        # Past its timeout, a run is stopped and fails.
-        timed_id = self.assert_success(run(user="U12", environment={**environment, "PLAYHOUSE_E2E_PLUGIN_AGENT_TIMEOUT_SECONDS": "1"}))["runID"]
-        self.wait_for(lambda: (finished() or {}).get("runID") == timed_id, "The timed-out run is reported.", timeout=30)
-        self.assertEqual((finished()["status"], finished()["error"]), ("failed", "The agent didn't finish within 1 seconds."))
-        self.assertNotIn("finished", self.plugin_state("listener-plugin", environment), "Another plugin listening for agent.finished never hears slack-dms's runs.")
-
-        # Cut off with its daemon, a run is reported interrupted by the next one.
-        interrupted_id = self.assert_success(run(user="U10"))["runID"]
-        orphan = self.wait_for(lambda: next((entry["pid"] for entry in self.jsonl(f"{executable}.agent-runs") if "U10" in entry["prompt"]), None),
-                               "The U10 agent started.")
-        self.kill_daemon(environment)
-        self.assertTrue(self.process_is_running(orphan), "The agent outlived its daemon.")
-        self.assertEqual(self.assert_success(self.call_cli("agent", "runs", extra_environment=environment)[0])["runs"], [])
-        # The service reports it on the board (a test store's settings can't be read back across daemons).
-        self.wait_for(lambda: "Slack task failed for U10: interrupted" in board_titles(), "The next daemon reports the cut-off run, with its context.", timeout=30)
-        self.assertNotIn(interrupted_id, [entry["runID"] for entry in self.assert_success(self.call_cli("agent", "runs", extra_environment=environment)[0])["runs"]])
-        self.wait_for(lambda: not self.process_is_running(orphan), "The orphaned agent is stopped.", timeout=10)
-
-        # Deleting the plugin stops its runs, with no event.
-        self.assert_success(run(user="U11"))
-        last = self.wait_for(lambda: next((entry["pid"] for entry in self.jsonl(f"{executable}.agent-runs") if "U11" in entry["prompt"]), None),
-                             "The U11 agent started.")
-        self.assert_success(self.call_cli("plugin", "delete", "--id", "slack-dms", extra_environment=environment)[0])
-        self.assertEqual(self.assert_success(self.call_cli("agent", "runs", extra_environment=environment)[0])["runs"], [])
-        self.wait_for(lambda: not self.process_is_running(last), "The deleted plugin's agent is stopped.", timeout=10)
-        time.sleep(1)
-        self.assertNotIn("Slack task cancelled for U11: The run was cancelled.", board_titles(), "A deleted plugin hears nothing of its stopped run.")
-
-    # case-contract: test_plugin_mcp_call_codex | mcp.call with provider codex (CLI mcp call --provider codex, Playhouse.mcp.call with {provider: "codex"}) calls the tool through the shared Codex app-server's mcpServer/tool/call on one ephemeral, read-only thread that a burst of calls reuses and that is released (thread/unsubscribe) once idle, with no turn, answering the tool's {content, structuredContent, isError}. A tool Codex can't reach fails as tool_failed with its message, one slower than the call's timeout as timeout, a Codex without mcpServer/tool/call or no Codex at all is unavailable, and a plugin's mcpTools refuse any other tool as permission_denied. A plugin's background half calls it on app.focus and saves the result in its state, which its popover shows.
-    def test_plugin_mcp_call_codex(self):
-        environment = self.install_codex_fixture("codex-fixture-mcp")
-        executable = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"])
-        profile, search = "mcp__claude_ai_Slack__slack_read_user_profile", "mcp__claude_ai_Slack__slack_search_public_and_private"
-        Path(f"{executable}.mcp-results").write_text(json.dumps({
-            profile: {"content": [{"type": "text", "text": "Nir Yosef"}]},
-            search: {"content": [{"type": "text", "text": "Dana"}, {"type": "text", "text": "Omri"}], "structuredContent": {"count": 2}, "isError": False},
-        }), encoding="utf-8")
-        first = self.assert_success(self.call_cli("mcp", "call", "--provider", "codex", "--tool", profile, "--arguments", '{"user":"U1"}', extra_environment=environment)[0])
-        self.assertEqual(first, {"content": [{"type": "text", "text": "Nir Yosef"}]})
-        second = self.assert_success(self.call_cli("mcp", "call", "--provider", "codex", "--tool", search, extra_environment=environment)[0])
-        self.assertEqual((second["structuredContent"], second["isError"]), ({"count": 2}, False))
-        calls = self.jsonl(f"{executable}.mcp-calls")
-        self.assertEqual([(call["server"], call["tool"], call["arguments"]) for call in calls],
-                         [("claude_ai_Slack", "slack_read_user_profile", {"user": "U1"}), ("claude_ai_Slack", "slack_search_public_and_private", {})],
-                         "Each call is an mcpServer/tool/call with the tool's server and own name.")
-        threads = self.jsonl(f"{executable}.ephemeral-threads")
-        self.assertEqual(len(threads), 1, "A burst of calls reuses one ephemeral thread.")
-        self.assertEqual({call["threadId"] for call in calls}, {threads[0]["threadId"]})
-        self.assertEqual(threads[0]["sandbox"], "read-only")
-        self.assertFalse(Path(f"{executable}.turn-starts").exists(), "No turn ran.")
-
-        failed = self.call_cli("mcp", "call", "--provider", "codex", "--tool", "mcp__linear__list_issues", extra_environment=environment, expected_status=1)[0]
-        self.assert_failure(failed, "tool_failed")
-        self.assertIn("MCP server not connected: linear", failed["error"]["message"])
-        self.write_installed_plugin("codex-reader", self.CODEX_MCP_SERVICE_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["app.focus"], "mcpTools": [search]})
-        self.assert_failure(self.call_cli("mcp", "call", "--provider", "codex", "--tool", profile, "--plugin", "codex-reader",
-                                          extra_environment=environment, expected_status=1)[0], "permission_denied")
-
-        # The background half reads through Codex on focus; its popover shows it.
-        self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=environment)[0])
-        self.wait_for(lambda: self.plugin_state("codex-reader").get("people") == ["Dana", "Omri"], "The service saves the Codex tool's result.", timeout=30)
-        rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "codex-reader")[0])
-        self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "mcp-people")), "Dana, Omri")
-        self.assertEqual(len(self.jsonl(f"{executable}.ephemeral-threads")), 1, "The service's call reused the warm thread.")
-        warm = self.jsonl(f"{executable}.ephemeral-threads")[0]["threadId"]
-        self.assert_success(self.call_cli("mcp", "call", "--provider", "codex", "--tool", profile,
-                                          extra_environment={**environment, "PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS": "1"})[0])
-        self.wait_for(lambda: warm in [entry["threadId"] for entry in self.jsonl(f"{executable}.unsubscribed")], "The idle thread is released.", timeout=15)
-        self.assert_success(self.call_cli("mcp", "call", "--provider", "codex", "--tool", profile, extra_environment=environment)[0])
-        self.assertEqual(len(self.jsonl(f"{executable}.ephemeral-threads")), 2, "After the release, a call starts a new thread.")
-
-        channel = "mcp__claude_ai_Slack__slack_read_channel"
-        Path(f"{executable}.mcp-results").write_text(json.dumps({channel: {"content": [{"type": "text", "text": "hi"}]}}), encoding="utf-8")
-        Path(f"{executable}.mcp-call-delay").write_text(json.dumps({channel: 4}), encoding="utf-8")
-        self.assert_failure(self.call_cli("mcp", "call", "--provider", "codex", "--tool", channel, "--timeout", "1",
-                                          extra_environment=environment, expected_status=1)[0], "timeout")
-
-        unsupported = self.install_codex_fixture("codex-fixture-no-mcp-call")
-        refused = self.call_cli("mcp", "call", "--provider", "codex", "--tool", profile, extra_environment=unsupported, expected_status=1)[0]
-        self.assert_failure(refused, "unavailable")
-        self.assertIn("can't call MCP tools directly", refused["error"]["message"])
-        self.assert_failure(self.call_cli("mcp", "call", "--provider", "codex", "--tool", profile, expected_status=1)[0], "unavailable")
-        self.assert_failure(self.call_cli("mcp", "call", "--provider", "gemini", "--tool", profile, expected_status=2)[0], "invalid_argument")
-
-    # case-contract: test_plugin_agent_run_codex | agent.run with provider codex (CLI agent run --provider codex, Playhouse.agent.run from the popover with the plugin's provider) starts one turn on an ephemeral, read-only Codex thread of the shared app-server with no approvals, the prompt, the model and the JSON schema as outputSchema, and returns its runID at once; agent runs lists it as a running Codex run, and its thread is released (thread/unsubscribe) when the turn ends. When it ends, only that plugin's background half hears agent.finished: done with the final message parsed as the schema's structured output, which the plugin's handler uses to create a board task, failed with Codex's error, when the message isn't JSON for the schema, or after the run timeout, or cancelled after agent cancel, which interrupts the turn. A run cut off by its daemon dying is reported failed with the error "interrupted" by the next daemon, which also interrupts the orphaned turn on the app-server that outlived it. With no Codex installed, agent.run with provider codex is unavailable.
-    def test_plugin_agent_run_codex(self):
-        executable = self.install_provider_fixture("codex", "codex-fixture-agent")
-        environment = self.restart_service_environment("codex", executable)
-        output = Path(f"{executable}.agent-output")
-        output.write_text(json.dumps({"title": "Reply to Omri", "prompt": "Answer Omri's question.", "nothingNew": False}), encoding="utf-8")
-        hold = Path(f"{executable}.agent-hold")
-        self.addCleanup(lambda: hold.unlink(missing_ok=True))
-        self.write_installed_plugin("slack-dms", self.AGENT_PLUGIN_SOURCE, placement="mainSidebar", presentation="popover",
-                                    manifest={"events": ["agent.finished"]})
-        self.write_installed_plugin("listener-plugin", self.LISTENER_SOURCE, placement="composerActions", presentation="headless",
-                                    manifest={"events": ["agent.finished"]})
-        schema = {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}
-        def run(user, extra=None):
-            return self.call_cli("agent", "run", "--plugin", "slack-dms", "--provider", "codex", "--prompt", f"Draft a task for {user}.",
-                                 "--model", "gpt-5.5", "--json-schema", json.dumps(schema), "--context", json.dumps({"kind": "slack-task", "userId": user}),
-                                 extra_environment={**environment, **(extra or {})})[0]
-        def finished():
-            return self.plugin_state("slack-dms", environment).get("finished")
-        def board_titles():
-            return [task["title"] for task in self.assert_success(self.call_cli("task", "list", extra_environment=environment)[0])["tasks"]]
-        def interrupts():
-            path = Path(f"{executable}.methods")
-            return path.read_text(encoding="utf-8").splitlines().count("turn/interrupt") if path.exists() else 0
-
-        # The popover's run passes the plugin's provider.
-        self.assert_success(self.call_cli("plugin", "state", "--id", "slack-dms", "--key", "provider", "--value", '"codex"', extra_environment=environment)[0])
-        pressed = self.assert_success(self.call_cli("plugin", "render", "--plugin", "slack-dms", "--event", "dm-create-U7:onPress",
-                                                    "--mock", 'agent.run={"runID":"run-popover"}', extra_environment=environment)[0])
-        call = next(call for call in pressed["hostCalls"] if call["name"] == "agent.run")
-        self.assertEqual((call["arguments"]["provider"], call["arguments"]["model"], call["arguments"]["pluginID"]), ("codex", "gpt-5.5", "slack-dms"))
-        self.assert_success(self.call_cli("plugin", "state", "--id", "slack-dms", "--key", "jobs", "--value", "null", extra_environment=environment)[0])
-
-        hold.touch()
-        run_id = self.assert_success(run("U7"))["runID"]
-        runs = self.assert_success(self.call_cli("agent", "runs", extra_environment=environment)[0])["runs"]
-        self.assertEqual([(entry["runID"], entry["provider"], entry["running"]) for entry in runs], [(run_id, "codex", True)])
-        launched = self.wait_for(lambda: next(iter(self.jsonl(f"{executable}.agent-runs")), None), "The Codex turn started.")
-        self.assertEqual((launched["model"], launched["outputSchema"], launched["sandbox"], launched["approvalPolicy"]),
-                         ("gpt-5.5", schema, "readOnly", "never"))
-        self.assertEqual(launched["prompt"], "Draft a task for U7.")
-        self.assertTrue(launched["threadId"].startswith("ephemeral-"), "The run has an ephemeral thread of its own.")
-        self.assertIsNone(finished(), "Nothing is heard while the agent runs.")
-        hold.unlink()
-        self.wait_for(lambda: (finished() or {}).get("status") == "done", "The plugin's service hears agent.finished.", timeout=30)
-        self.assertEqual(finished(), {"status": "done", "userId": "U7", "runID": run_id, "error": None, "title": "Reply to Omri"})
-        self.assertIn("Reply to Omri", board_titles(), "The structured output became the task.")
-        self.wait_for(lambda: launched["threadId"] in [entry["threadId"] for entry in self.jsonl(f"{executable}.unsubscribed")],
-                      "The finished run's thread is released.")
-
-        Path(f"{executable}.agent-fail").touch()
-        failed_id = self.assert_success(run("U8"))["runID"]
-        self.wait_for(lambda: (finished() or {}).get("runID") == failed_id, "The failed run is reported.", timeout=30)
-        self.assertEqual((finished()["status"], finished()["error"]), ("failed", "The fixture agent failed on purpose."))
-        Path(f"{executable}.agent-fail").unlink()
-        output.write_text("not json", encoding="utf-8")
-        unparsed_id = self.assert_success(run("U9"))["runID"]
-        self.wait_for(lambda: (finished() or {}).get("runID") == unparsed_id, "The unparsable answer is reported.", timeout=30)
-        self.assertEqual((finished()["status"], finished()["error"]), ("failed", "Codex returned no structured output for the JSON schema."))
-        output.write_text(json.dumps({"title": "Reply to Omri", "prompt": "Answer Omri's question.", "nothingNew": False}), encoding="utf-8")
-
-        hold.touch()
-        before = interrupts()
-        cancelled_id = self.assert_success(run("U10"))["runID"]
-        self.assert_success(self.call_cli("agent", "cancel", "--plugin", "slack-dms", "--run", cancelled_id, extra_environment=environment)[0])
-        self.wait_for(lambda: (finished() or {}).get("runID") == cancelled_id, "The cancelled run is reported.", timeout=30)
-        self.assertEqual(finished()["status"], "cancelled")
-        self.assertGreater(interrupts(), before, "Cancelling interrupts the Codex turn.")
-        timed_id = self.assert_success(run("U11", {"PLAYHOUSE_E2E_PLUGIN_AGENT_TIMEOUT_SECONDS": "1"}))["runID"]
-        self.wait_for(lambda: (finished() or {}).get("runID") == timed_id, "The timed-out run is reported.", timeout=30)
-        self.assertEqual((finished()["status"], finished()["error"]), ("failed", "The agent didn't finish within 1 seconds."))
-        self.assertNotIn("finished", self.plugin_state("listener-plugin", environment), "Another plugin never hears slack-dms's runs.")
-
-        # Cut off with its daemon; the app-server outlives it, and the next daemon interrupts the orphaned turn.
-        before = interrupts()
-        interrupted_id = self.assert_success(run("U12"))["runID"]
-        self.wait_for(lambda: any("U12" in entry["prompt"] for entry in self.jsonl(f"{executable}.agent-runs")), "The U12 turn started.")
-        self.kill_daemon(environment)
-        self.assertNotIn(interrupted_id, [entry["runID"] for entry in self.assert_success(self.call_cli("agent", "runs", extra_environment=environment)[0])["runs"]])
-        # The service reports it on the board (a test store's settings can't be read back across daemons).
-        self.wait_for(lambda: "Slack task failed for U12: interrupted" in board_titles(), "The next daemon reports the cut-off run.", timeout=30)
-        self.wait_for(lambda: interrupts() > before, "The next daemon interrupts the orphaned Codex turn.", timeout=15)
-        self.assert_failure(self.call_cli("agent", "run", "--plugin", "slack-dms", "--provider", "codex", "--prompt", "Go.",
-                                          extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"}, expected_status=1)[0], "unavailable")
-
+        # The mode is saved with the task, so a new daemon reads it back after the old one dies.
+        private = self.restart_service_environment("claude", executable)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id, extra_environment=private)[0])["mode"], "optimized")
+        self.kill_daemon(private)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id, extra_environment=private)[0])["mode"], "optimized",
+                         "Optimized context survives a daemon restart.")

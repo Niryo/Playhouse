@@ -344,11 +344,21 @@ extension ConversationManager {
                     pluginID: task.authoringPluginID,
                     pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                     pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory,
+                    isOptimizedContext: task.conversationContextMode == .optimized
                 )
             }
             var threadID: String
             var resumesExistingSession = false
+            // Only a follow-up the user sent rotates the session: Playhouse's own nudges and
+            // autopilot prompts, and answers to the agent's questions, continue the session
+            // that asked for them.
+            let startsOptimizedSession = task.conversationContextMode == .optimized
+                && !task.isStandaloneChat && task.authoringPluginID == nil
+                && !isPlayhouseNudge && !hideSensitiveRecoveryPrompt && userInputAnswers.isEmpty
+                && !normalizedText.hasPrefix(Self.pullRequestAutopilotPromptMarker)
+                && !PlayhouseSentMessage.matches(normalizedText)
+            var optimizedSeedContext: String?
             // Each page owns its provider session. A page without one starts a fresh session that
             // carries the system prompt plus only that page's turns, so context never accumulates
             // across pages; the task pointer follows the active page's session.
@@ -391,10 +401,45 @@ extension ConversationManager {
                     code: "operation_failed",
                     message: "Playhouse couldn't open this chat page's own conversation. Try again."
                 )
+            } else if let existing = task.activeConversationID, startsOptimizedSession,
+                      // A Codex goal belongs to its thread; rotating would strand it, so a task
+                      // pursuing one keeps its thread until the goal is cleared.
+                      await !Self.threadHasGoal(existing, provider: provider, clients: clients, workspace: workspace) {
+                // Optimized context: a follow-up starts like a first message, in a fresh session
+                // seeded with the conversation's outline and the user's own messages, and the
+                // agent reads anything else it needs by position.
+                optimizedSeedContext = ConversationHandoff.optimizedFollowUpContext(
+                    taskID: taskID,
+                    timeline: ConversationTimeline(transcript: try transcripts.read(taskID, turns: .all, includeImages: false))
+                )
+                threadID = try await client.startThread(
+                    workspace: workspace,
+                    modelID: modelID,
+                    developerInstructions: standaloneChatInstructions()
+                )
+                phase = "thread-persistence"
+                _ = try await tasks.persistConversationID(taskID, provider: provider, id: threadID, replacing: existing)
+                persistedThreadID = threadID
+                PlayhouseDiagnostics.record("conversation.optimized_session_started", fields: [
+                    "taskID": taskID.uuidString,
+                    "provider": provider.rawValue,
+                    "replacedThreadID": existing,
+                    "threadID": threadID,
+                    "seeded": optimizedSeedContext == nil ? "false" : "true"
+                ])
+                phase = "thread-start"
             } else if let existing = task.activeConversationID {
                 threadID = existing
                 resumesExistingSession = true
             } else {
+                // A provider's first session in an optimized task that already has turns (after a
+                // provider switch) gets the optimized seed rather than the whole visible history.
+                if startsOptimizedSession {
+                    optimizedSeedContext = ConversationHandoff.optimizedFollowUpContext(
+                        taskID: taskID,
+                        timeline: ConversationTimeline(transcript: try transcripts.read(taskID, turns: .all, includeImages: false))
+                    )
+                }
                 threadID = try await client.startThread(
                     workspace: workspace,
                     modelID: modelID,
@@ -472,7 +517,8 @@ extension ConversationManager {
                         pluginID: task.authoringPluginID,
                         pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                         pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                        pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
+                        pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory,
+                        isOptimizedContext: task.conversationContextMode == .optimized
                     )
                     if provider == .claude {
                         compactedBeforeTurn = await runAutomaticCompaction(
@@ -507,6 +553,10 @@ extension ConversationManager {
             if let segment {
                 try transcripts.mutate(taskID, turns: .none) { transcript in
                     if !isPlayhouseNudge { transcript.latestDiff = nil }
+                    if mode == .plan { transcript.planTurnIDs = (transcript.planTurnIDs ?? []) + [localTurnID] }
+                    if optimizedSeedContext != nil {
+                        transcript.freshSessionTurnIDs = (transcript.freshSessionTurnIDs ?? []) + [localTurnID]
+                    }
                     transcript.turns.append(.init(id: localTurnID, segmentID: segment.segmentID, messages: [ConversationMessage(
                         id: "\(localTurnID)-user", role: .user, text: normalizedText, imageDataURLs: imageDataURLs,
                         turnID: localTurnID, provider: provider, createdAt: .now, modelID: modelID
@@ -545,7 +595,8 @@ extension ConversationManager {
                 ConversationHandoff.prompt(
                     normalizedText,
                     // The recovered transcript already holds what a provider-switch handoff carries.
-                    context: [missingThreadRecoveryContext ?? segment?.handoff, standaloneChatSeedContext]
+                    // An optimized seed already holds every visible turn a provider switch would hand off.
+                    context: [missingThreadRecoveryContext ?? optimizedSeedContext ?? segment?.handoff, standaloneChatSeedContext]
                         .compactMap { $0 }.joined(separator: "\n\n").nilWhenBlank
                 ),
                 imageDataURLs: imageDataURLs,
@@ -567,7 +618,8 @@ extension ConversationManager {
                     pluginID: task.authoringPluginID,
                     pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                     pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory,
+                    isOptimizedContext: task.conversationContextMode == .optimized
                 ),
                 onDelta: callbacks.onDelta,
                 onFinalMessage: callbacks.onFinalMessage,
@@ -632,6 +684,8 @@ extension ConversationManager {
             fields["provider"] = provider.rawValue
             fields["phase"] = phase
             fields["storePath"] = PlayhouseDiagnostics.storeURL.path
+            // A turn its task's deletion stopped fails on purpose.
+            if TaskDeletion.isDeleting(taskID) { fields["stoppedForTaskDeletion"] = "true" }
             fields.merge(client.diagnosticFields(forThread: persistedThreadID ?? "", [:])) { _, new in new }
             let wasUserInterrupted = persistedThreadID.map { client.wasLastTurnInterrupted(threadID: $0) } ?? false
             let shouldKeepWaiting = wasUserInterrupted
@@ -675,5 +729,13 @@ extension ConversationManager {
         )
         onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
+    }
+
+    /// Whether the provider's thread is pursuing a goal (active or paused). Only Codex has goals.
+    static func threadHasGoal(
+        _ threadID: String, provider: ConversationProvider, clients: ConversationClients, workspace: ConversationWorkspaceContext
+    ) async -> Bool {
+        guard provider.supportsGoals else { return false }
+        return ((try? await clients.codex.getGoal(threadID: threadID, workspace: workspace)) ?? nil) != nil
     }
 }

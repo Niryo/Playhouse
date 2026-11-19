@@ -98,6 +98,111 @@ extension ConversationManager {
         return interrupted || stoppedWaitingSend
     }
 
+    // MARK: - Task deletion
+
+    /// How long deleting a task gives its turn to stop after an interrupt, and then again after
+    /// the provider is force-stopped, before the delete gives up with an error.
+    static let deleteInterruptTimeout: Duration = .seconds(3)
+    static let deleteForceStopTimeout: Duration = .seconds(5)
+
+    /// Deletes a task at once, whatever its agent is doing: a running turn, one waiting on a
+    /// question, a launch, or sends waiting for the turn are stopped first, by interrupt and
+    /// then by force, and only then is the task deleted. Every wait is bounded, so a turn that
+    /// can't be stopped fails the delete with an error instead of hanging it. A second delete
+    /// of the same task while one runs shares that one's result.
+    func deleteTask(_ taskID: UUID, diagnostics: [String: String] = [:]) async throws {
+        if let running = TaskDeletion.running(taskID) {
+            PlayhouseDiagnostics.record("task.delete.joined", fields: ["taskID": taskID.uuidString])
+            return try await running.value
+        }
+        // An unknown task fails as before, before anything is stopped.
+        _ = try tasks.taskModel(taskID)
+        let deletion = Task { @MainActor in
+            try await self.stopTurnForDeletion(taskID)
+            try await self.tasks.delete(taskID, diagnostics: diagnostics)
+            // A provider process left idle after the turn has nothing more to do for the task. The
+            // delete is done, so its reply doesn't wait for this.
+            if let threadID = TaskDeletion.threadID(taskID) {
+                let client = self.clients.client(for: TaskDeletion.provider(taskID) ?? .claude)
+                Task { @MainActor in _ = await client.forceStopActiveTurn(threadID: threadID) }
+            }
+        }
+        TaskDeletion.begin(taskID, deletion)
+        do {
+            try await deletion.value
+            TaskDeletion.finish(taskID, deleted: true)
+        } catch {
+            TaskDeletion.finish(taskID, deleted: false)
+            throw error
+        }
+    }
+
+    private func stopTurnForDeletion(_ taskID: UUID) async throws {
+        let task = try tasks.conversationSubject(taskID)
+        TaskDeletion.remember(taskID, threadID: task.activeConversationID, provider: task.conversationProvider)
+        let reserved = try tasks.hasConversationTurnReservation(taskID)
+        guard reserved || ConversationTurnLaunch.isLaunching(taskID) || ConversationTurnLaunch.hasWaitingSend(taskID) else { return }
+        var fields = [
+            "taskID": taskID.uuidString,
+            "provider": task.conversationProvider.rawValue,
+            "threadID": task.activeConversationID ?? "",
+            "taskStatus": task.status.rawValue,
+            "reservationHeld": String(reserved)
+        ]
+        PlayhouseDiagnostics.record("task.delete.stopping_turn", fields: fields)
+        // A question the turn waits on is declined first: an interrupt alone leaves a turn that
+        // waits on the user open.
+        if let threadID = task.activeConversationID,
+           let question = try? transcripts.readState(taskID).pendingUserInputRequest, question.threadID == threadID {
+            client(for: task).rejectUserInput(requestID: question.id, threadID: threadID, message: "The task was deleted.")
+            fields["declinedQuestion"] = "true"
+        }
+        let interruptDeadline = ContinuousClock.now + Self.deleteInterruptTimeout
+        let interrupted = await BoundedWait.result(within: Self.deleteInterruptTimeout) {
+            (try? await self.interrupt(taskID: taskID)) ?? false
+        }
+        fields["interrupted"] = interrupted.map(String.init) ?? "timed_out"
+        if await waitForTurnToEnd(taskID, timeout: max(.zero, interruptDeadline - ContinuousClock.now)) {
+            fields["method"] = "interrupt"
+            PlayhouseDiagnostics.record("task.delete.turn_stopped", fields: fields)
+            return
+        }
+        // The provider didn't end the turn, so it is ended without it.
+        let forceDeadline = ContinuousClock.now + Self.deleteForceStopTimeout
+        let threadID = (try? tasks.conversationSubject(taskID).activeConversationID) ?? task.activeConversationID
+        if let threadID {
+            TaskDeletion.remember(taskID, threadID: threadID, provider: task.conversationProvider)
+            let providerClient = client(for: task)
+            let forced = await BoundedWait.result(within: Self.deleteForceStopTimeout) {
+                await providerClient.forceStopActiveTurn(threadID: threadID)
+            }
+            fields["forceStopped"] = forced.map(String.init) ?? "timed_out"
+        }
+        PlayhouseDiagnostics.record("task.delete.turn_force_killed", fields: fields)
+        if await waitForTurnToEnd(taskID, timeout: max(.zero, forceDeadline - ContinuousClock.now)) {
+            fields["method"] = "force"
+            PlayhouseDiagnostics.record("task.delete.turn_stopped", fields: fields)
+            return
+        }
+        PlayhouseDiagnostics.record("task.delete.stop_failed", fields: fields)
+        let seconds = (Self.deleteInterruptTimeout + Self.deleteForceStopTimeout).components.seconds
+        throw BridgeCommandError(
+            code: "operation_failed",
+            message: "Couldn't stop the agent working on this task within \(seconds) seconds, so the task wasn't deleted. Try deleting it again."
+        )
+    }
+
+    /// Whether the task's turn, its launch and every send waiting for it ended within `timeout`.
+    private func waitForTurnToEnd(_ taskID: UUID, timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while true {
+            let reserved = (try? tasks.hasConversationTurnReservation(taskID)) ?? true
+            if !reserved, !ConversationTurnLaunch.isLaunching(taskID), !ConversationTurnLaunch.hasWaitingSend(taskID) { return true }
+            guard ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     func steer(taskID: UUID, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
@@ -315,6 +420,7 @@ extension ConversationManager {
         defer { Self.bumpVisibleRevision(taskID) }
         activeSendTaskIDs.insert(taskID)
         defer { activeSendTaskIDs.remove(taskID) }
+        try TaskDeletion.checkNotDeleting(taskID)
         ConversationTurnLaunch.sendWaiting(taskID)
         PlayhouseDiagnostics.recordAndFlush("conversation.send.accepted", fields: ["taskID": taskID.uuidString])
         var ownsTurnReservation = false
@@ -348,6 +454,9 @@ extension ConversationManager {
                 defer { ConversationTurnLaunch.end(taskID) }
                 ownsTurnReservation = true
                 ConversationTurnLaunch.sendStoppedWaiting(taskID, ownsTurn: true)
+                // A send that waited behind a turn its task's deletion stopped hands the
+                // reservation straight to the delete.
+                try TaskDeletion.checkNotDeleting(taskID)
                 // Only the reservation holder owns the applying marker: take it for
                 // a recovery, or drop one a crashed recovery left behind.
                 try self.transcripts.mutate(taskID, turns: .none) { transcript in
@@ -479,6 +588,49 @@ extension ConversationManager {
     /// Goes back to the turns that were running when this service's previous daemon exited:
     /// agents keep running across a daemon restart, so each such turn is followed again by this
     /// daemon, and a turn whose agent is gone is settled as interrupted.
+}
+
+/// Tasks this daemon is deleting or has deleted. A send for one of them gives up instead of
+/// starting a turn, so a follow-up queued behind the stopped turn can't take the reservation
+/// back from the delete, and nothing dispatches more work for a task that is gone.
+@MainActor
+enum TaskDeletion {
+    private static var runningDeletions: [UUID: Task<Void, Error>] = [:]
+    private static var deletedTaskIDs: Set<UUID> = []
+    private static var threads: [UUID: (threadID: String, provider: ConversationProvider)] = [:]
+
+    static func running(_ taskID: UUID) -> Task<Void, Error>? { runningDeletions[taskID] }
+
+    static func begin(_ taskID: UUID, _ deletion: Task<Void, Error>) { runningDeletions[taskID] = deletion }
+
+    /// A delete that failed leaves the task usable again.
+    static func finish(_ taskID: UUID, deleted: Bool) {
+        runningDeletions.removeValue(forKey: taskID)
+        threads.removeValue(forKey: taskID)
+        if deleted { deletedTaskIDs.insert(taskID) }
+    }
+
+    /// The conversation the deleted task's turn ran in, kept so its idle provider process is
+    /// stopped once the task is gone.
+    static func remember(_ taskID: UUID, threadID: String?, provider: ConversationProvider) {
+        guard let threadID, !threadID.isEmpty else { return }
+        threads[taskID] = (threadID, provider)
+    }
+
+    static func threadID(_ taskID: UUID) -> String? { threads[taskID]?.threadID }
+    static func provider(_ taskID: UUID) -> ConversationProvider? { threads[taskID]?.provider }
+
+    static func isDeleting(_ taskID: UUID) -> Bool {
+        runningDeletions[taskID] != nil || deletedTaskIDs.contains(taskID)
+    }
+
+    static let deletingCode = "task_deleting"
+
+    /// Thrown from a send for a task being deleted.
+    static func checkNotDeleting(_ taskID: UUID) throws {
+        guard isDeleting(taskID) else { return }
+        throw BridgeCommandError(code: deletingCode, message: "This task is being deleted, so the message wasn't sent.")
+    }
 }
 
 /// A task's turn from the moment its send owns the turn reservation until the provider has a
