@@ -4,6 +4,7 @@ import codex_fixture_protocol as _protocol
 import codex_fixture_history as _history
 import codex_fixture_turns as _turns
 import codex_fixture_turn_scenarios as _scenarios
+import codex_fixture_plugin as _plugin
 
 
 def handle_message(runtime, _session_state, message):
@@ -40,6 +41,9 @@ def handle_message(runtime, _session_state, message):
 
 
 
+    # Plugins' background work: ephemeral threads, direct MCP tool calls, agent turns.
+    if _plugin.handle(runtime, message):
+        return
     runtime.remember_thread_cwd(message)
     
     if "-question-isolation-" in _session_state.mode and message.get("method") in ("thread/items/list", "thread/turns/list"):

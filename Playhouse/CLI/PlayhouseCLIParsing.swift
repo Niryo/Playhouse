@@ -589,12 +589,27 @@ extension PlayhouseCLI {
                 arguments["name"] = flags["--name"]?.first.map(BridgeValue.string)
                 arguments["presentation"] = flags["--presentation"]?.first.map(BridgeValue.string)
                 return BridgeRequest(command: "plugin.author", arguments: arguments)
+            case "services":
+                guard rest.count == 1 else { throw CLIError.usage(usage) }
+                return BridgeRequest(command: "plugin.services")
+            case "service":
+                let serviceUsage = "Use: playhouse plugin service (--file <index.js> | --plugin <plugin-id>) --event <name>[:<json payload>]... [--props <json>] [--mock <command>[:<tool>]=<json>...]"
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--plugin", "--props", "--event", "--mock"])
+                guard (flags["--file"] == nil) != (flags["--plugin"] == nil), let events = flags["--event"], !events.isEmpty else { throw CLIError.usage(serviceUsage) }
+                var arguments: [String: BridgeValue] = ["events": .array(events.map(BridgeValue.string))]
+                arguments["file"] = flags["--file"]?.first.map { path in
+                    .string(URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path)
+                }
+                arguments["pluginID"] = flags["--plugin"]?.first.map(BridgeValue.string)
+                arguments["props"] = flags["--props"]?.first.map(BridgeValue.string)
+                if let mocks = try parseMocks(flags["--mock"]) { arguments["mocks"] = mocks }
+                return BridgeRequest(command: "plugin.service", arguments: arguments)
             case "render":
                 break
             default:
                 throw CLIError.unknownCommand(args)
             }
-            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--plugin", "--task", "--props", "--event", "--advance"])
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--plugin", "--task", "--props", "--event", "--advance", "--mock"])
             guard [flags["--file"], flags["--page"], flags["--plugin"]].compactMap({ $0 }).count == 1 else { throw CLIError.usage(renderUsage) }
             guard flags["--task"] == nil || flags["--plugin"] != nil else { throw CLIError.usage(renderUsage) }
             var arguments: [String: BridgeValue] = [:]
@@ -611,7 +626,40 @@ extension PlayhouseCLI {
                 guard let seconds = Double(advance), seconds >= 0 else { throw CLIError.usage(renderUsage) }
                 arguments["advance"] = .decimal(seconds)
             }
+            if let mocks = try parseMocks(flags["--mock"]) { arguments["mocks"] = mocks }
             return BridgeRequest(command: "plugin.render", arguments: arguments)
+        case "agent":
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--plugin", "--prompt", "--model", "--allowed-tool", "--json-schema", "--context", "--cwd", "--run", "--provider"])
+            func json(_ flag: String) throws -> BridgeValue? {
+                guard let text = flags[flag]?.first else { return nil }
+                guard let value = try? JSONDecoder().decode(BridgeValue.self, from: Data(text.utf8)) else { throw CLIError.usage("\(flag) must be JSON.") }
+                return value
+            }
+            switch rest.first {
+            case "run":
+                var arguments: [String: BridgeValue] = [
+                    "pluginID": .string(try requiredFlag("--plugin", flags: flags).first!),
+                    "prompt": .string(try requiredFlag("--prompt", flags: flags).first!),
+                ]
+                arguments["model"] = flags["--model"]?.first.map(BridgeValue.string)
+                arguments["provider"] = flags["--provider"]?.first.map(BridgeValue.string)
+                arguments["allowedTools"] = flags["--allowed-tool"].map { .array($0.map(BridgeValue.string)) }
+                arguments["jsonSchema"] = try json("--json-schema")
+                arguments["context"] = try json("--context")
+                arguments["cwd"] = flags["--cwd"]?.first.map { path in
+                    .string(URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path)
+                }
+                return BridgeRequest(command: "agent.run", arguments: arguments)
+            case "cancel":
+                return BridgeRequest(command: "agent.cancel", arguments: [
+                    "pluginID": .string(try requiredFlag("--plugin", flags: flags).first!),
+                    "runID": .string(try requiredFlag("--run", flags: flags).first!),
+                ])
+            case "runs":
+                return BridgeRequest(command: "agent.runs", arguments: flags["--plugin"]?.first.map { ["pluginID": .string($0)] } ?? [:])
+            default:
+                throw CLIError.unknownCommand(args)
+            }
         case "usage":
             switch rest.first {
             case "get":
@@ -714,6 +762,7 @@ extension PlayhouseCLI {
             guard let operation = rest.first else { throw CLIError.usage("Missing mcp operation.") }
             let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: [
                 "--task", "--server", "--scope", "--name", "--root", "--command", "--arg", "--env", "--url", "--header", "--config-json", "--provider",
+                "--tool", "--arguments", "--plugin", "--timeout",
             ])
             var arguments: [String: BridgeValue] = [:]
             if let task = flags["--task"]?.first { arguments["taskID"] = .string(task) }
@@ -749,6 +798,21 @@ extension PlayhouseCLI {
                 ])
             }
             switch operation {
+            case "call":
+                var call: [String: BridgeValue] = ["tool": .string(try requiredFlag("--tool", flags: flags).first!)]
+                if let json = flags["--arguments"]?.first {
+                    guard let value = try? JSONDecoder().decode(BridgeValue.self, from: Data(json.utf8)), value.object != nil else {
+                        throw CLIError.usage("--arguments must be a JSON object.")
+                    }
+                    call["arguments"] = value
+                }
+                call["pluginID"] = flags["--plugin"]?.first.map(BridgeValue.string)
+                call["provider"] = flags["--provider"]?.first.map(BridgeValue.string)
+                if let timeout = flags["--timeout"]?.first {
+                    guard let seconds = Double(timeout) else { throw CLIError.usage("--timeout is a number of seconds.") }
+                    call["timeout"] = .decimal(seconds)
+                }
+                return BridgeRequest(command: "mcp.call", arguments: call)
             case "list":
                 return BridgeRequest(command: "mcp.list", arguments: arguments)
             case "get":

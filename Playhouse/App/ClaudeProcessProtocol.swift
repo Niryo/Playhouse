@@ -64,19 +64,8 @@ extension ClaudeSessionRunner {
         }
         arguments += ["--append-system-prompt", systemPrompt]
 
-        var environment = PlayhouseProcessEnvironment.current
-        environment["PATH"] = ClaudeCodeClient.expandedSearchPath(environment["PATH"])
-        ConversationProcessEnvironment.forwardPlayhouseBridgeEnvironment(&environment, dataDirectoryOverride: owner?.dataDirectoryOverride ?? nil)
-        // Claude Code finds its keychain sign-in by user name; services started by
-        // launchd are not guaranteed a login environment.
-        environment["HOME"] = environment["HOME"] ?? NSHomeDirectory()
-        environment["USER"] = environment["USER"] ?? NSUserName()
-        environment["LOGNAME"] = environment["LOGNAME"] ?? NSUserName()
-        if let configDirectoryOverride { environment["CLAUDE_CONFIG_DIR"] = configDirectoryOverride }
+        var environment = ClaudeCodeClient.childEnvironment(dataDirectoryOverride: owner?.dataDirectoryOverride ?? nil, configDirectoryOverride: configDirectoryOverride)
         if let effort { environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort.rawValue }
-        // The CLI is a child of Playhouse, not an IDE integration or nested session.
-        environment.removeValue(forKey: "CLAUDECODE")
-        environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
 
         // Claude Code finds a session to resume under its working folder. A rootless task's
         // folder follows the repository root setting (and was the home folder in earlier

@@ -209,11 +209,12 @@ struct JavaScriptCommandHandler: PluginCommandHandler {
 // MARK: - Validation
 
 extension PluginLibrary {
-    /// Why a manifest's commands are invalid, for its presentation.
-    static func commandErrors(_ commands: [PluginCommandManifest], presentation: PluginPresentation?) -> [String] {
+    /// Why a manifest's commands are invalid, for its presentation. A headless
+    /// plugin needs commands, events for a background half, or both.
+    static func commandErrors(_ commands: [PluginCommandManifest], presentation: PluginPresentation?, hasEvents: Bool = false) -> [String] {
         var errors: [String] = []
-        if presentation == .headless, commands.isEmpty {
-            errors.append("A headless plugin has no surface; it needs at least one command in \"commands\".")
+        if presentation == .headless, commands.isEmpty, !hasEvents {
+            errors.append("A headless plugin has no surface; it needs at least one command in \"commands\" or an event in \"events\".")
         }
         var seen: Set<String> = []
         for command in commands {
@@ -229,6 +230,35 @@ extension PluginLibrary {
             }
         }
         return errors
+    }
+}
+
+extension PluginLibrary {
+    /// Why a manifest's `events` and `mcpTools` are invalid.
+    static func serviceErrors(events: [String], mcpTools: [String]?) -> [String] {
+        var errors: [String] = []
+        var seen: Set<String> = []
+        for event in events {
+            if !PluginEvent.names.contains(event) {
+                errors.append("Unknown event \"\(event)\" in \"events\". Events: \(PluginEvent.names.joined(separator: ", ")).")
+            } else if !seen.insert(event).inserted {
+                errors.append("The event \(event) is listed twice in \"events\".")
+            }
+        }
+        for tool in mcpTools ?? [] where !PluginMcpTool.isQualified(tool) {
+            errors.append("\"\(tool)\" in \"mcpTools\" is not a fully qualified MCP tool name such as mcp__<server>__<tool>.")
+        }
+        return errors
+    }
+}
+
+/// An MCP tool's fully qualified name, as Claude Code calls it: `mcp__<server>__<tool>`.
+enum PluginMcpTool {
+    static func isQualified(_ name: String) -> Bool {
+        guard name.hasPrefix("mcp__") else { return false }
+        let rest = name.dropFirst(5)
+        guard let separator = rest.range(of: "__") else { return false }
+        return !rest[..<separator.lowerBound].isEmpty && !rest[separator.upperBound...].isEmpty
     }
 }
 

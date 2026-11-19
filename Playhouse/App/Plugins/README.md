@@ -297,6 +297,9 @@ and its script:
   "width": 320, "height": 200 }
 ```
 
+Optional keys: `commands` (see "Slash commands"), and `events` and `mcpTools`
+(see "Background halves").
+
 `plugin refresh` validates every folder and makes the window reload. It checks
 the manifest and renders each plugin once with sample context; any error marks
 the plugin invalid. The Plugins menu lists every plugin with its placement;
@@ -354,7 +357,8 @@ the new props, and deleting a plugin forgets them. `presentation` is one of:
   show at most a compact count there. On a task card, keep it to an icon or a
   short label.
 - `headless`: only at `composerActions`. The plugin has no button and no
-  surface, only the `/` commands its manifest declares (see "Slash commands").
+  surface, only the `/` commands its manifest declares (see "Slash commands"),
+  a background half (its `events`, see "Background halves"), or both.
 
 Each presentation but `inline` and `section` starts with the app's standard modal header (the plugin's
 icon and name, `plugin-surface-title`, and its close button,
@@ -409,7 +413,7 @@ them, so the menu lists them without running the plugin:
 
 A `name` is lowercase words joined by hyphens, can't be declared twice or take
 a built-in command's name, and needs a `detail` (the row's second line); `icon`
-defaults to the plugin's. A headless plugin without commands is invalid, as is
+defaults to the plugin's. A headless plugin with neither commands nor events is invalid, as is
 a declared command the script never registers. The script registers each
 command's handlers with `Playhouse.commands.register(name, {available, list,
 run, choose, press})`; each gets one request object and returns a value or a
@@ -453,8 +457,13 @@ then the installed ones by id; a disabled or invalid plugin offers none.
 | --- | --- | --- |
 | `task.statusChanged` | `{taskID, from, to}` (column names, such as `"In Progress"` and `"Review"`) | The plugin's task moved between board columns |
 | `app.focus` | `{}` | The app became the active application |
-| `plugin.stateChanged` | `{pluginID, key, value}` | One of the plugin's saved values changed |
+| `plugin.stateChanged` | `{pluginID, key, value}` | One of the plugin's saved values changed; targeted at that plugin |
 | `app.launched` | `{}` | Once per app launch, as the plugin first mounts. The window claims each plugin's launch once (`PluginLaunch.claim`); a launch no listener heard is kept, and the first listener the plugin adds later hears it |
+| `agent.finished` | `{runID, status, result, error, context}` | Only in a background half: an agent the plugin started with `agent.run` ended (see "Background halves"); targeted at that plugin |
+
+An event may be targeted at one plugin (`PluginEvent.pluginID`): it wakes only
+that plugin's service and its mounted runtimes, so a state change or an agent's
+result never reaches another plugin.
 
 A mounted plugin hears them from its surface (`PluginSurfaceView` compares
 its old and new props). A task card's plugin keeps running when its card is
@@ -478,7 +487,154 @@ commands. The daemon raises `task.statusChanged` and `plugin.stateChanged` for
 the changes its commands save; a window forwards the others (`app.focus`)
 over `plugin.event` (`app.launched` too, so a service can act once per launch), which the CLI sends as
 `plugin event <name> [--payload <json>]` (an unknown name is
-`invalid_argument`).
+`invalid_argument`; a `plugin.stateChanged` or `agent.finished` payload's
+`pluginID` targets it). A built-in service hears every event not targeted at
+another plugin.
+
+### Background halves
+
+A script plugin can have a background half too: handlers in its script that
+run in the bridge daemon for app events, with or without a window open. Its
+manifest lists the events they hear, and any presentation may declare them, so
+a popover plugin gets a background half next to its UI; a `headless` plugin
+may have only these:
+
+```json
+{ "id": "slack-dms", "name": "Slack DMs", "icon": "bubble.left.and.bubble.right",
+  "placement": "mainSidebar", "presentation": "popover",
+  "events": ["app.focus", "agent.finished"],
+  "mcpTools": ["mcp__claude_ai_Slack__slack_search_public_and_private"] }
+```
+
+Each name must be one of `PluginEvent.names` and listed once. The same
+`index.js` holds both halves. `Playhouse.service.on(name, handler)` registers a
+background handler; it does nothing in a mounted UI, and `Playhouse.render`
+does nothing in the background, so an event is never handled twice while the
+popover is open (`Playhouse.service.active` says which runtime the script is
+in). A handler gets `{name, payload}` with the payload's fields beside them
+(`e.status`, `e.context`) and may return a promise:
+
+```js
+Playhouse.service.on("app.focus", async function () {
+  var res = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_search_public_and_private", { query: "to:me" });
+  await Playhouse.setState("people", parse(res));
+});
+```
+
+The daemon's `PluginServiceHost` wakes only the services an event is for: a
+targeted event only its plugin's, an untargeted one only the enabled, valid
+plugins whose manifest lists it. It finds the script plugins afresh for each
+event (`plugin.services`, the CLI's internal `plugin services`), so a plugin
+saved, deleted, enabled or disabled is heard from its next event on.
+`JavaScriptPluginService` (`Services/JavaScriptPluginService.swift`) delivers
+one event: it runs `plugin.service` with the plugin's props (the plugin and its
+state, as `JavaScriptCommandHandler` gives a command), which loads the script
+into a fresh service runtime (`PluginServiceCommand` in
+`Core/PluginServiceCommand.swift`), calls the event's handlers, waits for their
+promises to settle (60 seconds, then an error in diagnostics,
+`plugin.service.failed`) and throws the runtime away. Nothing but the plugin's
+state carries over to the next event. `app.focus` is throttled per plugin
+(`PluginThrottle`, 20 seconds), so coming back to the app over and over runs it
+once; events that carry their own payload (a move, a state change, an agent's
+result) are each delivered, since a throttle keeps only the latest call and
+would drop the others. A service never hears its own state writes (its
+handlers' bridge requests carry the internal `__pluginService` argument), so a
+handler that saves state can't wake itself in a loop; a write made elsewhere,
+by its popover or the CLI, does reach it. Script handlers are background work
+only: a move that waits for its services' reactions (`PluginServiceHost.settle`,
+such as the pull request mode opening a pull request) never waits for them.
+A plugin can't call `plugin.service` or `plugin.services` itself
+(`invalid_argument`): only the daemon delivers events. In a handler, `Playhouse.bridge` and `fetch` are
+answered as `PluginHeadlessHost` answers a command's, and every `ui` call is
+`unavailable`. The two halves talk through the plugin's state: the service's
+`Playhouse.setState` raises `plugin.stateChanged` and an open popover
+re-renders from its props.
+
+`plugin service (--file <index.js> | --plugin <id>) --event <name>[:<json>]...
+[--props <json>] [--mock <command>[:<tool>]=<json>...]` runs the handlers
+headlessly, as `plugin render --event` does for a UI, and reports each event's
+handler count, the `hostCalls`, the `stateWritten` and the `errors` (exit 1 if
+any). A file's `Playhouse.setState` writes a scratch `state`, which the report
+returns. Bridge calls are answered by the daemon; `mcp.call`, `agent.run` and
+`agent.cancel` are `unavailable` unless a `--mock` answers them, by command or
+for one MCP tool (`mcp.call:<tool>`), and `{"error": {code, message}}` mocks a
+failure. `agent.finished` is injected with a fake result as
+`--event 'agent.finished:{"runID":…,"status":"done","result":…,"context":…}'`.
+`plugin render` takes the same `--mock` and refuses the same calls without one.
+
+#### Calling MCP tools
+
+`Playhouse.mcp.call(tool, arguments, {provider, timeout})` (the bridge's
+`mcp.call {tool, arguments, provider?, timeout?, pluginID?}`, the CLI's
+`mcp call --tool <mcp__server__tool> [--arguments <json>]`) calls an MCP tool
+directly and resolves with its `{content, structuredContent, isError}`, with no
+model turn and no tokens. `ClaudeCodeClient.callMcpTool` sends Claude Code's
+`mcp_call` control request (`result_not_for_model`) through the same session
+runner as `mcp_status`. That request isn't part of Claude Code's documented
+interface, so it is used only when Claude Code's `initialize` lists
+`mcp_call_result_not_for_model_v1` in its `capabilities`. One session stays warm
+60 seconds after its last call, so a burst of calls starts Claude Code once.
+Errors: a tool name that isn't `mcp__<server>__<tool>` is `invalid_argument`,
+Claude Code missing or without the capability is `unavailable`, an error
+Claude Code returns (a server that isn't connected, an unknown tool) is
+`tool_failed` with its message, and no answer within `timeout` (60 seconds) is
+`timeout`. With `provider` `codex`, `CodexAppServerClient.callMcpTool` sends
+the shared app-server's `mcpServer/tool/call` (`{threadId, server, tool,
+arguments}`, the name split at its `__`s) on an ephemeral, read-only thread
+(`thread/start` with `ephemeral`, never listed among the user's threads), kept
+warm the same 60 seconds; a Codex without that method is `unavailable`. Claude
+Code is the default, since a plugin's MCP servers (claude.ai connectors among
+them) are configured per provider. A manifest's `mcpTools`, when present, lists
+the only tools the plugin calls; any other is `permission_denied`. It catches
+mistakes and is not a security boundary.
+
+#### Running an agent
+
+`Playhouse.agent.run({prompt, model, allowedTools, jsonSchema, context, cwd})`
+(the bridge's `agent.run`, with `pluginID` filled from `Playhouse.props.plugin`
+as `setState` does; the CLI's `agent run --plugin <id> --prompt <text> …`)
+starts a background agent and resolves `{runID}` at once. `PluginAgentRuns`
+(`Services/PluginAgentRuns.swift`) runs it in the daemon, in `cwd` or a folder
+of its own beside the store, holding `BridgeBackgroundWork` so closing the
+popover or the window doesn't stop it, for at most 15 minutes:
+
+- On Claude Code (the default): one non-persisted turn, `claude -p
+  --output-format json --no-session-persistence` with `--model`,
+  `--allowedTools` and `--json-schema`; `result` is its `structured_output`.
+- With `provider: "codex"`: one turn on an ephemeral thread of the shared
+  app-server (`CodexAppServerClient.startPlainTurn`), read-only and with no
+  approvals, with the model and the schema as `turn/start`'s `outputSchema`;
+  its final message is parsed as the structured output. Its notifications go
+  only to the run (`CodexPlainTurn`), never to a conversation, and the server
+  counts it as work so it isn't stopped as idle. Codex has no per-turn tool
+  list, so `allowedTools` applies to Claude Code only. Cancelling or timing out
+  interrupts the turn (`turn/interrupt`).
+
+Model names are the provider's own (`opus`, `gpt-5.5`). When it ends, the
+plugin's background half hears `agent.finished`, targeted at the plugin:
+
+```
+{runID, status: "done" | "failed" | "cancelled", result, error, context}
+```
+
+`result` is the schema's `structured_output` when `jsonSchema` was given, else
+the final text. `context` is any small JSON value (16 KB at most) handed back
+unchanged, which is how a fresh service runtime tells its runs apart (`{kind:
+"slack-task", userId}`); `runID` lets it drop a stale result. The plugin must
+list `agent.finished` in `events` (`invalid_argument` otherwise). Unfinished
+runs are saved beside the store in `plugin-agent-runs.json`
+(`PluginAgentRunStore`: `{runID, pluginID, context, startedAt, model, process}`). A daemon that starts
+after one was cut off reports each of its runs `failed` with the error
+`"interrupted"`, and stops its Claude Code if it is still running, or
+interrupts its Codex turn on the shared app-server, which can outlive a daemon. A daemon
+serves many stores and learns of each from a request, so it checks a store on
+its first event (`plugin.services`, which every event asks) or `agent runs`,
+not at launch; with the app open, the window's `app.launched` and `app.focus`
+reach it at once. `Playhouse.agent.cancel(runID)` (`agent.cancel
+{pluginID, runID}`, the CLI's `agent cancel`) stops a run, which ends
+`cancelled`. Deleting a plugin stops its runs with no event. `agent runs
+[--plugin <id>]` lists the unfinished runs with their provider and whether this
+daemon is running them, so usage spent in the background is visible.
 
 ### Built-in plugins
 

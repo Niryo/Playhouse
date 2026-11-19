@@ -1,12 +1,16 @@
 import Foundation
 
-/// A built-in plugin's background half: it hears the app's events in the
-/// bridge daemon, whether or not a window shows the plugin, and acts only
-/// through bridge commands, the same ones a JavaScript plugin's
-/// `Playhouse.bridge` reaches.
+/// A plugin's background half: it hears the app's events in the bridge
+/// daemon, whether or not a window shows the plugin, and acts only through
+/// bridge commands, the same ones a JavaScript plugin's `Playhouse.bridge`
+/// reaches. A built-in's is Swift; a script plugin's is
+/// `JavaScriptPluginService`, which runs its `Playhouse.service.on` handlers.
 @MainActor
 protocol PluginService: AnyObject {
     var pluginID: String { get }
+    /// The events the service hears (a script plugin's manifest `events`), or
+    /// nil for a built-in, which hears every event not targeted at another plugin.
+    var events: Set<String>? { get }
     func handle(_ event: PluginEvent, context: PluginServiceContext) async
     /// Whether the service still wants `action` done for `taskID`, asked by a
     /// command it started right before an irreversible step (a merge, a fix
@@ -15,6 +19,8 @@ protocol PluginService: AnyObject {
 }
 
 extension PluginService {
+    var events: Set<String>? { nil }
+
     func confirms(_ action: String, taskID: String, context: PluginServiceContext) async -> Bool { true }
 }
 
@@ -45,15 +51,22 @@ struct PluginServiceContext {
     }
 }
 
-/// Delivers app events to the built-in plugins' services. The bridge daemon
-/// installs the services; a window forwards the changes it saves itself to
-/// the daemon (`plugin.event`), so each change reaches the services once.
+/// Delivers app events to the plugins' services. The bridge daemon installs
+/// the built-ins' and finds the script plugins' (`scriptServices`); a window
+/// forwards the changes it saves itself to the daemon (`plugin.event`), so each
+/// change reaches the services once. An event wakes only the services it is
+/// for: a targeted one only its plugin's, and a script plugin only for the
+/// events its manifest lists.
 @MainActor
 enum PluginServiceHost {
     /// The request being performed, whose isolation a service's commands reuse.
     @TaskLocal static var origin: BridgeRequest?
 
     nonisolated(unsafe) static var services: [any PluginService] = []
+    /// Set in the daemon: the script plugins' services for the store `context`'s
+    /// request reaches, found afresh for each event, so a plugin saved, deleted,
+    /// enabled or disabled is heard (or not) from its next event on.
+    nonisolated(unsafe) static var scriptServices: (@MainActor (PluginServiceContext) async -> [any PluginService])?
     /// Set in the app: sends an event it raised to the daemon's services.
     nonisolated(unsafe) static var forward: ((PluginEvent) -> Void)?
 
@@ -64,30 +77,59 @@ enum PluginServiceHost {
             forward(event)
             return
         }
-        guard !services.isEmpty else { return }
+        guard !services.isEmpty || scriptServices != nil else { return }
         guard let origin else {
             PlayhouseDiagnostics.record("plugin.event.dropped", fields: ["name": event.name, "reason": "no-origin-request"])
             return
         }
         PlayhouseDiagnostics.record("plugin.event.published", fields: [
-            "name": event.name, "taskID": event.payload["taskID"]?.string ?? "", "to": event.payload["to"]?.string ?? ""
+            "name": event.name, "taskID": event.payload["taskID"]?.string ?? "", "to": event.payload["to"]?.string ?? "",
+            "target": event.pluginID ?? ""
         ])
         let context = PluginServiceContext(origin: origin)
-        for service in services {
-            let id = UUID()
-            // The daemon stays up until the service has acted.
-            BridgeBackgroundWork.onBegin?()
-            let task = Task { @MainActor in
-                if await context.enabledState(of: service.pluginID) != nil {
-                    await service.handle(event, context: context)
-                }
-                running[id] = nil
-                BridgeBackgroundWork.onEnd?()
-            }
-            // The task can't start before this main-actor turn ends, so it's
-            // recorded before it can remove itself.
-            running[id] = (event.payload["taskID"]?.string, task)
+        let taskID = event.payload["taskID"]?.string
+        for service in services where accepts(service, event) {
+            start(service, event, context: context, taskID: taskID)
         }
+        guard let scriptServices else { return }
+        // A script service never hears its own state writes, so a handler that
+        // saves state can't wake itself over and over.
+        let writer = origin.arguments["__pluginService"]?.string
+        if event.name == PluginEvent.pluginStateChanged, let writer, event.pluginID == writer { return }
+        let id = UUID()
+        BridgeBackgroundWork.onBegin?()
+        // Script handlers are third-party code: they are background work, but a
+        // move that waits for its reactions (`settle`) waits only for the built-ins'.
+        let task = Task { @MainActor in
+            for service in await scriptServices(context) where accepts(service, event) {
+                start(service, event, context: context, taskID: nil)
+            }
+            running[id] = nil
+            BridgeBackgroundWork.onEnd?()
+        }
+        running[id] = (nil, task)
+    }
+
+    /// Whether `service` hears `event`: it isn't targeted at another plugin and,
+    /// for a script plugin, its manifest lists it.
+    static func accepts(_ service: any PluginService, _ event: PluginEvent) -> Bool {
+        event.reaches(service.pluginID) && service.events?.contains(event.name) != false
+    }
+
+    private static func start(_ service: any PluginService, _ event: PluginEvent, context: PluginServiceContext, taskID: String?) {
+        let id = UUID()
+        // The daemon stays up until the service has acted.
+        BridgeBackgroundWork.onBegin?()
+        let task = Task { @MainActor in
+            if await context.enabledState(of: service.pluginID) != nil {
+                await service.handle(event, context: context)
+            }
+            running[id] = nil
+            BridgeBackgroundWork.onEnd?()
+        }
+        // The task can't start before this main-actor turn ends, so it's
+        // recorded before it can remove itself.
+        running[id] = (taskID, task)
     }
 
     /// Asks the service of `pluginID` whether it still wants `action` done for

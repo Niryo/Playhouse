@@ -245,3 +245,173 @@ extension CodexAppServerClient {
         return [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)]
     }
 }
+
+/// One plugin agent turn on an ephemeral Codex thread: the text of its last agent
+/// message and how its turn ended.
+@MainActor
+final class CodexPlainTurn {
+    struct Outcome {
+        var status: String
+        var text: String?
+        var error: String?
+    }
+
+    let threadID: String
+    var turnID: String?
+    private var lastMessage: String?
+    private var outcome: Outcome?
+    private var waiters: [CheckedContinuation<Outcome, Never>] = []
+
+    init(threadID: String) { self.threadID = threadID }
+
+    /// Takes one of the thread's notifications; true once the turn has ended.
+    func observe(method: String, params: [String: Any]) -> Bool {
+        switch method {
+        case "turn/started":
+            turnID = (params["turn"] as? [String: Any])?["id"] as? String ?? turnID
+        case "item/completed":
+            if let item = params["item"] as? [String: Any], item["type"] as? String == "agentMessage", let text = item["text"] as? String {
+                lastMessage = text
+            }
+        case "turn/completed":
+            let turn = params["turn"] as? [String: Any] ?? [:]
+            let error = (turn["error"] as? [String: Any])?["message"] as? String
+            switch turn["status"] as? String ?? "completed" {
+            case "completed": finish(status: "completed", error: nil)
+            case "interrupted": finish(status: "interrupted", error: error)
+            default: finish(status: "failed", error: error ?? "Codex couldn't finish the turn.")
+            }
+            return true
+        default:
+            break
+        }
+        return false
+    }
+
+    func finish(status: String, error: String?) {
+        guard outcome == nil else { return }
+        let outcome = Outcome(status: status, text: lastMessage, error: error)
+        self.outcome = outcome
+        waiters.forEach { $0.resume(returning: outcome) }
+        waiters.removeAll()
+    }
+
+    func result() async -> Outcome {
+        if let outcome { return outcome }
+        return await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+// MARK: - Plugins' background work
+
+extension CodexAppServerClient {
+    /// A thread Codex keeps in memory only, for a plugin's background work: it
+    /// never appears in the user's Codex threads. It runs read-only with no
+    /// approval prompts, since nobody watches it.
+    func startEphemeralThread(workspace: ConversationWorkspaceContext, modelID: String) async throws -> String {
+        try await ensureInitialized(workspace: workspace)
+        let response = try await request(method: "thread/start", params: [
+            "ephemeral": true, "model": modelID, "cwd": workspace.cwd.path,
+            "sandbox": "read-only", "approvalPolicy": "never", "approvalsReviewer": "user",
+            "dynamicTools": [], "selectedCapabilityRoots": [], "runtimeWorkspaceRoots": workspace.roots.map(\.path)
+        ])
+        guard let threadID = (response["thread"] as? [String: Any])?["id"] as? String else {
+            throw ClientError.protocolFailure("Codex did not return a thread ID.")
+        }
+        return threadID
+    }
+
+    /// Calls an MCP tool Codex is connected to (`mcp__<server>__<tool>`) with
+    /// `mcpServer/tool/call`, with no model turn, on an ephemeral thread kept warm
+    /// `ClaudeCodeClient.McpCallSession.idleLifetime` after its last call.
+    func callMcpTool(_ qualified: String, arguments: [String: Any], workspace: ConversationWorkspaceContext, timeout: Duration) async throws -> [String: Any] {
+        guard isInstalled else { throw ClientError.cliNotFound }
+        guard let (server, tool) = McpToolCallError.split(qualified) else {
+            throw McpToolCallError.toolFailed("Not a fully-qualified MCP tool name: \(qualified)")
+        }
+        let threadID: String
+        if let warm = mcpCallThread {
+            threadID = warm.id
+        } else if let start = mcpCallThreadStart {
+            threadID = try await start.value
+        } else {
+            let start = Task { @MainActor in try await self.startEphemeralThread(workspace: workspace, modelID: Self.modelID) }
+            mcpCallThreadStart = start
+            defer { mcpCallThreadStart = nil }
+            threadID = try await start.value
+        }
+        mcpCallThread?.idle?.cancel()
+        mcpCallThread = (threadID, nil)
+        mcpCallsInFlight += 1
+        // The idle wait starts when the last call returns, so a long call keeps its thread.
+        defer {
+            mcpCallsInFlight -= 1
+            if mcpCallsInFlight == 0, mcpCallThread?.id == threadID {
+                let lifetime = ClaudeCodeClient.McpCallSession.idleLifetime
+                mcpCallThread = (threadID, Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: lifetime)
+                    guard !Task.isCancelled, self?.mcpCallThread?.id == threadID, self?.mcpCallsInFlight == 0 else { return }
+                    self?.mcpCallThread = nil
+                    self?.releaseEphemeralThread(threadID)
+                })
+            }
+        }
+        do {
+            return try await request(method: "mcpServer/tool/call", params: [
+                "threadId": threadID, "server": server, "tool": tool, "arguments": arguments
+            ], timeout: timeout)
+        } catch ClientError.protocolFailure(let message) where message.contains("did not answer") {
+            throw McpToolCallError.timedOut(Int(timeout.components.seconds))
+        } catch let error as ClientError {
+            let message = error.localizedDescription
+            let lowered = message.lowercased()
+            if lowered.contains("method not found") || lowered.contains("unknown variant") {
+                throw McpToolCallError.unsupported("This Codex release can't call MCP tools directly; update Codex.")
+            }
+            // The thread went away (a restarted app-server): the next call starts another.
+            if lowered.contains("thread not found") { mcpCallThread?.idle?.cancel(); mcpCallThread = nil }
+            if case .processExited = error { throw error }
+            throw McpToolCallError.toolFailed(message)
+        }
+    }
+
+    /// Starts a plugin's agent turn on an ephemeral thread, with `outputSchema`
+    /// constraining its final message when given; await `CodexPlainTurn.result()`.
+    func startPlainTurn(prompt: String, modelID: String?, outputSchema: [String: Any]?, workspace: ConversationWorkspaceContext) async throws -> CodexPlainTurn {
+        guard isInstalled else { throw ClientError.cliNotFound }
+        let model = modelID ?? Self.modelID
+        let threadID = try await startEphemeralThread(workspace: workspace, modelID: model)
+        // Waiting before the turn starts, since its notifications can precede the answer.
+        let turn = CodexPlainTurn(threadID: threadID)
+        plainTurns[threadID] = turn
+        var params: [String: Any] = [
+            "threadId": threadID, "model": model, "cwd": workspace.cwd.path, "approvalPolicy": "never",
+            "sandboxPolicy": ["type": "readOnly", "networkAccess": true],
+            "input": [["type": "text", "text": prompt]]
+        ]
+        if let outputSchema { params["outputSchema"] = outputSchema }
+        do {
+            let response = try await request(method: "turn/start", params: params)
+            turn.turnID = turn.turnID ?? (response["turn"] as? [String: Any])?["id"] as? String
+        } catch {
+            plainTurns[threadID] = nil
+            throw error
+        }
+        return turn
+    }
+
+    /// Lets the app-server unload an ephemeral thread whose work is over, so a
+    /// long session doesn't keep every run's thread loaded.
+    func releaseEphemeralThread(_ threadID: String) {
+        Task { @MainActor in
+            _ = try? await request(method: "thread/unsubscribe", params: ["threadId": threadID], timeout: .seconds(5))
+        }
+    }
+
+    /// Stops a plugin's agent turn; it ends `interrupted`.
+    func interruptPlainTurn(_ turn: CodexPlainTurn) async {
+        guard let turnID = turn.turnID else { return }
+        _ = try? await request(method: "turn/interrupt", params: ["threadId": turn.threadID, "turnId": turnID])
+    }
+}
+

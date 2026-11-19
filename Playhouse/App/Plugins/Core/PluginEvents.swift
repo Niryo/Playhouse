@@ -1,31 +1,52 @@
 import Foundation
 
 /// Something that happened in the app, delivered to plugins: a JavaScript
-/// plugin hears it through `Playhouse.on(name, listener)`, a built-in through
-/// its view or its daemon service. The payload is plain JSON.
+/// plugin's mounted UI hears it through `Playhouse.on(name, listener)` and its
+/// background half in the daemon through `Playhouse.service.on`, a built-in
+/// through its view or its daemon service. The payload is plain JSON.
 struct PluginEvent: Equatable, Sendable {
     /// A task moved between board columns: `{taskID, from, to}` (statuses as the board names them).
     static let taskStatusChanged = "task.statusChanged"
     /// The app became the active application: `{}`.
     static let appFocus = "app.focus"
-    /// A plugin's saved state changed: `{pluginID, key, value}`.
+    /// A plugin's saved state changed: `{pluginID, key, value}`, targeted at that plugin.
     static let pluginStateChanged = "plugin.stateChanged"
+    /// An agent a plugin started with `agent.run` finished:
+    /// `{runID, status, result, error, context}`, targeted at that plugin.
+    static let agentFinished = "agent.finished"
 
     /// The app launched: `{}`, once per launch to each plugin, when it is
     /// first mounted, so it can refresh what an earlier launch left.
     static let appLaunched = "app.launched"
 
-    static let names = [taskStatusChanged, appFocus, pluginStateChanged, appLaunched]
+    static let names = [taskStatusChanged, appFocus, pluginStateChanged, appLaunched, agentFinished]
 
     var name: String
     var payload: [String: PluginValue] = [:]
+    /// The one plugin the event is for, or nil for an event every plugin may hear.
+    /// A targeted event wakes only that plugin's service and mounted runtimes.
+    var pluginID: String?
 
     static func statusChanged(taskID: String, from: String, to: String) -> PluginEvent {
         PluginEvent(name: taskStatusChanged, payload: ["taskID": .string(taskID), "from": .string(from), "to": .string(to)])
     }
 
     static func stateChanged(pluginID: String, key: String, value: PluginValue) -> PluginEvent {
-        PluginEvent(name: pluginStateChanged, payload: ["pluginID": .string(pluginID), "key": .string(key), "value": value])
+        PluginEvent(name: pluginStateChanged, payload: ["pluginID": .string(pluginID), "key": .string(key), "value": value], pluginID: pluginID)
+    }
+
+    /// `status` is "done", "failed" or "cancelled"; `result` is the run's structured
+    /// output or final text, and `context` the value `agent.run` was given, unchanged.
+    static func agentFinished(pluginID: String, runID: String, status: String, result: PluginValue, error: String?, context: PluginValue) -> PluginEvent {
+        PluginEvent(name: agentFinished, payload: [
+            "runID": .string(runID), "status": .string(status), "result": result,
+            "error": error.map(PluginValue.string) ?? .null, "context": context
+        ], pluginID: pluginID)
+    }
+
+    /// Whether the plugin `pluginID` may hear this event: it isn't targeted at another plugin.
+    func reaches(_ pluginID: String?) -> Bool {
+        self.pluginID == nil || self.pluginID == pluginID
     }
 
     /// `<name>[:<json payload>]`, as `plugin event` and `plugin render --event @…` take it.
@@ -41,12 +62,19 @@ struct PluginEvent: Equatable, Sendable {
             }
             payload = object
         }
-        self.init(name: name, payload: payload)
+        self.init(name: name, payload: payload, pluginID: Self.target(of: name, payload: payload))
     }
 
-    init(name: String, payload: [String: PluginValue] = [:]) {
+    /// The plugin an event given by name and payload (`plugin event`, `--event`) is
+    /// targeted at: a state change's or an agent run's `pluginID`.
+    static func target(of name: String, payload: [String: PluginValue]) -> String? {
+        [pluginStateChanged, agentFinished].contains(name) ? payload["pluginID"]?.string : nil
+    }
+
+    init(name: String, payload: [String: PluginValue] = [:], pluginID: String? = nil) {
         self.name = name
         self.payload = payload
+        self.pluginID = pluginID
     }
 }
 

@@ -5,6 +5,15 @@ import Darwin
 
 extension CodexAppServerClient {
     func handleNotification(method: String, params: [String: Any]) {
+        if let threadID = params["threadId"] as? String, let plain = plainTurns[threadID] {
+            if plain.observe(method: method, params: params) {
+                plainTurns[threadID] = nil
+                releaseEphemeralThread(threadID)
+            }
+            return
+        }
+        // The warm thread of direct MCP calls runs no turns; its notifications are no conversation's.
+        if let threadID = params["threadId"] as? String, threadID == mcpCallThread?.id { return }
         let context = (params["threadId"] as? String).flatMap { turnContexts[$0] }
         if method == "turn/started" || method == "turn/completed", let threadID = params["threadId"] as? String,
            threadParents[threadID] == nil {

@@ -83,6 +83,9 @@
 
   global.__playhouseBoot = function (atomNames) {
     var React = require("react");
+    // The daemon's service runtime (the plugin's background half) sets this:
+    // there Playhouse.service.on registers handlers and Playhouse.render does nothing.
+    var serviceMode = global.__playhouseService === true;
     var Reconciler = require("react-reconciler");
     var atoms = {};
     atomNames.forEach(function (name) { atoms[name] = true; });
@@ -302,7 +305,8 @@
     }
 
     // App events (PluginEvent in Swift): Swift calls __playhouseEmit(name, payload)
-    // for "task.statusChanged", "app.focus", "plugin.stateChanged" and "app.launched".
+    // for "task.statusChanged", "app.focus", "plugin.stateChanged" and "app.launched"
+    // in a mounted UI. A plugin's background half hears them through service.on.
     var eventListeners = {};
     // "app.launched" arrives as the plugin first mounts, often before the effect
     // that listens for it has run: the first listener added later still hears it.
@@ -367,6 +371,36 @@
       };
     }
 
+    // The background half (the manifest's "events"): handlers the daemon runs in
+    // a fresh service runtime per event with __playhouseRunService(token, name,
+    // payload), waiting for the promises they return, then throws the runtime away.
+    // Each handler gets {name, payload} with the payload's fields beside them, so
+    // an agent.finished handler reads e.status, e.result and e.context directly.
+    var serviceHandlers = {};
+    function onService(name, handler) {
+      if (!serviceMode || typeof handler !== "function") return function () {};
+      name = String(name);
+      (serviceHandlers[name] = serviceHandlers[name] || []).push(handler);
+      return function () {
+        var handlers = serviceHandlers[name] || [];
+        var index = handlers.indexOf(handler);
+        if (index >= 0) handlers.splice(index, 1);
+      };
+    }
+    global.__playhouseRunService = function (token, name, payload) {
+      payload = payload || {};
+      var event = Object.assign({}, payload, { name: name, payload: payload });
+      var handlers = (serviceHandlers[name] || []).slice();
+      var errors = [];
+      Promise.all(handlers.map(function (handler) {
+        return new Promise(function (resolve) { resolve(handler(event)); }).then(null, function (error) {
+          errors.push((error && error.message) || String(error));
+        });
+      })).then(function () {
+        __native.commandResult(token, true, { handlers: handlers.length, errors: errors });
+      });
+    };
+
     // `/` commands (the manifest's "commands"): each name's handlers, which the
     // host runs with __playhouseRunCommand(token, name, phase, request) in a
     // fresh runtime, and whose result (or error) it hears through
@@ -421,7 +455,34 @@
       // Listens for an app event; returns a function that stops listening.
       on: on,
       throttle: throttle,
-      render: function (element) { reconciler.updateContainer(element, root, null, null); },
+      render: function (element) { if (!serviceMode) reconciler.updateContainer(element, root, null, null); },
+      // The background half's handlers: service.on(name, handler) for an event the
+      // manifest lists in "events". It does nothing in a mounted UI, so one script
+      // holds both halves without an event being handled twice.
+      service: { on: onService, active: serviceMode },
+      // Calls an MCP tool directly, with no model turn, through Claude Code or Codex:
+      // resolves {content, structuredContent, isError}. options: {provider: "claude" or "codex", timeout}.
+      mcp: {
+        call: function (tool, args, options) {
+          var plugin = Playhouse.props.plugin || {};
+          return hostCall("bridge", "mcp.call", Object.assign({}, options || {}, {
+            pluginID: plugin.id, tool: String(tool), arguments: args || {}
+          }));
+        }
+      },
+      // Runs an agent in the background: {prompt, model, allowedTools, jsonSchema,
+      // context, cwd} resolves {runID} at once; the plugin's background half hears
+      // agent.finished with {runID, status, result, error, context} when it ends.
+      agent: {
+        run: function (options) {
+          var plugin = Playhouse.props.plugin || {};
+          return hostCall("bridge", "agent.run", Object.assign({}, options || {}, { pluginID: plugin.id }));
+        },
+        cancel: function (runID) {
+          var plugin = Playhouse.props.plugin || {};
+          return hostCall("bridge", "agent.cancel", { pluginID: plugin.id, runID: String(runID) });
+        }
+      },
       onPropsChange: onPropsChange,
       // The current props, re-rendering the component whenever they change.
       useProps: function () {
