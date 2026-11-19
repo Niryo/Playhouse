@@ -534,7 +534,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation, whose turns Playhouse holds in its own store, immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window: when its sent turn streams sixty replies, each stored as its own message in order, it keeps the newest 40 of those 61 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation, whose turns Playhouse holds in its own store, immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window: when its sent turn streams sixty replies, each stored as its own message in order, it keeps the newest 40 of those 61 messages rendered as they arrive. Reopened once that turn settles, its sixty replies, all the turn's own with none of them progress that collapses, make a newest turn far longer than what a conversation renders when it opens: it opens at its end on the newest reply, renders only the messages above it that fill the viewport (more than the six it opens with, fewer than 40) and not the turn's question, and scrolling up reveals the earlier replies and reaches that question. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -569,8 +569,50 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({
             !self.element("codex-working-duration").exists && self.noTurnIsRunning()
         }, timeout: 20), "The sent turn should settle before earlier history is seeded.")
-        // Earlier sessions' turns are already in Playhouse's own store; the provider holds none of them.
+        // The settled turn's sixty replies are its own, so the newest turn is far longer than
+        // what a conversation renders when it opens. Reopened, it opens at its end on its newest
+        // messages, and only the messages above them that fill the viewport render with them.
         let seededTaskID = try taskID(named: "Long conversation history")
+        let liveHistory = try XCTUnwrap(try runCLI(["conversation", "history", seededTaskID])["result"] as? [String: Any])
+        let liveQuestionID = try XCTUnwrap(((liveHistory["messages"] as? [[String: Any]])?.first)?["id"] as? String)
+        openTask(named: "Long conversation history")
+        let reopenedLive = element("conversation-scroll-view")
+        func reopenedLiveCount() -> Int {
+            (reopenedLive.value as? String ?? "").split(separator: " ").compactMap { Int($0) }.first ?? 0
+        }
+        let newestLiveReply = transcriptMessage("Live long history reply 60.")
+        XCTAssertTrue(waitUntil({
+            (reopenedLive.value as? String ?? "").hasSuffix(" of 61 messages") && newestLiveReply.exists
+                && reopenedLive.frame.intersects(newestLiveReply.frame)
+        }, timeout: 20), "Reopening a long newest turn should show its newest reply; value=\(reopenedLive.value as? String ?? "nil").")
+        // The window fills the viewport a few messages at a time, then rests.
+        var settledCount = reopenedLiveCount()
+        var settledSince = Date()
+        XCTAssertTrue(waitUntil({
+            let count = reopenedLiveCount()
+            if count != settledCount { settledCount = count; settledSince = Date() }
+            return Date().timeIntervalSince(settledSince) >= 1.5
+        }, timeout: 15), "The opening window should stop growing once the viewport is full.")
+        // Six messages open the window; one-line replies that short leave the viewport to fill.
+        XCTAssertGreaterThan(settledCount, 6, "The messages above the newest few should render until they fill the viewport; rendered=\(settledCount).")
+        XCTAssertLessThan(settledCount, 40, "Opening should not render the whole long turn; rendered=\(settledCount).")
+        XCTAssertFalse(element("user-message-\(liveQuestionID)").exists, "The long turn's question stays unrendered until the reader scrolls up to it.")
+        XCTAssertGreaterThanOrEqual(newestLiveReply.frame.maxY, reopenedLive.frame.maxY - 140,
+                                    "The long turn opens at its end; reply=\(newestLiveReply.frame), viewport=\(reopenedLive.frame).")
+        XCTAssertLessThanOrEqual(newestLiveReply.frame.maxY, reopenedLive.frame.maxY + 4,
+                                 "The newest reply is fully in view, not cut off below it; reply=\(newestLiveReply.frame), viewport=\(reopenedLive.frame).")
+        attachScreenshot(named: "long-history-1-long-turn-opens-at-end")
+        reopenedLive.scroll(byDeltaX: 0, deltaY: 1500)
+        XCTAssertTrue(waitUntil({ reopenedLiveCount() > settledCount }, timeout: 10),
+                      "Scrolling up should reveal the long turn's earlier replies.")
+        reopenedLive.scroll(byDeltaX: 0, deltaY: 40_000)
+        for _ in 0..<40 where !element("user-message-\(liveQuestionID)").exists {
+            reopenedLive.scroll(byDeltaX: 0, deltaY: 1500)
+            _ = waitUntil({ self.element("user-message-\(liveQuestionID)").exists }, timeout: 0.5)
+        }
+        XCTAssertTrue(element("user-message-\(liveQuestionID)").waitToExist(timeout: 5), "Scrolling up reaches the long turn's question.")
+        attachScreenshot(named: "long-history-2-long-turn-question-revealed")
+        // Earlier sessions' turns are already in Playhouse's own store; the provider holds none of them.
         XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before its stored history is seeded.")
         try seedLongHistory(seededTaskID, tallLatestAnswer: true)
         launchAppWithOpen()

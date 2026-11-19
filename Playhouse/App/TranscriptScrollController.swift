@@ -105,6 +105,8 @@ final class TranscriptScrollController: NSObject {
     private var isRevealPending = false
     /// Newer messages were revealed below a window that ends early and have not laid out yet.
     private var isNewerRevealPending = false
+    /// The window opened on its newest messages and should fill the viewport once they lay out.
+    private var isFillPending = false
     private var topRowID: String?
     private var notificationTokens: [NSObjectProtocol] = []
     private var scrollWheelMonitor: Any?
@@ -124,6 +126,13 @@ final class TranscriptScrollController: NSObject {
     var isFollowing: Bool {
         if case .following = intent { return true }
         return false
+    }
+
+    private var isReadingOrFollowing: Bool {
+        switch intent {
+        case .following, .reading: true
+        case .latestTurn, .row: false
+        }
     }
 
     // MARK: Intents
@@ -156,6 +165,23 @@ final class TranscriptScrollController: NSObject {
     /// than the viewport, `onApproachTop` runs again.
     func didRevealOlderRows() {
         isRevealPending = true
+    }
+
+    /// The rendered window opened on only the newest few messages. Once they lay out, older
+    /// messages are revealed, a batch per layout, for as long as the viewport still reaches
+    /// within a viewport of the oldest rendered one, so the reader opens on a full screen
+    /// without the rows far above it rendering.
+    ///
+    /// Unlike a reveal it holds no further batch back: the window may not change at all, as on a
+    /// reload of the same messages, and then no layout would come to clear it. It is checked
+    /// once the call has returned as well, for the same reason.
+    func fillViewportWithOlderRows() {
+        isFillPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, isFillPending, isReadingOrFollowing, let metrics = metrics(), isNearTop(metrics) else { return }
+            isFillPending = false
+            approachTop()
+        }
     }
 
     /// Newer messages were just revealed below a window that ends before the transcript does.
@@ -216,6 +242,7 @@ final class TranscriptScrollController: NSObject {
         last = nil
         isRevealPending = false
         isNewerRevealPending = false
+        isFillPending = false
     }
 
     private func metrics() -> Metrics? {
@@ -300,8 +327,9 @@ final class TranscriptScrollController: NSObject {
 
     private func layoutDidChange() {
         guard !isApplying else { return }
-        let didReveal = isRevealPending
+        let didReveal = isRevealPending || isFillPending
         isRevealPending = false
+        isFillPending = false
         let didRevealNewer = isNewerRevealPending
         isNewerRevealPending = false
         // A running animation moves toward the intent's position as it now is.
@@ -310,7 +338,9 @@ final class TranscriptScrollController: NSObject {
             return
         }
         applyIntent()
-        if didReveal, case .reading = intent, let last, isNearTop(last) {
+        // A transcript following its end keeps filling too, as one opened on its newest
+        // messages does until they reach above the viewport.
+        if didReveal, isReadingOrFollowing, let last, isNearTop(last) {
             // Revealing changes state, which a layout pass must not.
             DispatchQueue.main.async { [weak self] in self?.approachTop() }
         }

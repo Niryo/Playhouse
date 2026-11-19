@@ -188,24 +188,28 @@ extension TaskConversationView {
 
     /// Opens the transcript on the newest turn: the window starts at its question, which sits at
     /// the top of the viewport. A turn that is running, or a question form waiting below it,
-    /// opens at the end of the transcript instead and follows what arrives.
+    /// opens at the end of the transcript instead and follows what arrives. A turn too long to
+    /// render at once opens at its end on its newest messages, and the messages above them
+    /// render until they fill the viewport (see `openingWindowStartID`).
     func presentLatestConversationTurn() {
-        guard let turnStartID = latestConversationTurnStartID else {
+        // A reload leaves any earlier chat page the reader had jumped to.
+        renderedWindowEndID = nil
+        dropHistoryHead()
+        guard let turnStartID = latestConversationTurnStartID, let windowStartID = openingWindowStartID else {
             // An empty conversation renders everything it receives while it stays open.
             transcriptScroll.pin(.bottom)
             return
         }
-        // A reload leaves any earlier chat page the reader had jumped to.
-        renderedWindowEndID = nil
-        dropHistoryHead()
-        oldestRenderedMessageID = turnStartID
+        oldestRenderedMessageID = windowStartID
         // The newest question is already in view, so it is not one that was just sent.
         lastScrolledUserMessageID = latestSentQuestion?.id
         // A pending question form renders below the newest turn and must be fully reachable,
         // Submit included. A conversation with no thread yet, as right after a provider switch,
         // has no form: no request is not a request for no thread.
         let hasQuestionForm = userInputRequest.map { $0.threadID == task.activeConversationID } ?? false
-        transcriptScroll.pin(isResponding || hasQuestionForm ? .bottom : .latestTurn)
+        let opensOnQuestion = windowStartID == turnStartID
+        transcriptScroll.pin(isResponding || hasQuestionForm || !opensOnQuestion ? .bottom : .latestTurn)
+        if !opensOnQuestion { transcriptScroll.fillViewportWithOlderRows() }
     }
 
     /// A question that was just sent lands at the top of the viewport while its answer streams in

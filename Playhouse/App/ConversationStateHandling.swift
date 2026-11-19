@@ -33,6 +33,12 @@ extension TaskConversationView {
             hasLoadedConversation = true
         }
 
+        // Read alongside the history rather than after it: awaiting it once the messages are
+        // in place let a frame render them before the finished turn's progress collapsed,
+        // which drew every progress message of a long turn on the first open.
+        let goalRead = Task { @MainActor in try? await conversationManager.goal(taskID: task.id) }
+        defer { goalRead.cancel() }
+
         do {
             // Standalone chat rotates one session per page, so the transcript asks for the
             // earlier pages to be restored from the local archive alongside the live session.
@@ -42,15 +48,13 @@ extension TaskConversationView {
             } else {
                 try await readLatestHistoryPage()
             }
+            // From here until the window is resolved nothing awaits, so no frame renders the
+            // messages before the rows the transcript shows of them are settled.
             // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
             flushStreamedTextDeltas()
             messages = history.messages
             earlierStoredMessageCount = history.earlierMessageCount ?? 0
             historyGap = nil
-            // Resolve the window as soon as the messages land. The assignment
-            // at the end of the load repeats it once progress collapsing has
-            // settled which rows the transcript renders.
-            oldestRenderedMessageID = latestConversationTurnStartID
             let savedUserInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
                 ? history.pendingUserInputRequest
                 : nil
@@ -70,7 +74,6 @@ extension TaskConversationView {
             timelineActivities = []
             mergeTimelineActivities(history.timelineActivities)
             providerBoundaries = history.providerBoundaries
-            activeGoal = try? await conversationManager.goal(taskID: task.id)
             let defaults = WorkspaceSettings.preferencesStore
             if let data = defaults.data(forKey: goalAchievementTimelineDefaultsKey),
                let entries = try? JSONDecoder().decode([GoalAchievementTimelineEntry].self, from: data) {
@@ -79,21 +82,6 @@ extension TaskConversationView {
             currentGoalGenerationID = defaults.string(forKey: goalGenerationDefaultsKey)
             currentGoalObjective = defaults.string(forKey: goalGenerationObjectiveDefaultsKey)
             currentGoalTimeBaselineSeconds = defaults.object(forKey: goalGenerationTimeBaselineDefaultsKey) as? Double
-            if let activeGoal {
-                reconcileGoalGeneration(with: activeGoal)
-                if activeGoal.status == "complete",
-                   let generationID = currentGoalGenerationID,
-                   !goalAchievementTimelineEntries.contains(where: { $0.id == generationID }) {
-                    let anchorID = fallbackGoalCompletionAnchorID(in: history.messages, objective: activeGoal.objective)
-                    goalAchievementTimelineEntries.append(GoalAchievementTimelineEntry(
-                        id: generationID,
-                        summary: goalAchievementSummary(activeGoal),
-                        afterMessageID: anchorID
-                    ))
-                    persistGoalAchievementTimeline()
-                }
-            }
-            goalStatusUpdatedAt = .now
             // A pending submitted prompt is shown as a bubble unless its text is already in the
             // loaded transcript. Only the flag decides draft restoration: `savedPrompt` otherwise
             // holds the last sent prompt, which can sit beyond the loaded page.
@@ -166,7 +154,23 @@ extension TaskConversationView {
                 .compactMap(\.turnID))
             // Open on the newest turn. Progress-message collapsing above changes
             // which rows the transcript renders, so resolve the window start here.
-            oldestRenderedMessageID = latestConversationTurnStartID
+            oldestRenderedMessageID = openingWindowStartID
+            activeGoal = await goalRead.value
+            if let activeGoal {
+                reconcileGoalGeneration(with: activeGoal)
+                if activeGoal.status == "complete",
+                   let generationID = currentGoalGenerationID,
+                   !goalAchievementTimelineEntries.contains(where: { $0.id == generationID }) {
+                    let anchorID = fallbackGoalCompletionAnchorID(in: history.messages, objective: activeGoal.objective)
+                    goalAchievementTimelineEntries.append(GoalAchievementTimelineEntry(
+                        id: generationID,
+                        summary: goalAchievementSummary(activeGoal),
+                        afterMessageID: anchorID
+                    ))
+                    persistGoalAchievementTimeline()
+                }
+            }
+            goalStatusUpdatedAt = .now
         } catch {
             errorMessage = error.localizedDescription
             // History failed, but an unanswered question stays answerable.

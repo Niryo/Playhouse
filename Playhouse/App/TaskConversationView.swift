@@ -517,6 +517,11 @@ struct TaskConversationView: View {
     /// Messages read per history request: the newest page on open, then one
     /// more page each time the rendered window reaches the oldest loaded one.
     static let historyPageSize = 80
+    /// Messages a conversation renders when it opens, at most. A newest turn with more, as a
+    /// long run of replies or a running turn's progress makes, opens on its newest messages;
+    /// older ones render as the viewport needs them. Every row renders before it is measured,
+    /// so opening on a whole long turn held the first frame up for seconds.
+    static let openedConversationMessageCount = 6
 
     /// Builds the Swift runtime metadata of this view's body type, which the first
     /// open of a conversation otherwise builds on the main thread before its first
@@ -538,6 +543,15 @@ struct TaskConversationView: View {
     var latestConversationTurnStartID: String? {
         let allMessages = conversationMessages
         return ConversationMessage.latestTurnStartIndex(in: allMessages, continuingIDs: liveSteerMessageIDs).map { allMessages[$0].id }
+    }
+
+    /// Where the rendered window starts when the conversation opens: the newest turn's first
+    /// message when the turn has at most `openedConversationMessageCount` messages, otherwise
+    /// the first of the newest that many.
+    var openingWindowStartID: String? {
+        let allMessages = conversationMessages
+        guard let turnStart = ConversationMessage.latestTurnStartIndex(in: allMessages, continuingIDs: liveSteerMessageIDs) else { return nil }
+        return allMessages[max(turnStart, allMessages.count - Self.openedConversationMessageCount)].id
     }
 
     /// The window runs from `oldestRenderedMessageID` to the newest message, or to
