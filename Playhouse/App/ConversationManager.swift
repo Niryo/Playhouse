@@ -121,7 +121,7 @@ extension ConversationManager {
                 )
             },
             onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onMessageTimestamp: { _, _ in }, onTurnStarted: { _ in },
-            onTokenUsage: { _ in },
+            onTokenUsage: { _ in }, onRecordedFinalMessage: nil,
             sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
         let reply = answers.joined(separator: "\n\n")

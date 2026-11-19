@@ -568,6 +568,7 @@ extension ConversationManager {
                 onMessageTimestamp: callbacks.onMessageTimestamp,
                 onTurnStarted: callbacks.onTurnStarted,
                 onTokenUsage: callbacks.onTokenUsage,
+                onRecordedFinalMessage: callbacks.onRecordedFinalMessage,
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
             )
