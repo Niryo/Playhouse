@@ -829,6 +829,9 @@ struct TaskConversationView: View {
             if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }
             if !isTurnActive, !isReadOnly {
                 refreshQueuedMessages()
+                // A reload while the turn still read as active keeps what this window shows, so a
+                // turn that failed to start would leave its dropped prompt here. Reload once it ends.
+                followHistory()
             }
             // A stop already shows. The stopped turn winding down, or starting late only to
             // be stopped, changes nothing until it is over.
