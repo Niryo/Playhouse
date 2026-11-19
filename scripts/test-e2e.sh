@@ -88,6 +88,13 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/agent-run-host-tests.swift" \
   -o "${agent_run_host_tests}"
 "${agent_run_host_tests}"
+# Unit checks of the bounded waits that keep a task delete from hanging on a turn that won't stop.
+bounded_waits_tests="${test_output_dir}/bounded-waits-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/BoundedWaits.swift" \
+  "${repository_root}/scripts/unit/bounded-waits-tests.swift" \
+  -o "${bounded_waits_tests}"
+"${bounded_waits_tests}"
 # Pure-logic unit checks of the context compaction decisions and session state reader.
 context_compaction_tests="${test_output_dir}/context-compaction-policy-tests"
 xcrun swiftc -parse-as-library -swift-version 5 -O \

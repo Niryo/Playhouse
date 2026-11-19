@@ -26,6 +26,35 @@ extension CodexAppServerClient {
         }
     }
 
+    /// Fails the thread's turn and any question it is waiting on right away and asks the
+    /// app-server to interrupt it without waiting for the answer. The app-server itself keeps
+    /// running: it is shared by every Codex conversation in this data folder.
+    func forceStopActiveTurn(threadID: String) async -> Bool {
+        if let owner = activeClient(forThread: threadID), owner !== self {
+            return await owner.forceStopActiveTurn(threadID: threadID)
+        }
+        var stopped = false
+        if let pending = pendingUserInputs[threadID] {
+            clearPendingUserInput(threadID: threadID)
+            sendServerError(requestID: pending.nativeID, code: -32000, message: "Playhouse deleted this task.")
+            stopped = true
+        }
+        if await stopBackgroundWait(threadID: threadID) { stopped = true }
+        guard let turnID = activeTurnID(for: threadID) else { return stopped }
+        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
+        rejectedTurnKeys.insert(turnKey)
+        wasLastTurnInterrupted = true
+        interruptedThreadIDs.insert(threadID)
+        let error = ClientError.turnFailed("Playhouse stopped this turn to delete its task.")
+        if let waiter = turnWaiters.removeValue(forKey: turnKey) {
+            waiter.resume(throwing: error)
+        } else {
+            completedTurns[turnKey] = .failure(error)
+        }
+        Task { try? await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID]) }
+        return true
+    }
+
     func getGoal(threadID: String, workspace: ConversationWorkspaceContext) async throws -> CodexThreadGoal? {
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace, reusingLoadedThread: true)
         let response = try await request(method: "thread/goal/get", params: ["threadId": threadID])

@@ -636,6 +636,18 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return interrupted
     }
 
+    /// Stops the session's Claude Code process (SIGTERM to its process group, then SIGKILL), which
+    /// also ends the background shells and subagents it started. The turn waiting on it, even one
+    /// held open by a question, fails at once.
+    func forceStopActiveTurn(threadID: String) async -> Bool {
+        guard let runner = runners[threadID] ?? Self.activeRunnersBySessionID[threadID] else { return false }
+        let stopped = runner.isTurnActive || runner.activeTurnID != nil || runner.pendingQuestion != nil
+        runner.wasInterrupted = true
+        interruptedThreadIDs.insert(threadID)
+        runner.shutdown()
+        return stopped
+    }
+
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }

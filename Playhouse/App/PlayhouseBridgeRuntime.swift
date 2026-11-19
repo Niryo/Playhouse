@@ -465,7 +465,9 @@ final class PlayhouseBridgeRuntime {
                  "task.changes.mark-unviewed", "task.changes.diff", "workspace.suggest", "workspace.repositories.list":
                 result = try await taskWorkspaceOperation(request, taskManager: taskManager, workspaces: workspaces, settings: settings)
             case "task.delete":
-                try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())
+                let clients = conversationClients()
+                let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings)
+                try await conversations.deleteTask(request.requiredUUID("taskID"), diagnostics: clients.codex.diagnosticFields())
                 result = .object(["deleted": .boolean(true)])
             case "task.delete.requires-confirmation":
                 let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))

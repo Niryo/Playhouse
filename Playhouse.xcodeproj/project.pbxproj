@@ -50,6 +50,7 @@
 		A1000000000000000000001D /* ProviderRequestLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001D /* ProviderRequestLog.swift */; };
 		A10000000000000000000008 /* WorkspaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* WorkspaceSupport.swift */; };
 		A10000000000000000000009 /* BridgeCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* BridgeCore.swift */; };
+		A1000000000000000000F801 /* BoundedWaits.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F801 /* BoundedWaits.swift */; };
 		A1000000000000000000000A /* BridgeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BridgeContract.swift */; };
 		C11C0000000000000000CA01 /* CLICommandCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11C0000000000000000CA02 /* CLICommandCatalog.swift */; };
 		A1000000000000000000000D /* WorkspaceChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* WorkspaceChanges.swift */; };
@@ -246,6 +247,7 @@
 		A2000000000000000000001D /* ProviderRequestLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderRequestLog.swift; sourceTree = "<group>"; };
 		A2000000000000000000000A /* WorkspaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSupport.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BridgeCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCore.swift; sourceTree = "<group>"; };
+		A2000000000000000000F801 /* BoundedWaits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedWaits.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* BridgeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeContract.swift; sourceTree = "<group>"; };
 		C11C0000000000000000CA02 /* CLICommandCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/CLICommandCatalog.swift; sourceTree = "<group>"; };
 		A2000000000000000000000D /* WorkspaceChanges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceChanges.swift; sourceTree = "<group>"; };
@@ -618,6 +620,7 @@
 				B20000000000000000000008 /* PlayhouseDiagnostics.swift */,
 				B20000000000000000000007 /* PlayhouseWorktreeServices.swift */,
 				A2000000000000000000000B /* BridgeCore.swift */,
+				A2000000000000000000F801 /* BoundedWaits.swift */,
 				B20000000000000000000005 /* PullRequestServices.swift */,
 				B20000000000000000000004 /* PlayhouseStore.swift */,
 				B20000000000000000000023 /* WorkspaceTaskManagers.swift */,
@@ -854,6 +857,7 @@
 				"$(SRCROOT)/Playhouse/CLI/BridgeClient.swift",
 				"$(SRCROOT)/Playhouse/CLI/PlayhouseCLI.swift",
 				"$(SRCROOT)/Playhouse/App/BridgeCore.swift",
+				"$(SRCROOT)/Playhouse/App/BoundedWaits.swift",
 				"$(SRCROOT)/Playhouse/App/BoardConversationStorage.swift",
 				"$(SRCROOT)/Playhouse/App/BoardLifecycleStatus.swift",
 				"$(SRCROOT)/Playhouse/App/BoardOperationLocks.swift",
@@ -1050,6 +1054,7 @@
 				A1000000000000000000001D /* ProviderRequestLog.swift in Sources */,
 				A10000000000000000000008 /* WorkspaceSupport.swift in Sources */,
 				A10000000000000000000009 /* BridgeCore.swift in Sources */,
+				A1000000000000000000F801 /* BoundedWaits.swift in Sources */,
 				A1000000000000000000000A /* BridgeContract.swift in Sources */,
 				C11C0000000000000000CA01 /* CLICommandCatalog.swift in Sources */,
 				A1000000000000000000000D /* WorkspaceChanges.swift in Sources */,

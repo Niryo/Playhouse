@@ -632,6 +632,8 @@ extension ConversationManager {
             fields["provider"] = provider.rawValue
             fields["phase"] = phase
             fields["storePath"] = PlayhouseDiagnostics.storeURL.path
+            // A turn its task's deletion stopped fails on purpose.
+            if TaskDeletion.isDeleting(taskID) { fields["stoppedForTaskDeletion"] = "true" }
             fields.merge(client.diagnosticFields(forThread: persistedThreadID ?? "", [:])) { _, new in new }
             let wasUserInterrupted = persistedThreadID.map { client.wasLastTurnInterrupted(threadID: $0) } ?? false
             let shouldKeepWaiting = wasUserInterrupted

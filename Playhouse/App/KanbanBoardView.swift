@@ -177,7 +177,7 @@ struct KanbanBoardView: View {
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) var allTasks: [BoardTask]
     /// Board cards. Recurring schedule templates aren't board tasks; the Scheduled Tasks popover
     /// lists them, and each of their runs appears here as its own task.
-    var tasks: [BoardTask] { allTasks.filter { !$0.isRecurringScheduleTemplate } }
+    var tasks: [BoardTask] { allTasks.filter { !$0.isRecurringScheduleTemplate && !deletingTaskIDs.contains($0.id) } }
     /// Every scheduled task, soonest first, as `schedule.list` lists them for
     /// the main sidebar's `props.schedules`.
     @Query(filter: #Predicate<BoardTask> { $0.scheduleKindRawValue != nil }) var scheduledTasks: [BoardTask]
@@ -192,6 +192,10 @@ struct KanbanBoardView: View {
     @State var taskBeingRenamed: BoardTask?
     @State var taskShowingTokenStats: TokenStatsTarget?
     @State var taskBeingDeleted: BoardTask?
+    /// Tasks whose confirmed delete is still running in the daemon. Their cards leave the board
+    /// at once, and come back only when the delete fails.
+    @State var deletingTaskIDs: Set<UUID> = []
+    @State var deleteError: String?
     @State var isShowingDeleteConfirmation = false
     @State var isDoneTargetActive = false
     @State var isShowingDoneArchive = false
@@ -303,6 +307,7 @@ struct KanbanBoardView: View {
                 conversationView(for: selectedTask)
             } else {
                 boardContent
+                    .modifier(DeleteTaskErrorAlert(message: $deleteError))
             }
         }
         .alert("Draft saved", isPresented: $showPluginDraftNotice) {
@@ -381,13 +386,16 @@ struct KanbanBoardView: View {
         ) {
             Button("Delete Task", role: .destructive) {
                 guard let taskBeingDeleted else { return }
+                let taskID = taskBeingDeleted.id
+                deletingTaskIDs.insert(taskID)
+                self.taskBeingDeleted = nil
                 Task { @MainActor in
                     do {
-                        try await remoteConversations.deleteTask(taskID: taskBeingDeleted.id)
+                        try await remoteConversations.deleteTask(taskID: taskID)
                     } catch {
-                        presentSaveError("\(error.localizedDescription)\n\nDiagnostic log: \(PlayhouseDiagnostics.logURL.path)")
+                        deletingTaskIDs.remove(taskID)
+                        deleteError = "\(error.localizedDescription)\n\nDiagnostic log: \(PlayhouseDiagnostics.logURL.path)"
                     }
-                    self.taskBeingDeleted = nil
                 }
             }
             .buttonHoverPointer()
@@ -1061,6 +1069,25 @@ extension Notification.Name {
 struct PluginAlert: Equatable {
     let title: String
     let message: String
+}
+
+/// The error a confirmed task delete failed with, after its card came back to the board.
+struct DeleteTaskErrorAlert: ViewModifier {
+    @Binding var message: String?
+
+    func body(content: Content) -> some View {
+        content.alert("Couldn't delete task", isPresented: Binding(
+            get: { message != nil },
+            set: { if !$0 { message = nil } }
+        )) {
+            Button("OK", role: .cancel) { message = nil }
+            .buttonHoverPointer()
+            .nativeHelp("Dismiss delete error")
+            .accessibilityIdentifier("dismiss-delete-error-button")
+        } message: {
+            Text(message ?? "Please try again.")
+        }
+    }
 }
 
 struct PluginAlertModifier: ViewModifier {
