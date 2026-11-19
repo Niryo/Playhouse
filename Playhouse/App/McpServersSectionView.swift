@@ -407,10 +407,10 @@ struct McpServersSectionView: View {
 
     /// A server on one line: its name, a mark when it conflicts or has a
     /// problem, any sign-in it needs, its Fix, switch and actions. Its details
-    /// show in a hint while the pointer rests on it.
+    /// show in a hint left of the row while the pointer rests on it.
     private func row(_ server: McpServerRecord) -> some View {
         let key = Self.key(server)
-        return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "trailing", width: 340, inset: 12, hover: true), onDismiss: {}) {
+        return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "leading", width: 280, inset: 12, hover: true), onDismiss: {}) {
             HStack(alignment: .center, spacing: 8) {
                 HStack(alignment: .center, spacing: 8) {
                     // Who starts the server leads its name, like a skill's row.

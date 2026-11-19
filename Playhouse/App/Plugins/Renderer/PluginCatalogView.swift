@@ -516,7 +516,7 @@ private struct NativeTokenStatsDemo: View {
 }
 
 /// The JavaScript Skills page above the native one (each as wide as the
-/// modal, 336 points, and 520 tall), from the same
+/// modal, 403 points, and 520 tall), from the same
 /// sample model, each opened by the composer's Skills button. Each side keeps its own page state; the native page uses a
 /// "native-" prefix so the two never share accessibility identifiers.
 private struct SkillsPageComparison: View {
