@@ -674,21 +674,42 @@ extension TaskConversationView {
         subagentHistory = nil
         subagentError = nil
         isLoadingSubagent = true
+        subagentRefresh?.cancel()
         guard activity.childThreadID != nil else { return }
-        Task { @MainActor in
-            do {
-                subagentHistory = try await conversationManager.subagentHistory(taskID: task.id, activity: activity)
-            } catch {
-                subagentError = "Couldn't load this agent conversation: \(error.localizedDescription)"
+        subagentRefresh = Task { @MainActor in
+            // A running agent keeps working; read it again until it finishes,
+            // then once more so its final work and report are shown.
+            var isRunning = true
+            while isRunning, !Task.isCancelled, selectedSubagent?.id == activity.id {
+                let current = activities.first { $0.id == activity.id } ?? activity
+                isRunning = current.isActive
+                do {
+                    subagentHistory = try await conversationManager.subagentHistory(taskID: task.id, activity: current)
+                    subagentError = nil
+                } catch {
+                    // A failed refresh keeps the work already shown.
+                    if subagentHistory == nil {
+                        subagentError = "Couldn't load this agent conversation: \(error.localizedDescription)"
+                    }
+                }
+                isLoadingSubagent = false
+                if isRunning { try? await Task.sleep(for: Self.subagentRefreshInterval) }
             }
-            isLoadingSubagent = false
         }
+    }
+
+    static let subagentRefreshInterval: Duration = .seconds(2)
+
+    /// The agent's tool calls that follow the given message, or precede every message when nil.
+    func subagentToolCalls(after messageID: String?, in history: ConversationHistory) -> [ConversationActivity] {
+        history.timelineActivities.filter { $0.afterMessageID == messageID }
     }
 
     func subagentConversation(_ activity: ConversationActivity) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 Button {
+                    subagentRefresh?.cancel()
                     selectedSubagent = nil
                     subagentHistory = nil
                 } label: {
@@ -712,8 +733,16 @@ extension TaskConversationView {
             } else if let subagentHistory {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(subagentHistory.messages) { message in messageBubble(message) }
-                        if subagentHistory.messages.isEmpty {
+                        ForEach(subagentToolCalls(after: nil, in: subagentHistory)) { activity in
+                            ToolCallTimelineRow(activity: activity, expansion: toolCallExpansion)
+                        }
+                        ForEach(subagentHistory.messages) { message in
+                            messageBubble(message)
+                            ForEach(subagentToolCalls(after: message.id, in: subagentHistory)) { activity in
+                                ToolCallTimelineRow(activity: activity, expansion: toolCallExpansion)
+                            }
+                        }
+                        if subagentHistory.messages.isEmpty && subagentHistory.timelineActivities.isEmpty {
                             Text("No conversation content is available yet.").foregroundStyle(.secondary).padding(20)
                         }
                     }

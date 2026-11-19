@@ -72,7 +72,7 @@ extension ClaudeCodeClient {
         }
     }
 
-    static func resultText(_ content: Any?) -> String {
+    nonisolated static func resultText(_ content: Any?) -> String {
         if let text = content as? String { return text }
         guard let blocks = content as? [[String: Any]] else { return "" }
         return blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined(separator: "\n")

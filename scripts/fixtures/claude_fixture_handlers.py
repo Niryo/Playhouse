@@ -755,6 +755,21 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.write({"type": "system", "subtype": "task_progress", "task_id": task_id, "run_id": "fixture-run-1",
                "tool_use_id": tool_id, "description": "Running Bash", "subagent_type": "Explore",
                "last_tool_name": "Bash"})
+        # Claude Code writes the agent's own work to its sidechain file, not to the stream.
+        sidechain = write_background_agent_sidechain(runtime, tool_id, [
+            {"type": "user", "isSidechain": True, "message": {"role": "user", "content": "check something"}},
+            {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                {"type": "text", "text": "<system-reminder>Fixture reminder, not the agent's prompt.</system-reminder>"},
+            ]}},
+            {"type": "assistant", "isSidechain": True, "message": {"id": "msg_bg_sub_1", "role": "assistant", "content": [
+                {"type": "text", "text": "Checking the fixture README first."},
+                {"type": "tool_use", "id": "toolu_bg_sub_read", "name": "Bash",
+                 "input": {"command": "cat README.md", "description": "Read the fixture README"}},
+            ]}},
+            {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_bg_sub_read", "content": "Fixture README contents", "is_error": False},
+            ]}},
+        ])
         runtime.text("msg_background_started", "STARTED")
         if not did_fail:
             # Model the provider finishing its parent response before it sends
@@ -778,6 +793,12 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
                 runtime.time.sleep(0.02)
             if not summary_release.exists():
                 raise TimeoutError("The test did not release the background-agent summary event.")
+        if sidechain is not None and not did_fail:
+            # The agent's last text is its report.
+            with open(sidechain, "a", encoding="utf-8") as handle:
+                handle.write(runtime.json.dumps({"type": "assistant", "isSidechain": True, "message": {
+                    "id": "msg_bg_sub_2", "role": "assistant", "content": [{"type": "text", "text": result_summary}],
+                }}) + "\n")
         runtime.write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
                "tool_use_id": tool_id, "status": terminal_status, "output_file": "", "summary": result_summary})
         runtime.write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
@@ -989,6 +1010,25 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
     else:
         runtime.text("msg_simple", runtime.SIMPLE_ANSWER)
     return commands
+
+
+def write_background_agent_sidechain(runtime, tool_id, lines):
+    """Writes a background agent's sidechain file and the meta file naming the tool use
+    that launched it, where the real CLI keeps them; returns the sidechain path."""
+    config = runtime.os.environ.get("CLAUDE_CONFIG_DIR")
+    session_id = runtime.argument("--session-id") or runtime.argument("--resume")
+    if not config or not session_id:
+        return None
+    subagents = runtime.Path(config) / "projects" / "-fixture-project" / session_id / "subagents"
+    subagents.mkdir(parents=True, exist_ok=True)
+    # The parent's session file is how a reader finds the session folder.
+    (subagents.parent.parent / f"{session_id}.jsonl").touch()
+    (subagents / "agent-fxbg.meta.json").write_text(runtime.json.dumps({
+        "agentType": "Explore", "description": "Background check", "toolUseId": tool_id,
+    }), encoding="utf-8")
+    sidechain = subagents / "agent-fxbg.jsonl"
+    sidechain.write_text("".join(runtime.json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    return sidechain
 
 
 def run_reattach_turn(runtime):
