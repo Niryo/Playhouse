@@ -367,7 +367,10 @@ def markdown(runtime, _session_state, message):
 def held_turn(runtime, _session_state, message):
     _session_state.hold_used = runtime.Path(str(runtime.sys.argv[0]) + ".hold-used")
     if _session_state.hold_used.exists():
+        # The answer completes this turn, as real Codex does; completing it here as well
+        # would leave a second, unowned completion of the same turn ID for the next turn.
         runtime.question_request(901)
+        return
     else:
         _session_state.hold_used.write_text("The first fixture turn is held for restart recovery.\n", encoding="utf-8")
         _session_state.release = runtime.Path(str(runtime.sys.argv[0]) + ".turn-release")

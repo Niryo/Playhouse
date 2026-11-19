@@ -122,7 +122,7 @@ extension ConversationManager {
         }
     }
 
-    static let privateRecoveryPromptMarker = "Continue this conversation by applying the user's answer to the pending question"
+    static let privateRecoveryPromptMarker = PrivatePromptPlaceholder.recoveryPromptMarker
     static let privateOutcomeReminderMarker = PrivateOutcomeNudgeMarker.current
     static let privateOutcomeReminderPlaceholder = PrivatePromptPlaceholder.outcomeReminder
 

@@ -63,9 +63,17 @@ enum ConversationRole: String, Codable, Equatable {
 enum PrivatePromptPlaceholder {
     static let recoveryAnswer = "[Private answer sent after restart]"
     static let outcomeReminder = "[Playhouse private outcome reminder hidden]"
+    /// How the prompt Playhouse sends with the user's answers after a restart begins.
+    static let recoveryPromptMarker = "Continue this conversation by applying the user's answer to the pending question"
 
     static func matches(_ text: String) -> Bool {
         text == recoveryAnswer || text.contains(outcomeReminder)
+    }
+
+    /// The prompt Playhouse sent with the user's answers after a restart, as the transcript
+    /// keeps it, or the stand-in the task's saved prompt holds for it.
+    static func isRecoveryAnswer(_ text: String) -> Bool {
+        text == recoveryAnswer || text.contains(recoveryPromptMarker)
     }
 }
 

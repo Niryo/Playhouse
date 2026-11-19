@@ -73,6 +73,8 @@ extension PlayhouseUITests {
                       "The reopened conversation should load its saved history, with the answer's prompt as sent.")
         XCTAssertTrue(transcriptContains("Ask a restart-safe structured question."),
                       "Reopening mid-recovery must still show the conversation the recovery continues.")
+        XCTAssertFalse(transcriptContains("[Private answer sent after restart]"),
+                       "The prompt shown as sent is not repeated as a pending stand-in bubble.")
         XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
                        "Reopening the task mid-recovery must not bring back the answered question.")
         let applyingHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
@@ -788,7 +790,12 @@ extension PlayhouseUITests {
         XCTAssertNotNil(steer?["turnID"] as? String)
         XCTAssertEqual(steer?["turnID"] as? String, question?["turnID"] as? String,
                        "The steered follow-up is recorded inside the turn it steered, not as a turn of its own.")
-        // The finished turn folds its progress into its work, which stays above the steer.
+        // The finished turn folds its progress into its work, which stays above the steer. The
+        // outcome nudge that follows the turn scrolls the transcript; the order is read once
+        // that private turn has settled the task, so both frames come from the same layout.
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 15),
+                      "The outcome nudge after the parked turn settles the task on the user.")
+        XCTAssertTrue(waitForStableFrame(transcriptMessage(followUp)), "The transcript stops moving once the nudge turn is shown.")
         assertSteerFollowsEarlierWork(followUp, earlierAnswer: nil, laterAnswer: "PARKED HANDLED", state: "after the turn ends")
         attachScreenshot(named: "Parked turn finished after the steered follow-up")
     }

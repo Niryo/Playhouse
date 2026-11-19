@@ -741,8 +741,15 @@ extension PlayhouseUITests {
         }?["id"] as? String)
         XCTAssertTrue(element("user-message-\(pastedPromptID)").waitToExist(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
         XCTAssertTrue(element("chat-image-\(pastedPromptID)-0").waitToExist(timeout: 10), "Conversation history should render the pasted image itself.")
-        let transcriptImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-")).firstMatch
+        // The answer's turn ends with an outcome nudge whose reply reloads the transcript; the
+        // thumbnail is clicked once that has settled the task, after scrolling it into view.
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: try self.taskID(named: "Pasted image conversation"))?["status"] as? String) == "Waiting Response"
+        }, timeout: 15), "The pasted image turn should settle before its thumbnail is opened.")
+        let transcriptImage = app.buttons["chat-image-\(pastedPromptID)-0"]
         XCTAssertTrue(transcriptImage.waitToExist(timeout: 5))
+        XCTAssertTrue(scrollFullyIntoView(transcriptImage, in: element("conversation-scroll-view")),
+                      "The pasted image should scroll into view before it is clicked.")
         let thumbnailFrame = transcriptImage.frame
         transcriptImage.click()
         let fullSizeImage = element("chat-image-full-size")

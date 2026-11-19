@@ -421,6 +421,16 @@ extension ConversationManager {
                 onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
             },
             onProgressMessage: { message in
+                var message = message
+                // Progress is recorded without a leaked outcome block, as an answer is, whichever
+                // of the live and backfill paths records it first.
+                if message.role == .assistant {
+                    let split = LeakedTurnOutcome.split(message.text)
+                    if split.taskID == taskID { recording.leakedOutcome = split.outcome }
+                    message.text = split.text
+                    // Progress that was only the echo leaves nothing to show.
+                    if message.text.isEmpty, message.asyncQuestions == nil { return }
+                }
                 self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, message)
                 // A notice the provider's runtime added to the turn streams as the user-side
                 // message it is recorded as, not as the assistant's progress.

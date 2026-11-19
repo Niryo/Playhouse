@@ -427,7 +427,12 @@ extension PlayhouseUITests {
     func expandLatestWorkedFor() -> Bool {
         let disclosure = element("codex-activity-disclosure")
         guard waitUntil({ disclosure.exists && disclosure.label.hasPrefix("Worked for") }, timeout: 15) else { return false }
-        if (disclosure.value as? String ?? "").hasPrefix("Collapsed") { disclosure.click() }
+        // A reopened conversation opens at the turn the user started, which can leave the
+        // disclosure below the viewport; a click there would miss it.
+        if (disclosure.value as? String ?? "").hasPrefix("Collapsed") {
+            guard revealInConversation(disclosure) else { return false }
+            disclosure.click()
+        }
         return element("codex-activity-details").waitToExist(timeout: 5)
     }
     func sendLaterTurnAndAssertNudgedCallInline(taskID: String, callID: String, visibleTexts: [String]) throws {

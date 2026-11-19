@@ -166,9 +166,10 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
     }
 
     /// Carries what an update to this call doesn't restate (its timeline
-    /// position, input, and output) over from the version already recorded.
+    /// position, input, output, and measured duration) over from the version already recorded.
     func preservingTimelineFields(of existing: ConversationActivity) -> ConversationActivity {
         var merged = self
+        merged.durationMs = durationMs ?? existing.durationMs
         merged.summary = summary ?? existing.summary
         merged.input = input ?? existing.input
         merged.output = output ?? existing.output
@@ -509,7 +510,7 @@ struct ConversationMessageImages: Codable, Equatable {
 
 struct ConversationHistory: Codable, Equatable {
     var messages: [ConversationMessage]
-    let activities: [ConversationActivity]
+    var activities: [ConversationActivity]
     /// Tool calls from every returned turn, each placed after the message it
     /// followed (`afterMessageID`), so earlier turns show their work too.
     var timelineActivities: [ConversationActivity] = []
