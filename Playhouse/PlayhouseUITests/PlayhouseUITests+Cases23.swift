@@ -126,11 +126,12 @@ extension PlayhouseUITests {
         element("submit-async-questions-item_playhouse_async_question").click()
 
         XCTAssertTrue(waitUntil({ self.transcriptContains("Additional detail: Keep the draft intact.") }, timeout: 10), "The full two-answer reply must be sent.")
-        // Once Playhouse's outcome nudge reloads the stored transcript, the reply carries a stored
-        // final-answer ID instead of the provider item ID, so match it by its answer.
-        let response = app.groups.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Additional detail: Keep the draft intact."
+        // Playhouse names stored messages after its own turns, so find the steered answer by content.
+        let response = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-",
+            "Answers received: Test and verify: Yes, update paired tests and run required verification"
         )).firstMatch
+        // Playhouse's outcome nudge can follow at once and push the reply out of the rendered rows.
         XCTAssertTrue(response.waitToExist(timeout: 10) || transcriptScan { response.exists }, "The steered answer should be in the transcript.")
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Keep the draft intact."))
@@ -162,7 +163,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(transcriptScan { laterCard.exists && laterCard.staticTexts["Answered"].exists }, "The later question must stay answered after reopening.")
         XCTAssertEqual(element("message-composer").value as? String, "An unsent draft stays here.")
     }
-    // case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered.
+    // case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered. The failed answer is not kept in the conversation as a sent message, and the retry sends it exactly once.
     func test_codex_async_question_queued_answer_retries() throws {
         let created = try runCLI(["task", "create", "--title", "Queued async question", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
@@ -193,14 +194,25 @@ extension PlayhouseUITests {
         XCTAssertEqual(queued["state"] as? String, "needsAction")
         let pendingAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
         XCTAssertEqual(pendingAnswered["itemIDs"] as? [String], [], "A pending async answer is not answered yet.")
+        let queuedReply = "Test and verify: Yes, update paired tests and run required verification\nAdditional detail: Retry this answer."
+        let pendingMessages = (try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+        XCTAssertFalse(pendingMessages.contains { $0["role"] as? String == "user" && $0["text"] as? String == queuedReply },
+                       "The answer stays in the queue as needs-action, so the conversation doesn't show it as sent.")
         element("back-to-board-button").click()
         openTask(named: "Queued async question")
-        XCTAssertTrue(card.waitToExist(timeout: 5))
-        XCTAssertTrue(card.staticTexts["Pending"].exists)
+        XCTAssertTrue(transcriptScan { card.exists && card.staticTexts["Pending"].exists }, "The answered question stays Pending after reopening.")
+        // The answer's text stays on its card and queued row; only a sent bubble would claim it reached Codex.
+        let sentAnswerBubbles = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", "Additional detail: Retry this answer."
+        ))
+        assertTranscriptLacks("The pending answer is not shown as a sent message.") { sentAnswerBubbles.count > 0 }
         let retry = element("retry-queued-message-\(queuedID.uppercased())")
         XCTAssertTrue(retry.waitToExist(timeout: 5))
+        // The scans end at the bottom; bring the Pending card back into view for the screenshot.
+        XCTAssertTrue(transcriptScan { card.exists && card.isHittable }, "The Pending card can be shown beside its retry action.")
+        attachScreenshot(named: "Queued async answer pending with its retry action")
         retry.click()
-        // Stored replies carry Playhouse's own turn IDs, so find the answer by content.
+        // Playhouse names stored messages after its own turns, so find the answer by content.
         let response = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Answers received: Test and verify"))
             .firstMatch
@@ -212,6 +224,12 @@ extension PlayhouseUITests {
                       "The queued answer should settle as Answered after its response appears.")
         let deliveredAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")
+        XCTAssertTrue(transcriptScan { sentAnswerBubbles.count > 0 }, "The retried answer shows as sent.")
+        assertTranscriptLacks("The retried answer shows as sent once, not twice.") { sentAnswerBubbles.count > 1 }
+        attachScreenshot(named: "Queued async answer delivered once and answered")
+        let deliveredMessages = (try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+        XCTAssertEqual(deliveredMessages.filter { $0["role"] as? String == "user" && $0["text"] as? String == queuedReply }.count, 1,
+                       "The retried answer is sent once.")
     }
     // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt. Recovering a never-started turn into Waiting Response starts Ping once.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {

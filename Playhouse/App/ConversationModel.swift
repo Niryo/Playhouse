@@ -63,9 +63,17 @@ enum ConversationRole: String, Codable, Equatable {
 enum PrivatePromptPlaceholder {
     static let recoveryAnswer = "[Private answer sent after restart]"
     static let outcomeReminder = "[Playhouse private outcome reminder hidden]"
+    /// How the prompt Playhouse sends with the user's answers after a restart begins.
+    static let recoveryPromptMarker = "Continue this conversation by applying the user's answer to the pending question"
 
     static func matches(_ text: String) -> Bool {
         text == recoveryAnswer || text.contains(outcomeReminder)
+    }
+
+    /// The prompt Playhouse sent with the user's answers after a restart, as the transcript
+    /// keeps it, or the stand-in the task's saved prompt holds for it.
+    static func isRecoveryAnswer(_ text: String) -> Bool {
+        text == recoveryAnswer || text.contains(recoveryPromptMarker)
     }
 }
 
@@ -135,6 +143,9 @@ struct ConversationTurnCallbacks {
     let onMessageTimestamp: (String, Date) -> Void
     let onTurnStarted: (String) -> Void
     let onTokenUsage: (ConversationTurnUsageReport) -> Void
+    /// A final answer the provider already reported as the progress item with this ID. A
+    /// provider that never records an answer early (Codex) doesn't use it.
+    var onRecordedFinalMessage: ((String, String) -> Void)? = nil
 }
 
 /// What a daemon found when it went back to a turn that was running when its predecessor died.
@@ -241,6 +252,7 @@ protocol ConversationProviderClient: AnyObject {
         onMessageTimestamp: @escaping (String, Date) -> Void,
         onTurnStarted: @escaping (String) -> Void,
         onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void,
+        onRecordedFinalMessage: ((String, String) -> Void)?,
         sensitiveUserInputAnswerValues: [String],
         hideSensitiveRecoveryPrompt: Bool
     ) async throws
@@ -332,7 +344,7 @@ extension ConversationProviderClient {
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
             onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onMessageTimestamp: { _, _ in }, onTurnStarted: { _ in },
-            onTokenUsage: { _ in },
+            onTokenUsage: { _ in }, onRecordedFinalMessage: nil,
             sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
     }

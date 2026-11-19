@@ -79,10 +79,7 @@ extension ClaudeSessionRunner {
         case "ExitPlanMode" where activeMode == .plan:
             // Playhouse keeps plan mode until the user starts implementation, so the
             // plan becomes this turn's answer and Claude stops without editing.
-            if let pendingAssistantText {
-                emitProgress(id: pendingAssistantText.id, text: pendingAssistantText.text)
-                self.pendingAssistantText = nil
-            }
+            closePendingAssistantText()
             let plan = (input["plan"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if !plan.isEmpty {
                 planWasPresented = true
@@ -146,10 +143,7 @@ extension ClaudeSessionRunner {
             try? sendControlResponse(requestID: requestID, response: ["behavior": "deny", "message": "The question had no content."])
             return
         }
-        if let pendingAssistantText {
-            emitProgress(id: pendingAssistantText.id, text: pendingAssistantText.text)
-            self.pendingAssistantText = nil
-        }
+        closePendingAssistantText()
         pendingQuestion = PendingQuestion(controlRequestID: requestID, sessionID: sessionID, input: input, questions: questions)
         if !isReplaying { agentRun?.notePending(requestID) }
         let request = ConversationUserInputRequest(id: requestID, threadID: sessionID, questions: questions, isBlocking: true, mode: activeMode)

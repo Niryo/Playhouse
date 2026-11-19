@@ -63,6 +63,13 @@ extension ConversationManager {
         history.messages = Self.attachingTurnTokenUsage(
             history.messages, rows: (try? transcripts.readState(taskID))?.tokenUsage ?? [], turnIDAfterPage: turnIDAfterPage
         )
+        // Durations Playhouse measured are also saved with the task when the turn settles; they
+        // fill in activities recorded before an update kept its duration (older transcripts).
+        let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
+        if !savedDurations.isEmpty {
+            history.activities = Self.fillingDurations(history.activities, from: savedDurations)
+            history.timelineActivities = Self.fillingDurations(history.timelineActivities, from: savedDurations)
+        }
         var hydratedImageMessages = 0
         var deferredImageMessages = 0
         if includesImageData {
@@ -542,6 +549,16 @@ extension ConversationManager {
     /// turn's tokens: providers report usage once per turn, never per message. A turn that
     /// runs past the end of the page (`turnIDAfterPage`, the turn of the first message after
     /// it) has its last reply on a later page, so none of its messages here is marked.
+    /// Activities without a duration of their own take the one saved for them, if any.
+    static func fillingDurations(_ activities: [ConversationActivity], from saved: [String: Int]) -> [ConversationActivity] {
+        activities.map { activity in
+            guard activity.durationMs == nil, let durationMs = saved[activity.id] else { return activity }
+            var activity = activity
+            activity.durationMs = durationMs
+            return activity
+        }
+    }
+
     static func attachingTurnTokenUsage(
         _ messages: [ConversationMessage], rows: [ConversationTranscript.TurnTokenUsage], turnIDAfterPage: String?
     ) -> [ConversationMessage] {

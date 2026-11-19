@@ -1365,6 +1365,11 @@ extension PlayhouseUITests {
         let answer = transcriptMessage("STEERED: \(steerText)")
         XCTAssertTrue(answer.waitToExist(timeout: 20), "Claude Code should answer the steer inside the launched turn.")
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The steered turn should finish.")
+        // The outcome nudge that follows the turn scrolls the transcript; the order is read once
+        // that private turn has settled the task, so both frames come from the same layout.
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String).map { $0 != "In Progress" } ?? false }, timeout: 15),
+                      "The outcome nudge after the steered turn settles the task.")
+        XCTAssertTrue(waitForStableFrame(transcriptMessage(steerText)), "The transcript stops moving once the nudge turn is shown.")
         assertWorkStaysAboveSteer(steerText, state: "after the turn ends")
         XCTAssertLessThanOrEqual(transcriptMessage(steerText).frame.maxY, answer.frame.minY, "The steer's answer renders below it.")
         XCTAssertEqual((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.count, 0, "The steer should not be queued for a turn of its own.")

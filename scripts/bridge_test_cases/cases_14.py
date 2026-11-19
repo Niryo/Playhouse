@@ -620,7 +620,7 @@ class BridgeTestCases14:
             "A lost wake ends in the column the recovery prompt's outcome names, not In Progress forever.",
         )
         self.assertEqual(len(nudges()), 2, "The lost wake earns exactly one recovery prompt of its own.")
-    # case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send. The steered follow-up is recorded inside the turn it steered rather than as a turn of its own, so the transcript keeps it in order: while the turn runs and after it ends, the turn's work stays above its bubble, as does the answer given before it while it is shown, and what the turn said after it renders below it.
+    # case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send. The steered follow-up is recorded inside the turn it steered rather than as a turn of its own, so the transcript keeps it in order: while the turn runs and after it ends, the turn's work stays above its bubble, as does the answer given before it while it is shown, and what the turn said after it renders below it. Once Claude's answer to the steer has its own result while the shell still holds the turn open, that answer is already recorded in history exactly once, below the steered follow-up with the answer given before the steer above it, and stays shown rather than living only in the stream; after the turn ends both earlier answers are kept once as commentary and only the woken parent turn's answer is final.
     def test_claude_steers_turn_parked_on_background_work(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-parked-steer"
@@ -635,6 +635,8 @@ class BridgeTestCases14:
         )
         task_id = self.assert_success(created)["id"]
         ready = Path(f"{executable}.parked-shell-ready")
+        answer_ready = Path(f"{executable}.steered-answer-ready")
+        Path(f"{executable}.steered-answer-pause").write_text("Hold after the steered answer's result.\n", encoding="utf-8")
         command = ("conversation", "send", task_id, "--message", "Launch a parked background shell for this turn.")
         process = self.start_cli(*command, extra_environment=env)
         try:
@@ -660,8 +662,26 @@ class BridgeTestCases14:
                 self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]), [],
                 "An accepted steer must leave the queue.",
             )
+            deadline = time.monotonic() + 20
+            while not answer_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(answer_ready.exists(), "Claude should answer the steer while the shell still runs.")
+            self.assertIsNone(process.poll(), "The shell still holds the turn open after the steered answer.")
+            # The answer's own result is out, but nothing settles the turn yet: the answer must
+            # already be recorded, in order, rather than held until the turn ends.
+            parked = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+            parked_texts = [message["text"] for message in parked["messages"]]
+            for text in ("PARKED STARTED", "Check the other blocked tasks too.", "STEERED: Check the other blocked tasks too."):
+                self.assertEqual(parked_texts.count(text), 1, f"{text!r} is recorded once while the turn is parked.")
+            self.assertLess(parked_texts.index("PARKED STARTED"), parked_texts.index("Check the other blocked tasks too."),
+                            "The answer given before the steer stays above it in history.")
+            self.assertLess(parked_texts.index("Check the other blocked tasks too."),
+                            parked_texts.index("STEERED: Check the other blocked tasks too."),
+                            "Claude's answer to the steer follows it in history.")
+            Path(f"{executable}.steered-answer-release").write_text("Release after the parked history check.\n", encoding="utf-8")
             response, events = self.finish_cli(process, command, timeout=60)
         finally:
+            Path(f"{executable}.steered-answer-release").write_text("Release the fixture.\n", encoding="utf-8")
             if process.poll() is None:
                 process.communicate(timeout=30)
         self.assert_success(response)
@@ -687,6 +707,12 @@ class BridgeTestCases14:
             "PARKED HANDLED",
             "The woken parent turn's answer still ends the turn.",
         )
+        assistant = [(message.get("phase"), message["text"]) for message in history["messages"] if message["role"] == "assistant"]
+        self.assertEqual(
+            assistant[-3:],
+            [("commentary", "PARKED STARTED"), ("commentary", "STEERED: Check the other blocked tasks too."), ("final_answer", "PARKED HANDLED")],
+            "Answers recorded while the turn was parked are kept once, and only the turn's last answer is final.",
+        )
         question, steer = (
             next(m for m in history["messages"] if m["role"] == "user" and m["text"] == text)
             for text in ("Launch a parked background shell for this turn.", "Check the other blocked tasks too.")
@@ -695,6 +721,65 @@ class BridgeTestCases14:
         self.assertEqual(
             steer.get("turnID"), question.get("turnID"),
             "The steered follow-up is recorded inside the turn it steered, not as a turn of its own.",
+        )
+    # case-contract: test_claude_steer_keeps_answer_written_before_it_above | A Claude turn that answers, then publishes a Playhouse progress report, which leaves that answer open, takes a steer at the report's tool boundary: the answer written before the steer is recorded once, above the steered message, as soon as the steer reaches Claude, rather than after Claude's reply to it, and the reply streams below the steer and stays shown while it is still being written instead of being cleared when the earlier answer is closed. After the turn ends the earlier answer stays above the steer as commentary and the reply is the final answer below it, each once. Only Claude Code keeps an answer open across a progress report, so Claude is the representative provider for this Playhouse-owned transcript order.
+    def test_claude_steer_keeps_answer_written_before_it_above(self):
+        env = self.install_claude_fixture("claude-fixture-reported-steer")
+        executable = Path(env["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude reported steer", "--prompt", "Fixture task description.",
+            "--root", self.primary, "--provider", "claude",
+        )
+        task_id = self.assert_success(created)["id"]
+        steer_ready = Path(f"{executable}.reported-steer-ready")
+        reply_ready = Path(f"{executable}.steer-reply-ready")
+        reply_release = Path(f"{executable}.steer-reply-release")
+        Path(f"{executable}.steer-reply-pause").write_text("Hold before the steer reply's result.\n", encoding="utf-8")
+        steer_text = "Also cover the docs."
+        command = ("conversation", "send", task_id, "--message", "Please answer, report progress, await steering.")
+        process = self.start_cli(*command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 20
+            while not steer_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(steer_ready.exists(), "The fixture should answer, report progress and wait for a steer.")
+            steered = self.assert_success(self.call_cli(
+                "conversation", "steer", task_id, "--message", steer_text, extra_environment=env,
+            )[0])
+            self.assertTrue(steered["accepted"], "The running turn accepts the steer at its report's tool boundary.")
+            deadline = time.monotonic() + 20
+            while not reply_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(reply_ready.exists(), "Claude should reply to the steer.")
+            # The reply has arrived but its result has not: the answer before the steer is already
+            # recorded, once and above the steer.
+            texts = [m["text"] for m in self.assert_success(
+                self.call_cli("conversation", "history", task_id, extra_environment=env)[0]
+            )["messages"]]
+            self.assertEqual(texts.count("REPORTED ANSWER"), 1, "The answer before the steer is recorded once.")
+            self.assertEqual(texts.count(steer_text), 1, "The steer is recorded once.")
+            self.assertLess(texts.index("REPORTED ANSWER"), texts.index(steer_text),
+                            "The answer written before the steer is recorded above it.")
+            reply_release.write_text("Release after the history check.\n", encoding="utf-8")
+            response, events = self.finish_cli(process, command, timeout=60)
+        finally:
+            reply_release.write_text("Release the fixture.\n", encoding="utf-8")
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        reply = f"STEER REPLY: {steer_text}"
+        kinds = [(e["type"], e["payload"].get("message") or e["payload"].get("text")) for e in events
+                 if e["type"] in ("steered_message", "assistant_progress", "assistant_final")]
+        self.assertEqual(
+            kinds, [("assistant_progress", "REPORTED ANSWER"), ("steered_message", steer_text), ("assistant_final", reply)],
+            "The answer before the steer streams as closed before the steer, and the reply as the final answer after it.",
+        )
+        messages = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])["messages"]
+        turn = [(m["role"], m.get("phase"), m["text"]) for m in messages
+                if m["text"] in ("REPORTED ANSWER", steer_text, reply)]
+        self.assertEqual(
+            turn, [("assistant", "commentary", "REPORTED ANSWER"), ("user", None, steer_text), ("assistant", "final_answer", reply)],
+            "After the turn the answer before the steer stays above it and the reply is the final answer below it, each once.",
         )
     # case-contract: test_claude_settles_turn_after_consumed_wake_notification | When Claude Code starts the provider turn that would deliver a finished background task's notification and then says nothing at all, Playhouse settles that turn on its own instead of leaving it open and the task In Progress forever: a follow-up queued while the turn was still parked stays queued through the silent wake, the send finishes and the task reaches Review, and that follow-up is then delivered in its own turn rather than stranded in the queue. A woken turn that is alive and merely slow to speak is not cut off by that backstop: it stays quiet past the grace a consumed notification gets and still ends the turn on its own answer.
     def test_claude_settles_turn_after_consumed_wake_notification(self):

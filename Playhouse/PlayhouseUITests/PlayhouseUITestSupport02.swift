@@ -223,6 +223,7 @@ extension PlayhouseUITests {
         let scrollView = element("conversation-scroll-view")
         guard scrollView.exists else { return true }
         for _ in 0..<8 {
+            guard target.exists else { return false }
             let viewport = scrollView.frame
             let frame = target.frame
             if frame.minY >= viewport.minY && frame.maxY <= viewport.maxY { return true }
@@ -234,14 +235,16 @@ extension PlayhouseUITests {
             _ = waitForStableFrame(target, timeout: 2)
         }
         let viewport = scrollView.frame
-        return target.frame.minY >= viewport.minY && target.frame.maxY <= viewport.maxY
+        return target.exists && target.frame.minY >= viewport.minY && target.frame.maxY <= viewport.maxY
     }
     @discardableResult
     func waitForStableFrame(_ target: XCUIElement, timeout: TimeInterval = 5) -> Bool {
         var previous = CGRect.null
         var stableSince = Date()
         return waitUntil({
-            let frame = target.frame
+            // A lazy transcript row can leave the hierarchy while it scrolls; a missing element's
+            // frame read fails hard, so it is read from a snapshot and is simply not stable yet.
+            guard let frame = (try? target.snapshot())?.frame else { previous = .null; stableSince = Date(); return false }
             if frame != previous { previous = frame; stableSince = Date() }
             return !frame.isEmpty && Date().timeIntervalSince(stableSince) >= 0.4
         }, timeout: timeout)
@@ -710,6 +713,9 @@ extension PlayhouseUITests {
     func expandActivityDetails(_ disclosure: XCUIElement? = nil, timeout: TimeInterval = 10) -> Bool {
         let control = disclosure ?? element("codex-activity-disclosure")
         guard control.exists else { return false }
+        // A reopened conversation opens at the turn the user started, which can leave the
+        // disclosure below the viewport; a click there would miss it.
+        guard revealInConversation(control) else { return false }
         return waitUntil({
             let value = control.value as? String ?? ""
             if value.hasPrefix("Expanded") { return true }

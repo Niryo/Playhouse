@@ -122,6 +122,7 @@ extension ClaudeSessionRunner {
         pendingUserInputRequest = nil
         deltaHandler = nil
         finalMessageHandler = nil
+        recordedFinalHandler = nil
         progressMessageHandler = nil
         steerMessageHandler = nil
         activityHandler = nil
@@ -165,6 +166,10 @@ extension ClaudeSessionRunner {
             ]))
             return false
         }
+        // What Claude wrote before this input is recorded above it, before its reply can start.
+        // A daemon that replays this run does not see the write, but Claude's reply re-records
+        // that answer under the same ID.
+        recordHeldAnswer()
         let uuid = UUID().uuidString.lowercased()
         pendingCommandUUIDs.insert(uuid)
         do {

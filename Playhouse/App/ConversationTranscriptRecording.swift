@@ -8,7 +8,7 @@ extension ConversationManager {
     /// Records a message of a local turn as its provider streamed it.
     func recordTurnMessage(
         taskID: UUID, turnID: String, provider: ConversationProvider = .claude,
-        modelID: String? = nil, _ message: ConversationMessage
+        modelID: String? = nil, replacingID: String? = nil, _ message: ConversationMessage
     ) {
         do {
             try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
@@ -27,7 +27,13 @@ extension ConversationManager {
                 // Stored order is the timeline; a provider's own item order would only
                 // mark the message as positioned.
                 message.timelineOrder = nil
-                if let existing = transcript.turns[index].messages.firstIndex(where: { $0.id == message.id }) {
+                // A message that replaces another, such as a final answer already recorded as
+                // progress, takes its place in the timeline.
+                if let replacingID,
+                   let replaced = transcript.turns[index].messages.firstIndex(where: { $0.id == replacingID }) {
+                    message.createdAt = message.createdAt ?? transcript.turns[index].messages[replaced].createdAt
+                    transcript.turns[index].messages[replaced] = message
+                } else if let existing = transcript.turns[index].messages.firstIndex(where: { $0.id == message.id }) {
                     message.createdAt = message.createdAt ?? transcript.turns[index].messages[existing].createdAt
                     transcript.turns[index].messages[existing] = message
                 } else {
@@ -239,8 +245,6 @@ extension ConversationManager {
     /// get their own.
     final class TurnRecording {
         var finalMessageCount = 0
-        /// Whether the provider accepted the turn; until then nothing of it reached the agent.
-        var providerTurnStarted = false
         var leakedOutcome: String?
         var pendingQuestionLifecycleRevision: Int?
         /// Set on a turn that resumes a Claude session with a warm-looking
@@ -301,23 +305,29 @@ extension ConversationManager {
     ) -> ConversationTurnCallbacks {
         let streamTurnUpdate = onUpdate
         let approvalNotice = "\(provider.displayName) requested an approval. Playhouse denied it because approval prompts are disabled."
+        // `recordedID` names the progress item a final answer settles, when the provider had
+        // to record the answer before its turn could end; the final takes that item's place.
+        let recordFinal: (String, String?) -> Void = { answer, recordedID in
+            let split = LeakedTurnOutcome.split(answer)
+            if split.taskID == taskID { recording.leakedOutcome = split.outcome }
+            let message = split.text
+            // An answer that was only the echo still replaces the streamed text.
+            if !message.isEmpty {
+                recording.finalMessageCount += 1
+                self.recordTurnMessage(
+                    taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, replacingID: recordedID,
+                    ConversationMessage(
+                        id: "\(localTurnID)-final-\(recording.finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
+                    )
+                )
+            }
+            streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message, itemID: message.isEmpty ? nil : recordedID))
+        }
         return ConversationTurnCallbacks(
             onDelta: { delta in
                 onUpdate(ConversationUpdate(type: "text_delta", text: delta))
             },
-            onFinalMessage: { answer in
-                let split = LeakedTurnOutcome.split(answer)
-                if split.taskID == taskID { recording.leakedOutcome = split.outcome }
-                let message = split.text
-                // An answer that was only the echo still replaces the streamed text.
-                if !message.isEmpty {
-                    recording.finalMessageCount += 1
-                    self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, ConversationMessage(
-                        id: "\(localTurnID)-final-\(recording.finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
-                    ))
-                }
-                streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message))
-            },
+            onFinalMessage: { answer in recordFinal(answer, nil) },
             onActivity: { activity in
                 switch recording.activityWrite(activity) {
                 case .now:
@@ -423,6 +433,16 @@ extension ConversationManager {
                 onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
             },
             onProgressMessage: { message in
+                var message = message
+                // Progress is recorded without a leaked outcome block, as an answer is, whichever
+                // of the live and backfill paths records it first.
+                if message.role == .assistant {
+                    let split = LeakedTurnOutcome.split(message.text)
+                    if split.taskID == taskID { recording.leakedOutcome = split.outcome }
+                    message.text = split.text
+                    // Progress that was only the echo leaves nothing to show.
+                    if message.text.isEmpty, message.asyncQuestions == nil { return }
+                }
                 self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, message)
                 // A notice the provider's runtime added to the turn streams as the user-side
                 // message it is recorded as, not as the assistant's progress.
@@ -440,7 +460,6 @@ extension ConversationManager {
             },
             onMessageTimestamp: { _, _ in },
             onTurnStarted: { providerTurnID in
-                recording.providerTurnStarted = true
                 ConversationTurnLaunch.turnStarted(taskID)
                 // Codex's own turn ID is kept as resume metadata beside the local turn.
                 if provider == .codex, let segment {
@@ -479,7 +498,8 @@ extension ConversationManager {
                         PlayhouseDiagnostics.record("task.token_usage.record_failed", fields: fields)
                     }
                 }
-            }
+            },
+            onRecordedFinalMessage: { answer, recordedID in recordFinal(answer, recordedID) }
         )
     }
 

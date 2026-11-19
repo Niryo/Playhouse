@@ -155,6 +155,8 @@ extension ClaudeSessionRunner {
         parentWakeBackstopGeneration += 1
         let handlers = (deltaHandler, finalMessageHandler, progressMessageHandler, steerMessageHandler,
                         activityHandler, actionRequestHandler, userInputHandler, tokenUsageHandler)
+        let recordedFinal = recordedFinalHandler
+        recordedFinalHandler = nil
         (deltaHandler, finalMessageHandler, progressMessageHandler, steerMessageHandler) = (nil, nil, nil, nil)
         (activityHandler, actionRequestHandler, userInputHandler, tokenUsageHandler) = (nil, nil, nil, nil)
         isReplaying = true
@@ -165,6 +167,7 @@ extension ClaudeSessionRunner {
         isReplaying = false
         (deltaHandler, finalMessageHandler, progressMessageHandler, steerMessageHandler,
          activityHandler, actionRequestHandler, userInputHandler, tokenUsageHandler) = handlers
+        recordedFinalHandler = recordedFinal
         // A line cut off mid-write ends the run at its next input, so the turn can't go on.
         if run.manifest.writeInProgress {
             PlayhouseDiagnostics.record("claude.turn.reattach_cut_off_write", fields: diagnosticFields([:]))

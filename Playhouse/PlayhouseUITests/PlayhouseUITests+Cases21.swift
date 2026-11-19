@@ -73,6 +73,8 @@ extension PlayhouseUITests {
                       "The reopened conversation should load its saved history, with the answer's prompt as sent.")
         XCTAssertTrue(transcriptContains("Ask a restart-safe structured question."),
                       "Reopening mid-recovery must still show the conversation the recovery continues.")
+        XCTAssertFalse(transcriptContains("[Private answer sent after restart]"),
+                       "The prompt shown as sent is not repeated as a pending stand-in bubble.")
         XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
                        "Reopening the task mid-recovery must not bring back the answered question.")
         let applyingHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
@@ -500,7 +502,7 @@ extension PlayhouseUITests {
             "An outcome reported in the woken turn must not trigger private outcome reminders."
         )
     }
-    // case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it.
+    // case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history, the answer once and as the final answer. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it.
     func test_claude_nudged_turn_work_stays_in_conversation() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-nudged-work")
         try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: executable)
@@ -564,6 +566,8 @@ extension PlayhouseUITests {
             ["agent_image", "Nudged turn screenshot"],
             ["final_answer", finalReport],
         ], "The nudged turn's work should be recorded in order after the stale answer.")
+        XCTAssertEqual(assistant.filter { $0[1] == staleAnswer }, [["final_answer", staleAnswer]],
+                       "The answer recorded before the review's report is kept once, as the final answer.")
         XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The final report is the latest message.")
         let imageID = try XCTUnwrap(messages.first { $0["phase"] as? String == "agent_image" }?["id"] as? String)
         XCTAssertTrue(scrollTranscriptUntilExists(element("chat-image-\(imageID)-0")), "The screenshot the nudged turn presented should render.")
@@ -707,7 +711,7 @@ extension PlayhouseUITests {
                       "The later turn's own nudge is shown after its message.")
         attachScreenshot(named: "Codex nudged turn work after a later turn")
     }
-    // case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send. The steered follow-up is recorded inside the turn it steered rather than as a turn of its own, so the transcript keeps it in order: while the turn runs and after it ends, the turn's work stays above its bubble, as does the answer given before it while it is shown, and what the turn said after it renders below it.
+    // case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send. The steered follow-up is recorded inside the turn it steered rather than as a turn of its own, so the transcript keeps it in order: while the turn runs and after it ends, the turn's work stays above its bubble, as does the answer given before it while it is shown, and what the turn said after it renders below it. Once Claude's answer to the steer has its own result while the shell still holds the turn open, that answer is already recorded in history exactly once, below the steered follow-up with the answer given before the steer above it, and stays shown rather than living only in the stream; after the turn ends both earlier answers are kept once as commentary and only the woken parent turn's answer is final.
     func test_claude_steers_turn_parked_on_background_work() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-parked-steer")
         try copyFixtureFile(
@@ -765,10 +769,24 @@ extension PlayhouseUITests {
                       "An accepted steer must leave the queue.")
         XCTAssertFalse(element("queued-message-text-\(queuedID)").exists, "The steered row should no longer be queued.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steeredAnswerReady.path) }, timeout: 10),
-                      "Claude should answer the steered follow-up before completing the parked turn.")
+                      "Claude should answer the steered follow-up while the shell still runs.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("STEERED: \(followUp)") }, timeout: 15),
-                      "Claude's answer to the steered follow-up belongs in the same turn.")
+                      "Claude's answer to the steered follow-up stays shown after its result, while the turn is parked.")
         XCTAssertTrue(element("pause-response-button").exists, "The parked turn remains active until its woken parent answer arrives.")
+        // Nothing settles the turn yet, so the answer must already be recorded, in order, not only streamed.
+        let parked = try XCTUnwrap(try runCLI(
+            ["conversation", "history", taskID],
+            extraEnvironment: ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )["result"] as? [String: Any])
+        let parkedTexts = (parked["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        for text in ["PARKED STARTED", followUp, "STEERED: \(followUp)"] {
+            XCTAssertEqual(parkedTexts.filter { $0 == text }.count, 1, "\(text) is recorded once while the turn is parked.")
+        }
+        if let started = parkedTexts.firstIndex(of: "PARKED STARTED"), let steered = parkedTexts.firstIndex(of: followUp),
+           let answer = parkedTexts.firstIndex(of: "STEERED: \(followUp)") {
+            XCTAssertTrue(started < steered, "The answer given before the steer stays above it in history.")
+            XCTAssertTrue(steered < answer, "Claude's answer to the steer follows it in history.")
+        }
         assertSteerFollowsEarlierWork(followUp, earlierAnswer: "PARKED STARTED", laterAnswer: "STEERED: \(followUp)", state: "while the turn runs")
         attachScreenshot(named: "Steered follow-up answered inside the parked turn")
 
@@ -783,14 +801,106 @@ extension PlayhouseUITests {
         XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["text"] as? String == followUp },
                       "The steered follow-up belongs in the conversation it steered.")
         XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.last?["text"] as? String, "PARKED HANDLED")
+        let assistant = messages.filter { $0["role"] as? String == "assistant" }
+            .map { "\($0["phase"] as? String ?? "") \($0["text"] as? String ?? "")" }
+        XCTAssertEqual(Array(assistant.suffix(3)),
+                       ["commentary PARKED STARTED", "commentary STEERED: \(followUp)", "final_answer PARKED HANDLED"],
+                       "Answers recorded while the turn was parked are kept once, and only the turn's last answer is final.")
         let question = messages.first { $0["role"] as? String == "user" && $0["text"] as? String == "Launch a parked background shell for this turn." }
         let steer = messages.first { $0["role"] as? String == "user" && $0["text"] as? String == followUp }
         XCTAssertNotNil(steer?["turnID"] as? String)
         XCTAssertEqual(steer?["turnID"] as? String, question?["turnID"] as? String,
                        "The steered follow-up is recorded inside the turn it steered, not as a turn of its own.")
-        // The finished turn folds its progress into its work, which stays above the steer.
+        // The finished turn folds its progress into its work, which stays above the steer. The
+        // outcome nudge that follows the turn scrolls the transcript; the order is read once
+        // that private turn has settled the task, so both frames come from the same layout.
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 15),
+                      "The outcome nudge after the parked turn settles the task on the user.")
+        XCTAssertTrue(waitForStableFrame(transcriptMessage(followUp)), "The transcript stops moving once the nudge turn is shown.")
         assertSteerFollowsEarlierWork(followUp, earlierAnswer: nil, laterAnswer: "PARKED HANDLED", state: "after the turn ends")
+        XCTAssertEqual(assistantBubbles(labeled: "PARKED HANDLED").count, 1, "The woken parent turn's answer is shown once.")
         attachScreenshot(named: "Parked turn finished after the steered follow-up")
+    }
+
+    // case-contract: test_claude_steer_keeps_answer_written_before_it_above | A Claude turn that answers, then publishes a Playhouse progress report, which leaves that answer open, takes a steer at the report's tool boundary: the answer written before the steer is recorded once, above the steered message, as soon as the steer reaches Claude, rather than after Claude's reply to it, and the reply streams below the steer and stays shown while it is still being written instead of being cleared when the earlier answer is closed. After the turn ends the earlier answer stays above the steer as commentary and the reply is the final answer below it, each once. Only Claude Code keeps an answer open across a progress report, so Claude is the representative provider for this Playhouse-owned transcript order.
+    func test_claude_steer_keeps_answer_written_before_it_above() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-reported-steer")
+        try copyFixtureFile(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let steerReady = URL(fileURLWithPath: executable.path + ".reported-steer-ready")
+        let replyPause = URL(fileURLWithPath: executable.path + ".steer-reply-pause")
+        let replyReady = URL(fileURLWithPath: executable.path + ".steer-reply-ready")
+        let replyRelease = URL(fileURLWithPath: executable.path + ".steer-reply-release")
+        try Data().write(to: replyPause, options: .atomic)
+        defer {
+            try? Data("Release the steer-reply fixture pause.\n".utf8).write(to: replyRelease, options: .atomic)
+            try? FileManager.default.removeItem(at: replyPause)
+            try? FileManager.default.removeItem(at: replyReady)
+            try? FileManager.default.removeItem(at: replyRelease)
+        }
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude reported steer", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Claude reported steer")
+        element("message-composer").click()
+        element("message-composer").typeText("Please answer, report progress, await steering.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steerReady.path) }, timeout: 15),
+                      "The fixture should answer, report progress and wait for a steer.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("REPORTED ANSWER") }, timeout: 10))
+
+        let steer = "Also cover the docs."
+        let reply = "STEER REPLY: \(steer)"
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText(steer)
+        composer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: replyReady.path) }, timeout: 15),
+                      "Claude should reply to the steer.")
+        // The reply has streamed and its message arrived, but not its result: closing the answer
+        // written before the steer must not clear it.
+        XCTAssertTrue(waitUntil({ self.transcriptContains(reply) }, timeout: 15),
+                      "The reply to the steer stays shown while it is still being written.")
+        XCTAssertTrue(element("pause-response-button").exists, "The turn is still running.")
+        assertSteerFollowsEarlierWork(steer, earlierAnswer: "REPORTED ANSWER", laterAnswer: reply, state: "while the reply is written")
+        let running = try XCTUnwrap(try runCLI(
+            ["conversation", "history", taskID],
+            extraEnvironment: ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )["result"] as? [String: Any])
+        let runningTexts = (running["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        XCTAssertEqual(runningTexts.filter { $0 == "REPORTED ANSWER" }.count, 1, "The answer before the steer is recorded once.")
+        XCTAssertEqual(runningTexts.filter { $0 == steer }.count, 1, "The steer is recorded once.")
+        if let answer = runningTexts.firstIndex(of: "REPORTED ANSWER"), let steered = runningTexts.firstIndex(of: steer) {
+            XCTAssertTrue(answer < steered, "The answer written before the steer is recorded above it.")
+        }
+        attachScreenshot(named: "Reply to the steer shown below it while being written")
+
+        try Data("Release after the reply is visible.\n".utf8).write(to: replyRelease, options: .atomic)
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The turn ends on the reply.")
+        // The finished turn folds its commentary into its work, which stays above the steer.
+        assertSteerFollowsEarlierWork(steer, earlierAnswer: nil, laterAnswer: reply, state: "after the turn ends")
+        XCTAssertEqual(assistantBubbles(labeled: reply).count, 1, "The reply is shown once after the turn ends.")
+        let history = try XCTUnwrap(try runCLI(
+            ["conversation", "history", taskID],
+            extraEnvironment: ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )["result"] as? [String: Any])
+        let turn = (history["messages"] as? [[String: Any]] ?? [])
+            .filter { ["REPORTED ANSWER", steer, reply].contains($0["text"] as? String) }
+            .map { "\($0["role"] as? String ?? "") \($0["phase"] as? String ?? "-") \($0["text"] as? String ?? "")" }
+        XCTAssertEqual(turn, ["assistant commentary REPORTED ANSWER", "user - \(steer)", "assistant final_answer \(reply)"],
+                       "After the turn the answer before the steer stays above it and the reply is the final answer below it, each once.")
+        attachScreenshot(named: "Turn finished with the reply below the steer")
     }
 
     /// A steered message reads in order: the turn's work and the answer before it sit above its
@@ -809,8 +919,9 @@ extension PlayhouseUITests {
             XCTAssertTrue(earlier.waitToExist(timeout: 10), "The answer given before the steer is shown \(state).", file: file, line: line)
             XCTAssertLessThanOrEqual(earlier.frame.maxY, bubble.frame.minY,
                                      "The answer given before the steer stays above it \(state).", file: file, line: line)
-            // Claude closes that answer as an item only once its next message starts, after the
-            // steer; the item settles where the answer streamed instead of repeating below the steer.
+            // Claude closes that answer as an item at its result or when the steer reaches it,
+            // which can follow the steer's bubble; the item settles where the answer streamed
+            // instead of repeating below the steer.
             XCTAssertEqual(assistantBubbles(labeled: earlierAnswer).count, 1,
                            "The answer given before the steer is shown once \(state).", file: file, line: line)
         }

@@ -1002,6 +1002,9 @@ extension ConversationManager {
                     onUpdate(ConversationUpdate(type: "queue_changed"))
                 } catch {
                     dispatchEncounteredFailure = true
+                    // The follow-up stays in the queue as needs-action, so a turn that got no
+                    // further than its message doesn't also show it as sent.
+                    discardUnansweredTurn(taskID: taskID, text: item.text, imageDataURLs: item.imageDataURLs ?? [])
                     try? tasks.finishQueuedMessage(item, succeeded: false)
                     onUpdate(ConversationUpdate(type: "queue_changed"))
                     onUpdate(ConversationUpdate(type: "action_notice", message: "A queued follow-up needs your review before it can be retried."))

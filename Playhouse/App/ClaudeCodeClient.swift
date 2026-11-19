@@ -438,6 +438,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         onMessageTimestamp: @escaping (String, Date) -> Void = { _, _ in },
         onTurnStarted: @escaping (String) -> Void,
         onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in },
+        onRecordedFinalMessage: ((String, String) -> Void)? = nil,
         sensitiveUserInputAnswerValues: [String] = [],
         hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {
@@ -463,6 +464,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         )
         runner.deltaHandler = onDelta
         runner.finalMessageHandler = onFinalMessage
+        runner.recordedFinalHandler = onRecordedFinalMessage
         runner.progressMessageHandler = onProgressMessage
         runner.steerMessageHandler = onSteerMessage
         runner.turnStartedHandler = onTurnStarted
@@ -585,6 +587,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         )
         runner.deltaHandler = callbacks.onDelta
         runner.finalMessageHandler = callbacks.onFinalMessage
+        runner.recordedFinalHandler = callbacks.onRecordedFinalMessage
         runner.progressMessageHandler = callbacks.onProgressMessage
         runner.steerMessageHandler = callbacks.onSteerMessage
         runner.activityHandler = callbacks.onActivity

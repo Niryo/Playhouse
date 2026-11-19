@@ -429,7 +429,7 @@
   },
   {
     "id": "test_claude_nudged_turn_work_stays_in_conversation",
-    "expectation": "A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it."
+    "expectation": "A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history, the answer once and as the final answer. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it."
   },
   {
     "id": "test_codex_nudged_turn_work_stays_in_conversation",
@@ -437,7 +437,11 @@
   },
   {
     "id": "test_claude_steers_turn_parked_on_background_work",
-    "expectation": "A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send. The steered follow-up is recorded inside the turn it steered rather than as a turn of its own, so the transcript keeps it in order: while the turn runs and after it ends, the turn's work stays above its bubble, as does the answer given before it while it is shown, and what the turn said after it renders below it."
+    "expectation": "A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send. The steered follow-up is recorded inside the turn it steered rather than as a turn of its own, so the transcript keeps it in order: while the turn runs and after it ends, the turn's work stays above its bubble, as does the answer given before it while it is shown, and what the turn said after it renders below it. Once Claude's answer to the steer has its own result while the shell still holds the turn open, that answer is already recorded in history exactly once, below the steered follow-up with the answer given before the steer above it, and stays shown rather than living only in the stream; after the turn ends both earlier answers are kept once as commentary and only the woken parent turn's answer is final."
+  },
+  {
+    "id": "test_claude_steer_keeps_answer_written_before_it_above",
+    "expectation": "A Claude turn that answers, then publishes a Playhouse progress report, which leaves that answer open, takes a steer at the report's tool boundary: the answer written before the steer is recorded once, above the steered message, as soon as the steer reaches Claude, rather than after Claude's reply to it, and the reply streams below the steer and stays shown while it is still being written instead of being cleared when the earlier answer is closed. After the turn ends the earlier answer stays above the steer as commentary and the reply is the final answer below it, each once. Only Claude Code keeps an answer open across a progress report, so Claude is the representative provider for this Playhouse-owned transcript order."
   },
   {
     "id": "test_claude_settles_turn_after_consumed_wake_notification",
@@ -477,7 +481,7 @@
   },
   {
     "id": "test_codex_async_question_queued_answer_retries",
-    "expectation": "An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered."
+    "expectation": "An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered. The failed answer is not kept in the conversation as a sent message, and the retry sends it exactly once."
   },
   {
     "id": "test_codex_interrupted_turn_blocks_with_reason_and_can_retry",
