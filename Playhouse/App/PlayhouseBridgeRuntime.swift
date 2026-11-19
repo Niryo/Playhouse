@@ -535,6 +535,29 @@ final class PlayhouseBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let task = try await conversations.setEffort(taskID: taskID, effort: effort)
                 result = try Self.value(task)
+            case "conversation.context-mode.get":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .object(["mode": .string(try conversations.contextMode(taskID: request.requiredUUID("taskID")).rawValue)])
+            case "conversation.context-mode.set":
+                let taskID = try request.requiredUUID("taskID")
+                guard let mode = ConversationContextMode(rawValue: try request.requiredString("mode")) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Context mode must be one of: full, optimized.")
+                }
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try await conversations.setContextMode(taskID: taskID, mode: mode))
+            case "conversation.outline":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try conversations.outline(taskID: request.requiredUUID("taskID")))
+            case "conversation.read":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try conversations.read(
+                    taskID: request.requiredUUID("taskID"),
+                    positions: request.arguments["at"]?.strings ?? [],
+                    from: request.arguments["from"]?.string,
+                    to: request.arguments["to"]?.string,
+                    kinds: request.arguments["kinds"]?.strings ?? [],
+                    includesTools: request.arguments["includeTools"]?.bool ?? false
+                ))
             case "conversation.model.get":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 result = .object(["modelID": try conversations.modelID(taskID: request.requiredUUID("taskID")).map(BridgeValue.string) ?? .null])

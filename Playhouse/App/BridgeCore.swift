@@ -453,6 +453,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let claudeSessionID: String?
     let conversationProvider: String
     let conversationEffort: String
+    /// full or optimized; absent from records older than the setting.
+    let conversationContextMode: String?
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
     let hasUnsentDraft: Bool
@@ -497,6 +499,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         claudeSessionID = task.claudeSessionID
         conversationProvider = task.conversationProvider.rawValue
         conversationEffort = task.conversationEffort
+        conversationContextMode = task.conversationContextMode.rawValue
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
         hasUnsentDraft = task.hasUnsentDraft
@@ -584,7 +587,7 @@ struct QueuedConversationMessage: Codable, Equatable, Identifiable {
     enum State: String, Codable { case queued, dispatching, needsAction }
     let id: UUID
     let taskID: UUID
-    let threadID: String
+    var threadID: String
     let text: String
     var imageDataURLs: [String]? = []
     var state: State

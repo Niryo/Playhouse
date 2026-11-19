@@ -334,6 +334,7 @@ class BridgeTestCases25:
 
         side = commands(help_text("help", "--for", "side-chat"))
         self.assertEqual(sorted({line.split(" <")[0].split(" --")[0].split(" [")[0] for line in side}), [
+            "playhouse conversation outline", "playhouse conversation read",
             "playhouse help", "playhouse task create", "playhouse task get|show", "playhouse task list", "playhouse task prompt",
             "playhouse task rename", "playhouse version", "playhouse workspace repos list"])
 

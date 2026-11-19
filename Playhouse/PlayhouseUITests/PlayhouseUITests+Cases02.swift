@@ -711,6 +711,7 @@ extension PlayhouseUITests {
             String(line.components(separatedBy: " <")[0].components(separatedBy: " --")[0].components(separatedBy: " [")[0])
         })
         XCTAssertEqual(side.sorted(), [
+            "playhouse conversation outline", "playhouse conversation read",
             "playhouse help", "playhouse task create", "playhouse task get|show", "playhouse task list", "playhouse task prompt",
             "playhouse task rename", "playhouse version", "playhouse workspace repos list",
         ])

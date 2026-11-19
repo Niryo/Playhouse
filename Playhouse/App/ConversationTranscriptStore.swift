@@ -104,6 +104,11 @@ struct ConversationTranscript: Codable, Equatable {
     var contextCompactions: [ContextCompactionEvent]?
     /// Resumed Claude turns whose first call missed the prompt cache, oldest first.
     var promptCacheMisses: [PromptCacheMissEvent]?
+    /// Turns sent in Plan mode, oldest first: each one's final answer is a plan. Absent
+    /// in transcripts written before turns recorded their mode.
+    var planTurnIDs: [String]?
+    /// Turns an optimized follow-up started in a fresh, seeded provider session.
+    var freshSessionTurnIDs: [String]?
 
     var isEmpty: Bool { segments.isEmpty && turns.isEmpty }
 

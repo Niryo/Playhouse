@@ -156,6 +156,8 @@ struct TaskConversationView: View {
     /// The message at the top of the transcript's viewport, as last reported.
     @State var topTranscriptRowID: String?
     @State var conversationMode: ConversationMode = .code
+    /// The task's saved context mode, read on appear and set by the composer's toggle.
+    @State var conversationContextMode: ConversationContextMode = .full
     @State var isEnteringGoal = false
     @State var activeGoal: CodexThreadGoal?
     @State var goalAchievementTimelineEntries: [GoalAchievementTimelineEntry] = []
@@ -696,6 +698,7 @@ struct TaskConversationView: View {
                let mode = ConversationMode(rawValue: savedMode) {
                 conversationMode = mode
             }
+            conversationContextMode = (try? conversationManager.contextMode(taskID: task.id)) ?? .full
             // A task that hasn't started reopens with Send in schedule mode. An existing
             // conversation's scheduled message waits in the composer, and Send sends it now.
             if let schedule = savedSchedule, !isExistingConversation {

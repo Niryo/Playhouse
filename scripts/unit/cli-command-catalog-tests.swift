@@ -130,7 +130,7 @@ struct CLICommandCatalogTests {
             expect(chatUsages.contains { $0.hasPrefix(needed) }, "The chat's help doesn't list \(needed).")
         }
         // The side chat's audience is its permission list; widening it grants a read-only chat a command.
-        expect(SideChatReadOnlyPolicy.allowedCLICommands == ["help", "version", "task list", "task get", "task show", "task create", "task rename", "task prompt", "workspace repos list"],
+        expect(SideChatReadOnlyPolicy.allowedCLICommands == ["help", "version", "task list", "task get", "task show", "task create", "task rename", "task prompt", "workspace repos list", "conversation outline", "conversation read"],
                "The side chat's commands changed: \(SideChatReadOnlyPolicy.allowedCLICommands).")
         // Every protocol command the agent instructions embed is declared.
         if CommandLine.arguments.count > 2, let instructions = try? String(contentsOfFile: CommandLine.arguments[2], encoding: .utf8) {

@@ -979,7 +979,10 @@ extension ConversationManager {
         while true {
             while true {
                 let item: QueuedConversationMessage?
-                do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: threadID, messageID: messageIDFilter) }
+                // Read the conversation per claim: an optimized follow-up starts a new session
+                // and moves the rest of the queue onto it.
+                let currentThreadID = (try? tasks.conversationSubject(taskID).activeConversationID) ?? threadID
+                do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: currentThreadID, messageID: messageIDFilter) }
                 catch { break }
                 guard let item else { break }
                 // Windows hide a follow-up while it is claimed, so announce the claim

@@ -97,6 +97,9 @@ struct ComposerModel: Codable, Equatable {
     var skills: Bool
     var attach: Attach
     var plan: ModeToggle
+    /// The Optimized context button beside Plan; nil where the conversation has no context
+    /// mode (the standalone chat). Independent of Plan and Goal.
+    var optimizedContext: ModeToggle? = nil
     /// Nil where the provider has no goals.
     var goal: ModeToggle?
     var startImplementing: StartImplementing?
@@ -121,6 +124,8 @@ struct ComposerActions {
     var attach: () -> Void = {}
     /// Turns Plan mode on (and Goal off) or off.
     var togglePlan: () -> Void = {}
+    /// Turns optimized context on or off.
+    var toggleOptimizedContext: () -> Void = {}
     /// Turns goal entry on (and Plan mode off) or off.
     var toggleGoal: () -> Void = {}
     var startImplementing: () -> Void = {}
@@ -188,6 +193,11 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
                 }
                 modeToggle(model.plan, testID: "conversation-plan-button", label: "Plan mode", action: actions.togglePlan) { on in
                     AtomIcon(props: IconProps(name: "lightbulb.max", size: 13, weight: "medium", color: Self.modeColor(on)))
+                }
+                if let optimized = model.optimizedContext {
+                    modeToggle(optimized, testID: "conversation-optimized-context-button", label: "Optimized context", action: actions.toggleOptimizedContext) { on in
+                        AtomIcon(props: IconProps(name: "gauge.open.with.lines.needle.33percent.and.arrowtriangle.from.0percent.to.50percent", size: 14, weight: "medium", color: Self.modeColor(on)))
+                    }
                 }
                 if let goal = model.goal {
                     modeToggle(goal, testID: "conversation-goal-button", label: "Goal", action: actions.toggleGoal) { on in

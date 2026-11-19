@@ -835,6 +835,7 @@ private struct NativeComposerDemo: View {
     let sample: ComposerComparison.Sample
     @State private var draft = ""
     @State private var mode = "default"
+    @State private var optimizedContext = false
     @State private var provider = "claude"
     @State private var modelID = "claude-sonnet-5-5"
     @State private var effort = "medium"
@@ -854,6 +855,7 @@ private struct NativeComposerDemo: View {
         model.draft = draft
         if goal { model.placeholder = "Set a goal to keep pursuing" }
         model.plan.on = plan
+        model.optimizedContext?.on = optimizedContext
         model.goal?.on = goal
         if !plan { model.startImplementing = nil }
         model.provider.title = title
@@ -882,6 +884,10 @@ private struct NativeComposerDemo: View {
             togglePlan: {
                 mode = mode == "plan" ? "default" : "plan"
                 lastAction = mode == "plan" ? "plan on" : "plan off"
+            },
+            toggleOptimizedContext: {
+                optimizedContext.toggle()
+                lastAction = optimizedContext ? "optimized context on" : "optimized context off"
             },
             toggleGoal: {
                 mode = mode == "goal" ? "default" : "goal"

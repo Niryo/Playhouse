@@ -1036,6 +1036,23 @@ extension TaskConversationView {
         if conversationMode == .plan { setConversationMode(.code) }
     }
 
+    /// Optimized context is independent of Plan and Goal: it changes what a follow-up's
+    /// session holds, not how the agent works. The task saves it, so it stays on until
+    /// turned off; a failed save puts the toggle back.
+    func toggleOptimizedContext() {
+        let previous = conversationContextMode
+        let next: ConversationContextMode = previous == .optimized ? .full : .optimized
+        conversationContextMode = next
+        Task {
+            do {
+                _ = try await conversationManager.setContextMode(taskID: task.id, mode: next)
+            } catch {
+                conversationContextMode = previous
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func startImplementingPlan() {
         isEnteringGoal = false
         setConversationMode(.code)

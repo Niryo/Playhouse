@@ -127,7 +127,10 @@ def start_thread(runtime, _session_state, message):
     wait_for_release(runtime, "thread-start", "Codex is starting the thread.")
     # `-single-server` modes run several tasks' threads on one server.
     # The thread replacing a missing one gets an ID of its own, as a real new thread does.
+    # `-fresh-threads-` modes answer every thread/start with a new thread, as the real
+    # app-server does, so a test can tell a fresh session from a resumed one.
     if "-question-isolation-" in _session_state.mode or "-single-server" in _session_state.mode \
+            or "-fresh-threads-" in _session_state.mode \
             or getattr(_session_state, "replaces_missing_thread", False):
         runtime.THREAD_ID = str(runtime.uuid.uuid4())
         _session_state.replaces_missing_thread = False
@@ -152,6 +155,10 @@ def start_thread(runtime, _session_state, message):
             "threadStartRuntimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
             "threadStartCount": _session_state.history.get("threadStartCount", 0) + 1,
         })
+        _session_state.history.setdefault("threadStarts", []).append({
+            "threadID": runtime.THREAD_ID,
+            "developerInstructions": _session_state.thread_start_instructions,
+        })
         _session_state.history_path.write_text(runtime.json.dumps(_session_state.history), encoding="utf-8")
     runtime.write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": runtime.THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
 
@@ -168,7 +175,8 @@ def resume_thread(runtime, _session_state, message):
             "message": f"no rollout found for thread id {message['params']['threadId']}",
         }})
         return
-    if "-question-isolation-" in _session_state.mode or "-single-server" in _session_state.mode:
+    if "-question-isolation-" in _session_state.mode or "-single-server" in _session_state.mode \
+            or "-fresh-threads-" in _session_state.mode:
         runtime.THREAD_ID = message["params"]["threadId"]
     if "-single-server" in _session_state.mode:
         with open(_session_state.fixture_state_directory / f"{runtime.Path(runtime.sys.argv[0]).name}.resumes", "a", encoding="utf-8") as handle:
@@ -200,6 +208,7 @@ def resume_thread(runtime, _session_state, message):
             "threadResumeCount": _session_state.history.get("threadResumeCount", 0) + 1,
             "threadResumeConfig": message.get("params", {}).get("config"),
         })
+        _session_state.history.setdefault("threadResumes", []).append(message.get("params", {}).get("threadId"))
         _session_state.history.setdefault("threadResumeDeveloperInstructions", []).append(
             message.get("params", {}).get("developerInstructions")
         )

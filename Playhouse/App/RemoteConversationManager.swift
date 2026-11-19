@@ -37,6 +37,7 @@ struct RemoteConversationManager {
 
     func modelID(taskID: UUID) throws -> String? { try store.modelID(taskID: taskID) }
     func effort(taskID: UUID) throws -> ConversationEffort { try store.effort(taskID: taskID) }
+    func contextMode(taskID: UUID) throws -> ConversationContextMode { try store.contextMode(taskID: taskID) }
     func setModelID(taskID: UUID, modelID: String) async throws { try await store.setModelID(taskID: taskID, modelID: modelID) }
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] { try store.cachedModels(taskID: taskID) }
     func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
@@ -266,6 +267,11 @@ struct RemoteConversationManager {
 
     func setEffort(taskID: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
         try await daemon.call("conversation.effort.set", ["taskID": id(taskID), "effort": .string(effort.rawValue)])
+            .decoded(BoardTaskRecord.self)
+    }
+
+    func setContextMode(taskID: UUID, mode: ConversationContextMode) async throws -> BoardTaskRecord {
+        try await daemon.call("conversation.context-mode.set", ["taskID": id(taskID), "mode": .string(mode.rawValue)])
             .decoded(BoardTaskRecord.self)
     }
 
