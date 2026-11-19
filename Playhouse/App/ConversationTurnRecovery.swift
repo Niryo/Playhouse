@@ -964,6 +964,8 @@ extension ConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void
     ) async {
+        // A task being deleted takes no more turns.
+        guard !TaskDeletion.isDeleting(taskID) else { return }
         // A task without a conversation can only hold follow-ups queued while its first message
         // was starting; they have no conversation ID, and the first one sent starts it.
         guard let threadID = try? tasks.conversationSubject(taskID).activeConversationID ?? "" else { return }

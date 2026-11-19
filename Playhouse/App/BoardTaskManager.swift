@@ -152,6 +152,11 @@ final class BoardTaskManager {
         return try JSONDecoder().decode([String: [QueuedConversationMessage]].self, from: Data(contentsOf: url))
     }
 
+    func removeQueuedMessages(taskID: UUID) throws {
+        guard try readQueuedMessages()[taskID.uuidString] != nil else { return }
+        try mutateQueuedMessages(taskID: taskID) { $0.removeAll() }
+    }
+
     func mutateQueuedMessages(taskID: UUID, _ mutation: (inout [QueuedConversationMessage]) throws -> Void) throws {
         let url = try queuedMessagesURL()
         let lockURL = url.appendingPathExtension("lock")
@@ -168,7 +173,7 @@ final class BoardTaskManager {
         }
         var items = all[taskID.uuidString] ?? []
         try mutation(&items)
-        all[taskID.uuidString] = items
+        all[taskID.uuidString] = items.isEmpty ? nil : items
         try JSONEncoder().encode(all).write(to: url, options: .atomic)
         guard Darwin.chmod(url.path, mode_t(0o600)) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
@@ -351,16 +356,31 @@ final class BoardTaskManager {
 
 
 
+    /// How long a delete waits for each lock it takes. A turn holding the task's reservation is
+    /// stopped before this (`ConversationManager.deleteTask`), so a wait this long means some
+    /// other operation is stuck, and the delete fails instead of hanging.
+    static let deleteLockTimeout: Duration = .seconds(10)
+
     func delete(_ id: UUID, diagnostics: [String: String] = [:]) async throws {
-        try await withConversationTurnReservation(id) {
-            try await self.deleteWhileTurnReserved(id, diagnostics: diagnostics)
+        do {
+            try await withConversationTurnReservation(id, timeout: Self.deleteLockTimeout) {
+                try await self.deleteWhileTurnReserved(id, diagnostics: diagnostics)
+            }
+        } catch let error as FileLockTimeoutError {
+            var fields = ["taskID": id.uuidString, "phase": "lock-wait", "lock": error.purpose]
+            fields.merge(diagnostics) { _, new in new }
+            PlayhouseDiagnostics.record("task.delete.failed", fields: fields)
+            throw BridgeCommandError(
+                code: "operation_failed",
+                message: "Couldn't delete the task: another operation on it didn't finish within \(Int(Self.deleteLockTimeout.components.seconds)) seconds. Try deleting it again."
+            )
         }
     }
 
     func deleteWhileTurnReserved(_ id: UUID, diagnostics: [String: String]) async throws {
-        try await withTaskOperationLock(id) {
+        try await withTaskOperationLock(id, timeout: Self.deleteLockTimeout) {
             let task = try requireTask(id)
-            try await withRepositoryAllocationLocks(task.repositoryWorktrees.map(\.repositoryPath)) {
+            try await withRepositoryAllocationLocks(task.repositoryWorktrees.map(\.repositoryPath), timeout: Self.deleteLockTimeout) {
                 try await deleteTaskWhileLocked(task, diagnostics: diagnostics)
             }
         }
@@ -391,6 +411,8 @@ final class BoardTaskManager {
             modelContext.delete(task)
             try await saveTaskContext(taskID: taskID)
             try? conversationTranscriptStore().remove(taskID)
+            // Follow-ups queued for the task would otherwise stay behind in the shared queue file.
+            try? removeQueuedMessages(taskID: taskID)
             removeOrphanedTaskPreferences()
             PlayhouseDiagnostics.record("task.delete.succeeded", fields: fields)
         } catch {

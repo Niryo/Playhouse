@@ -713,7 +713,7 @@ class BridgeTestCases13:
             'ClaudeCodeClient', 'ProviderRequestLog', 'ProcessCPUSampler', 'AgentRunHost',
             'ContextCompaction', 'AgentUsage', 'AgentUsageStore', 'ConversationTranscriptStore',
             'StandaloneChatStore', 'SkillCatalog', 'RuleCatalog', 'MentionCatalog', 'SlashCommandCatalog',
-            'McpCatalog', 'CodexConfigTOML', 'BridgeCore', 'TaskSchedule',
+            'McpCatalog', 'CodexConfigTOML', 'BridgeCore', 'BoundedWaits', 'TaskSchedule',
             'BoardConversationStorage', 'BoardLifecycleStatus', 'BoardOperationLocks', 'BoardPromptPersistence',
             'BoardPullRequestLifecycle', 'BoardRepositoryLifecycle', 'BoardScheduling', 'BoardTaskCRUD',
             'BoardTaskManager', 'BoardUsageReporting', 'ClaudeAccountUsage', 'ClaudeClientMapping',

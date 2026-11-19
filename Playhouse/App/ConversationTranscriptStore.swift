@@ -241,15 +241,27 @@ final class ConversationTranscriptStore {
     /// Applies `mutation` to the selected turns in one transaction and writes
     /// only the rows it changed. Image data is not loaded for mutation: a
     /// message saved without images keeps any images its row already stores.
+    ///
+    /// A task removed in this process takes no more writes: the turn its deletion stopped may
+    /// still be winding down, and its last events must not bring the transcript back.
     @discardableResult
     func mutate<T>(_ taskID: UUID, turns selection: TurnSelection, _ mutation: (inout ConversationTranscript) throws -> T) throws -> T {
         try pool.write { db in
             var transcript = try Self.load(db, taskID: taskID, selection: selection, includeImages: false)
             let original = transcript
             let result = try mutation(&transcript)
-            try Self.save(db, taskID: taskID, from: original, to: transcript)
+            if !Self.isRemoved(taskID) {
+                try Self.save(db, taskID: taskID, from: original, to: transcript)
+            }
             return result
         }
+    }
+
+    private static let removedTaskIDsLock = NSLock()
+    private static var removedTaskIDs: Set<UUID> = []
+
+    static func isRemoved(_ taskID: UUID) -> Bool {
+        removedTaskIDsLock.withLock { removedTaskIDs.contains(taskID) }
     }
 
     /// Stored image data URLs for the given messages, keyed by message ID and
@@ -423,6 +435,7 @@ final class ConversationTranscriptStore {
     }
 
     func remove(_ taskID: UUID) throws {
+        _ = Self.removedTaskIDsLock.withLock { Self.removedTaskIDs.insert(taskID) }
         try pool.write { db in
             for table in ["conversation_state", "conversation_token_usage", "conversation_turns", "conversation_messages", "conversation_activities"] {
                 try db.execute(sql: "DELETE FROM \(table) WHERE task_id = ?", arguments: [taskID.uuidString])

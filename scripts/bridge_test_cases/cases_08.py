@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases08:
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Deleting a task also removes its per-task preferences and any left by already-deleted tasks, while another task's preferences remain.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion removes the card from the board at once and waits briefly for a conversation-turn reservation another process holds; when that reservation stays held past the stop timeout the delete fails with a clear error and the task and its card come back, and with no turn to stop a task lock another process keeps holding fails the delete the same way after the lock timeout, recording the lock it waited for; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Deleting a task also removes its per-task preferences and any left by already-deleted tasks, while another task's preferences remain.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         pending = self.create_repo_task("Pending delete", [self.primary])
         pending_id = pending["id"]
@@ -60,6 +60,39 @@ class BridgeTestCases08:
         self.assertFalse(self.default_exists(pending_preference), "Deleting a task must remove its per-task preferences.")
         self.assertFalse(self.default_exists(orphaned_preference), "Deleting a task must remove preferences left by already-deleted tasks.")
         self.assertEqual(self.read_default(kept_preference)[0], "plan", "Another task's preferences must survive a delete.")
+        # A reservation another process keeps holding is waited for only up to the stop timeout:
+        # the delete then fails with a clear error and leaves the task as it was.
+        held_reservation = ConversationTurnLockBarrier(self.data_directory, kept_id)
+        try:
+            started = time.monotonic()
+            response, _ = self.call_cli("task", "delete", kept_id, expected_status=1, timeout=40)
+            self.assertLess(time.monotonic() - started, 25, "A delete must give up instead of waiting for a held reservation.")
+            self.assert_failure(response, "operation_failed")
+            self.assertIn("wasn't deleted", response["error"]["message"])
+        finally:
+            held_reservation.release()
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", kept_id)[0])["id"], kept_id)
+        self.assertTrue(any(
+            event.get("event") == "task.delete.stop_failed" and event.get("taskID") == kept_id
+            for event in self.diagnostic_events()
+        ), "A delete that couldn't stop the turn is recorded.")
+        # With no turn to stop, a task-operation lock another process keeps holding fails the delete
+        # after the lock timeout instead of hanging it.
+        held_operation = TaskOperationLockBarrier(self.data_directory, kept_id)
+        try:
+            started = time.monotonic()
+            response, _ = self.call_cli("task", "delete", kept_id, expected_status=1, timeout=40)
+            self.assertLess(time.monotonic() - started, 25, "A delete must give up instead of waiting for a held task lock.")
+            self.assert_failure(response, "operation_failed")
+            self.assertIn("didn't finish within", response["error"]["message"])
+        finally:
+            held_operation.release()
+        self.assertTrue(any(
+            event.get("event") == "task.delete.failed" and event.get("taskID") == kept_id
+            and event.get("phase") == "lock-wait" and event.get("lock") == "task-operation"
+            for event in self.diagnostic_events()
+        ), "A delete that timed out on a lock is recorded with the lock it waited for.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", kept_id)[0])["id"], kept_id)
         self.assertTrue(self.assert_success(self.call_cli("task", "delete", kept_id)[0])["deleted"])
         self.assertFalse(self.default_exists(kept_preference))
 
@@ -106,6 +139,12 @@ class BridgeTestCases08:
 
         response, _ = self.call_cli("board", "list")
         self.assertEqual(self.assert_success(response)["tasks"], [])
+    # case-contract: test_claude_delete_stops_live_turn_immediately | Deleting a task whose Claude turn waits on an AskUserQuestion, and one whose Claude turn is running and ignores its interrupt, removes the task within seconds instead of waiting for the agent: the delete declines the pending question, which ends that turn without force, asks Claude to interrupt a running turn, and force-stops the Claude Code process when the turn hasn't ended within the interrupt timeout, and records task.delete.stopping_turn, task.delete.turn_force_killed and task.delete.turn_stopped. Afterwards the Claude process is gone, the turn reservation is free, the task's worktree is removed, the daemon no longer reports the turn live, the stopped send ends, and no transcript rows come back. A follow-up queued behind the running turn is removed with the task and never runs, and a send waiting for that turn fails with task_deleting instead of starting a turn. A second delete sent while the first runs shares its result and a later one reports not found. In the window the card leaves the board as soon as the delete is confirmed, and no error appears.
+    def test_claude_delete_stops_live_turn_immediately(self):
+        self.assert_delete_stops_live_turns("claude")
+    # case-contract: test_codex_delete_stops_live_turn_immediately | Deleting a task whose Codex turn waits on a blocking question, and one whose Codex turn is running and ignores its turn/interrupt, removes the task within seconds instead of waiting for the agent: the delete declines the pending question, which ends that turn without force, asks Codex to interrupt a running turn, and, when the turn hasn't ended within the interrupt timeout, fails the turn in Playhouse without waiting for the shared app-server, and records task.delete.stopping_turn, task.delete.turn_force_killed and task.delete.turn_stopped. Afterwards the turn reservation is free, the task's worktree is removed, the daemon no longer reports the turn live, the stopped send ends, and no transcript rows come back, even after the app-server ends the stopped turn. A follow-up queued behind the running turn is removed with the task and never runs, and a send waiting for that turn fails with task_deleting instead of starting a turn. A second delete sent while the first runs shares its result and a later one reports not found. In the window the card leaves the board as soon as the delete is confirmed, and no error appears.
+    def test_codex_delete_stops_live_turn_immediately(self):
+        self.assert_delete_stops_live_turns("codex")
     # case-contract: test_task_delete_reports_real_worktree_failure_and_allows_retry | A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details, including bounded NSError user-info keys and values, without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored.
     def test_task_delete_reports_real_worktree_failure_and_allows_retry(self):
         broken_repository = self.data_directory / "delete-failure-repository"

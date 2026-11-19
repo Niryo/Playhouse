@@ -440,36 +440,6 @@ enum RepositoryAllocationLock {
     }
 }
 
-@MainActor
-enum TaskOperationLockGate {
-    private static var heldKeys: Set<String> = []
-    private static var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-
-    static func acquire(_ key: String) async {
-        guard !heldKeys.contains(key) else {
-            await withCheckedContinuation { continuation in
-                waiters[key, default: []].append(continuation)
-            }
-            return
-        }
-        heldKeys.insert(key)
-    }
-
-    static func isHeld(_ key: String) -> Bool {
-        heldKeys.contains(key)
-    }
-
-    static func release(_ key: String) {
-        guard var pending = waiters[key], !pending.isEmpty else {
-            heldKeys.remove(key)
-            return
-        }
-        let next = pending.removeFirst()
-        waiters[key] = pending.isEmpty ? nil : pending
-        next.resume()
-    }
-}
-
 struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let id: UUID
     var title: String

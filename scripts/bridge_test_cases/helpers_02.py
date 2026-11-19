@@ -413,3 +413,132 @@ class BridgeTestHelpers02:
         self.addCleanup(stop)
         ports = json.loads(server.stdout.readline())
         return f"http://127.0.0.1:{ports['port']}", f"http://127.0.0.1:{ports['closedPort']}"
+    def assert_delete_stops_live_turns(self, provider):
+        """Deletes a task whose turn waits on a question and one whose turn ignores its interrupt.
+        Each delete finishes within seconds, with no wait for the agent, and leaves nothing of
+        the task running or stored."""
+        display = "Claude" if provider == "claude" else "Codex"
+        fixture_source = Path(__file__).resolve().parent / "fixtures" / (
+            "claude-code-fixture.py" if provider == "claude" else "codex-app-server-fixture.py"
+        )
+        environment_name = "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE" if provider == "claude" else "PLAYHOUSE_E2E_CODEX_EXECUTABLE"
+        thread_key = "claudeSessionID" if provider == "claude" else "codexThreadID"
+        if provider == "claude":
+            (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+                "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+            )
+        else:
+            (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+                "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+            )
+        for scenario, message in [("question", "Ask a structured question."), ("hold-interrupt", "Hold until stopped.")]:
+            executable = self.data_directory / f"{provider}-fixture-delete-{scenario}"
+            copy_file(fixture_source, executable)
+            executable.chmod(0o755)
+            # The Codex question fixture asks once this marker exists.
+            Path(str(executable) + ".turn-release").write_text("Ask at once.\n", encoding="utf-8")
+            environment = {environment_name: str(executable)}
+            created, _ = self.call_cli(
+                "task", "create", "--title", f"{display} delete during {scenario}", "--prompt", "Fixture task description.",
+                "--repo", self.primary, "--provider", provider,
+            )
+            task_id = self.assert_success(created)["id"]
+            sender = self.start_cli("conversation", "send", task_id, "--message", message, extra_environment=environment)
+            waiting_send = None
+            try:
+                if scenario == "question":
+                    self.wait_for(
+                        lambda: self.assert_success(self.call_cli("task", "get", task_id)[0])["status"] == "Waiting Response",
+                        f"The {display} turn should wait on its question before the delete.",
+                    )
+                else:
+                    self.wait_for(lambda: Path(str(executable) + ".interrupt-ready").is_file(),
+                                  f"The {display} turn should be running before the delete.")
+                live = self.assert_success(self.call_cli("task", "get", task_id)[0])
+                thread_id = live[thread_key]
+                worktree = Path(live["repositoryWorktrees"][0]["worktreePath"])
+                self.assertTrue(worktree.is_dir(), "The turn should run in the task's own worktree.")
+                runtime = self.assert_success(self.call_cli("conversation", "runtime")[0])
+                self.assertIn(thread_id, runtime["activeThreadIDs"], f"The {display} turn should be live when the delete starts.")
+                with self.assertRaises(OSError, msg="A live turn holds the task's turn reservation."):
+                    ConversationTurnLockBarrier(self.data_directory, task_id)
+
+                waiting_send = None
+                if scenario == "hold-interrupt":
+                    # A follow-up queued behind the turn and a send waiting for it are stopped with it.
+                    self.assert_success(self.call_cli("conversation", "queue", task_id, "--message", "Queued before the delete.")[0])
+                    waiting_send = self.start_cli("conversation", "send", task_id, "--message", "Sent while the turn runs.", extra_environment=environment)
+                    self.wait_for(lambda: sum(
+                        event.get("event") == "conversation.send.accepted" and event.get("taskID") == task_id
+                        for event in self.diagnostic_events()
+                    ) == 2, "The second send should be waiting for the running turn before the delete.")
+                started = time.monotonic()
+                first = self.start_cli("task", "delete", task_id, extra_environment=environment)
+                second = self.start_cli("task", "delete", task_id, extra_environment=environment)
+                response, _ = self.finish_cli(first, ["task", "delete", task_id], timeout=30)
+                elapsed = time.monotonic() - started
+                self.assertTrue(self.assert_success(response)["deleted"])
+                self.assertLess(elapsed, 15, f"Deleting a task with a live {display} turn must not wait for the agent.")
+                # A delete sent while the first one runs shares its result; one sent after it finds no task.
+                stdout, _ = second.communicate(timeout=30)
+                repeated = json.loads([line for line in stdout.splitlines() if line.strip()][-1])
+                if repeated.get("ok"):
+                    self.assertTrue(repeated["result"]["deleted"])
+                else:
+                    self.assert_failure(repeated, "not_found")
+                self.assert_failure(self.call_cli("task", "delete", task_id, expected_status=3)[0], "not_found")
+                self.assert_failure(self.call_cli("task", "get", task_id, expected_status=3)[0], "not_found")
+
+                sender.communicate(timeout=20)
+                self.assertNotEqual(sender.returncode, 0, "The stopped turn's send ends without a result.")
+                self.assertFalse(worktree.exists(), "Deleting the task removes the worktree its turn ran in.")
+                ConversationTurnLockBarrier(self.data_directory, task_id).release()
+                settled = self.assert_success(self.call_cli("conversation", "runtime")[0])
+                self.assertNotIn(thread_id, settled["activeThreadIDs"], "The deleted task's turn is no longer live.")
+                if provider == "claude":
+                    self.wait_for(
+                        lambda: subprocess.run(["pgrep", "-f", str(executable)], capture_output=True).returncode != 0,
+                        "Deleting the task stops its Claude Code process.", timeout=10,
+                    )
+                if waiting_send is not None:
+                    stdout, _ = waiting_send.communicate(timeout=20)
+                    self.assert_failure(json.loads([line for line in stdout.splitlines() if line.strip()][-1]), "task_deleting")
+                    queue_file = self.data_directory / "queued-conversation-messages.json"
+                    queued = json.loads(queue_file.read_text(encoding="utf-8")) if queue_file.is_file() else {}
+                    self.assertNotIn(task_id.upper(), queued, "Deleting the task removes its queued follow-ups.")
+                    if provider == "codex":
+                        held_turns = Path(str(executable) + ".held-turns").read_text(encoding="utf-8").split()
+                        self.assertEqual(len(held_turns), 1, "Neither the queued follow-up nor the waiting send starts a turn.")
+                        # Let the app-server finish the turn it was told to stop, so its late events
+                        # reach the daemon before the transcript is checked.
+                        release = Path(str(executable) + ".interrupt-release")
+                        release.write_text("release\n", encoding="utf-8")
+                        self.wait_for(lambda: not release.exists(), "The Codex fixture should end the stopped turn after the delete.")
+                # The stopped turn's last events must not bring the deleted task's transcript back.
+                time.sleep(0.5)
+                self.assertEqual(self.conversation_row_counts(task_id), {"turns": 0, "messages": 0, "activities": 0})
+                self.assert_failure(self.call_cli("task", "get", task_id, expected_status=3)[0], "not_found")
+                events = [event for event in self.diagnostic_events() if event.get("taskID") == task_id]
+                names = [event.get("event") for event in events]
+                self.assertIn("task.delete.stopping_turn", names)
+                stopped = next(event for event in events if event.get("event") == "task.delete.turn_stopped")
+                if scenario == "question":
+                    self.assertEqual(stopped.get("declinedQuestion"), "true", "The delete declines the question the turn waits on.")
+                    self.assertEqual(stopped["method"], "interrupt", "A declined question ends the turn without force.")
+                    self.assertNotIn("task.delete.turn_force_killed", names)
+                if scenario == "hold-interrupt":
+                    self.assertTrue(Path(str(executable) + ".interrupt-received").is_file(),
+                                    f"The delete first asks {display} to interrupt the turn.")
+                    self.assertIn("task.delete.turn_force_killed", names,
+                                  "A turn that ignores its interrupt is force-stopped.")
+                    self.assertEqual(stopped["method"], "force")
+                self.assertIn("task.delete.succeeded", names)
+                self.assertNotIn("task.delete.failed", names)
+            finally:
+                Path(str(executable) + ".interrupt-release").write_text("release\n", encoding="utf-8")
+                if waiting_send is not None and waiting_send.poll() is None:
+                    waiting_send.kill()
+                    waiting_send.communicate()
+                if sender.poll() is None:
+                    sender.kill()
+                    sender.communicate()

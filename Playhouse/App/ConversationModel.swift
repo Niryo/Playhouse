@@ -281,6 +281,10 @@ protocol ConversationProviderClient: AnyObject {
     /// agent's execution resumes after the report. `nil` removes it.
     func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String)
     func interruptActiveTurn(threadID: String) async throws -> Bool
+    /// Ends the thread's turn now, without waiting for the provider to acknowledge, so the send
+    /// running it gives up the task's turn reservation: what deleting a task falls back on when
+    /// its turn did not stop on an interrupt. True when there was a turn or a wait to end.
+    func forceStopActiveTurn(threadID: String) async -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool
     func rejectUserInput(requestID: String, threadID: String, message: String)

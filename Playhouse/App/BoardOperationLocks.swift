@@ -7,13 +7,14 @@ import SQLite3
 extension BoardTaskManager {
     func withTaskOperationLock<T>(
         _ id: UUID,
+        timeout: Duration? = nil,
         operation: @MainActor () async throws -> T
     ) async throws -> T {
         guard let taskOperationLockDirectory else {
             throw BridgeFileLockError(message: "Couldn't determine the task-store location for an operation lock.")
         }
         let lockURL = taskOperationLockDirectory.appendingPathComponent("\(id.uuidString).lock")
-        return try await withExclusiveFileLocks(at: [lockURL], purpose: "task-operation") {
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "task-operation", timeout: timeout) {
             try await operation()
         }
     }
@@ -40,13 +41,14 @@ extension BoardTaskManager {
     /// remains held. Never hold a task-operation lock across the Codex turn.
     func withConversationTurnReservation<T>(
         _ id: UUID,
+        timeout: Duration? = nil,
         operation: @MainActor () async throws -> T
     ) async throws -> T {
         guard let conversationTurnLockDirectory else {
             throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation-turn reservation.")
         }
         let lockURL = conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).lock")
-        return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-turn") {
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-turn", timeout: timeout) {
             try await operation()
         }
     }
@@ -224,6 +226,7 @@ extension BoardTaskManager {
 
     func withRepositoryAllocationLocks<T>(
         _ repositoryPaths: [String],
+        timeout: Duration? = nil,
         operation: @MainActor () async throws -> T
     ) async throws -> T {
         guard !repositoryPaths.isEmpty else { return try await operation() }
@@ -235,7 +238,7 @@ extension BoardTaskManager {
                 RepositoryAllocationLock.fileName(for: repositoryPath)
             )
         }).sorted { $0.path < $1.path }
-        return try await withExclusiveFileLocks(at: lockURLs, purpose: "repository-allocation") {
+        return try await withExclusiveFileLocks(at: lockURLs, purpose: "repository-allocation", timeout: timeout) {
             try await operation()
         }
     }
@@ -243,21 +246,31 @@ extension BoardTaskManager {
     /// Thrown instead of waiting when a lock taken with `waitingForHolder: false` is held.
     struct FileLockHeldError: Error {}
 
+    /// Thrown when a lock taken with a `timeout` is still held once the timeout has passed.
+    struct FileLockTimeoutError: LocalizedError {
+        let purpose: String
+        var errorDescription: String? { "Timed out waiting for the \(purpose) lock." }
+    }
+
     func withExclusiveFileLocks<T>(
         at lockURLs: [URL],
         purpose: String,
         waitingForHolder: Bool = true,
+        timeout: Duration? = nil,
         operation: @MainActor () async throws -> T
     ) async throws -> T {
         let orderedURLs = Array(Set(lockURLs.map { $0.standardizedFileURL }))
             .sorted { $0.path < $1.path }
         var acquiredKeys: [String] = []
         var descriptors: [Int32] = []
+        let fileDeadline = timeout.map { Date().addingTimeInterval(Double($0.components.seconds) + Double($0.components.attoseconds) / 1e18) }
 
         do {
             for lockURL in orderedURLs {
                 let key = lockURL.path
-                await TaskOperationLockGate.acquire(key)
+                guard await TaskOperationLockGate.acquire(key, timeout: fileDeadline.map { .seconds(max(0, $0.timeIntervalSinceNow)) }) else {
+                    throw FileLockTimeoutError(purpose: purpose)
+                }
                 do {
                     let descriptor = try await Task.detached(priority: .utility) {
                         do {
@@ -280,6 +293,10 @@ extension BoardTaskManager {
                                 guard waitingForHolder else {
                                     _ = Darwin.close(descriptor)
                                     throw FileLockHeldError()
+                                }
+                                if let fileDeadline, Date() >= fileDeadline {
+                                    _ = Darwin.close(descriptor)
+                                    throw FileLockTimeoutError(purpose: purpose)
                                 }
                                 usleep(50_000)
                                 continue
