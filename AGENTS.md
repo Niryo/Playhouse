@@ -16,7 +16,7 @@ Whenever you need to read Swift source, use the `swift-nav` skill in `.agents/sk
 ## App operations through the bridge
 
 - Use `scripts/playhouse.sh` for semantic Playhouse actions and state reads. It builds the app-bundled CLI when needed and sends versioned JSON requests to the bridge daemon (`playhouse-daemon`, bundled beside the CLI in `Contents/MacOS`) over its Unix domain socket, starting the daemon on demand, without opening a window. The "CLI/XPC" suite name used below is historical; the bridge no longer uses XPC.
-- Implement product operations in the shared managers in `Playhouse/App/BridgeCore.swift`; GUI actions and CLI/daemon commands must call the same manager logic. Add a CLI operation and real bridge assertion for each new semantic product capability. Window focus, open sheets, and current selection are transient presentation state and are outside the bridge API.
+- Implement product operations in the shared managers in `Playhouse/App/BridgeCore.swift`; GUI actions and CLI/daemon commands must call the same manager logic. Add a CLI operation and real bridge assertion for each new semantic product capability. Declare every CLI command once in `Playhouse/Bridge/CLICommandCatalog.swift`, with its usage, a one-line description and the agent audiences that may use it: the parser refuses undeclared commands, `help` prints the declarations, and agent instructions in `Playhouse/App/CodexTaskInstructions.swift` point agents at `help --for <audience>` instead of listing commands, so never copy command usage into those instructions. Window focus, open sheets, and current selection are transient presentation state and are outside the bridge API.
 
 ## Plugins
 

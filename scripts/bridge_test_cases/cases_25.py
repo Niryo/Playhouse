@@ -277,6 +277,88 @@ class BridgeTestCases25:
         self.assert_failure(run("flaky", expected_status=1), "unavailable")
 
 
+    # case-contract: test_cli_help_lists_commands_by_group_and_audience | The CLI's help is printed from its single command catalog, which the parser also requires: help, help <group> and <group> --help print that group's declared commands with their usage and a one-line description, and --for <audience> narrows them to one agent. The standalone chat's help lists the board commands, task create and every schedule command but no internal command (schedule tick) and no task-only command (task outcome, task progress publish, task pr autopilot, task move to Done --discard-changes); the task agent's help lists those task commands and still no internal one; the side chat's help lists only the read-only board commands its hook lets it run, the same list it is refused with, and never the option that starts a task; the plugin editor's help lists plugin render and no task or schedule command. The full help lists everything, internal commands marked. An unknown group or audience and an undeclared command or operation are refused as invalid_argument, pointing at help. Following the chat's help, a new task is created and scheduled once for tomorrow at 09:00 with schedule set, and it is in schedule list and in the Scheduled Tasks popover with that run time. The help reads only the CLI's own catalog and the schedule goes through the shared board manager, so provider selection cannot change either; no provider runs.
+    def test_cli_help_lists_commands_by_group_and_audience(self):
+        environment = {**os.environ, "PLAYHOUSE_DATA_DIRECTORY": str(self.data_directory), "PLAYHOUSE_BRIDGE_SERVICE_NAME": arguments.service_name}
+        def help_text(*command):
+            completed = subprocess.run([str(self.cli), *command], capture_output=True, text=True, timeout=30, env=environment)
+            self.assertEqual(completed.returncode, 0, f"{command}: {completed.stdout} {completed.stderr}")
+            return completed.stdout
+        def commands(text):
+            return [line.strip() for line in text.splitlines() if line.startswith("  playhouse ")]
+        def refused(*command):
+            response = self.call_cli(*command, expected_status=2)[0]
+            self.assert_failure(response, "invalid_argument")
+            message = response["error"]["message"]
+            self.assertIn("help", message, f"{command} should point at help: {response}")
+            return message
+
+        full = help_text("help")
+        self.assertIn(f"`playhouse` stands for this CLI: {self.cli}", full)
+        self.assertEqual(help_text(), full, "Running the CLI with no arguments prints the full help.")
+        self.assertIn("  playhouse schedule tick [--now <ISO8601>]", full)
+        self.assertIn("each minute. (internal)", full, "The full help marks internal commands.")
+        self.assertIn("  playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>]", full)
+
+        # One group, asked either way, lists only its own commands, each with a description.
+        schedule = help_text("help", "schedule")
+        self.assertEqual(help_text("schedule", "--help"), schedule)
+        self.assertTrue(commands(schedule) and all(line.startswith("playhouse schedule ") for line in commands(schedule)), schedule)
+        self.assertIn("playhouse schedule set <task-id> --prompt <text> --once <ISO8601> [--title <title>] [--image <path>...] [--mode default|plan] [--model <id>]", commands(schedule))
+        self.assertIn("      Schedule a task to start once with this prompt", schedule)
+        self.assertIn("playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]", commands(help_text("task", "--help")))
+        self.assertEqual(help_text("task", "pr", "--help"), help_text("help", "task", "pr"))
+        self.assertTrue(all(line.startswith("playhouse task pr ") for line in commands(help_text("help", "task", "pr"))))
+
+        chat = help_text("help", "--for", "chat")
+        for line in ["playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]",
+                     "playhouse schedule list", "playhouse schedule clear|pause|resume|run-now <task-id>",
+                     "playhouse workspace repos list", "playhouse plugin mode [--on|--off]"]:
+            self.assertIn(line, commands(chat))
+        self.assertTrue(any(line.startswith("playhouse schedule set <task-id> --prompt <text> --once ") for line in commands(chat)))
+        for hidden in ["schedule tick", "task outcome", "task progress publish", "task pr autopilot", "--discard-changes", "(internal)", "chat page new"]:
+            self.assertNotIn(hidden, chat, f"The chat's help must not list {hidden}.")
+        self.assertEqual(help_text("schedule", "--help", "--for", "chat"), help_text("help", "schedule", "--for", "chat"))
+        self.assertNotIn("schedule tick", help_text("help", "schedule", "--for", "chat"))
+
+        task = help_text("help", "--for", "task")
+        for line in ["playhouse task outcome <task-id> <completed|waiting-response|blocked> [--reason <text>]",
+                     "playhouse task move <task-id> Done --discard-changes", "playhouse task repository add <task-id> --repo <path>",
+                     "playhouse task repository add-worktree <task-id> --repo <path> [--branch <name>] [--branch-from <ref>]",
+                     "playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>"]:
+            self.assertIn(line, commands(task))
+        self.assertTrue(any(line.startswith("playhouse task progress publish ") for line in commands(task)))
+        self.assertTrue(any(line.startswith("playhouse task pr autopilot ") for line in commands(task)))
+        self.assertNotIn("schedule tick", task)
+        self.assertNotIn("(internal)", task)
+
+        side = commands(help_text("help", "--for", "side-chat"))
+        self.assertEqual(sorted({line.split(" <")[0].split(" --")[0].split(" [")[0] for line in side}), [
+            "playhouse help", "playhouse task create", "playhouse task get|show", "playhouse task list", "playhouse task prompt",
+            "playhouse task rename", "playhouse version", "playhouse workspace repos list"])
+
+        self.assertNotIn("--submitted", help_text("help", "--for", "side-chat"), "A read-only side chat can't start a task.")
+        editor = commands(help_text("help", "--for", "plugin-editor"))
+        self.assertTrue(any(line.startswith("playhouse plugin render ") for line in editor), editor)
+        self.assertFalse(any(line.startswith(("playhouse task ", "playhouse schedule ")) for line in editor), editor)
+
+        self.assertIn("Groups: help, status", refused("help", "nosuch"))
+        self.assertIn("chat, side-chat, task, plugin-editor", refused("help", "--for", "nobody"))
+        self.assertIn("playhouse help task", refused("task", "bogus"))
+        self.assertIn("playhouse help", refused("frobnicate"))
+
+        # An agent that follows the chat's help can schedule a task for tomorrow at 09:00.
+        once = next(line for line in commands(chat) if line.startswith("playhouse schedule set <task-id> --prompt <text> --once "))
+        self.assertIn("--once <ISO8601>", once)
+        created = self.assert_success(self.call_cli("task", "create", "--title", "Write the release notes",
+                                                    "--prompt", "Write the release notes for the next version.")[0])
+        tomorrow = (datetime.datetime.now().astimezone() + datetime.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        self.assert_success(self.call_cli("schedule", "set", created["id"], "--prompt", "Write the release notes.",
+                                          "--once", tomorrow.isoformat(timespec="seconds"))[0])
+        listed = self.assert_success(self.call_cli("schedule", "list")[0])["tasks"]
+        self.assertEqual([task["id"] for task in listed], [created["id"]])
+        self.assertEqual(self.parse_schedule_iso(listed[0]["schedule"]["scheduledAt"]), tomorrow.astimezone(datetime.timezone.utc))
+
 HEADLESS_NOTES_SOURCE = """
 Playhouse.commands.register("greet", {
   run: function () { return { text: "Hello from " + Playhouse.props.task.title + " " }; }

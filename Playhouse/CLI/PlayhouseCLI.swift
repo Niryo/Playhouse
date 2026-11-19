@@ -5,9 +5,15 @@ import Foundation
 enum PlayhouseCLI {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
-        if arguments.isEmpty || arguments == ["help"] || arguments == ["--help"] || arguments == ["-h"] {
-            print(helpText)
-            return
+        do {
+            if let help = try helpRequest(arguments) {
+                let executable = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
+                print(CLICommandCatalog.helpText(selecting: help.words, for: help.audience, executable: executable))
+                return
+            }
+        } catch {
+            printResponse(.failure(BridgeRequest(command: "help"), code: "invalid_argument", message: error.localizedDescription))
+            exit(2)
         }
 
         // Claude Code's read-only side chat hook: answered here, without the daemon, for each tool call.

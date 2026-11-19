@@ -451,7 +451,15 @@ extension PlayhouseUITests {
         let chatInstructions = (chatFixtureHistory["threadStartDeveloperInstructions"] as? String) ?? ""
         XCTAssertTrue(chatInstructions.contains("task create"), "The chat must be taught the Playhouse task CLI.")
         XCTAssertTrue(chatInstructions.contains("they always mean Playhouse"))
-        XCTAssertTrue(chatInstructions.contains("task create --title \"<title>\" --prompt"), "The chat must create tasks with a full description.")
+        XCTAssertTrue(chatInstructions.contains("`task create` requires --prompt"), "The chat must create tasks with a full description.")
+        // Its capabilities come from the CLI's own help, never from a copied command list that
+        // drifts from the CLI, and it may call something impossible only after checking help.
+        XCTAssertTrue(chatInstructions.contains("\(cliURL.path)' help --for chat"), "The chat must be sent to the CLI's own help.")
+        XCTAssertTrue(chatInstructions.contains("Say that something isn't possible only after its help shows no command for it."))
+        XCTAssertFalse(chatInstructions.contains("task create --title \"<title>\""))
+        XCTAssertFalse(chatInstructions.contains("say so plainly"))
+        XCTAssertTrue(chatInstructions.contains("Never start, move or schedule a task unless the user asks you to"))
+        XCTAssertTrue(chatInstructions.contains("Before you delete anything, such as a task, skill, rule or MCP server, confirm with the user."))
         // Page titles reach the user as transcript separators, parsed from close-turn.
         // Assert the prohibition positively too: pinning only the old wording would let the
         // instruction come back phrased differently.
