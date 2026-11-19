@@ -159,7 +159,7 @@ extension PlayhouseUITests {
             "The recovered turn must continue in Plan mode, not silently downgrade to Code mode."
         )
     }
-    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript as the agent's row (named, finished working, with an arrow) rather than a reply bubble, opens the report in the read-only agent window when clicked, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
+    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript as the agent's row (named, finished working, with an arrow) rather than a reply bubble, opens the report in the read-only agent window when clicked, and survives fresh CLI/XPC history reads and app reopening without duplication. The agent's window, opened while it runs and again after it finishes, also shows its own work read from its Claude Code sidechain file (found by the meta file naming the launching tool use): its prompt without Claude Code's own reminders, its text, and its tool calls with their input and output, each after the text it followed, ending with its report once as the final answer only after it finishes; a window left open on the running agent updates with that report when the agent finishes, without reopening it. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
     func test_claude_background_agent_keeps_turn_open_until_resolved() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-background-agent")
         try copyFixtureFile(
@@ -182,7 +182,11 @@ extension PlayhouseUITests {
             "task", "create", "--title", "Claude background agent", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
-        launchApp(defaultParent: fixture.parent.path)
+        // The fixture writes the agent's own work where Claude Code keeps its session files.
+        let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: [
+            "CLAUDE_CONFIG_DIR": claudeConfig, "PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR": claudeConfig,
+        ])
         openTask(named: "Claude background agent")
         element("message-composer").click()
         element("message-composer").typeText("Launch a background agent for this turn.")
@@ -204,7 +208,38 @@ extension PlayhouseUITests {
         )
         let reportIdentifier = "agent-report-row-toolu_background_agent"
         XCTAssertFalse(element(reportIdentifier).exists, "A status-only completion must not render progress text as the agent result.")
+        // The running agent's window shows its own work so far, read from its sidechain file.
+        subagentRow.descendants(matching: .any).matching(identifier: "subagent-row-chevron").firstMatch.click()
+        XCTAssertTrue(element("subagent-conversation-panel").waitToExist(timeout: 5), "The running agent's arrow should open its window.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("check something") }, timeout: 10),
+                      "The running agent's window should show the prompt it was given.")
+        XCTAssertTrue(transcriptContains("Checking the fixture README first."), "The running agent's window should show its text.")
+        XCTAssertFalse(transcriptContains("Fixture reminder"), "Claude Code's own reminders are not part of the agent's work.")
+        let agentToolCall = element("conversation-tool-call-toolu_bg_sub_read")
+        XCTAssertTrue(agentToolCall.waitToExist(timeout: 5), "The running agent's window should show its tool calls.")
+        let agentToolSummary = element("conversation-tool-call-summary-toolu_bg_sub_read")
+        XCTAssertTrue((agentToolSummary.value as? String ?? agentToolSummary.label).hasPrefix("Read the fixture"), String(describing: agentToolSummary.value))
+        XCTAssertFalse(transcriptContains("Background check finished."), "The report is not shown before the agent finishes.")
+        let agentText = element("assistant-message-msg_bg_sub_1-0")
+        XCTAssertTrue(agentText.exists, "The agent's text renders as its own message.")
+        XCTAssertGreaterThanOrEqual(agentToolCall.frame.minY, agentText.frame.maxY - 1, "The agent's tool call sits after the text it followed.")
+        // A call this short shows its whole input and output without a toggle.
+        XCTAssertTrue(element("conversation-tool-call-input-toolu_bg_sub_read").exists)
+        XCTAssertTrue(transcriptContains("cat README.md"), "The agent's tool call shows its input.")
+        XCTAssertTrue(transcriptContains("Fixture README"), "The agent's tool call shows its output.")
+        XCTAssertTrue(element("conversation-tool-call-output-toolu_bg_sub_read").exists)
+        attachScreenshot(named: "Claude background agent work while running")
+        // The window left open on the running agent updates once it finishes, without reopening it.
         try "Release summary notification.\n".write(to: summaryRelease, atomically: true, encoding: .utf8)
+        let agentReport = element("assistant-message-msg_bg_sub_2-0")
+        XCTAssertTrue(agentReport.waitToExist(timeout: 15), "The open agent window should show the report once the agent finishes.")
+        XCTAssertTrue(element("subagent-conversation-panel").exists, "The agent window stays open while it updates.")
+        XCTAssertFalse(element("assistant-message-toolu_background_agent-report").exists,
+                       "The report the agent already wrote as its last text is shown once, not added again.")
+        XCTAssertLessThanOrEqual(agentToolCall.frame.maxY, agentReport.frame.minY + 1, "The report follows the agent's earlier work.")
+        attachScreenshot(named: "Claude background agent window updated with its report")
+        element("subagent-back-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5))
         // The fixture reports no outcome, so an outcome nudge turn follows at once; each turn
         // that settles folds Worked for closed again. Expand only after everything has settled.
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response"), "The turn and its outcome nudge should settle.")
@@ -243,6 +278,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("subagent-conversation-panel").waitToExist(timeout: 5), "The agent row's arrow should open the agent's window.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("Background check finished.") }, timeout: 10),
                       "The agent window should show the agent's report.")
+        XCTAssertTrue(transcriptContains("Checking the fixture README first."), "The finished agent's window keeps its earlier work.")
+        XCTAssertTrue(element("conversation-tool-call-toolu_bg_sub_read").exists, "The finished agent's window keeps its tool calls.")
         attachScreenshot(named: "Claude background agent report opened")
         element("subagent-back-button").click()
         XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5))
