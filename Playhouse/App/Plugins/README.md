@@ -57,7 +57,11 @@ two. `catalog/Composer.js` does the same for `ComposerView`, the conversation
 composer's box: the editor, the attach button, the Skills button, the Plan
 and Goal buttons (an orange highlight while on, never both), Start
 Implementing, the provider menu, the model button with its popover, the
-schedule button and the send, stop, continue or schedule control. The
+schedule button and the send, stop, continue or schedule control. Its toolbar
+is two row Stacks, the actions and then the provider, model and send; the native
+box sets them side by side while both fit at their natural widths and otherwise
+puts the second on a row of its own under the first (a narrow chat sidebar),
+which the catalog's copy, shown at a fixed width, never needs. The
 conversation (`TaskConversationView.composer`) derives a `ComposerModel` and
 `ComposerActions` and passes the notices, images, queued follow-ups and goal
 row above the box as the view's native `header`, and the schedule popover's

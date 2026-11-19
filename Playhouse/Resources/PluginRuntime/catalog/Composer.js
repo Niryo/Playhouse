@@ -124,18 +124,23 @@ function Primary(props) {
   }, label);
 }
 
+// The actions, then the provider, model and send at the trailing edge. Where one row is too
+// narrow for both, the native box moves the second group to a row of its own; this copy is
+// always shown at the catalog's width, where they share a row.
 function Toolbar(props) {
   var model = props.model, on = props.on;
   return h(Stack, { axis: "h", spacing: 12 },
-    h(AttachButton, { model: model, on: on }),
-    model.skills ? h(SkillsButton, { testID: model.prefix + "open-skills-button", onPress: on.openSkills }) : null,
-    h(ModeToggles, { model: model, on: on }),
-    model.startImplementing != null ? h(StartImplementing, { model: model, on: on }) : null,
+    h(Stack, { axis: "h", spacing: 12 },
+      h(AttachButton, { model: model, on: on }),
+      model.skills ? h(SkillsButton, { testID: model.prefix + "open-skills-button", onPress: on.openSkills }) : null,
+      h(ModeToggles, { model: model, on: on }),
+      model.startImplementing != null ? h(StartImplementing, { model: model, on: on }) : null),
     h(Spacer, { minLength: 0 }),
-    h(ProviderMenu, { model: model, on: on }),
-    h(ModelPicker, { model: model, on: on }),
-    model.schedule != null ? h(ScheduleButton, { model: model, on: on }) : null,
-    h(Primary, { model: model, on: on }));
+    h(Stack, { axis: "h", spacing: 12 },
+      h(ProviderMenu, { model: model, on: on }),
+      h(ModelPicker, { model: model, on: on }),
+      model.schedule != null ? h(ScheduleButton, { model: model, on: on }) : null,
+      h(Primary, { model: model, on: on })));
 }
 
 function Composer(props) {

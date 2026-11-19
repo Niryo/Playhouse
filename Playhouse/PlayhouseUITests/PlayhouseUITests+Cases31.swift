@@ -880,7 +880,7 @@ extension PlayhouseUITests {
         XCTAssertTrue((composer.value as? String ?? "").contains("Continue working"), "The composer accepts the next request.")
         attachScreenshot(named: "Plugin editor after daemon restart")
     }
-    // case-contract: test_plugin_edit_opens_editor_mid_turn | Edit on a plugin whose editor conversation has a turn running opens that conversation at once: while the editor's Claude turn has streamed its first answer and still holds its turn, the editor that sent it shows the turn running, `conversation runtime` lists the editor's task ID in activeTaskIDs (and drops it once the turn ends), and `plugin edit --id` returns within seconds with the same editor ID and the turn keeps running, and in the window the plugin submenu's Edit…, from the board and again with the editor already open, shows the editor with its preview and the running turn's pause button without closing it, and the output the turn streams next appears live in the reopened editor, as it does for `conversation watch` on the editor. Once the turn finishes its reply follows in the same conversation; `plugin sessions` lists the editor, `plugin discard --id` resets the saved plugin's draft and keeps its editor, and deleting the plugin removes its editor from `plugin sessions`. Opening an editor is Playhouse-owned and provider neutral, so Claude represents both providers.
+    // case-contract: test_plugin_edit_opens_editor_mid_turn | Edit on a plugin whose editor conversation has a turn running opens that conversation at once: while the editor's Claude turn has streamed its first answer and still holds its turn, the editor that sent it shows the turn running, `conversation runtime` lists the editor's task ID in activeTaskIDs (and drops it once the turn ends), and `plugin edit --id` returns within seconds with the same editor ID and the turn keeps running, and in the window the plugin submenu's Edit…, from the board and again with the editor already open, shows the editor with its preview and the running turn's pause button without closing it, the plugin submenu stays open under the pointer while the turn runs, and the output the turn streams next appears live in the reopened editor, as it does for `conversation watch` on the editor. Once the turn finishes its reply follows in the same conversation; `plugin sessions` lists the editor, `plugin discard --id` resets the saved plugin's draft and keeps its editor, and deleting the plugin removes its editor from `plugin sessions`. Opening an editor is Playhouse-owned and provider neutral, so Claude represents both providers.
     func test_plugin_edit_opens_editor_mid_turn() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-editor-hold")
         let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
@@ -966,6 +966,13 @@ extension PlayhouseUITests {
         XCTAssertTrue(live.waitToExist(timeout: 10), "The reopened editor shows the running turn's live output.")
         XCTAssertTrue(element("pause-response-button").exists, "The turn is still running.")
         attachScreenshot(named: "Plugin editor opened mid-turn")
+
+        // The window's runtime and CPU feeds keep changing while the turn runs (CPU every 4 seconds). The menu
+        // bar must not be rebuilt for them, or a plugin submenu open under the pointer closes before its click.
+        let openEdit = openInstalledPluginSubmenu(on: "Edit…", pluginRow: "Busy editor — Main sidebar")
+        XCTAssertFalse(waitUntil({ !openEdit.isHittable }, timeout: 5), "The plugin submenu stays open under the pointer while the editor's turn runs.")
+        app.typeKey(.escape, modifierFlags: [])
+        app.typeKey(.escape, modifierFlags: [])
 
         // With the editor already open, Edit… keeps it open on the live turn.
         clickEdit()
