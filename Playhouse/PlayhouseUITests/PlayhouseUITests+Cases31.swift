@@ -798,7 +798,7 @@ extension PlayhouseUITests {
     /// `TaskThreadDeveloperInstructions.pluginChangeRule`: the editor's setup choices are a starting point.
     static let pluginChangeRule = "When the user asks to change the plugin's name, icon, placement or presentation, update plugin.json to match and keep the plugin ID and folder"
 
-    // case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
+    // case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, points it at the CLI's plugin-editor help for its commands, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
     func test_plugin_authoring_codex_instructions_resume() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: true).path
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
@@ -822,6 +822,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Build a countdown timer." }, timeout: 20))
         let instructions = try XCTUnwrap(history()["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains("plugin render"), "Codex validates the persistent draft without publishing it.")
+        XCTAssertTrue(instructions.contains("\(cliURL.path)' help --for plugin-editor"), "The editor finds its commands in its help.")
         for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", Self.pluginChangeRule, pluginID] {
             XCTAssertTrue(instructions.contains(text), "Codex receives \(text) in thread instructions.")
         }

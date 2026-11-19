@@ -836,6 +836,9 @@ class BridgeTestCases06:
             instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)
             self.assertIn("task progress publish", instructions)
+            # The task agent finds every other command in its audience's help.
+            self.assertIn(f"'{self.cli}' help --for task", instructions)
+            self.assertNotIn("Repository context commands for this task", instructions)
             self.assertIn("hidden from the conversation", instructions)
             self.assertIn("at least every 30 seconds", instructions)
             self.assertIn("active suite/case and position", instructions)

@@ -219,9 +219,10 @@ SIDE_CHAT_MARKER = "You are now in a Playhouse side chat"
 
 def side_chat_respond(user_text, instructions, turn, prior_turns):
     """Answers a Playhouse side chat turn. The first turn of a fork quotes the selection and the
-    source session's latest prompt. Asking it to create a task tries four tool calls: a Write, an
-    ordinary shell command, the Playhouse CLI chained with `&` to another command, and the CLI's
-    `task create` whose quoted description contains shell punctuation. As Claude Code does, each
+    source session's latest prompt. Asking it to create a task tries five tool calls: a Write, an
+    ordinary shell command, the Playhouse CLI chained with `&` to another command, the CLI's
+    `task create` whose quoted description contains shell punctuation, and its `task prompt` with
+    the options that would start a task. As Claude Code does, each
     call first goes through the `PreToolUse` hooks the launch's --settings carry (recorded in
     `hookDecisions`), and the fixture then asks Playhouse's permission handler about each one
     (`permissionDecisions`). The CLI command really runs when both allow it. A question naming
@@ -242,8 +243,9 @@ def side_chat_respond(user_text, instructions, turn, prior_turns):
             raise TimeoutError("The test did not release the held side chat answer.")
         release.unlink(missing_ok=True)
     if "create a task" in question.lower():
+        # The instructions name the CLI in the line that runs its help for the side chat.
         line = next((line.strip() for line in instructions.splitlines()
-                     if line.strip().startswith("'") and "task create" in line), "")
+                     if line.strip().startswith("'") and " help --for side-chat" in line), "")
         executable = shlex.split(line)[0] if line else "playhouse-cli"
         cli_command = shlex.join([executable, "task", "create", "--title", "Side chat follow-up",
                                   "--prompt", f"Follow up on the side chat about: {question} -> keep a; b <path>"])
@@ -252,6 +254,9 @@ def side_chat_respond(user_text, instructions, turn, prior_turns):
             "side-chat-shell": {"tool_name": "Bash", "input": {"command": "touch side-chat-forbidden.txt"}},
             "side-chat-chained": {"tool_name": "Bash", "input": {"command": shlex.join([executable, "task", "list"]) + " & touch side-chat-forbidden.txt"}},
             "side-chat-cli": {"tool_name": "Bash", "input": {"command": cli_command}},
+            # A board command the side chat may run, but with the options that would start the task.
+            "side-chat-start": {"tool_name": "Bash", "input": {"command": shlex.join([
+                executable, "task", "prompt", session, "--text", "Start it.", "--status", "In Progress", "--submitted", "true"])}},
         }
         settings = json.loads(argument("--settings") or "{}")
         hook_commands = [hook["command"] for entry in settings.get("hooks", {}).get("PreToolUse", [])

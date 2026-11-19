@@ -51,6 +51,7 @@
 		A10000000000000000000008 /* WorkspaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* WorkspaceSupport.swift */; };
 		A10000000000000000000009 /* BridgeCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* BridgeCore.swift */; };
 		A1000000000000000000000A /* BridgeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BridgeContract.swift */; };
+		C11C0000000000000000CA01 /* CLICommandCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11C0000000000000000CA02 /* CLICommandCatalog.swift */; };
 		A1000000000000000000000D /* WorkspaceChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* WorkspaceChanges.swift */; };
 		A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* MonacoDiffEditor.swift */; };
 		A10000000000000000000015 /* CodeSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* CodeSyntaxHighlighter.swift */; };
@@ -246,6 +247,7 @@
 		A2000000000000000000000A /* WorkspaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSupport.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BridgeCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* BridgeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeContract.swift; sourceTree = "<group>"; };
+		C11C0000000000000000CA02 /* CLICommandCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/CLICommandCatalog.swift; sourceTree = "<group>"; };
 		A2000000000000000000000D /* WorkspaceChanges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceChanges.swift; sourceTree = "<group>"; };
 		A2000000000000000000000E /* MonacoDiffEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonacoDiffEditor.swift; sourceTree = "<group>"; };
 		A20000000000000000000015 /* CodeSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeSyntaxHighlighter.swift; sourceTree = "<group>"; };
@@ -623,6 +625,7 @@
 				B20000000000000000000017 /* ConversationManager.swift */,
 				B20000000000000000000006 /* PlayhouseBridgeRuntime.swift */,
 				A2000000000000000000000C /* BridgeContract.swift */,
+				C11C0000000000000000CA02 /* CLICommandCatalog.swift */,
 				A2000000000000000000000D /* WorkspaceChanges.swift */,
 				A2000000000000000000000E /* MonacoDiffEditor.swift */,
 				A20000000000000000000015 /* CodeSyntaxHighlighter.swift */,
@@ -841,6 +844,7 @@
 				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
 				"$(SRCROOT)/Playhouse/Bridge/BridgeContract.swift",
+				"$(SRCROOT)/Playhouse/Bridge/CLICommandCatalog.swift",
 				"$(SRCROOT)/Playhouse/Bridge/BridgeSocket.swift",
 				"$(SRCROOT)/Playhouse/Bridge/UpdateCore.swift",
 				"$(SRCROOT)/Playhouse/Bridge/ReleaseSigningKey.swift",
@@ -1047,6 +1051,7 @@
 				A10000000000000000000008 /* WorkspaceSupport.swift in Sources */,
 				A10000000000000000000009 /* BridgeCore.swift in Sources */,
 				A1000000000000000000000A /* BridgeContract.swift in Sources */,
+				C11C0000000000000000CA01 /* CLICommandCatalog.swift in Sources */,
 				A1000000000000000000000D /* WorkspaceChanges.swift in Sources */,
 				A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */,
 				A10000000000000000000015 /* CodeSyntaxHighlighter.swift in Sources */,

@@ -306,7 +306,7 @@ class BridgeTestCases22:
         self.assertNotIn("Plugin authoring", plain["arguments"][plain["arguments"].index("--append-system-prompt") + 1])
         self.assertNotIn("playhouse-plugin", plain["skills"])
 
-    # case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
+    # case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement, generated plugin identity and permission to change any of those choices in thread instructions, points it at the CLI's plugin-editor help for its commands, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
     def test_plugin_authoring_codex_instructions_resume(self):
         # Codex: the instructions ride the thread and the skill an extra root plus a structured input.
         executable = self.install_provider_fixture("codex", "codex-fixture-plugin-author")
@@ -327,6 +327,7 @@ class BridgeTestCases22:
         self.assertIn(self.PLUGIN_CHANGE_RULE, history["threadStartDeveloperInstructions"], "Codex is told every setup choice can change on request.")
         self.assertIn(task["authoredPluginID"], history["threadStartDeveloperInstructions"])
         self.assertIn("persistent draft", history["threadStartDeveloperInstructions"])
+        self.assertIn(f"'{self.cli}' help --for plugin-editor", history["threadStartDeveloperInstructions"], "The editor finds its commands in its help.")
         roots = [Path(root) for root in history["skillExtraRoots"] if (Path(root) / "playhouse-plugin" / "SKILL.md").exists()]
         self.assertEqual(len(roots), 1, f"One extra root carries the plugin skill: {history['skillExtraRoots']}")
         self.assertSamePath(roots[0].parent, self.data_directory / "skill-bridge" / "codex")
