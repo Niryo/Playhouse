@@ -129,7 +129,7 @@ extension CodexAppServerClient {
     /// A question no conversation here owns is ignored, not added to `pendingUserInputs`, so
     /// it never counts: the idle stop stays the backstop for a question nobody will answer.
     var serverHasLocalWork: Bool {
-        !turnContexts.isEmpty || !startingThreadIDs.isEmpty || !pendingUserInputs.isEmpty || !contextlessTurnIDs.isEmpty
+        !turnContexts.isEmpty || !startingThreadIDs.isEmpty || !pendingUserInputs.isEmpty || !contextlessTurnIDs.isEmpty || !plainTurns.isEmpty
             || goalObservationThreadID != nil || conversationOperationsInFlight > 0 || initializationTask != nil
     }
 
@@ -241,6 +241,10 @@ extension CodexAppServerClient {
         ]) { _, new in new }))
         let error = ClientError.processExited(exitDetail)
         for pending in pendingCompactions.values { pending.result = .failure(error) }
+        for plain in plainTurns.values { plain.finish(status: "failed", error: exitDetail) }
+        plainTurns.removeAll()
+        mcpCallThread?.idle?.cancel()
+        mcpCallThread = nil
         process = nil
         inputPipe = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil

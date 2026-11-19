@@ -29,6 +29,21 @@ extension PlayhouseCLI {
         return result
     }
 
+    /// `--mock <command>[:<tool>]=<json>`, repeatable: canned bridge answers for
+    /// `plugin render` and `plugin service`, by command (and MCP tool).
+    static func parseMocks(_ values: [String]?) throws -> BridgeValue? {
+        guard let values, !values.isEmpty else { return nil }
+        var mocks: [String: BridgeValue] = [:]
+        for value in values {
+            guard let separator = value.firstIndex(of: "="), separator != value.startIndex,
+                  let result = try? JSONDecoder().decode(BridgeValue.self, from: Data(value[value.index(after: separator)...].utf8)) else {
+                throw CLIError.usage("Use --mock <command>[:<tool>]=<json result>, such as --mock 'mcp.call={\"content\":[]}'.")
+            }
+            mocks[String(value[..<separator])] = result
+        }
+        return .object(mocks)
+    }
+
     static func requiredFlag(_ name: String, flags: [String: [String]]) throws -> [String] {
         guard let values = flags[name], !values.isEmpty else { throw CLIError.usage("Missing required option \(name).") }
         return values

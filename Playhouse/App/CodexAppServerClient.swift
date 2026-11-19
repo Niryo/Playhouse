@@ -182,6 +182,15 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
     var turnContexts: [String: TurnContext] = [:]
+    /// Plugins' agent turns (`agent.run`), each on an ephemeral thread of its own, by thread.
+    /// Their notifications go only to them, never to a conversation's state.
+    var plainTurns: [String: CodexPlainTurn] = [:]
+    /// The ephemeral thread `callMcpTool` keeps warm between calls.
+    var mcpCallThread: (id: String, idle: Task<Void, Never>?)?
+    /// The warm thread's start in flight, shared by concurrent first calls.
+    var mcpCallThreadStart: Task<String, Error>?
+    /// Direct MCP calls waiting on the warm thread; it goes idle only once none are.
+    var mcpCallsInFlight = 0
     /// Subagent thread -> the thread that spawned it, from `thread/started`.
     var threadParents: [String: String] = [:]
     /// The cumulative total last seen per thread, so a repeated usage

@@ -41,8 +41,9 @@ message, for any the request leaves open. Don't guess:
     it is collapsed (`state.collapsed`); render the section's content only.
     Render nothing to hide the section, header included.
   - `headless`: only at `composerActions`. No button and no surface: the
-    plugin only adds `/` commands to the composer's command menu (see
-    "Slash commands" below). Pick it when the user wants a slash command.
+    plugin adds `/` commands to the composer's command menu (see "Slash
+    commands" below), works in the background (see "Background work" below),
+    or both. Pick it when the user wants a slash command or only background work.
 - **Name and icon**: a short name and an SF Symbol name for its button.
 
 The name, placement and presentation the user picked when the editor opened are
@@ -70,7 +71,8 @@ joined by hyphens, and it is also the folder name. The folder holds two files.
 ```
 
 `entry`, `width` and `height` are optional. `entry` defaults to `index.js`,
-and each presentation picks a size when they are absent.
+and each presentation picks a size when they are absent. `commands`, `events`
+and `mcpTools` are optional too (see "Slash commands" and "Background work").
 
 `index.js` is plain JavaScript, with no JSX, TypeScript, imports or bundler.
 It uses these globals:
@@ -144,7 +146,9 @@ It uses these globals:
   (`{pluginID, key, value}`, when a saved value changes) and `"app.launched"`
   (`{}`, once per app launch; the first listener added after it still hears
   it). Subscribe in a
-  `React.useEffect` and return the stop function from it.
+  `React.useEffect` and return the stop function from it. These are the mounted
+  UI's listeners; work that must happen with no window open belongs in the
+  background half (`Playhouse.service.on`, below).
 - `Playhouse.throttle(fn, seconds)` returns a function that runs `fn` at once,
   then collapses the calls made while it runs or within `seconds` into one
   trailing call with the latest arguments. Wrap anything an event triggers
@@ -264,6 +268,75 @@ nothing between calls except through `Playhouse.setState`. Check the commands
 with `playhouse-cli slash-commands list --task <task-id> --query <name>` and
 `playhouse-cli slash-commands run --task <task-id> --command <name> [--item <id>
 [--button <id>]]` once the plugin is saved.
+
+### Background work
+
+A plugin can also work in the background, in Playhouse's daemon, whether or not
+its window or popover is open: react to app events, call MCP tools, and run an
+agent and hear its result. List the events its background half hears in
+`plugin.json`'s `events` (`"app.focus"`, `"app.launched"`,
+`"task.statusChanged"`, `"plugin.stateChanged"`, `"agent.finished"`); any
+presentation may have them. Optionally list the only MCP tools it calls in
+`mcpTools` (any other is refused with `permission_denied`):
+
+```json
+{ "id": "slack-dms", "name": "Slack DMs", "icon": "bubble.left.and.bubble.right",
+  "placement": "mainSidebar", "presentation": "popover",
+  "events": ["app.focus", "agent.finished"],
+  "mcpTools": ["mcp__claude_ai_Slack__slack_search_public_and_private"] }
+```
+
+The same `index.js` holds both halves:
+
+- `Playhouse.service.on(name, handler)` registers a background handler for an
+  event the manifest lists. It does nothing in the mounted UI, and
+  `Playhouse.render` does nothing in the background, so nothing runs twice.
+  The handler gets `{name, payload}` with the payload's fields beside them and
+  may return a Promise. Each event runs in a fresh copy of the script with the
+  plugin's props (`plugin` and `state`), then is thrown away: keep everything
+  between events in `Playhouse.setState`. `Playhouse.bridge` and `fetch` work;
+  `Playhouse.ui` calls reject with `unavailable`. `app.focus` runs at most once
+  per 20 seconds. A `plugin.stateChanged` reaches only the plugin whose state
+  changed, so the two halves talk through state: the background half saves,
+  and the popover re-renders from `Playhouse.props.state`.
+- `Playhouse.mcp.call(tool, arguments, {provider})` calls an MCP tool (a full
+  name such as `mcp__claude_ai_Slack__slack_read_channel`) with no model turn,
+  through Claude Code, or Codex with `{provider: "codex"}` (each reaches the MCP
+  servers configured for it), and resolves `{content, structuredContent, isError}`. It rejects with
+  `unavailable` when Claude Code can't, `tool_failed` with Claude Code's
+  message, or `timeout`.
+- `Playhouse.agent.run({prompt, provider, model, allowedTools, jsonSchema,
+  context, cwd})` starts an agent in the background, Claude Code by default or
+  Codex with `provider: "codex"` (use that provider's model names; Codex runs
+  read-only and ignores `allowedTools`), and resolves `{runID}` at once; it
+  needs `"agent.finished"` in `events`. When it ends, the background
+  half hears `agent.finished` with `{runID, status: "done", "failed" or
+  "cancelled", result, error, context}`: `result` is the `jsonSchema`'s
+  structured output, or the final text without one, and `context` is the small
+  JSON value you passed, unchanged, so the handler knows what the run was for
+  (`{kind: "slack-task", userId}`). A run cut off by Playhouse quitting ends
+  `failed` with the error `"interrupted"`. `Playhouse.agent.cancel(runID)` stops
+  one.
+
+```js
+Playhouse.service.on("app.focus", async function () {
+  var res = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_search_public_and_private", { query: "to:me" });
+  await Playhouse.setState("people", res.content.map(function (block) { return block.text; }));
+});
+Playhouse.service.on("agent.finished", async function (e) {
+  if (e.context.kind !== "slack-task" || e.status !== "done") return;
+  await Playhouse.bridge("task.create", { title: e.result.title, prompt: e.result.prompt, roots: [], repositories: [] });
+});
+```
+
+Check the background half with `playhouse-cli plugin service --file
+<draft-folder>/<plugin-id>/index.js --event app.focus` (repeat `--event`; give
+a payload as `--event 'agent.finished:{"runID":"r1","status":"done","result":{…},"context":{…}}'`).
+It reports the handlers' bridge calls, the state they wrote and their errors.
+`mcp.call` and `agent.run` reject with `unavailable` there unless you fake
+them with `--mock 'mcp.call={"content":[…]}'`, `--mock
+'mcp.call:<tool>={…}'` or `--mock 'agent.run={"runID":"r1"}'`; `plugin render`
+takes the same `--mock`.
 
 ## 3. Check the draft
 

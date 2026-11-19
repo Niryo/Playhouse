@@ -59,10 +59,16 @@ final class PluginRuntime {
     @ObservationIgnored private var commandResults: [Int: Result<PluginValue, PluginHostError>] = [:]
     @ObservationIgnored private var nextCommandToken = 0
 
+    /// The plugin whose props this runtime holds; an event targeted at another plugin skips it.
+    /// Nil for a script with no plugin in its props.
+    @ObservationIgnored private var pluginID: String?
+
     /// Loads the runtime from `resources` and runs `source`. `props` is the
     /// plugin's input, readable as `Playhouse.props`. A script that throws
-    /// leaves its error in `errors` rather than failing the init.
-    init(source: String, sourceName: String = "plugin.js", props: [String: PluginValue] = [:], resources: URL? = PluginRuntime.bundledResources, timers: Timers = .mainQueue) throws {
+    /// leaves its error in `errors` rather than failing the init. With
+    /// `service`, it is the plugin's background half: `Playhouse.service.on`
+    /// registers handlers and `Playhouse.render` does nothing.
+    init(source: String, sourceName: String = "plugin.js", props: [String: PluginValue] = [:], resources: URL? = PluginRuntime.bundledResources, timers: Timers = .mainQueue, service: Bool = false) throws {
         guard let resources else { throw PluginTreeError(message: "This build has no bundled plugin runtime.") }
         guard let context = JSContext() else { throw PluginTreeError(message: "Couldn't create a JavaScript context.") }
         self.context = context
@@ -74,6 +80,8 @@ final class PluginRuntime {
             self?.record(error: Self.describe(exception))
         }
         installNative()
+        pluginID = props["plugin"]?.object?["id"]?.string
+        if service { context.setObject(true, forKeyedSubscript: "__playhouseService" as NSString) }
 
         let prelude = try String(contentsOf: resources.appendingPathComponent("prelude.js"), encoding: .utf8)
         context.evaluateScript(prelude, withSourceURL: resources.appendingPathComponent("prelude.js"))
@@ -107,6 +115,8 @@ final class PluginRuntime {
     /// updates commit as one batch. Returns how many listeners heard it.
     @discardableResult
     func emit(_ event: PluginEvent) -> Int {
+        // A script rendered from a file has no plugin id of its own, so it hears every event.
+        guard pluginID == nil || event.reaches(pluginID) else { return 0 }
         let emitter = context.objectForKeyedSubscript("__playhouseEmit")
         return Int(emitter?.call(withArguments: [event.name, PluginValue.object(event.payload).javaScriptValue(in: context)])?.toInt32() ?? 0)
     }
@@ -114,6 +124,7 @@ final class PluginRuntime {
     /// Replaces `Playhouse.props` and tells `Playhouse.useProps` subscribers,
     /// whose updates commit as one batch.
     func updateProps(_ props: [String: PluginValue]) {
+        pluginID = props["plugin"]?.object?["id"]?.string ?? pluginID
         context.objectForKeyedSubscript("__playhouseSetProps")?.call(withArguments: [PluginValue.object(props).javaScriptValue(in: context)])
     }
 
@@ -165,6 +176,15 @@ final class PluginRuntime {
         nextCommandToken += 1
         let token = nextCommandToken
         context.objectForKeyedSubscript("__playhouseRunCommand")?.call(withArguments: [token, name, phase, request.javaScriptValue(in: context)])
+        return token
+    }
+
+    /// Calls the background half's handlers for `event`; once every promise they
+    /// returned has settled, `commandResult(_:)` holds `{handlers, errors}`.
+    func runService(_ event: PluginEvent) -> Int {
+        nextCommandToken += 1
+        let token = nextCommandToken
+        context.objectForKeyedSubscript("__playhouseRunService")?.call(withArguments: [token, event.name, PluginValue.object(event.payload).javaScriptValue(in: context)])
         return token
     }
 

@@ -82,9 +82,10 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
     /// plugin's name, at the bottom of the board's sidebar: the only
     /// presentation of `PluginPlacement.mainSidebarBottom`, and only there.
     case section
-    /// No surface at all: the plugin only exposes `/` commands in the
-    /// composer (its manifest's `commands`), whose menus the host draws.
-    /// Its placement is always `PluginPlacement.composerActions`.
+    /// No surface at all: the plugin exposes `/` commands in the composer (its
+    /// manifest's `commands`), whose menus the host draws, a background half in
+    /// the daemon (its `events`), or both. Its placement is always
+    /// `PluginPlacement.composerActions`.
     case headless
 
     var title: String {
@@ -142,8 +143,15 @@ struct PluginManifest: Codable, Equatable, Sendable {
     var height: Double?
     /// The `/` commands the plugin exposes in the composer, which its script
     /// registers with `Playhouse.commands.register`. Any plugin may declare
-    /// them; a headless plugin has nothing else.
+    /// them; a headless plugin has these, `events`, or both.
     var commands: [PluginCommandManifest]? = nil
+    /// The app events (`PluginEvent.names`) the plugin's background half hears in
+    /// the daemon through `Playhouse.service.on`, with or without a window open.
+    /// Any presentation may declare them.
+    var events: [String]? = nil
+    /// The only MCP tools `Playhouse.mcp.call` may call, when present, such as
+    /// `mcp__claude_ai_Slack__slack_read_channel`; it catches mistakes, it isn't a security boundary.
+    var mcpTools: [String]? = nil
 }
 
 /// One plugin folder as `plugin list` reports it.
@@ -170,11 +178,18 @@ struct PluginRecord: Codable, Equatable, Sendable, Identifiable {
     var state: [String: PluginValue] = [:]
     /// The manifest's `/` commands.
     var commands: [PluginCommandManifest] = []
+    /// The manifest's `events`: what its background half hears in the daemon.
+    var events: [String] = []
+    /// The manifest's `mcpTools`, nil when it allows any tool.
+    var mcpTools: [String]? = nil
+
+    /// Has a background half in the daemon (`Playhouse.service.on`).
+    var hasService: Bool { !events.isEmpty }
 
     /// Mounted in the window: valid and not disabled.
     var isActive: Bool { valid && enabled }
 
-    /// Has an entry button or an in-place surface; a headless plugin only has commands.
+    /// Has an entry button or an in-place surface; a headless plugin only has commands and a background half.
     var hasSurface: Bool { presentation != PluginPresentation.headless.rawValue }
 
     /// The same plugin at another placement: its commands run in the
@@ -188,6 +203,8 @@ struct PluginRecord: Codable, Equatable, Sendable, Identifiable {
         record.enabled = enabled
         record.state = state
         record.commands = commands
+        record.events = events
+        record.mcpTools = mcpTools
         return record
     }
 }
@@ -680,7 +697,8 @@ struct PluginLibrary: Sendable {
                 errors.append("Unknown presentation \"\(manifest.presentation)\". Presentations: \(PluginPresentation.allCases.map(\.rawValue).joined(separator: ", ")).")
             }
             if BuiltInPlugins.isBuiltIn(folderID) { errors.append("\"\(folderID)\" is a built-in plugin's id.") }
-            errors += Self.commandErrors(manifest.commands ?? [], presentation: PluginPresentation(rawValue: manifest.presentation))
+            errors += Self.commandErrors(manifest.commands ?? [], presentation: PluginPresentation(rawValue: manifest.presentation), hasEvents: !(manifest.events ?? []).isEmpty)
+            errors += Self.serviceErrors(events: manifest.events ?? [], mcpTools: manifest.mcpTools)
         }
         let entry = folder.appendingPathComponent(manifest.entry ?? Self.defaultEntry)
         let entryInside = entry.standardizedFileURL.path.hasPrefix(folder.standardizedFileURL.path + "/")
@@ -696,6 +714,8 @@ struct PluginLibrary: Sendable {
             folder: folder.path, entryPath: entry.path, valid: errors.isEmpty, errors: errors
         )
         record.commands = manifest.commands ?? []
+        record.events = manifest.events ?? []
+        record.mcpTools = manifest.mcpTools
         if validate, errors.isEmpty {
             let renderErrors = self.renderErrors(record)
             if !renderErrors.isEmpty {
@@ -705,6 +725,8 @@ struct PluginLibrary: Sendable {
                     folder: record.folder, entryPath: record.entryPath, valid: false, errors: renderErrors
                 )
                 record.commands = manifest.commands ?? []
+                record.events = manifest.events ?? []
+                record.mcpTools = manifest.mcpTools
             }
         }
         return record
@@ -758,8 +780,13 @@ enum PluginHostRules {
     static func refusal(kind: String, name: String, placement: PluginPlacement?, arguments: PluginValue = .null) -> PluginHostError? {
         switch kind {
         case "bridge":
-            // Every other bridge command is the plugin's to call; rendering plugins would recurse.
-            return name == "plugin.render" ? PluginHostError(code: "invalid_argument", message: "A plugin can't render plugins.") : nil
+            // Every other bridge command is the plugin's to call; rendering plugins would recurse,
+            // and the daemon alone delivers events to plugins' background halves.
+            if name == "plugin.render" { return PluginHostError(code: "invalid_argument", message: "A plugin can't render plugins.") }
+            if name == "plugin.service" || name == "plugin.services" {
+                return PluginHostError(code: "invalid_argument", message: "A plugin can't run plugins' background halves; the daemon delivers their events.")
+            }
+            return nil
         case "ui":
             guard uiCalls.contains(name) else { return PluginHostError(code: "invalid_argument", message: "Unknown host call ui.\(name).") }
             if name.hasPrefix("composer."), let placement, !placement.hasTask || placement == .taskItem {

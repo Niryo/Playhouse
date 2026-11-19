@@ -314,6 +314,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     var mcpLogins: [String: McpLoginSession] = [:]
 
+    /// The session `callMcpTool` keeps warm between calls, and the start in flight.
+    var mcpCallSession: McpCallSession?
+    var mcpCallSessionStart: Task<McpCallSession, Error>?
+
     /// Asks Claude Code to start the OAuth sign-in of an MCP server and returns
     /// the link to open in the browser. Claude Code is told not to open it itself.
     ///
@@ -817,7 +821,162 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return MetadataResponse(initialize: initialize, extra: try await query(runner))
     }
 
+    /// The environment every Claude Code process Playhouse starts runs with.
+    static func childEnvironment(dataDirectoryOverride: String?, configDirectoryOverride: String?) -> [String: String] {
+        var environment = PlayhouseProcessEnvironment.current
+        environment["PATH"] = expandedSearchPath(environment["PATH"])
+        ConversationProcessEnvironment.forwardPlayhouseBridgeEnvironment(&environment, dataDirectoryOverride: dataDirectoryOverride)
+        // Claude Code finds its keychain sign-in by user name; services started by
+        // launchd are not guaranteed a login environment.
+        environment["HOME"] = environment["HOME"] ?? NSHomeDirectory()
+        environment["USER"] = environment["USER"] ?? NSUserName()
+        environment["LOGNAME"] = environment["LOGNAME"] ?? NSUserName()
+        if let configDirectoryOverride { environment["CLAUDE_CONFIG_DIR"] = configDirectoryOverride }
+        // The CLI is a child of Playhouse, not an IDE integration or nested session.
+        environment.removeValue(forKey: "CLAUDECODE")
+        environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
+        return environment
+    }
+
+    // MARK: - Direct MCP tool calls
+
+    /// One Claude Code process that answers `mcp_call` requests with no model
+    /// turn. It stays up `McpCallSession.idleLifetime` after its last call, so a
+    /// burst of calls (a plugin refreshing a list) starts Claude Code once.
+    final class McpCallSession {
+        let runner: ClaudeSessionRunner
+        /// Claude Code advertised `mcp_call_result_not_for_model_v1` when it initialized.
+        let supported: Bool
+        var inFlight = 0
+        var idle: Task<Void, Never>?
+        init(runner: ClaudeSessionRunner, supported: Bool) {
+            self.runner = runner
+            self.supported = supported
+        }
+
+        static let capability = "mcp_call_result_not_for_model_v1"
+        /// 60 seconds; tests shorten it with `PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS`.
+        static var idleLifetime: Duration {
+            .seconds(PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS"].flatMap(Double.init) ?? 60)
+        }
+    }
+
+    /// Calls an MCP tool Claude Code is connected to, such as
+    /// `mcp__claude_ai_Slack__slack_read_channel`, with no model turn and no
+    /// tokens, and returns its `{content, structuredContent?, isError?}`.
+    ///
+    /// This uses Claude Code's `mcp_call` control request, which its own hosts
+    /// use but which isn't part of its documented interface, so support is read
+    /// from the capabilities Claude Code reports when it initializes.
+    func callMcpTool(_ tool: String, arguments: [String: Any], workspace: ConversationWorkspaceContext, timeout: Duration) async throws -> [String: Any] {
+        let session = try await warmMcpCallSession(workspace: workspace)
+        guard session.supported else {
+            throw McpToolCallError.unsupported("This Claude Code release can't call MCP tools directly; update Claude Code (`claude update`).")
+        }
+        session.inFlight += 1
+        session.idle?.cancel()
+        defer {
+            session.inFlight -= 1
+            scheduleIdleShutdown(session)
+        }
+        var timedOut = false
+        let timer = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            timedOut = true
+            self?.dropMcpCallSession(session)
+        }
+        defer { timer.cancel() }
+        do {
+            return try await session.runner.controlRequest([
+                "subtype": "mcp_call", "tool": tool, "arguments": arguments, "result_not_for_model": true
+            ])
+        } catch ClientError.protocolFailure(let message) where !timedOut {
+            // Claude Code answered with an error: the tool, its server or its name.
+            throw McpToolCallError.toolFailed(message)
+        } catch {
+            if timedOut { throw McpToolCallError.timedOut(Int(timeout.components.seconds)) }
+            dropMcpCallSession(session)
+            throw error
+        }
+    }
+
+    private func warmMcpCallSession(workspace: ConversationWorkspaceContext) async throws -> McpCallSession {
+        if let session = mcpCallSession, session.runner.process != nil { return session }
+        if let start = mcpCallSessionStart { return try await start.value }
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let configDirectoryOverride = configDirectoryOverride
+        let start = Task { @MainActor () throws -> McpCallSession in
+            let runner = ClaudeSessionRunner(
+                sessionID: UUID().uuidString.lowercased(), executable: executable,
+                configDirectoryOverride: configDirectoryOverride, persistsSessions: false, owner: nil
+            )
+            do {
+                let initialize = try await runner.launch(
+                    resume: false, mode: .code, modelID: Self.defaultModelID, effort: nil,
+                    workspace: workspace, developerInstructions: nil
+                )
+                let capabilities = initialize["capabilities"] as? [String] ?? []
+                return McpCallSession(runner: runner, supported: capabilities.contains(McpCallSession.capability))
+            } catch {
+                runner.shutdown()
+                throw error
+            }
+        }
+        mcpCallSessionStart = start
+        defer { mcpCallSessionStart = nil }
+        let session = try await start.value
+        mcpCallSession = session
+        PlayhouseDiagnostics.record("mcp.call.session.started", fields: ["supported": String(session.supported)])
+        scheduleIdleShutdown(session)
+        return session
+    }
+
+    private func scheduleIdleShutdown(_ session: McpCallSession) {
+        guard session.inFlight == 0 else { return }
+        session.idle?.cancel()
+        let lifetime = McpCallSession.idleLifetime
+        session.idle = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: lifetime)
+            guard !Task.isCancelled, session.inFlight == 0 else { return }
+            self?.dropMcpCallSession(session)
+        }
+    }
+
+    private func dropMcpCallSession(_ session: McpCallSession) {
+        session.idle?.cancel()
+        if mcpCallSession === session { mcpCallSession = nil }
+        session.runner.shutdown()
+        PlayhouseDiagnostics.record("mcp.call.session.stopped", fields: [:])
+    }
+
     // MARK: - Mapping
+}
+
+/// Why a direct MCP tool call (`mcp.call`) failed, from either provider.
+enum McpToolCallError: LocalizedError {
+    /// The provider's release can't call tools directly.
+    case unsupported(String)
+    case timedOut(Int)
+    /// The provider answered with an error: the tool, its server or its name.
+    case toolFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupported(let message): message
+        case .timedOut(let seconds): "The MCP tool didn't answer within \(seconds) seconds."
+        case .toolFailed(let message): message
+        }
+    }
+
+    /// `mcp__<server>__<tool>` split into its server and the tool's own name.
+    static func split(_ qualified: String) -> (server: String, tool: String)? {
+        guard qualified.hasPrefix("mcp__") else { return nil }
+        let rest = qualified.dropFirst(5)
+        guard let separator = rest.range(of: "__") else { return nil }
+        let server = String(rest[..<separator.lowerBound]), tool = String(rest[separator.upperBound...])
+        return server.isEmpty || tool.isEmpty ? nil : (server, tool)
+    }
 }
 
 

@@ -669,7 +669,7 @@ final class PlayhouseBridgeRuntime {
                     }
                     payload = object
                 }
-                let event = PluginEvent(name: name, payload: payload)
+                let event = PluginEvent(name: name, payload: payload, pluginID: PluginEvent.target(of: name, payload: payload))
                 PluginServiceHost.publish(event)
                 // A move's reactions (opening pull requests) finish before the answer.
                 if let taskID = payload["taskID"]?.string.flatMap(UUID.init(uuidString:)) {
@@ -716,6 +716,7 @@ final class PlayhouseBridgeRuntime {
                       do { try await taskManager.deletePlugin(id: id, library: library) }
                       catch let error as PluginLibraryError { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
                       catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
+                      if let store = storeDirectory.map(PluginAgentRunStore.init(storeDirectory:)) { PluginAgentRuns.cancelAll(pluginID: id, store: store, codex: conversationClients().codex) }
                       settings.clearPluginState(id)
                       return .object(["discarded": .string(id), "deleted": .boolean(true), "revision": .integer(settings.bumpPluginsRevision())])
                   }
@@ -756,6 +757,7 @@ final class PlayhouseBridgeRuntime {
                     throw BridgeCommandError(code: "invalid_argument", message: error.message)
                 }
                 // A plugin installed again later under this id starts enabled, with no saved state.
+                if let store = storeDirectory.map(PluginAgentRunStore.init(storeDirectory:)) { PluginAgentRuns.cancelAll(pluginID: id, store: store, codex: conversationClients().codex) }
                 settings.setPluginEnabled(id, true)
                 settings.clearPluginState(id)
                 result = .object(["deleted": .string(id), "revision": .integer(settings.bumpPluginsRevision())])
@@ -853,6 +855,9 @@ final class PlayhouseBridgeRuntime {
                     if case .array(let events)? = request.arguments["events"] {
                         command.events = try events.map { try PluginRenderCommand.Event(parsing: $0.string ?? "") }
                     }
+                    if case .object(let mocks)? = request.arguments["mocks"] {
+                        command.mocks = mocks.mapValues(PluginValue.init(bridge:))
+                    }
                     switch request.arguments["advance"] {
                     case .decimal(let seconds)?: command.advance = seconds
                     case .integer(let seconds)?: command.advance = Double(seconds)
@@ -863,6 +868,11 @@ final class PlayhouseBridgeRuntime {
                 } catch let error as PluginTreeError {
                     throw BridgeCommandError(code: "invalid_argument", message: error.message)
                 }
+            case "plugin.service", "plugin.services", "agent.run", "agent.cancel", "agent.runs", "mcp.call":
+                result = try await pluginBackgroundOperation(
+                    request, settings: settings, library: pluginLibrary, storeDirectory: storeDirectory, conversationClients: conversationClients,
+                    mcpWorkspace: { ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings).mcpWorkspace(taskID: nil) }
+                )
             case "skills.list":
                 let roots = try skillRoots()
                 result = try Self.value(skills.catalog(roots: roots, bundledClaudeSkills: await bundledClaudeSkills(roots)))

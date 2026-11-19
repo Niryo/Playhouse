@@ -706,10 +706,44 @@ def fixture_commands():
     return commands
 
 
+def run_plugin_agent():
+    """A plugin's background agent: `claude -p --output-format json`, its prompt on stdin.
+
+    Each run is logged to `<executable>.agent-runs` (its prompt, model, allowed tools,
+    JSON schema and folder). `<executable>.agent-hold` keeps the run going until the
+    file is removed, so a test can cancel it or cut its daemon off; `<executable>.agent-fail`
+    makes it report an error. The answer is `<executable>.agent-output` (a JSON value)
+    as `structured_output` when a schema is given, otherwise a short text."""
+    prompt = sys.stdin.read()
+    schema = argument("--json-schema")
+    record = {"prompt": prompt, "model": argument("--model"), "allowedTools": argument("--allowedTools"),
+              "jsonSchema": json.loads(schema) if schema else None, "cwd": os.getcwd(), "pid": os.getpid(),
+              "persisted": "--no-session-persistence" not in sys.argv}
+    with open(str(sys.argv[0]) + ".agent-runs", "a", encoding="utf-8") as runs:
+        runs.write(json.dumps(record) + "\n")
+    hold = Path(str(sys.argv[0]) + ".agent-hold")
+    deadline = time.monotonic() + 120
+    while hold.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if Path(str(sys.argv[0]) + ".agent-fail").exists():
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                          "result": "The fixture agent failed on purpose."}))
+        return 1
+    output = Path(str(sys.argv[0]) + ".agent-output")
+    answer = {"type": "result", "subtype": "success", "is_error": False,
+              "result": f"Fixture agent answered: {prompt.strip()[:60]}"}
+    if schema:
+        answer["structured_output"] = json.loads(output.read_text(encoding="utf-8")) if output.exists() else {}
+    print(json.dumps(answer))
+    return 0
+
+
 def main():
     global background_result_sent, current_command_uuid
     if sys.argv[1:2] == ["auth"]:
         return auth_command(sys.argv[2:])
+    if argument("--output-format") == "json":
+        return run_plugin_agent()
     if "-reattach" in Path(sys.argv[0]).name and "-p" in sys.argv:
         return run_reattach_turn()
     history_path = Path(str(sys.argv[0]) + ".history")
@@ -790,7 +824,9 @@ def main():
                     time.sleep(8)
                 response = {"claude_code_version": "2.1.308 (Claude Code fixture)",
                             "models": models,
-                            "commands": fixture_commands(), "agents": []}
+                            "commands": fixture_commands(), "agents": [],
+                            # A `-no-mcp-call` copy is a release that can't call MCP tools directly.
+                            "capabilities": [] if "-no-mcp-call" in Path(sys.argv[0]).name else ["mcp_call_result_not_for_model_v1"]}
             elif request.get("subtype") == "mcp_status":
                 # The servers a test seeds in `<executable>.mcp-status` (such as a
                 # claude.ai connector), then each server this run was passed with
@@ -821,6 +857,26 @@ def main():
                 response = {"authUrl": f"https://auth.example.test/claude/authorize?server={name}",
                             "requiresUserAction": True, "callbackExpected": True,
                             "redirectScheme": "localhost", "callbackPort": 54321}
+            elif request.get("subtype") == "mcp_call":
+                # A direct MCP tool call: each is logged to `<executable>.mcp-calls`, and
+                # answered with the tool's result from `<executable>.mcp-results`
+                # ({tool: result}); a tool missing there is a server that isn't connected.
+                with open(str(sys.argv[0]) + ".mcp-calls", "a", encoding="utf-8") as calls:
+                    calls.write(json.dumps({"tool": request.get("tool"), "arguments": request.get("arguments"),
+                                            "resultNotForModel": request.get("result_not_for_model"), "pid": os.getpid()}) + "\n")
+                # `<executable>.mcp-call-delay` ({tool: seconds}) makes a tool slow to answer.
+                delays = Path(str(sys.argv[0]) + ".mcp-call-delay")
+                if delays.exists():
+                    time.sleep(float(json.loads(delays.read_text(encoding="utf-8")).get(request.get("tool"), 0)))
+                seeded = Path(str(sys.argv[0]) + ".mcp-results")
+                results = json.loads(seeded.read_text(encoding="utf-8")) if seeded.exists() else {}
+                if request.get("tool") not in results:
+                    server = (request.get("tool") or "").split("__")[1] if "__" in (request.get("tool") or "") else ""
+                    write({"type": "control_response", "response": {
+                        "subtype": "error", "request_id": message.get("request_id"), "error": f"MCP server not connected: {server}",
+                    }})
+                    continue
+                response = results[request.get("tool")]
             elif request.get("subtype") == "get_usage":
                 # The plan's usage as `/usage` reads it; without a seeded file the
                 # account has none, as with an API-key login.

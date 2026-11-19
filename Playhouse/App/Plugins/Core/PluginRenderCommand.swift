@@ -43,6 +43,9 @@ struct PluginRenderCommand: Sendable {
     /// rejected. `Playhouse.ui` calls are recorded and resolved with null;
     /// `fetch` calls reach the network as they do in the window.
     var bridge: (@Sendable (String, PluginValue) async throws -> PluginValue)?
+    /// Canned bridge answers, as `PluginServiceCommand.mocks`. `mcp.call`,
+    /// `agent.run` and `agent.cancel` are `unavailable` here unless mocked.
+    var mocks: [String: PluginValue] = [:]
     /// An installed plugin's placement, which decides what its host refuses.
     var placement: PluginPlacement?
     var events: [Event] = []
@@ -125,8 +128,17 @@ struct PluginRenderCommand: Sendable {
                 guard let call = runtime.pendingHostCalls.first else { return }
                 var entry: [String: PluginValue] = ["kind": .string(call.kind), "name": .string(call.name), "arguments": call.arguments]
                 let result: Result<PluginValue, PluginHostError>
+                let mock = call.kind == "bridge" ? Self.mock(for: call, in: mocks) : nil
                 if let refusal = PluginHostRules.refusal(kind: call.kind, name: call.name, placement: placement, arguments: call.arguments) {
                     result = .failure(refusal)
+                } else if let mock {
+                    if let error = mock.object?["error"]?.object, mock.object?.count == 1 {
+                        result = .failure(PluginHostError(code: error["code"]?.string ?? "operation_failed", message: error["message"]?.string ?? "The mocked call failed."))
+                    } else {
+                        result = .success(mock)
+                    }
+                } else if call.kind == "bridge", PluginServiceCommand.providerCommands.contains(call.name) {
+                    result = .failure(PluginHostError(code: "unavailable", message: "\(call.name) starts provider work, which plugin render only fakes: pass --mock \(call.name)=<json>."))
                 } else if call.kind == "bridge", let bridge {
                     do {
                         result = .success(try await bridge(call.name, call.arguments))
@@ -195,6 +207,11 @@ struct PluginRenderCommand: Sendable {
             "emitted": .array(emitted),
             "log": .array(runtime.log.map { .string("\($0.level): \($0.message)") })
         ])
+    }
+
+    static func mock(for call: PluginRuntime.HostCall, in mocks: [String: PluginValue]) -> PluginValue? {
+        if call.name == "mcp.call", let tool = call.arguments.object?["tool"]?.string, let mock = mocks["mcp.call:\(tool)"] { return mock }
+        return mocks[call.name]
     }
 
     static func find(testID: String, in node: PluginNode) -> PluginNode? {

@@ -916,3 +916,695 @@ extension PlayhouseUITests {
         XCTAssertTrue(terminateAppAndWait(app))
     }
 }
+
+// MARK: - Script plugins' background halves
+
+extension PlayhouseUITests {
+    static let serviceFocusPluginSource = #"""
+function Panel() {
+  var props = Playhouse.useProps();
+  var state = props.state || {};
+  return h(Stack, { spacing: 4 },
+    h(Text, { testID: "service-focused" }, "focused " + (state.focused || 0)),
+    h(Text, { testID: "service-heard" }, "heard " + (state.heard || []).join(",")),
+    h(Text, { testID: "service-active" }, "service " + Playhouse.service.active));
+}
+Playhouse.service.on("app.focus", async function (event) {
+  var state = Playhouse.props.state || {};
+  await Playhouse.setState("focused", (state.focused || 0) + 1);
+});
+// No guard against its own writes: a service never hears those, so this can't loop.
+Playhouse.service.on("plugin.stateChanged", async function (event) {
+  var heard = (Playhouse.props.state || {}).heard || [];
+  await Playhouse.setState("heard", heard.concat([event.payload.pluginID + ":" + event.key]));
+});
+Playhouse.render(h(Panel));
+"""#
+    static let serviceQuietPluginSource = #"""
+Playhouse.service.on("app.focus", function () { return Playhouse.setState("focused", true); });
+Playhouse.service.on("task.statusChanged", function (event) { return Playhouse.setState("moved", event.to); });
+Playhouse.service.on("plugin.stateChanged", function (event) {
+  if (event.key !== "heard") return Playhouse.setState("heard", event.payload.pluginID + ":" + event.key);
+});
+"""#
+    static let serviceHeadlessHandlersSource = #"""
+Playhouse.service.on("app.focus", async function () {
+  var tasks = await Playhouse.bridge("task.list", {});
+  await Playhouse.setState("tasks", tasks.tasks.length);
+  try { await Playhouse.ui.close(); } catch (error) { await Playhouse.setState("ui", error.code); }
+  try { await Playhouse.bridge("plugin.services", {}); } catch (error) { await Playhouse.setState("internal", error.code); }
+  try {
+    var answer = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_user_profile", { user: "U1" });
+    await Playhouse.setState("mcp", answer.content[0].text);
+  } catch (error) { await Playhouse.setState("mcp", error.code); }
+  try {
+    var run = await Playhouse.agent.run({ prompt: "Summarize", context: { kind: "probe" } });
+    await Playhouse.setState("run", run.runID);
+  } catch (error) { await Playhouse.setState("run", error.code); }
+});
+Playhouse.service.on("agent.finished", async function (e) {
+  await Playhouse.setState("finished", { status: e.status, kind: e.context.kind, title: e.result.title, runID: e.runID, same: e.payload.runID === e.runID });
+});
+Playhouse.service.on("task.statusChanged", function () { throw new Error("The move handler broke."); });
+Playhouse.render(h(Text, { testID: "never" }, "never rendered"));
+"""#
+    static let servicePopoverCallsSource = #"""
+function Calls() {
+  var result = React.useState("idle");
+  function call() {
+    Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_user_profile", {}).then(
+      function (answer) { result[1]("mcp " + answer.content[0].text); },
+      function (error) { result[1]("mcp " + error.code); });
+  }
+  function run() {
+    Playhouse.agent.run({ prompt: "Go", context: { kind: "ui" } }).then(
+      function (answer) { result[1]("run " + answer.runID); },
+      function (error) { result[1]("run " + error.code); });
+  }
+  var off = Playhouse.service.on("app.focus", function () { result[1]("service handler ran in the UI"); });
+  return h(Stack, {},
+    h(Button, { testID: "call-mcp", onPress: call }, h(Text, {}, "MCP")),
+    h(Button, { testID: "call-agent", onPress: run }, h(Text, {}, "Agent")),
+    h(Text, { testID: "call-result" }, result[0] + (Playhouse.service.active ? " (service)" : "")));
+}
+Playhouse.render(h(Calls));
+"""#
+    static let serviceMcpPluginSource = #"""
+Playhouse.service.on("app.focus", async function () {
+  var answer = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_search_public_and_private", { query: "to:me", channel_types: "im" });
+  await Playhouse.setState("people", answer.content.map(function (block) { return block.text; }));
+  // Not in the manifest's mcpTools: refused before Claude Code is asked.
+  try { await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_user_profile", {}); } catch (error) { await Playhouse.setState("denied", error.code); }
+});
+function People() {
+  var people = (Playhouse.useProps().state || {}).people || [];
+  return h(Text, { testID: "mcp-people" }, people.length ? people.join(", ") : "nobody yet");
+}
+Playhouse.render(h(People));
+"""#
+    static let serviceCodexMcpPluginSource = #"""
+Playhouse.service.on("app.focus", async function () {
+  var answer = await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_search_public_and_private", { query: "to:me" }, { provider: "codex" });
+  await Playhouse.setState("people", answer.content.map(function (block) { return block.text; }));
+});
+function People() {
+  var people = (Playhouse.useProps().state || {}).people || [];
+  return h(Text, { testID: "mcp-people" }, people.length ? people.join(", ") : "nobody yet");
+}
+Playhouse.render(h(People));
+"""#
+    static let serviceSlowPluginSource = #"""
+Playhouse.service.on("task.statusChanged", async function (event) {
+  await Playhouse.setState("before", event.to);
+  await Playhouse.mcp.call("mcp__claude_ai_Slack__slack_read_channel", { channel_id: "D1" });
+  await Playhouse.setState("after", event.to);
+});
+"""#
+    static let serviceListenerPluginSource = #"""
+Playhouse.service.on("agent.finished", function (e) { return Playhouse.setState("finished", e.runID); });
+"""#
+    static let serviceAgentPluginSource = #"""
+var TASK_SCHEMA = { type: "object", properties: { title: { type: "string" }, prompt: { type: "string" }, nothingNew: { type: "boolean" } }, required: ["title", "prompt", "nothingNew"] };
+function onCreate(userId) {
+  var jobs = (Playhouse.props.state || {}).jobs || {};
+  // The plugin's "provider" setting picks the agent; each has its own model names.
+  var provider = (Playhouse.props.state || {}).provider;
+  Playhouse.agent.run({ prompt: "Read the DMs of " + userId + " and draft a task.", provider: provider, model: provider === "codex" ? "gpt-5.5" : "opus",
+    allowedTools: ["mcp__claude_ai_Slack__slack_read_channel", "mcp__claude_ai_Slack__slack_read_thread"],
+    jsonSchema: TASK_SCHEMA, context: { kind: "slack-task", userId: userId } })
+    .then(function (r) { var next = Object.assign({}, jobs); next[userId] = r.runID; return Playhouse.setState("jobs", next); });
+}
+function DMs() {
+  var state = Playhouse.useProps().state || {};
+  var finished = state.finished;
+  return h(Stack, { spacing: 6 },
+    h(Button, { style: "bordered", testID: "dm-create-U7", onPress: function () { onCreate("U7"); } }, h(Text, {}, "Create task for Dana")),
+    h(Text, { testID: "dm-job" }, (state.jobs || {}).U7 ? "running" : "no job"),
+    h(Text, { testID: "dm-finished" }, finished ? finished.status + " " + finished.userId + " " + (finished.error || finished.title || "") : "not finished"));
+}
+Playhouse.service.on("agent.finished", async function (e) {
+  if (e.context.kind !== "slack-task") return;
+  var title = null;
+  if (e.status === "done" && !e.result.nothingNew) {
+    var created = await Playhouse.bridge("task.create", { title: e.result.title, prompt: e.result.prompt, roots: [], repositories: [] });
+    title = created.title;
+  } else if (e.status !== "done") {
+    // A run that didn't finish is put on the board, so the user sees it.
+    await Playhouse.bridge("task.create", { title: "Slack task " + e.status + " for " + e.context.userId + (e.error ? ": " + e.error : ""),
+      prompt: "Draft the Slack task for " + e.context.userId + " again.", roots: [], repositories: [] });
+  }
+  var jobs = Object.assign({}, (Playhouse.props.state || {}).jobs || {});
+  if (jobs[e.context.userId] === e.runID) delete jobs[e.context.userId];
+  await Playhouse.setState("jobs", jobs);
+  await Playhouse.setState("finished", { status: e.status, userId: e.context.userId, runID: e.runID, error: e.error, title: title });
+});
+Playhouse.render(h(DMs));
+"""#
+
+    func pluginState(_ pluginID: String, environment: [String: String] = [:]) throws -> [String: Any] {
+        try XCTUnwrap((try runCLI(["plugin", "state", "--id", pluginID], extraEnvironment: environment)["result"] as? [String: Any])?["state"] as? [String: Any])
+    }
+
+    /// Makes the app inactive and active again, as the user coming back to it does: the window raises app.focus.
+    func refocusApp() {
+        XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
+        XCTAssertTrue(waitUntil({ self.app.state != .runningForeground }, timeout: 5), "Another app comes to the front.")
+        app.activate()
+        XCTAssertTrue(waitUntil({ self.app.state == .runningForeground }, timeout: 5), "Playhouse comes back to the front.")
+    }
+
+    // case-contract: test_plugin_service_events_targeting_and_state | A plugin.json may list "events" (app events from PluginEvent's names, agent.finished included) for a background half next to any presentation, and a headless plugin is valid with only events; an unknown or repeated event, an mcpTools entry that isn't mcp__<server>__<tool>, or a headless plugin with neither commands nor events is reported in its errors. `plugin service --file` runs the script's Playhouse.service.on handlers headlessly in a fresh service runtime per event, where Playhouse.render does nothing: bridge calls are answered, ui calls are refused as unavailable, plugin.services is refused as invalid_argument, mcp.call and agent.run are unavailable unless --mock answers them (also by tool), agent.finished is injected with a fake result whose fields and context reach the handler beside payload, an unknown event is invalid_argument, and the report lists each event's handler count, the bridge calls, the state written and a throwing handler's error (exit 1). In a mounted UI (plugin render) Playhouse.service.on does nothing and mcp.call or agent.run is unavailable unless mocked. In the daemon, app.focus (from the window's activation or plugin event) wakes only the enabled plugins whose manifest lists it, collapsing quick repeats into one trailing run after the cooldown; a plugin's state change is targeted at it, so its own service hears a change made elsewhere while another plugin's service doesn't, and a service never hears its own writes, so a handler that saves on every change doesn't loop; the service writes state that the popover shows from its props, and a disabled plugin's service isn't woken by a focus that still reaches an enabled one.
+    func test_plugin_service_events_targeting_and_state() throws {
+        try writeInstalledPlugin("bad-events", source: Self.serviceQuietPluginSource, placement: "composerActions", presentation: "headless",
+                                 extra: ["events": ["app.focus", "app.focus", "nope"], "mcpTools": ["slack_read"]])
+        try writeInstalledPlugin("bare-headless", source: Self.serviceQuietPluginSource, placement: "composerActions", presentation: "headless")
+        try writeInstalledPlugin("headless-service", source: Self.serviceQuietPluginSource, placement: "composerActions", presentation: "headless",
+                                 extra: ["events": ["task.statusChanged", "agent.finished"], "mcpTools": ["mcp__claude_ai_Slack__slack_read_channel"]])
+        try writeInstalledPlugin("focus-service", source: Self.serviceFocusPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Focus Service", icon: "bolt", extra: ["events": ["app.focus", "plugin.stateChanged"]])
+        try writeInstalledPlugin("other-service", source: Self.serviceQuietPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Other Service", icon: "moon", extra: ["events": ["plugin.stateChanged", "task.statusChanged"]])
+        try writeInstalledPlugin("focus-control", source: Self.serviceFocusPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Focus Control", icon: "bolt.circle", extra: ["events": ["app.focus"]])
+        let cooldown = ["PLAYHOUSE_E2E_PLUGIN_SERVICE_COOLDOWN_SECONDS": "5"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: cooldown)
+        let listed = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        func plugin(_ id: String) throws -> [String: Any] { try XCTUnwrap(listed.first { $0["id"] as? String == id }) }
+        let badErrors = try plugin("bad-events")["errors"] as? [String] ?? []
+        XCTAssertEqual(try plugin("bad-events")["valid"] as? Bool, false)
+        XCTAssertTrue(badErrors.contains { $0.contains(#"Unknown event "nope""#) } && badErrors.contains { $0.contains("app.focus is listed twice") }
+                      && badErrors.contains { $0.contains(#""slack_read" in "mcpTools""#) }, "\(badErrors)")
+        XCTAssertTrue((try plugin("bare-headless")["errors"] as? [String] ?? []).contains { $0.contains(#"an event in "events""#) })
+        XCTAssertEqual(try plugin("headless-service")["valid"] as? Bool, true, "A headless plugin with only events is valid.")
+        XCTAssertEqual(try plugin("headless-service")["events"] as? [String], ["task.statusChanged", "agent.finished"])
+
+        // Headless runs of a file, with faked provider calls.
+        let file = dataDirectory.appendingPathComponent("service-handlers.js")
+        try Self.serviceHeadlessHandlersSource.write(to: file, atomically: true, encoding: .utf8)
+        let finished = #"agent.finished:{"runID":"run-1","status":"done","result":{"title":"Reply to Dana"},"error":null,"context":{"kind":"slack-task","userId":"U7"}}"#
+        let report = try XCTUnwrap(try runCLI(["plugin", "service", "--file", file.path, "--event", "app.focus", "--event", finished])["result"] as? [String: Any])
+        XCTAssertEqual((report["errors"] as? [Any])?.count, 0, "\(report)")
+        let state = try XCTUnwrap(report["state"] as? [String: Any])
+        XCTAssertEqual(state["ui"] as? String, "unavailable", "A background half has no window.")
+        XCTAssertEqual(state["mcp"] as? String, "unavailable", "mcp.call is faked headlessly.")
+        XCTAssertEqual(state["run"] as? String, "unavailable")
+        XCTAssertEqual(state["internal"] as? String, "invalid_argument", "Only the daemon delivers events to background halves.")
+        let heardFinish = try XCTUnwrap(state["finished"] as? [String: Any])
+        XCTAssertEqual(heardFinish["kind"] as? String, "slack-task")
+        XCTAssertEqual(heardFinish["same"] as? Bool, true, "The injected result's fields sit beside payload.")
+        let mocked = try XCTUnwrap(try runCLI(["plugin", "service", "--file", file.path, "--event", "app.focus",
+                                               "--mock", #"mcp.call:mcp__claude_ai_Slack__slack_read_user_profile={"content":[{"type":"text","text":"Nir"}]}"#,
+                                               "--mock", #"agent.run={"runID":"run-mocked"}"#])["result"] as? [String: Any])
+        XCTAssertEqual((mocked["state"] as? [String: Any])?["mcp"] as? String, "Nir")
+        XCTAssertEqual((mocked["state"] as? [String: Any])?["run"] as? String, "run-mocked")
+        let broken = try runCLI(["plugin", "service", "--file", file.path, "--event", #"task.statusChanged:{"taskID":"t","from":"Backlog","to":"Review"}"#], expectedStatus: 1)
+        XCTAssertTrue(((broken["result"] as? [String: Any])?["errors"] as? [String] ?? []).contains { $0.contains("The move handler broke.") })
+        XCTAssertEqual(((try runCLI(["plugin", "service", "--file", file.path, "--event", "app.nope"], expectedStatus: 2))["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        // A mounted UI's provider calls need a mock too, and its service.on does nothing.
+        let popover = dataDirectory.appendingPathComponent("popover-calls.js")
+        try Self.servicePopoverCallsSource.write(to: popover, atomically: true, encoding: .utf8)
+        func callResult(_ options: [String]) throws -> String {
+            let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--file", popover.path] + options)["result"] as? [String: Any])
+            return try XCTUnwrap(pluginTreeText(rendered["tree"], testID: "call-result"))
+        }
+        XCTAssertEqual(try callResult(["--event", "call-mcp:onPress", "--event", "@app.focus"]), "mcp unavailable")
+        XCTAssertEqual(try callResult(["--event", "call-agent:onPress", "--mock", #"agent.run={"runID":"run-ui"}"#]), "run run-ui")
+        let services = try XCTUnwrap((try runCLI(["plugin", "services"])["result"] as? [String: Any])?["services"] as? [[String: Any]])
+        XCTAssertEqual(Set(services.compactMap { $0["pluginID"] as? String }), ["focus-service", "other-service", "focus-control", "headless-service"],
+                       "Only valid, enabled plugins with events have a background half.")
+
+        func focusCount(_ id: String = "focus-service") -> Int { ((try? pluginState(id))?["focused"] as? Int) ?? 0 }
+        // The launch's own focus may run first; once any trailing run is over, start from a known count.
+        refocusApp()
+        XCTAssertTrue(waitUntil({ focusCount() >= 1 }, timeout: 20), "The window's focus reaches the service.")
+        // A trailing run restarts the cooldown, so wait until the count holds still past one.
+        var base = focusCount()
+        for _ in 0..<6 {
+            RunLoop.current.run(until: Date().addingTimeInterval(5.5))
+            let now = focusCount()
+            if now == base { break }
+            base = now
+        }
+        XCTAssertNil(try pluginState("other-service")["focused"], "A plugin whose manifest doesn't list app.focus isn't woken by it.")
+        XCTAssertNil(try pluginState("headless-service")["focused"])
+        // Two quick activations: one run at once, one trailing run after the cooldown, no more.
+        refocusApp()
+        refocusApp()
+        XCTAssertTrue(waitUntil({ self.focusCountIs(base + 2, of: "focus-service") }, timeout: 20), "Quick repeats collapse into one trailing run: \(focusCount())")
+        RunLoop.current.run(until: Date().addingTimeInterval(6))
+        XCTAssertEqual(focusCount(), base + 2, "Two activations in one cooldown run the service twice, not more.")
+        let entry = element("plugin-entry-focus-service")
+        XCTAssertTrue(entry.waitToExist(timeout: 10), "The popover plugin has its sidebar button.")
+        entry.click()
+        let focused = element("service-focused")
+        XCTAssertTrue(waitUntil({ focused.exists && self.pluginText(focused) == "focused \(focusCount())" }, timeout: 10), "The popover shows the service's state: \(pluginText(focused))")
+        XCTAssertEqual(pluginText(element("service-active")), "service false", "Playhouse.service.on does nothing in the mounted UI.")
+        attachScreenshot(named: "The popover shows the focus count its background half saved")
+        // A state change is targeted at its plugin: its own service hears it and the open popover re-renders.
+        _ = try runCLI(["plugin", "state", "--id", "focus-service", "--key", "note", "--value", #""hello""#])
+        let heard = element("service-heard")
+        XCTAssertTrue(waitUntil({ self.pluginText(heard) == "heard focus-service:note" }, timeout: 15), "The service heard its own state change: \(pluginText(heard))")
+        attachElementScreenshot(element("plugin-surface-focus-service"), named: "The service's reaction to its state change reaches the open popover")
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(try pluginState("focus-service")["heard"] as? [String], ["focus-service:note"], "A service never hears its own writes, so it doesn't loop.")
+        XCTAssertNil(try pluginState("other-service")["heard"], "Another plugin's state change doesn't wake this service.")
+        // A move reaches the plugins that list it.
+        _ = try runCLI(["plugin", "event", "task.statusChanged", "--payload", #"{"taskID":"t-1","from":"Backlog","to":"Review"}"#])
+        XCTAssertTrue(waitUntil({ (try? self.pluginState("other-service"))?["moved"] as? String == "Review" }, timeout: 15))
+        XCTAssertTrue(waitUntil({ (try? self.pluginState("headless-service"))?["moved"] as? String == "Review" }, timeout: 15))
+        XCTAssertNil(try pluginState("other-service")["focused"], "Still never woken by focus.")
+        app.typeKey(.escape, modifierFlags: [])
+        // Disabled, its service isn't woken, while the same focus reaches an enabled plugin.
+        _ = try runCLI(["plugin", "disable", "--id", "focus-service"])
+        XCTAssertTrue(waitForDisappearance(entry, timeout: 10), "Disabling the plugin removes its button.")
+        let before = focusCount()
+        let control = focusCount("focus-control")
+        RunLoop.current.run(until: Date().addingTimeInterval(5.5))
+        refocusApp()
+        XCTAssertTrue(waitUntil({ focusCount("focus-control") > control }, timeout: 15), "The focus reaches an enabled plugin.")
+        RunLoop.current.run(until: Date().addingTimeInterval(6))
+        XCTAssertEqual(focusCount(), before, "A disabled plugin's service isn't woken.")
+    }
+
+    func focusCountIs(_ count: Int, of pluginID: String) -> Bool {
+        ((try? pluginState(pluginID))?["focused"] as? Int) == count
+    }
+
+    /// The text of the atom with `testID` in a `plugin render` tree.
+    func pluginTreeText(_ tree: Any?, testID: String) -> String? {
+        guard let node = tree as? [String: Any] else { return nil }
+        let children = node["children"] as? [[String: Any]] ?? []
+        if (node["props"] as? [String: Any])?["testID"] as? String == testID {
+            return children.filter { $0["type"] as? String == "#text" }.compactMap { $0["text"] as? String }.joined()
+        }
+        return children.lazy.compactMap { self.pluginTreeText($0, testID: testID) }.first
+    }
+
+    // case-contract: test_plugin_mcp_call_warm_session_and_allowlist | mcp.call (CLI mcp call, Playhouse.mcp.call) calls a fully qualified MCP tool through Claude Code's mcp_call control request with result_not_for_model and no model turn, answering the tool's {content, structuredContent, isError}; a burst of calls reuses one warm Claude Code session, which shuts down once idle, so the next call starts another. A tool Claude Code can't reach fails as tool_failed with its message, a tool slower than the call's timeout as timeout, a name that isn't mcp__<server>__<tool> is invalid_argument, a Claude Code that doesn't advertise mcp_call_result_not_for_model_v1 or no Claude Code at all is unavailable, and a plugin whose manifest lists mcpTools is refused any other tool as permission_denied, both from the CLI and from its own Playhouse.mcp.call, which sends its plugin id. An installed plugin's background half calls mcp.call on app.focus in the daemon and saves the result in its state, which its popover shows. A task move doesn't wait for a script handler stuck on a slow tool, which still finishes; a handler past the service timeout is given up on with its runtime and reported in diagnostics.
+    func test_plugin_mcp_call_warm_session_and_allowlist() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-ui-mcp")
+        let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        let profile = "mcp__claude_ai_Slack__slack_read_user_profile", search = "mcp__claude_ai_Slack__slack_search_public_and_private"
+        try JSONSerialization.data(withJSONObject: [
+            profile: ["content": [["type": "text", "text": "Nir Yosef"]]],
+            search: ["content": [["type": "text", "text": "Dana"], ["type": "text", "text": "Omri"]], "structuredContent": ["count": 2], "isError": false],
+        ]).write(to: URL(fileURLWithPath: executable + ".mcp-results"))
+        // The window starts Claude Code sessions of its own (models, MCP status), so the
+        // direct calls' sessions are told apart by the process each call reached.
+        func sessions() -> Int { Set(jsonLines(executable + ".mcp-calls").compactMap { ($0 as? [String: Any])?["pid"] as? Int }).count }
+        try writeInstalledPlugin("slack-reader", source: Self.serviceMcpPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Slack Reader", icon: "bubble.left", extra: ["events": ["app.focus"], "mcpTools": [search]])
+        try writeInstalledPlugin("slow-service", source: Self.serviceSlowPluginSource, placement: "composerActions", presentation: "headless",
+                                 extra: ["events": ["task.statusChanged"]])
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["plugin", "refresh"])
+
+        // The window's focus wakes the background half, which calls the tool with no model turn.
+        refocusApp()
+        XCTAssertTrue(waitUntil({ ((try? self.pluginState("slack-reader"))?["people"] as? [String]) == ["Dana", "Omri"] }, timeout: 30), "The service saves the tool's result.")
+        let entry = element("plugin-entry-slack-reader")
+        XCTAssertTrue(entry.waitToExist(timeout: 10))
+        entry.click()
+        let people = element("mcp-people")
+        XCTAssertTrue(waitUntil({ people.exists && self.pluginText(people) == "Dana, Omri" }, timeout: 10), "The popover shows what the service read: \(pluginText(people))")
+        attachScreenshot(named: "The popover shows the people its background half read with mcp.call")
+        attachElementScreenshot(element("plugin-surface-slack-reader"), named: "Slack DMs read by mcp.call, with no model turn")
+        app.typeKey(.escape, modifierFlags: [])
+        let calls = jsonLines(executable + ".mcp-calls").compactMap { $0 as? [String: Any] }
+        XCTAssertEqual(calls.last?["tool"] as? String, search)
+        XCTAssertEqual(calls.last?["resultNotForModel"] as? Bool, true)
+        XCTAssertTrue(waitUntil({ (try? self.pluginState("slack-reader"))?["denied"] as? String == "permission_denied" }, timeout: 15),
+                      "Playhouse.mcp.call sends the plugin's id, so its mcpTools refuse an unlisted tool.")
+
+        // More calls reuse the warm session.
+        let answer = try XCTUnwrap(try runCLI(["mcp", "call", "--tool", profile, "--arguments", #"{"user":"U1"}"#])["result"] as? [String: Any])
+        XCTAssertEqual(((answer["content"] as? [[String: Any]])?.first)?["text"] as? String, "Nir Yosef")
+        XCTAssertEqual(sessions(), 1, "A burst of calls starts Claude Code once.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: executable + ".history"), "No model turn ran.")
+        let failed = try runCLI(["mcp", "call", "--tool", "mcp__linear__list_issues"], expectedStatus: 1)
+        XCTAssertEqual((failed["error"] as? [String: Any])?["code"] as? String, "tool_failed")
+        XCTAssertTrue(((failed["error"] as? [String: Any])?["message"] as? String ?? "").contains("MCP server not connected: linear"))
+        _ = try runCLI(["mcp", "call", "--tool", "slack_read"], expectedStatus: 2)
+        let denied = try runCLI(["mcp", "call", "--tool", profile, "--plugin", "slack-reader"], expectedStatus: 1)
+        XCTAssertEqual((denied["error"] as? [String: Any])?["code"] as? String, "permission_denied", "A plugin's mcpTools catch a tool it didn't list.")
+
+        // Idle, the session shuts down; the next call starts Claude Code again.
+        _ = try runCLI(["mcp", "call", "--tool", profile], extraEnvironment: ["PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS": "1"])
+        let pid = try XCTUnwrap((jsonLines(executable + ".mcp-calls").last as? [String: Any])?["pid"] as? Int)
+        XCTAssertTrue(waitUntil({ kill(pid_t(pid), 0) != 0 }, timeout: 15), "The idle session's Claude Code exits.")
+        _ = try runCLI(["mcp", "call", "--tool", profile])
+        XCTAssertEqual(sessions(), 2, "After the idle shutdown, a call starts a new session.")
+
+        // A slow tool: mcp.call's timeout, a move that doesn't wait for script handlers, and the handlers' own timeout.
+        let channel = "mcp__claude_ai_Slack__slack_read_channel"
+        try JSONSerialization.data(withJSONObject: [
+            profile: ["content": [["type": "text", "text": "Nir Yosef"]]], channel: ["content": [["type": "text", "text": "hi"]]],
+        ]).write(to: URL(fileURLWithPath: executable + ".mcp-results"))
+        try JSONSerialization.data(withJSONObject: [channel: 4]).write(to: URL(fileURLWithPath: executable + ".mcp-call-delay"))
+        let timedOut = try runCLI(["mcp", "call", "--tool", channel, "--timeout", "1"], expectedStatus: 1)
+        XCTAssertEqual((timedOut["error"] as? [String: Any])?["code"] as? String, "timeout")
+        let moved = try XCTUnwrap((try runCLI(["task", "create", "--title", "Slow plugin move", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])?["id"] as? String)
+        let started = Date()
+        _ = try runCLI(["plugin", "event", "task.statusChanged", "--payload", #"{"taskID":"\#(moved)","from":"In Progress","to":"Review"}"#])
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3, "A move waits for the built-ins' reactions, not for script handlers.")
+        XCTAssertTrue(waitUntil({ (try? self.pluginState("slow-service"))?["after"] as? String == "Review" }, timeout: 30), "The slow handler still finishes.")
+        _ = try runCLI(["plugin", "event", "task.statusChanged", "--payload", #"{"taskID":"\#(moved)","from":"Review","to":"Done"}"#],
+                       extraEnvironment: ["PLAYHOUSE_E2E_PLUGIN_SERVICE_TIMEOUT_SECONDS": "1"])
+        XCTAssertTrue(waitUntil({ (try? self.pluginState("slow-service"))?["before"] as? String == "Done" }, timeout: 15), "The handler starts.")
+        XCTAssertTrue(waitUntil({
+            ((try? self.diagnosticEvents()) ?? []).contains { $0["event"] as? String == "plugin.service.failed" && ($0["errors"] as? String ?? "").contains("didn't finish within 1 seconds") }
+        }, timeout: 15), "The timed-out handlers are reported in diagnostics.")
+        RunLoop.current.run(until: Date().addingTimeInterval(5))
+        XCTAssertEqual(try pluginState("slow-service")["after"] as? String, "Review", "A handler past its timeout is given up on, with its runtime.")
+
+        // A Claude Code that can't call tools directly.
+        let unsupported = try installClaudeFixture(named: "claude-fixture-ui-no-mcp-call")
+        let refused = try runCLI(["mcp", "call", "--tool", profile], expectedStatus: 1, extraEnvironment: unsupported)
+        XCTAssertEqual((refused["error"] as? [String: Any])?["code"] as? String, "unavailable")
+        XCTAssertTrue(((refused["error"] as? [String: Any])?["message"] as? String ?? "").contains("can't call MCP tools directly"))
+        let none = try runCLI(["mcp", "call", "--tool", profile], expectedStatus: 1, extraEnvironment: ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": "none"])
+        XCTAssertEqual((none["error"] as? [String: Any])?["code"] as? String, "unavailable")
+    }
+
+    // case-contract: test_plugin_agent_run_finishes_and_recovers | agent.run (CLI agent run, Playhouse.agent.run from the popover, which fills pluginID from props and passes its model, allowed tools, JSON schema and context) starts a non-persisted Claude Code run in the daemon with the given prompt, model, allowed tools and JSON schema and returns its runID at once; agent runs lists it as running, and nothing is heard while it runs. When it ends, only that plugin's background half hears agent.finished with {runID, status, result, error, context}, never another plugin that listens for agent.finished: done with the schema's structured output as result, which the plugin's handler uses to create a board task, failed with Claude Code's error or after the run timeout, or cancelled after agent cancel (an unknown run is not_found); the run then leaves agent runs. A run cut off by its daemon dying, which it outlives, is reported failed with the error "interrupted" by the next daemon, with its context intact, and its orphaned Claude Code process is stopped; deleting a plugin stops its runs with no event. agent.run is refused for a plugin that doesn't list agent.finished or a missing prompt (invalid_argument), an unknown plugin (not_found) and a disabled plugin (unavailable).
+    func test_plugin_agent_run_finishes_and_recovers() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-ui-agent")
+        let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        try JSONSerialization.data(withJSONObject: ["title": "Reply to Dana", "prompt": "Answer Dana's question.", "nothingNew": false])
+            .write(to: URL(fileURLWithPath: executable + ".agent-output"))
+        let hold = URL(fileURLWithPath: executable + ".agent-hold")
+        addTeardownBlock { try? FileManager.default.removeItem(at: hold) }
+        try writeInstalledPlugin("slack-dms", source: Self.serviceAgentPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Slack DMs", icon: "bubble.left.and.bubble.right", extra: ["events": ["agent.finished"]])
+        try writeInstalledPlugin("deaf-plugin", source: Self.serviceAgentPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Deaf Plugin", icon: "ear", extra: ["events": ["app.focus"]])
+        try writeInstalledPlugin("listener-plugin", source: Self.serviceListenerPluginSource, placement: "composerActions", presentation: "headless",
+                                 extra: ["events": ["agent.finished"]])
+        // Its own daemon, so killing it leaves the UI runner's shared one alone.
+        let daemon = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).agents-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemon)
+        _ = try runCLI(["plugin", "refresh"], extraEnvironment: daemon)
+        func finished() -> [String: Any]? { (try? pluginState("slack-dms", environment: daemon))?["finished"] as? [String: Any] }
+        func agentRuns() throws -> [[String: Any]] {
+            try XCTUnwrap((try runCLI(["agent", "runs"], extraEnvironment: daemon)["result"] as? [String: Any])?["runs"] as? [[String: Any]])
+        }
+        func runs() -> [[String: Any]] { jsonLines(executable + ".agent-runs").compactMap { $0 as? [String: Any] } }
+        let schema = #"{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}"#
+        func run(_ plugin: String = "slack-dms", user: String, expectedStatus: Int32 = 0, extra: [String: String] = [:]) throws -> [String: Any] {
+            try runCLI(["agent", "run", "--plugin", plugin, "--prompt", "Draft a task for \(user).", "--model", "opus",
+                        "--allowed-tool", "mcp__claude_ai_Slack__slack_read_channel", "--json-schema", schema,
+                        "--context", #"{"kind":"slack-task","userId":"\#(user)"}"#], expectedStatus: expectedStatus, extraEnvironment: daemon.merging(extra) { _, new in new })
+        }
+        func code(_ response: [String: Any]) -> String? { (response["error"] as? [String: Any])?["code"] as? String }
+        XCTAssertEqual(code(try run("deaf-plugin", user: "U1", expectedStatus: 2)), "invalid_argument", "A plugin must list agent.finished to run an agent.")
+        XCTAssertEqual(code(try run("no-such-plugin", user: "U1", expectedStatus: 3)), "not_found")
+        XCTAssertEqual(code(try runCLI(["agent", "run", "--plugin", "slack-dms", "--prompt", "  "], expectedStatus: 2, extraEnvironment: daemon)), "invalid_argument", "A prompt is required.")
+        // The popover's Playhouse.agent.run fills its plugin id and passes every option.
+        let pressed = try XCTUnwrap(try runCLI(["plugin", "render", "--plugin", "slack-dms", "--event", "dm-create-U7:onPress", "--mock", #"agent.run={"runID":"run-popover"}"#],
+                                               extraEnvironment: daemon)["result"] as? [String: Any])
+        let popoverCall = try XCTUnwrap((pressed["hostCalls"] as? [[String: Any]])?.first { $0["name"] as? String == "agent.run" }?["arguments"] as? [String: Any])
+        XCTAssertEqual(popoverCall["pluginID"] as? String, "slack-dms")
+        XCTAssertEqual(popoverCall["model"] as? String, "opus")
+        XCTAssertEqual(popoverCall["allowedTools"] as? [String], ["mcp__claude_ai_Slack__slack_read_channel", "mcp__claude_ai_Slack__slack_read_thread"])
+        XCTAssertEqual((popoverCall["context"] as? [String: Any])?["userId"] as? String, "U7")
+        XCTAssertEqual((popoverCall["jsonSchema"] as? [String: Any])?["required"] as? [String], ["title", "prompt", "nothingNew"])
+        _ = try runCLI(["plugin", "state", "--id", "slack-dms", "--key", "jobs", "--value", "null"], extraEnvironment: daemon)
+        _ = try runCLI(["plugin", "disable", "--id", "deaf-plugin"], extraEnvironment: daemon)
+        XCTAssertEqual(((try run("deaf-plugin", user: "U1", expectedStatus: 1))["error"] as? [String: Any])?["code"] as? String, "unavailable", "A disabled plugin can't run an agent.")
+        func boardCard(_ title: String) -> XCUIElement? {
+            guard let id = (try? taskRecord(named: title))??["id"] as? String else { return nil }
+            return element("task-card-\(id)")
+        }
+
+        // The popover's button starts the run; its background half creates the task when it ends.
+        try Data().write(to: hold)
+        let entry = element("plugin-entry-slack-dms")
+        XCTAssertTrue(entry.waitToExist(timeout: 10), "The popover plugin has its sidebar button.")
+        entry.click()
+        let create = element("dm-create-U7")
+        XCTAssertTrue(create.waitToExist(timeout: 10))
+        create.click()
+        let job = element("dm-job")
+        XCTAssertTrue(waitUntil({ self.pluginText(job) == "running" }, timeout: 15), "agent.run answers at once with its runID: \(pluginText(job))")
+        let listed = try agentRuns()
+        XCTAssertEqual(listed.count, 1)
+        XCTAssertEqual(listed.first?["running"] as? Bool, true)
+        XCTAssertEqual((listed.first?["context"] as? [String: Any])?["userId"] as? String, "U7")
+        let runID = try XCTUnwrap(listed.first?["runID"] as? String)
+        XCTAssertTrue(waitUntil({ !runs().isEmpty }, timeout: 15), "The agent started.")
+        XCTAssertNil(finished(), "Nothing is heard while the agent runs.")
+        XCTAssertEqual(runs().last?["model"] as? String, "opus")
+        XCTAssertEqual(runs().last?["allowedTools"] as? String, "mcp__claude_ai_Slack__slack_read_channel,mcp__claude_ai_Slack__slack_read_thread")
+        XCTAssertEqual(runs().last?["persisted"] as? Bool, false)
+        attachElementScreenshot(element("plugin-surface-slack-dms"), named: "The popover started an agent run, which is still running")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(element("plugin-surface-slack-dms"), timeout: 10), "Closing the popover doesn't stop the run.")
+        try FileManager.default.removeItem(at: hold)
+        XCTAssertTrue(waitUntil({ finished()?["status"] as? String == "done" }, timeout: 30), "The plugin's service hears agent.finished.")
+        XCTAssertEqual(finished()?["runID"] as? String, runID)
+        XCTAssertEqual(finished()?["title"] as? String, "Reply to Dana")
+        let card = try XCTUnwrap(try taskRecord(named: "Reply to Dana"), "The service created the task from the structured result.")
+        XCTAssertTrue(element("task-card-\(try XCTUnwrap(card["id"] as? String))").waitToExist(timeout: 15), "The new task is on the board.")
+        entry.click()
+        let result = element("dm-finished")
+        XCTAssertTrue(waitUntil({ self.pluginText(result) == "done U7 Reply to Dana" }, timeout: 10), "The reopened popover shows the result: \(pluginText(result))")
+        XCTAssertEqual(pluginText(job), "no job")
+        attachScreenshot(named: "The agent's result created a task, and the popover shows it")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertEqual(try agentRuns().count, 0)
+
+        // Failed, cancelled, and cut off with the daemon.
+        try Data().write(to: URL(fileURLWithPath: executable + ".agent-fail"))
+        let failedID = try XCTUnwrap((try run(user: "U8")["result"] as? [String: Any])?["runID"] as? String)
+        XCTAssertTrue(waitUntil({ finished()?["runID"] as? String == failedID }, timeout: 30))
+        XCTAssertEqual(finished()?["status"] as? String, "failed")
+        XCTAssertEqual(finished()?["error"] as? String, "The fixture agent failed on purpose.")
+        XCTAssertNotNil(try taskRecord(named: "Slack task failed for U8: The fixture agent failed on purpose."), "The service files the failed run on the board.")
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: executable + ".agent-fail"))
+        try Data().write(to: hold)
+        let cancelledID = try XCTUnwrap((try run(user: "U9")["result"] as? [String: Any])?["runID"] as? String)
+        XCTAssertEqual(code(try runCLI(["agent", "cancel", "--plugin", "slack-dms", "--run", "agent-run-nope"], expectedStatus: 3, extraEnvironment: daemon)), "not_found")
+        _ = try runCLI(["agent", "cancel", "--plugin", "slack-dms", "--run", cancelledID], extraEnvironment: daemon)
+        XCTAssertTrue(waitUntil({ finished()?["runID"] as? String == cancelledID }, timeout: 30))
+        XCTAssertEqual(finished()?["status"] as? String, "cancelled")
+        // Past its timeout, a run is stopped and fails.
+        let timedID = try XCTUnwrap((try run(user: "U12", extra: ["PLAYHOUSE_E2E_PLUGIN_AGENT_TIMEOUT_SECONDS": "1"])["result"] as? [String: Any])?["runID"] as? String)
+        XCTAssertTrue(waitUntil({ finished()?["runID"] as? String == timedID }, timeout: 30), "The timed-out run is reported.")
+        XCTAssertEqual(finished()?["status"] as? String, "failed")
+        XCTAssertEqual(finished()?["error"] as? String, "The agent didn't finish within 1 seconds.")
+        XCTAssertNil(try pluginState("listener-plugin", environment: daemon)["finished"], "Another plugin listening for agent.finished never hears slack-dms's runs.")
+        let interruptedID = try XCTUnwrap((try run(user: "U10")["result"] as? [String: Any])?["runID"] as? String)
+        func pid(of user: String) -> Int? { runs().first { ($0["prompt"] as? String ?? "").contains(user) }?["pid"] as? Int }
+        XCTAssertTrue(waitUntil({ pid(of: "U10") != nil }, timeout: 15), "The U10 agent started.")
+        let orphan = try XCTUnwrap(pid(of: "U10"))
+        let firstPID = try XCTUnwrap(try daemonProcessID(environment: daemon))
+        kill(pid_t(firstPID), SIGKILL)
+        XCTAssertEqual(kill(pid_t(orphan), 0), 0, "The agent outlives its daemon.")
+        XCTAssertTrue(waitUntil({ ((try? self.daemonProcessID(environment: daemon)) ?? firstPID) != firstPID }, timeout: 20), "A fresh daemon takes over.")
+        // The service files it on the board (a test store's settings can't be read back across daemons).
+        // The new daemon checks the store on its first event or listing.
+        _ = try agentRuns()
+        let interruptedTitle = "Slack task failed for U10: interrupted"
+        XCTAssertTrue(waitUntil({ boardCard(interruptedTitle)?.exists == true }, timeout: 30), "The next daemon reports the cut-off run, with its context, and the board shows it.")
+        XCTAssertFalse(try agentRuns().contains { $0["runID"] as? String == interruptedID }, "The cut-off run left the list.")
+        XCTAssertTrue(waitUntil({ kill(pid_t(orphan), 0) != 0 }, timeout: 10), "The orphaned agent is stopped.")
+        attachElementScreenshot(try XCTUnwrap(boardCard(interruptedTitle)), named: "A run cut off with its daemon is reported as interrupted")
+
+        // Deleting the plugin stops its runs, with no event.
+        _ = try run(user: "U11")
+        XCTAssertTrue(waitUntil({ pid(of: "U11") != nil }, timeout: 15), "The U11 agent started.")
+        let last = try XCTUnwrap(pid(of: "U11"))
+        _ = try runCLI(["plugin", "delete", "--id", "slack-dms"], extraEnvironment: daemon)
+        XCTAssertEqual(try agentRuns().count, 0)
+        XCTAssertTrue(waitUntil({ kill(pid_t(last), 0) != 0 }, timeout: 10), "The deleted plugin's agent is stopped.")
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertNil(try taskRecord(named: "Slack task cancelled for U11: The run was cancelled."), "A deleted plugin hears nothing of its stopped run.")
+    }
+}
+
+// MARK: - Script plugins' background work on Codex
+
+extension PlayhouseUITests {
+    /// A copy of the Codex app-server fixture under this case's data folder, owned by this case.
+    func installCodexFixture(named name: String) throws -> [String: String] {
+        let executable = dataDirectory.appendingPathComponent(name)
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        codexFixtureExecutable = executable.path
+        return ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
+    }
+
+    // case-contract: test_plugin_mcp_call_codex | mcp.call with provider codex (CLI mcp call --provider codex, Playhouse.mcp.call with {provider: "codex"}) calls the tool through the shared Codex app-server's mcpServer/tool/call on one ephemeral, read-only thread that a burst of calls reuses and that is released (thread/unsubscribe) once idle, with no turn, answering the tool's {content, structuredContent, isError}. A tool Codex can't reach fails as tool_failed with its message, one slower than the call's timeout as timeout, a Codex without mcpServer/tool/call or no Codex at all is unavailable, and a plugin's mcpTools refuse any other tool as permission_denied. A plugin's background half calls it on app.focus and saves the result in its state, which its popover shows.
+    func test_plugin_mcp_call_codex() throws {
+        let environment = try installCodexFixture(named: "codex-fixture-ui-mcp")
+        let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"])
+        let profile = "mcp__claude_ai_Slack__slack_read_user_profile", search = "mcp__claude_ai_Slack__slack_search_public_and_private"
+        try JSONSerialization.data(withJSONObject: [
+            profile: ["content": [["type": "text", "text": "Nir Yosef"]]],
+            search: ["content": [["type": "text", "text": "Dana"], ["type": "text", "text": "Omri"]], "structuredContent": ["count": 2], "isError": false],
+        ]).write(to: URL(fileURLWithPath: executable + ".mcp-results"))
+        func lines(_ suffix: String) -> [[String: Any]] { jsonLines(executable + suffix).compactMap { $0 as? [String: Any] } }
+        func code(_ response: [String: Any]) -> String? { (response["error"] as? [String: Any])?["code"] as? String }
+        try writeInstalledPlugin("codex-reader", source: Self.serviceCodexMcpPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Codex Reader", icon: "bubble.left", extra: ["events": ["app.focus"], "mcpTools": [search]])
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["plugin", "refresh"])
+
+        // The window's focus wakes the background half, which calls the tool through Codex with no turn.
+        refocusApp()
+        XCTAssertTrue(waitUntil({ ((try? self.pluginState("codex-reader"))?["people"] as? [String]) == ["Dana", "Omri"] }, timeout: 30), "The service saves the Codex tool's result.")
+        let entry = element("plugin-entry-codex-reader")
+        XCTAssertTrue(entry.waitToExist(timeout: 10))
+        entry.click()
+        let people = element("mcp-people")
+        XCTAssertTrue(waitUntil({ people.exists && self.pluginText(people) == "Dana, Omri" }, timeout: 10), "The popover shows what the service read: \(pluginText(people))")
+        attachScreenshot(named: "The popover shows the people its background half read through Codex")
+        attachElementScreenshot(element("plugin-surface-codex-reader"), named: "Slack DMs read by Codex's mcpServer/tool/call")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertEqual(lines(".mcp-calls").last?["server"] as? String, "claude_ai_Slack")
+        XCTAssertEqual(lines(".mcp-calls").last?["tool"] as? String, "slack_search_public_and_private")
+
+        let answer = try XCTUnwrap(try runCLI(["mcp", "call", "--provider", "codex", "--tool", profile, "--arguments", #"{"user":"U1"}"#])["result"] as? [String: Any])
+        XCTAssertEqual(((answer["content"] as? [[String: Any]])?.first)?["text"] as? String, "Nir Yosef")
+        XCTAssertEqual((lines(".mcp-calls").last?["arguments"] as? [String: Any])?["user"] as? String, "U1")
+        XCTAssertEqual(lines(".ephemeral-threads").count, 1, "A burst of calls reuses one ephemeral thread.")
+        XCTAssertEqual(lines(".ephemeral-threads").first?["sandbox"] as? String, "read-only")
+        XCTAssertEqual(Set(lines(".mcp-calls").compactMap { $0["threadId"] as? String }).count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: executable + ".turn-starts"), "No turn ran.")
+        let warm = try XCTUnwrap(lines(".ephemeral-threads").first?["threadId"] as? String)
+        _ = try runCLI(["mcp", "call", "--provider", "codex", "--tool", profile], extraEnvironment: ["PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS": "1"])
+        XCTAssertTrue(waitUntil({ lines(".unsubscribed").contains { $0["threadId"] as? String == warm } }, timeout: 15), "The idle thread is released.")
+        _ = try runCLI(["mcp", "call", "--provider", "codex", "--tool", profile])
+        XCTAssertEqual(lines(".ephemeral-threads").count, 2, "After the release, a call starts a new thread.")
+        let failed = try runCLI(["mcp", "call", "--provider", "codex", "--tool", "mcp__linear__list_issues"], expectedStatus: 1)
+        XCTAssertEqual(code(failed), "tool_failed")
+        XCTAssertTrue(((failed["error"] as? [String: Any])?["message"] as? String ?? "").contains("MCP server not connected: linear"))
+        XCTAssertEqual(code(try runCLI(["mcp", "call", "--provider", "codex", "--tool", profile, "--plugin", "codex-reader"], expectedStatus: 1)), "permission_denied")
+
+        let channel = "mcp__claude_ai_Slack__slack_read_channel"
+        try JSONSerialization.data(withJSONObject: [channel: ["content": [["type": "text", "text": "hi"]]]]).write(to: URL(fileURLWithPath: executable + ".mcp-results"))
+        try JSONSerialization.data(withJSONObject: [channel: 4]).write(to: URL(fileURLWithPath: executable + ".mcp-call-delay"))
+        XCTAssertEqual(code(try runCLI(["mcp", "call", "--provider", "codex", "--tool", channel, "--timeout", "1"], expectedStatus: 1)), "timeout")
+
+        let unsupported = try installCodexFixture(named: "codex-fixture-ui-no-mcp-call")
+        let refused = try runCLI(["mcp", "call", "--provider", "codex", "--tool", profile], expectedStatus: 1, extraEnvironment: unsupported)
+        XCTAssertEqual(code(refused), "unavailable")
+        XCTAssertTrue(((refused["error"] as? [String: Any])?["message"] as? String ?? "").contains("can't call MCP tools directly"))
+        XCTAssertEqual(code(try runCLI(["mcp", "call", "--provider", "codex", "--tool", profile], expectedStatus: 1, extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"])), "unavailable")
+        XCTAssertEqual(code(try runCLI(["mcp", "call", "--provider", "gemini", "--tool", profile], expectedStatus: 2)), "invalid_argument")
+    }
+
+    // case-contract: test_plugin_agent_run_codex | agent.run with provider codex (CLI agent run --provider codex, Playhouse.agent.run from the popover with the plugin's provider) starts one turn on an ephemeral, read-only Codex thread of the shared app-server with no approvals, the prompt, the model and the JSON schema as outputSchema, and returns its runID at once; agent runs lists it as a running Codex run, and its thread is released (thread/unsubscribe) when the turn ends. When it ends, only that plugin's background half hears agent.finished: done with the final message parsed as the schema's structured output, which the plugin's handler uses to create a board task, failed with Codex's error, when the message isn't JSON for the schema, or after the run timeout, or cancelled after agent cancel, which interrupts the turn. A run cut off by its daemon dying is reported failed with the error "interrupted" by the next daemon, which also interrupts the orphaned turn on the app-server that outlived it. With no Codex installed, agent.run with provider codex is unavailable.
+    func test_plugin_agent_run_codex() throws {
+        let environment = try installCodexFixture(named: "codex-fixture-ui-agent")
+        let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"])
+        let output = URL(fileURLWithPath: executable + ".agent-output")
+        let answer = try JSONSerialization.data(withJSONObject: ["title": "Reply to Omri", "prompt": "Answer Omri's question.", "nothingNew": false])
+        try answer.write(to: output)
+        let hold = URL(fileURLWithPath: executable + ".agent-hold")
+        addTeardownBlock { try? FileManager.default.removeItem(at: hold) }
+        try writeInstalledPlugin("slack-dms", source: Self.serviceAgentPluginSource, placement: "mainSidebar", presentation: "popover",
+                                 name: "Slack DMs", icon: "bubble.left.and.bubble.right", extra: ["events": ["agent.finished"]])
+        try writeInstalledPlugin("listener-plugin", source: Self.serviceListenerPluginSource, placement: "composerActions", presentation: "headless",
+                                 extra: ["events": ["agent.finished"]])
+        // Its own daemon, so killing it leaves the UI runner's shared one alone.
+        let daemon = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).codex-agents-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemon)
+        _ = try runCLI(["plugin", "refresh"], extraEnvironment: daemon)
+        func finished() -> [String: Any]? { (try? pluginState("slack-dms", environment: daemon))?["finished"] as? [String: Any] }
+        func runs() -> [[String: Any]] { jsonLines(executable + ".agent-runs").compactMap { $0 as? [String: Any] } }
+        func interrupts() -> Int { ((try? String(contentsOfFile: executable + ".methods", encoding: .utf8)) ?? "").components(separatedBy: "\n").filter { $0 == "turn/interrupt" }.count }
+        func code(_ response: [String: Any]) -> String? { (response["error"] as? [String: Any])?["code"] as? String }
+        let schema = #"{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}"#
+        func run(_ user: String, extra: [String: String] = [:]) throws -> String {
+            try XCTUnwrap((try runCLI(["agent", "run", "--plugin", "slack-dms", "--provider", "codex", "--prompt", "Draft a task for \(user).", "--model", "gpt-5.5",
+                                       "--json-schema", schema, "--context", #"{"kind":"slack-task","userId":"\#(user)"}"#],
+                                      extraEnvironment: daemon.merging(extra) { _, new in new })["result"] as? [String: Any])?["runID"] as? String)
+        }
+        func boardCard(_ title: String) -> XCUIElement? {
+            guard let id = (try? taskRecord(named: title))??["id"] as? String else { return nil }
+            return element("task-card-\(id)")
+        }
+
+        // The popover's button runs the agent on the plugin's provider; its background half creates the task.
+        _ = try runCLI(["plugin", "state", "--id", "slack-dms", "--key", "provider", "--value", #""codex""#], extraEnvironment: daemon)
+        try Data().write(to: hold)
+        let entry = element("plugin-entry-slack-dms")
+        XCTAssertTrue(entry.waitToExist(timeout: 10), "The popover plugin has its sidebar button.")
+        entry.click()
+        let create = element("dm-create-U7")
+        XCTAssertTrue(create.waitToExist(timeout: 10))
+        create.click()
+        let job = element("dm-job")
+        XCTAssertTrue(waitUntil({ self.pluginText(job) == "running" }, timeout: 15), "agent.run answers at once with its runID: \(pluginText(job))")
+        let listed = try XCTUnwrap((try runCLI(["agent", "runs"], extraEnvironment: daemon)["result"] as? [String: Any])?["runs"] as? [[String: Any]])
+        XCTAssertEqual(listed.first?["provider"] as? String, "codex")
+        XCTAssertEqual(listed.first?["running"] as? Bool, true)
+        let runID = try XCTUnwrap(listed.first?["runID"] as? String)
+        XCTAssertTrue(waitUntil({ !runs().isEmpty }, timeout: 15), "The Codex turn started.")
+        XCTAssertEqual(runs().last?["model"] as? String, "gpt-5.5")
+        XCTAssertEqual(runs().last?["sandbox"] as? String, "readOnly")
+        XCTAssertEqual(runs().last?["approvalPolicy"] as? String, "never")
+        XCTAssertEqual(((runs().last?["outputSchema"] as? [String: Any])?["required"] as? [String]), ["title", "prompt", "nothingNew"])
+        XCTAssertTrue((runs().last?["threadId"] as? String ?? "").hasPrefix("ephemeral-"), "The run has an ephemeral thread of its own.")
+        XCTAssertNil(finished(), "Nothing is heard while the agent runs.")
+        attachElementScreenshot(element("plugin-surface-slack-dms"), named: "The popover started a Codex agent run, which is still running")
+        app.typeKey(.escape, modifierFlags: [])
+        try FileManager.default.removeItem(at: hold)
+        XCTAssertTrue(waitUntil({ finished()?["status"] as? String == "done" }, timeout: 30), "The plugin's service hears agent.finished.")
+        XCTAssertEqual(finished()?["runID"] as? String, runID)
+        XCTAssertEqual(finished()?["title"] as? String, "Reply to Omri")
+        XCTAssertTrue(waitUntil({ boardCard("Reply to Omri")?.exists == true }, timeout: 15), "The new task is on the board.")
+        let runThread = try XCTUnwrap(runs().first?["threadId"] as? String)
+        XCTAssertTrue(waitUntil({ jsonLines(executable + ".unsubscribed").contains { ($0 as? [String: Any])?["threadId"] as? String == runThread } }, timeout: 15),
+                      "The finished run's thread is released.")
+        entry.click()
+        let result = element("dm-finished")
+        XCTAssertTrue(waitUntil({ self.pluginText(result) == "done U7 Reply to Omri" }, timeout: 10), "The reopened popover shows the result: \(pluginText(result))")
+        attachScreenshot(named: "The Codex agent's result created a task, and the popover shows it")
+        app.typeKey(.escape, modifierFlags: [])
+
+        // Failed, unparsable, cancelled and timed out.
+        try Data().write(to: URL(fileURLWithPath: executable + ".agent-fail"))
+        let failedID = try run("U8")
+        XCTAssertTrue(waitUntil({ finished()?["runID"] as? String == failedID }, timeout: 30))
+        XCTAssertEqual(finished()?["status"] as? String, "failed")
+        XCTAssertEqual(finished()?["error"] as? String, "The fixture agent failed on purpose.")
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: executable + ".agent-fail"))
+        try Data("not json".utf8).write(to: output)
+        let unparsedID = try run("U9")
+        XCTAssertTrue(waitUntil({ finished()?["runID"] as? String == unparsedID }, timeout: 30))
+        XCTAssertEqual(finished()?["status"] as? String, "failed")
+        XCTAssertEqual(finished()?["error"] as? String, "Codex returned no structured output for the JSON schema.")
+        try answer.write(to: output)
+        try Data().write(to: hold)
+        var before = interrupts()
+        let cancelledID = try run("U10")
+        _ = try runCLI(["agent", "cancel", "--plugin", "slack-dms", "--run", cancelledID], extraEnvironment: daemon)
+        XCTAssertTrue(waitUntil({ finished()?["runID"] as? String == cancelledID }, timeout: 30))
+        XCTAssertEqual(finished()?["status"] as? String, "cancelled")
+        XCTAssertGreaterThan(interrupts(), before, "Cancelling interrupts the Codex turn.")
+        let timedID = try run("U11", extra: ["PLAYHOUSE_E2E_PLUGIN_AGENT_TIMEOUT_SECONDS": "1"])
+        XCTAssertTrue(waitUntil({ finished()?["runID"] as? String == timedID }, timeout: 30))
+        XCTAssertEqual(finished()?["status"] as? String, "failed")
+        XCTAssertEqual(finished()?["error"] as? String, "The agent didn't finish within 1 seconds.")
+        XCTAssertNil(try pluginState("listener-plugin", environment: daemon)["finished"], "Another plugin never hears slack-dms's runs.")
+
+        // Cut off with its daemon; the app-server outlives it, and the next daemon interrupts the orphaned turn.
+        before = interrupts()
+        _ = try run("U12")
+        XCTAssertTrue(waitUntil({ runs().contains { ($0["prompt"] as? String ?? "").contains("U12") } }, timeout: 15), "The U12 turn started.")
+        let firstPID = try XCTUnwrap(try daemonProcessID(environment: daemon))
+        kill(pid_t(firstPID), SIGKILL)
+        XCTAssertTrue(waitUntil({ ((try? self.daemonProcessID(environment: daemon)) ?? firstPID) != firstPID }, timeout: 20), "A fresh daemon takes over.")
+        _ = try runCLI(["agent", "runs"], extraEnvironment: daemon)
+        // The service files it on the board (a test store's settings can't be read back across daemons).
+        let interruptedTitle = "Slack task failed for U12: interrupted"
+        XCTAssertTrue(waitUntil({ boardCard(interruptedTitle)?.exists == true }, timeout: 30), "The next daemon reports the cut-off run, and the board shows it.")
+        XCTAssertTrue(waitUntil({ interrupts() > before }, timeout: 15), "The next daemon interrupts the orphaned Codex turn.")
+        attachElementScreenshot(try XCTUnwrap(boardCard(interruptedTitle)), named: "A Codex run cut off with its daemon is reported as interrupted")
+        XCTAssertEqual(code(try runCLI(["agent", "run", "--plugin", "slack-dms", "--provider", "codex", "--prompt", "Go."], expectedStatus: 1,
+                                       extraEnvironment: daemon.merging(["PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"]) { _, new in new })), "unavailable")
+    }
+}

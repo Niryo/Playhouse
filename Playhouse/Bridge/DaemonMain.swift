@@ -260,6 +260,8 @@ enum PlayhouseBridgeDaemonMain {
         // or not a window is open.
         MainActor.assumeIsolated {
             PluginServiceHost.services = [PullRequestModeService()]
+            // Script plugins' background halves, found per event from the request's store.
+            PluginServiceHost.scriptServices = { await JavaScriptPluginService.services($0) }
         }
         startScheduleTicker(environment: environment)
         RunLoop.current.run()

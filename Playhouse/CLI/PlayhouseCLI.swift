@@ -56,7 +56,7 @@ enum PlayhouseCLI {
             printResponse(response)
             guard response.ok else { exit(exitStatus(for: response.error?.code)) }
             // A plugin that renders with errors still answers with the full report, but fails the process.
-            if configuredRequest.command == "plugin.render",
+            if ["plugin.render", "plugin.service"].contains(configuredRequest.command),
                case .array(let errors)? = response.result?.object?["errors"], !errors.isEmpty {
                 exit(1)
             }
