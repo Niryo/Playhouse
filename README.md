@@ -17,6 +17,10 @@
 </p>
 
 <p align="center">
+  <a href="https://niryo.github.io/Playhouse/"><b>niryo.github.io/Playhouse</b></a>
+</p>
+
+<p align="center">
   <img src="docs/images/board.png" alt="The Playhouse board with tasks in Blocked, Waiting Response, In Progress and Review">
 </p>
 
@@ -68,6 +72,10 @@ The Changes panel lists every file the agent touched. Click one to open a side-b
 ### Side chats
 
 Select any part of a reply and ask a quick question about it in a side chat. The answer stays next to the selection and never derails the main conversation or the agent's context.
+
+<p align="center">
+  <img src="docs/images/side-chat.png" alt="A side chat open over a task conversation, answering a question about the selected root-cause paragraph">
+</p>
 
 ### Switch providers seamlessly
 
