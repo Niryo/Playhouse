@@ -7,10 +7,13 @@ struct PlayhouseApp: App {
     @NSApplicationDelegateAdaptor(PlayhouseApplicationDelegate.self) private var applicationDelegate
     private let modelContainer: ModelContainer
     private let appPreferences: UserDefaults
-    @StateObject private var conversationRuntime: ConversationRuntimeModel
-    @StateObject private var cpuUsageModel: TaskCPUUsageModel
-    @StateObject private var agentUsageModel = AgentUsageModel(client: DaemonClient())
-    @StateObject private var updateController: UpdateController
+    // Held, not observed: each change of an object the app observes rebuilds the scene's menu
+    // bar, closing a submenu open under the pointer, and these change on every runtime and CPU
+    // update. The window's views and the menu items that show them observe them themselves.
+    @State private var conversationRuntime: ConversationRuntimeModel
+    @State private var cpuUsageModel: TaskCPUUsageModel
+    @State private var agentUsageModel = AgentUsageModel(client: DaemonClient())
+    @State private var updateController: UpdateController
     @State private var pluginRegistry = PluginRegistry()
 
     private var windowTitle: String {
@@ -25,11 +28,11 @@ struct PlayhouseApp: App {
     init() {
         let environment = ProcessInfo.processInfo.environment
         let runtime = ConversationRuntimeModel(client: DaemonClient())
-        _conversationRuntime = StateObject(wrappedValue: runtime)
+        _conversationRuntime = State(initialValue: runtime)
         let cpuUsage = TaskCPUUsageModel(client: DaemonClient())
-        _cpuUsageModel = StateObject(wrappedValue: cpuUsage)
+        _cpuUsageModel = State(initialValue: cpuUsage)
         let updates = UpdateController(client: DaemonClient())
-        _updateController = StateObject(wrappedValue: updates)
+        _updateController = State(initialValue: updates)
         // The bridge daemon owns every provider turn, so quitting the window
         // doesn't stop one; it just stops watching.
         PlayhouseApplicationDelegate.terminationHandler = { [weak runtime, weak cpuUsage, weak updates] in

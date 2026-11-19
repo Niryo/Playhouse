@@ -597,10 +597,32 @@ extension ConversationManager {
             let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
             return try await clients.codex.inspectThreadReadOnly(id: childID, workspace: workspace)
         }
-        // Claude Code reports a subagent's prompt summary and final report to its
-        // parent; Playhouse shows those rather than its private sidechain.
+        // Claude Code streams only a subagent's launch and report to its parent;
+        // its own work is in its sidechain file, read again on every call so a
+        // running agent shows its latest work.
+        let sessionIDs = [task.conversationID(for: .claude)].compactMap { $0 }
+        let configDirectory = clients.claude.configDirectory
+        let parsed = await Task.detached(priority: .userInitiated) {
+            ClaudeSubagentTranscriptReader.agentFile(toolUseID: childID, sessionIDs: sessionIDs, configDirectory: configDirectory)
+                .flatMap { try? Data(contentsOf: $0, options: .mappedIfSafe) }
+                .map(ClaudeSubagentTranscriptReader.parse)
+        }.value
+        let sidechain = parsed.map(ClaudeSubagentTranscriptReader.history)
         let report = ConversationMessage(id: "\(childID)-report", role: .assistant, text: activity.detail, phase: "final_answer", provider: .claude)
-        return ConversationHistory(messages: [report], activities: [], diff: nil)
+        guard var history = sidechain, !history.messages.isEmpty || !history.timelineActivities.isEmpty else {
+            return ConversationHistory(messages: [report], activities: [], diff: nil)
+        }
+        // A finished agent's report is its last text; add it when the file ends before it.
+        if !activity.isActive, !activity.detail.isEmpty {
+            let trimmed = { (text: String) in text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            if let last = history.messages.indices.last, history.messages[last].role == .assistant,
+               trimmed(history.messages[last].text) == trimmed(activity.detail) {
+                history.messages[last].phase = "final_answer"
+            } else {
+                history.messages.append(report)
+            }
+        }
+        return history
     }
 
     func searchArchive(query: String) async throws -> [BoardTaskRecord] {

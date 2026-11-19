@@ -15,12 +15,19 @@ extension View {
     func atomHighlightRoot() -> some View {
         modifier(AtomHighlightRootModifier())
     }
+
+    /// Carries the highlight flag from `environment` to content hosted outside
+    /// this view tree, such as an `NSPopover`.
+    func atomHighlightEnvironment(from environment: EnvironmentValues) -> some View {
+        self.environment(\.highlightNativeAtoms, environment.highlightNativeAtoms)
+    }
 }
 #else
 extension View {
     /// Returns `Self`, not `some View`, so release view types are unchanged.
     @inline(__always) func atomHighlight(_ atom: AtomType) -> Self { self }
     @inline(__always) func atomHighlightRoot() -> Self { self }
+    @inline(__always) func atomHighlightEnvironment(from environment: EnvironmentValues) -> Self { self }
 }
 #endif
 

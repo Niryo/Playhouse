@@ -1090,6 +1090,11 @@ extension PlayhouseUITests {
     }
     /// Opens an installed plugin's submenu in the Plugins menu and clicks one of its actions.
     func clickInstalledPluginAction(_ action: String, pluginRow: String, file: StaticString = #filePath, line: UInt = #line) {
+        openInstalledPluginSubmenu(on: action, pluginRow: pluginRow, file: file, line: line).click()
+    }
+    /// Opens the Plugins menu's `pluginRow` submenu and rests the pointer on its `action` item, which it returns.
+    @discardableResult
+    func openInstalledPluginSubmenu(on action: String, pluginRow: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         let menu = app.menuBars.menuBarItems["Plugins"]
         menu.click()
         let row = menu.menuItems[pluginRow]
@@ -1112,7 +1117,7 @@ extension PlayhouseUITests {
         let itemLeading = item.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 6, dy: 0))
         itemLeading.withOffset(CGVector(dx: 0, dy: row.frame.midY - item.frame.minY)).hover()
         itemLeading.withOffset(CGVector(dx: 0, dy: item.frame.height / 2)).hover()
-        item.click()
+        return item
     }
     func pluginMode() throws -> Bool {
         try XCTUnwrap((try runCLI(["plugin", "mode"])["result"] as? [String: Any])?["enabled"] as? Bool)

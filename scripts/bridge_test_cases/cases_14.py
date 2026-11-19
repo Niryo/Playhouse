@@ -248,7 +248,7 @@ class BridgeTestCases14:
         )
         resumed, _ = self.call_cli("conversation", "history", task_id)
         self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
-    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript as the agent's row (named, finished working, with an arrow) rather than a reply bubble, opens the report in the read-only agent window when clicked, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript as the agent's row (named, finished working, with an arrow) rather than a reply bubble, opens the report in the read-only agent window when clicked, and survives fresh CLI/XPC history reads and app reopening without duplication. The agent's window, opened while it runs and again after it finishes, also shows its own work read from its Claude Code sidechain file (found by the meta file naming the launching tool use): its prompt without Claude Code's own reminders, its text, and its tool calls with their input and output, each after the text it followed, ending with its report once as the final answer only after it finishes; a window left open on the running agent updates with that report when the agent finishes, without reopening it. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
     def test_claude_background_agent_keeps_turn_open_until_resolved(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-background-agent"
@@ -261,7 +261,7 @@ class BridgeTestCases14:
             "task", "create", "--title", "Claude background agent", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
-        env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable), "CLAUDE_CONFIG_DIR": str(self.data_directory / "claude-config")}
         command = ("conversation", "send", task_id, "--message", "Launch a background agent for this turn.")
         pause = Path(str(executable) + ".background-summary-pause")
         ready = Path(str(executable) + ".background-summary-ready")
@@ -292,6 +292,22 @@ class BridgeTestCases14:
                 any(message.get("phase") == "subagent_report" for message in interim_history["messages"]),
                 "Progress detail must not appear as a completed assistant result before Claude sends its summary.",
             )
+            # The running agent's own work is read from its sidechain file, not only its report.
+            running_work = self.assert_success(self.call_cli(
+                "conversation", "subagent-history", task_id, "--activity", json.dumps(interim_activity), extra_environment=env
+            )[0])
+            self.assertEqual(
+                [(message["role"], message["text"]) for message in running_work["messages"]],
+                [("user", "check something"), ("assistant", "Checking the fixture README first.")],
+                "A running Claude agent shows its prompt and text, without Claude Code's own reminders.",
+            )
+            running_tools = running_work["timelineActivities"]
+            self.assertEqual([tool["id"] for tool in running_tools], ["toolu_bg_sub_read"], running_tools)
+            self.assertEqual(running_tools[0]["status"], "completed")
+            self.assertEqual(running_tools[0]["input"], "cat README.md")
+            self.assertEqual(running_tools[0]["output"], "Fixture README contents")
+            self.assertEqual(running_tools[0]["afterMessageID"], running_work["messages"][1]["id"],
+                             "The agent's tool call sits after the text it followed.")
             release.write_text("Release summary notification.\n", encoding="utf-8")
             stdout, stderr = process.communicate(timeout=60)
             self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {command}: {stderr!r}")
@@ -340,6 +356,15 @@ class BridgeTestCases14:
         fresh_history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
         fresh_reports = [message for message in fresh_history["messages"] if message.get("phase") == "subagent_report"]
         self.assertEqual(fresh_reports, reports, "Fresh XPC reads should preserve one stable result message without duplication.")
+        finished_work = self.assert_success(self.call_cli(
+            "conversation", "subagent-history", task_id, "--activity", json.dumps(activity), extra_environment=env
+        )[0])
+        self.assertEqual(
+            [(message["text"], message.get("phase")) for message in finished_work["messages"]],
+            [("check something", None), ("Checking the fixture README first.", "commentary"), ("Background check finished.", "final_answer")],
+            "A finished agent's work ends with its report once, as its final answer.",
+        )
+        self.assertEqual([tool["id"] for tool in finished_work["timelineActivities"]], ["toolu_bg_sub_read"])
         launch_arguments = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"][0]["arguments"]
         system_prompt = launch_arguments[launch_arguments.index("--append-system-prompt") + 1]
         for guidance in [

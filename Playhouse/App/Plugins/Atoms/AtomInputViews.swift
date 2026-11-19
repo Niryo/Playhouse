@@ -384,7 +384,7 @@ private struct HoverPopoverPresenter: NSViewRepresentable {
         view.edge = edge
         // The popover hosts its content outside this tree, so carry over the
         // environment the atoms read; anything else falls back to its default.
-        view.content = AnyView(content.environment(\.highlightNativeAtoms, context.environment.highlightNativeAtoms))
+        view.content = AnyView(content.atomHighlightEnvironment(from: context.environment))
         view.isPresented = isPresented
         view.sync()
     }
