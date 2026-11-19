@@ -48,6 +48,7 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         // When redaction has replaced every user message, the placeholders are all there is to anchor on.
         messages.indices.last(where: { index in
             !PrivatePromptPlaceholder.matches(messages[index].text)
+                && !PrivatePromptPlaceholder.isRecoveryAnswer(messages[index].text)
                 && startsUserTurn(at: index, in: messages, continuingIDs: continuingIDs)
         })
             ?? messages.lastIndex(where: { $0.role == .user })

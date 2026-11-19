@@ -310,7 +310,7 @@ class BridgeTestCases15:
                          {question["id"], "item_playhouse_async_later_question"})
         self.assertTrue(any("Answers received: One more check: Finish after the turn." in message["text"]
                             for message in completed_history["messages"]))
-    # case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered.
+    # case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered. The failed answer is not kept in the conversation as a sent message, and the retry sends it exactly once.
     def test_codex_async_question_queued_answer_retries(self):
         task_id = self.create_task("Queued async question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -339,6 +339,11 @@ class BridgeTestCases15:
         self.assertEqual(queued_item["asyncQuestionItemID"], question["id"])
         pending, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         self.assertEqual(self.assert_success(pending)["answeredAsyncQuestionIDs"], [])
+        expected_reply = ("Test and verify: Yes, update paired tests and run required verification\n"
+                          "Additional detail: Retry this answer.")
+        # The answer stays in the queue as needs-action, so the conversation doesn't show it as sent.
+        self.assertFalse(any(message["role"] == "user" and message["text"] == expected_reply
+                             for message in self.assert_success(pending)["messages"]))
         self.assertEqual(self.assert_success(self.call_cli("conversation", "answered-async", task_id)[0])["itemIDs"], [])
         duplicate, _ = self.call_cli("conversation", "answer-async", task_id, question["id"],
                                      "--answer", "No, leave tests and verification for later",
@@ -350,10 +355,11 @@ class BridgeTestCases15:
         delivered_history = self.assert_success(delivered)
         self.assertEqual(delivered_history["answeredAsyncQuestionIDs"], [question["id"]])
         self.assertEqual(self.assert_success(self.call_cli("conversation", "answered-async", task_id)[0])["itemIDs"], [question["id"]])
-        expected_reply = ("Test and verify: Yes, update paired tests and run required verification\n"
-                          "Additional detail: Retry this answer.")
         self.assertTrue(any(message["text"] == "Answers received: " + expected_reply
                             for message in delivered_history["messages"]))
+        self.assertEqual(sum(message["role"] == "user" and message["text"] == expected_reply
+                             for message in delivered_history["messages"]), 1,
+                         "The retried answer is sent once.")
     # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt. Recovering a never-started turn into Waiting Response starts Ping once.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]

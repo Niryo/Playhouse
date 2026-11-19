@@ -92,6 +92,19 @@ extension ConversationManager {
         }
     }
 
+    /// Removes the latest turn when it got no further than its user message, with this text (as
+    /// sent, mentions expanded) and exactly these images: a send that failed before its provider produced anything. Writes load
+    /// messages without their images, so the turn is first read with them.
+    func discardUnansweredTurn(taskID: UUID, text: String, imageDataURLs: [String]) {
+        guard let latest = (try? transcripts.read(taskID, turns: .latest, includeImages: true))?.turns.last,
+              latest.activities.isEmpty, latest.messages.count == 1, let only = latest.messages.first,
+              only.role == .user, only.imageDataURLs == imageDataURLs,
+              MentionText.sameUserText(only.text, text) else { return }
+        try? transcripts.mutate(taskID, turns: .latest) { transcript in
+            transcript.turns.removeAll { $0.id == latest.id && $0.activities.isEmpty && $0.messages.count == 1 }
+        }
+    }
+
     func sendReserved(
         taskID: UUID,
         text: String,

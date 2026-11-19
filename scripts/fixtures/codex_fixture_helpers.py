@@ -254,7 +254,13 @@ def _unstreamed_turn_items(runtime, thread_id, turn_id):
     streamed = runtime.STREAMED_TURN_ITEMS.setdefault(turn_id, set())
     # Scenarios reuse one turn ID across turns: the entries an earlier turn under the same
     # ID already completed with belong to that turn, not this one.
+    # A history that shrank was reset (a case deletes the history file while this server
+    # runs on), so the turns it recorded before are gone and nothing counts as completed.
+    sizes = runtime.COMPLETED_TURN_HISTORY_SIZES
     earlier = runtime.COMPLETED_TURN_ENTRIES.get(turn_id, collections.Counter())
+    if len(entries) < sizes.get(turn_id, 0):
+        earlier = collections.Counter()
+    sizes[turn_id] = len(entries)
     current = collections.Counter(
         runtime.json.dumps(entry, sort_keys=True) for entry in entries if entry.get("turnId") == turn_id
     )
@@ -285,6 +291,7 @@ def write(runtime, value):
     if not hasattr(runtime, "STREAMED_TURN_ITEMS"):
         runtime.STREAMED_TURN_ITEMS = {}
         runtime.COMPLETED_TURN_ENTRIES = {}
+        runtime.COMPLETED_TURN_HISTORY_SIZES = {}
     if isinstance(value, dict) and value.get("method") == "turn/started":
         runtime.STREAMED_TURN_ITEMS[((value.get("params") or {}).get("turn") or {}).get("id")] = set()
     if isinstance(value, dict) and value.get("method") in ("item/started", "item/completed"):

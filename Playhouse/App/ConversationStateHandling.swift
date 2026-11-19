@@ -103,7 +103,10 @@ extension TaskConversationView {
             let hasPendingSubmittedPrompt = pendingSubmittedPrompt != nil
             if let submittedPrompt = pendingSubmittedPrompt,
                !submittedPrompt.isEmpty,
-               !history.messages.contains(where: { $0.role == .user && MentionText.sameUserText($0.text, submittedPrompt) }) {
+               !history.messages.contains(where: { $0.role == .user && MentionText.sameUserText($0.text, submittedPrompt) }),
+               // The saved prompt stands in for a recovery prompt the transcript keeps as sent.
+               !(submittedPrompt == PrivatePromptPlaceholder.recoveryAnswer
+                   && history.messages.contains(where: { $0.role == .user && PrivatePromptPlaceholder.isRecoveryAnswer($0.text) })) {
                 messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
             // A marked draft is unsent by definition: steering, queueing, and sending clear it.
