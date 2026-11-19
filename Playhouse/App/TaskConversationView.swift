@@ -249,6 +249,8 @@ struct TaskConversationView: View {
     @State var expandedActivityTitleIDs = Set<String>()
     @State var selectedSubagent: ConversationActivity?
     @State var subagentHistory: ConversationHistory?
+    /// Re-reads the open agent while it is still working.
+    @State var subagentRefresh: Task<Void, Never>?
     @State var isLoadingSubagent = false
     @State var subagentError: String?
     /// `props.workspace.revision` for the conversation sidebar's plugins (Changes is one),
@@ -953,6 +955,7 @@ struct TaskConversationView: View {
         .onDisappear {
             changeWatcher?.stop()
             changeWatcher = nil
+            subagentRefresh?.cancel()
             terminalSession.terminate()
             // Switching tasks replaces this view without going back first.
             if !isReadOnly, isDraftUnsaved { persistDraft(reportingErrors: false) }

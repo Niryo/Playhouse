@@ -301,3 +301,123 @@ enum ClaudeSessionUsageReader {
         return result
     }
 }
+
+/// Reads a Claude Code subagent's own work from its sidechain file.
+///
+/// Claude Code streams only a subagent's launch, progress and final report to
+/// its parent; the subagent's prompt, text and tool calls are written to
+/// `<session>/subagents/agent-<id>.jsonl`, and its `agent-<id>.meta.json`
+/// names the parent's tool-use ID (the activity's `childThreadID`). The file
+/// grows while the agent works, so reading it again shows its latest work.
+enum ClaudeSubagentTranscriptReader {
+    /// The sidechain file of the agent the given tool use launched: the given
+    /// sessions' agents first, then the other sessions of the same folders,
+    /// which hold agents of earlier pages or replaced sessions.
+    nonisolated static func agentFile(toolUseID: String, sessionIDs: [String], configDirectory: String) -> URL? {
+        let mainFiles = sessionIDs.compactMap { ClaudeSessionUsageReader.sessionFile(sessionID: $0, configDirectory: configDirectory) }
+        if let file = agentFile(toolUseID: toolUseID, mainFiles: mainFiles) { return file }
+        var projects: [URL] = []
+        for project in mainFiles.map({ $0.deletingLastPathComponent() }) where !projects.contains(project) { projects.append(project) }
+        let siblings = projects.flatMap { project in
+            ((try? FileManager.default.contentsOfDirectory(at: project, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "jsonl" && !mainFiles.contains($0) }
+        }
+        return agentFile(toolUseID: toolUseID, mainFiles: siblings)
+    }
+
+    nonisolated private static func agentFile(toolUseID: String, mainFiles: [URL]) -> URL? {
+        for main in mainFiles {
+            for subagent in ClaudeSessionUsageReader.subagentFiles(mainFile: main) {
+                let meta = subagent.file.deletingPathExtension().appendingPathExtension("meta.json")
+                guard let data = try? Data(contentsOf: meta),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      object["toolUseId"] as? String == toolUseID else { continue }
+                return subagent.file
+            }
+        }
+        return nil
+    }
+
+    /// What a sidechain file holds, parsed off the main actor; the file grows
+    /// without bound while the agent works and is read again on every refresh.
+    struct Sidechain: Sendable {
+        struct Message: Sendable { let id: String; let isUser: Bool; let text: String; let createdAt: Date?; let modelID: String? }
+        struct Call: Sendable { let id: String; let name: String; let input: Data; let afterMessageID: String?; var status = "inProgress"; var output = "" }
+        var messages: [Message] = []
+        var calls: [Call] = []
+    }
+
+    nonisolated static func parse(_ data: Data) -> Sidechain {
+        var sidechain = Sidechain()
+        var callIndexes: [String: Int] = [:]
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  let message = object["message"] as? [String: Any] else { continue }
+            let createdAt = (object["timestamp"] as? String).flatMap { timestampFormatter.date(from: $0) }
+            let blocks: [[String: Any]] = (message["content"] as? String).map { [["type": "text", "text": $0]] }
+                ?? message["content"] as? [[String: Any]] ?? []
+            switch object["type"] as? String {
+            case "user":
+                for block in blocks {
+                    if block["type"] as? String == "tool_result" {
+                        guard let toolID = block["tool_use_id"] as? String, let index = callIndexes[toolID] else { continue }
+                        sidechain.calls[index].status = block["is_error"] as? Bool == true ? "failed" : "completed"
+                        sidechain.calls[index].output = ClaudeCodeClient.resultText(block["content"])
+                    } else if block["type"] as? String == "text", let text = block["text"] as? String,
+                              // Claude Code's own reminders and notices are not the agent's prompt.
+                              !text.isEmpty, !text.hasPrefix("<") {
+                        let id = "\(object["uuid"] as? String ?? "user")-\(sidechain.messages.count)"
+                        sidechain.messages.append(.init(id: id, isUser: true, text: text, createdAt: createdAt, modelID: nil))
+                    }
+                }
+            case "assistant":
+                // Claude Code writes a call's blocks on lines of their own that share its ID.
+                let lineID = object["uuid"] as? String ?? message["id"] as? String ?? "assistant"
+                for (index, block) in blocks.enumerated() {
+                    if block["type"] as? String == "text", let text = block["text"] as? String,
+                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        sidechain.messages.append(.init(
+                            id: "\(lineID)-\(index)", isUser: false, text: text, createdAt: createdAt, modelID: message["model"] as? String
+                        ))
+                    } else if block["type"] as? String == "tool_use", let toolID = block["id"] as? String,
+                              let name = block["name"] as? String, callIndexes[toolID] == nil {
+                        let input = (try? JSONSerialization.data(withJSONObject: block["input"] as? [String: Any] ?? [:])) ?? Data()
+                        callIndexes[toolID] = sidechain.calls.count
+                        sidechain.calls.append(.init(id: toolID, name: name, input: input, afterMessageID: sidechain.messages.last?.id))
+                    }
+                }
+            default:
+                continue
+            }
+        }
+        return sidechain
+    }
+
+    /// The agent's prompt and text as messages, and its tool calls as timeline
+    /// rows placed after the message each followed.
+    @MainActor
+    static func history(_ sidechain: Sidechain) -> ConversationHistory {
+        let messages = sidechain.messages.map { message in
+            message.isUser
+                ? ConversationMessage(id: message.id, role: .user, text: message.text, provider: .claude, createdAt: message.createdAt)
+                : ConversationMessage(
+                    id: message.id, role: .assistant, text: message.text, phase: "commentary",
+                    provider: .claude, createdAt: message.createdAt, modelID: message.modelID
+                )
+        }
+        let tools = sidechain.calls.map { call in
+            let input = (try? JSONSerialization.jsonObject(with: call.input)) as? [String: Any] ?? [:]
+            var activity = ClaudeCodeClient.activity(toolID: call.id, name: call.name, input: input, status: call.status, turnID: nil)
+            activity.afterMessageID = call.afterMessageID
+            if activity.input != nil, !call.output.isEmpty { activity.output = String(call.output.suffix(2_000)) }
+            return activity
+        }
+        return ConversationHistory(messages: messages, activities: tools, timelineActivities: tools.filter(\.isTimelineToolCall), diff: nil)
+    }
+
+    nonisolated(unsafe) private static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+}
