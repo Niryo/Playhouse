@@ -173,33 +173,39 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
         }
     }
 
+    /// The actions, then the provider, model and send at the trailing edge: one row where both fit,
+    /// otherwise the second group on a row of its own, so a narrow box (the chat sidebar) never
+    /// grows past its container.
     private var toolbar: some View {
-        AtomStack(props: StackProps(axis: "h", spacing: 12)) {
-            attachButton
-            if model.skills {
-                SkillsButton(testID: prefix + "open-skills-button", action: actions.openSkills)
-            }
-            if let pluginActions {
-                pluginActions
-            }
-            modeToggle(model.plan, testID: "conversation-plan-button", label: "Plan mode", action: actions.togglePlan) { on in
-                AtomIcon(props: IconProps(name: "lightbulb.max", size: 13, weight: "medium", color: Self.modeColor(on)))
-            }
-            if let goal = model.goal {
-                modeToggle(goal, testID: "conversation-goal-button", label: "Goal", action: actions.toggleGoal) { on in
-                    AtomIcon(props: IconProps(asset: "GoalIcon", color: Self.modeColor(on)), common: AtomCommon(width: 15, height: 15))
+        ComposerToolbarLayout(spacing: 12) {
+            AtomStack(props: StackProps(axis: "h", spacing: 12)) {
+                attachButton
+                if model.skills {
+                    SkillsButton(testID: prefix + "open-skills-button", action: actions.openSkills)
+                }
+                if let pluginActions {
+                    pluginActions
+                }
+                modeToggle(model.plan, testID: "conversation-plan-button", label: "Plan mode", action: actions.togglePlan) { on in
+                    AtomIcon(props: IconProps(name: "lightbulb.max", size: 13, weight: "medium", color: Self.modeColor(on)))
+                }
+                if let goal = model.goal {
+                    modeToggle(goal, testID: "conversation-goal-button", label: "Goal", action: actions.toggleGoal) { on in
+                        AtomIcon(props: IconProps(asset: "GoalIcon", color: Self.modeColor(on)), common: AtomCommon(width: 15, height: 15))
+                    }
+                }
+                if let start = model.startImplementing {
+                    startImplementing(start)
                 }
             }
-            if let start = model.startImplementing {
-                startImplementing(start)
+            AtomStack(props: StackProps(axis: "h", spacing: 12)) {
+                providerMenu
+                modelPicker
+                if let schedule = model.schedule {
+                    scheduleButton(schedule)
+                }
+                primary
             }
-            AtomSpacer(props: SpacerProps(minLength: 0))
-            providerMenu
-            modelPicker
-            if let schedule = model.schedule {
-                scheduleButton(schedule)
-            }
-            primary
         }
     }
 
@@ -341,6 +347,44 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
         ) {
             AtomIcon(props: IconProps(name: name, size: size, weight: "bold", color: "white"))
         }
+    }
+}
+
+/// The composer's toolbar: its actions at the leading edge and its controls at the trailing edge,
+/// with at least the gap a spacer between two spaced items keeps. They share one row only while
+/// both fit at their natural widths; squeezing them into one row instead wrapped the model
+/// button's name a few letters to a line and still made the box wider than a narrow chat.
+private struct ComposerToolbarLayout: Layout {
+    var spacing: CGFloat
+    var rowSpacing: CGFloat = 10
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard subviews.count == 2 else { return .zero }
+        let oneRow = oneRowWidth(subviews)
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? oneRow
+        if oneRow <= width {
+            return CGSize(width: width, height: subviews.map { $0.sizeThatFits(.unspecified).height }.max() ?? 0)
+        }
+        let row = ProposedViewSize(width: width, height: nil)
+        let rows = subviews.map { $0.sizeThatFits(row) }
+        return CGSize(width: max(width, rows[0].width, rows[1].width), height: rows[0].height + rowSpacing + rows[1].height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 2 else { return }
+        if oneRowWidth(subviews) <= bounds.width {
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+            subviews[1].place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: .unspecified)
+        } else {
+            let row = ProposedViewSize(width: bounds.width, height: nil)
+            let actionsHeight = subviews[0].sizeThatFits(row).height
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY), anchor: .topLeading, proposal: row)
+            subviews[1].place(at: CGPoint(x: bounds.maxX, y: bounds.minY + actionsHeight + rowSpacing), anchor: .topTrailing, proposal: row)
+        }
+    }
+
+    private func oneRowWidth(_ subviews: Subviews) -> CGFloat {
+        subviews[0].sizeThatFits(.unspecified).width + 2 * spacing + subviews[1].sizeThatFits(.unspecified).width
     }
 }
 
