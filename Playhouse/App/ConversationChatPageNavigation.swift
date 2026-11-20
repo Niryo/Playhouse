@@ -324,14 +324,15 @@ extension TaskConversationView {
             if startsNewChatPage {
                 newChatPageSeparator(removable: true)
             } else if !messages.isEmpty, !sendsNewChatPage, !isResponding {
-                HStack {
-                    Spacer(minLength: 0)
+                // The plus sits on a page rule, so it reads as the place a new page would begin.
+                AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: "new-chat-page-rule", paddingY: 2)) {
+                    transcriptRule(opacity: 0.13)
                     NewChatPageButton {
                         startsNewChatPage = true
                         returnToLatestMessages()
                         isComposerFocused = true
                     }
-                    Spacer(minLength: 0)
+                    transcriptRule(opacity: 0.13)
                 }
             }
         }

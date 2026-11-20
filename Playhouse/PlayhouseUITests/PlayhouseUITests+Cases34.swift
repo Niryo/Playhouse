@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 
 extension PlayhouseUITests {
-    // case-contract: test_standalone_chat_new_page_skips_last_page_context | A standalone chat's next message can start a new page, so it runs without the last page's context. Without it, a message continues the active page and resumes that page's provider session. The CLI's conversation send --new-page, and in the chat the small New page plus button right above the composer (absent from an empty chat), open a page titled "New page" that Playhouse marks as the user's own, before the turn, whose turn starts a fresh provider session, never resuming the last page's: its prompt carries a Playhouse page header naming that "New page" as the current page, telling the agent the user started it for a new topic and to name it in close-turn, and listing the earlier page by title and ID only so it can still be read, while none of the last page's turns travel with it. While the turn runs it is already on that page, still titled "New page" with no messages, and the chat shows a "New page" separator without a remove button above the sent message and no plus button. The agent's close-turn --new-title names that page instead of opening another one, so the chat gains exactly one page, holding the turn, the earlier page keeps its own messages, and the next message without New page resumes the new page's session; a close-turn with --continues true and no title leaves the page to the fallback classifier, which names it from the message, so it never keeps its placeholder title. A New page send that fails leaves its empty page, which another New page send reuses, running there in a fresh session that opens with the New page header again and names it, and a send without New page instead removes it and continues the page before it, resuming that page's session; in the chat, a New page send that fails keeps its removable New page separator, so the next message still starts that page. In the chat, pressing the button replaces it with a "New page" separator with a remove button; removing it brings the button back and the next message continues the active page, and once a message is sent with it the turn sits under the page's separator showing its real title and the button comes back; no plus button shows while any turn runs, a plain one included. --new-page on a board task is invalid_argument. The page is opened in Playhouse's provider-neutral turn path before the provider session is chosen and the header reaches either provider as the same seeded context, so one representative provider (Claude) covers the case.
+    // case-contract: test_standalone_chat_new_page_skips_last_page_context | A standalone chat's next message can start a new page, so it runs without the last page's context. Without it, a message continues the active page and resumes that page's provider session. The CLI's conversation send --new-page, and in the chat the small New page plus button, centered on a page rule right above the composer (absent from an empty chat), open a page titled "New page" that Playhouse marks as the user's own, before the turn, whose turn starts a fresh provider session, never resuming the last page's: its prompt carries a Playhouse page header naming that "New page" as the current page, telling the agent the user started it for a new topic and to name it in close-turn, and listing the earlier page by title and ID only so it can still be read, while none of the last page's turns travel with it. While the turn runs it is already on that page, still titled "New page" with no messages, and the chat shows a "New page" separator without a remove button above the sent message and no plus button. The agent's close-turn --new-title names that page instead of opening another one, so the chat gains exactly one page, holding the turn, the earlier page keeps its own messages, and the next message without New page resumes the new page's session; a close-turn with --continues true and no title leaves the page to the fallback classifier, which names it from the message, so it never keeps its placeholder title. A New page send that fails leaves its empty page, which another New page send reuses, running there in a fresh session that opens with the New page header again and names it, and a send without New page instead removes it and continues the page before it, resuming that page's session; in the chat, a New page send that fails keeps its removable New page separator, so the next message still starts that page. In the chat, pressing the button replaces it with a "New page" separator with a remove button; removing it brings the button back and the next message continues the active page, and once a message is sent with it the turn sits under the page's separator showing its real title and the button comes back; no plus button shows while any turn runs, a plain one included. --new-page on a board task is invalid_argument. The page is opened in Playhouse's provider-neutral turn path before the provider session is chosen and the header reaches either provider as the same seeded context, so one representative provider (Claude) covers the case.
     func test_standalone_chat_new_page_skips_last_page_context() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-chat-new-page")
         let executable = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]))
@@ -63,8 +63,32 @@ extension PlayhouseUITests {
         let firstSession = try XCTUnwrap(fixtureTurns(endingWith: firstPrompt).last?["sessionID"] as? String)
         XCTAssertTrue(button.waitToExist(timeout: 10), "The New page button shows right above the composer.")
         XCTAssertLessThan(button.frame.maxY, composer.frame.minY, "The button sits above the composer.")
+        let buttonRule = element("new-chat-page-rule")
+        XCTAssertTrue(buttonRule.exists, "The button sits on a page rule.")
+        XCTAssertGreaterThan(buttonRule.frame.width, button.frame.width * 4, "The rule runs across the chat on both sides of the button.")
+        XCTAssertLessThan(abs(buttonRule.frame.midX - button.frame.midX), 2, "The button sits centered on its rule.")
+        XCTAssertLessThan(abs(buttonRule.frame.midY - button.frame.midY), 2, "The rule passes through the button's middle.")
+        // The rule's hairlines are drawn: halfway between each end of the rule and the button, the
+        // pixel column holds one line that stands out from the background, level with the button's middle.
+        let ruleFrame = buttonRule.frame
+        let ruleBitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(buttonRule.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+        let ruleScale = CGFloat(ruleBitmap.pixelsWide) / ruleFrame.width
+        func ruleLuminance(_ x: Int, _ y: Int) -> CGFloat {
+            guard let color = ruleBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return 0 }
+            return 0.299 * color.redComponent + 0.587 * color.greenComponent + 0.114 * color.blueComponent
+        }
+        for (side, pointX) in [("left", (ruleFrame.minX + button.frame.minX) / 2), ("right", (button.frame.maxX + ruleFrame.maxX) / 2)] {
+            let x = Int((pointX - ruleFrame.minX) * ruleScale)
+            let background = ruleLuminance(x, 0)
+            let column = (0..<ruleBitmap.pixelsHigh).map { abs(ruleLuminance(x, $0) - background) }
+            let lineRow = try XCTUnwrap(column.indices.max { column[$0] < column[$1] })
+            XCTAssertGreaterThan(column[lineRow], 0.03, "The \(side) hairline of the page rule is drawn.")
+            let lineY = ruleFrame.minY + CGFloat(lineRow) / ruleScale
+            XCTAssertLessThan(abs(lineY - button.frame.midY), 1.5, "The \(side) hairline passes through the button's middle.")
+            XCTAssertLessThanOrEqual(column.filter { $0 > 0.03 }.count, Int(ceil(2 * ruleScale)), "The \(side) side shows one thin line, not a filled band.")
+        }
         attachScreenshot(named: "standalone-chat-new-page-button")
-        attachElementScreenshot(button, named: "standalone-chat-new-page-button-close-up")
+        attachElementScreenshot(buttonRule, named: "standalone-chat-new-page-button-close-up")
 
         // Pressing it adds the New page separator in its place; removing it brings the button back.
         button.click()
