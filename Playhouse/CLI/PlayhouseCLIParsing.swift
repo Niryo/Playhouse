@@ -339,7 +339,7 @@ extension PlayhouseCLI {
                     if let branch = flags["--branch"]?.last { arguments["branch"] = .string(branch) }
                     if let branchFrom = flags["--branch-from"]?.last { arguments["branchFrom"] = .string(branchFrom) }
                     return BridgeRequest(command: "task.repository.add-worktree", arguments: arguments)
-                case "remove", "renew":
+                case "remove", "renew", "resolve":
                     let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo", "--worktree", "--worktree-branch"])
                     var arguments = try Self.worktreeArguments(flags, usage: "Use: playhouse task repository \(tail[0]) <task-id> (--repo <path>|--worktree <path>)")
                     arguments["taskID"] = .string(id)

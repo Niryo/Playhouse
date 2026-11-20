@@ -270,6 +270,12 @@ extension TaskConversationView {
             URL(fileURLWithPath: $0.repositoryPath).lastPathComponent
         }
         guard repositoryNames.isEmpty else { return repositoryNames }
+        // A new task opens before its saved repositories are attached; naming them meanwhile
+        // keeps the empty state from flashing "No repository selected" first.
+        if isApplyingSavedRepositories {
+            let savedNames = validLastSelectedRepositoryURLs.map(\.lastPathComponent)
+            if !savedNames.isEmpty { return savedNames }
+        }
         return task.workspaceRootPaths.compactMap { path in
             let repositoryURL = URL(fileURLWithPath: path, isDirectory: true)
             let gitMarker = repositoryURL.appendingPathComponent(".git")
