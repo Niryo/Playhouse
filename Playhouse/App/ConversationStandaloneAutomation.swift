@@ -216,7 +216,9 @@ extension ConversationManager {
         }
         guard task.status == .review else { return try outcome("inactive", reason: "Autopilot acts only on tasks in Review.") }
         guard task.repositoryWorktrees.contains(where: { !$0.isPending && $0.pullRequestNumber != nil && !$0.isPullRequestClosed }) else {
-            return try outcome("inactive", reason: "This task has no linked pull request yet.")
+            var result = try outcome("inactive", reason: "This task has no linked pull request yet.")
+            result.noPullRequest = true
+            return result
         }
         guard Self.autopilotRunningTaskIDs.insert(taskID).inserted else {
             return try outcome("inactive", reason: "Autopilot is already handling this task.")
