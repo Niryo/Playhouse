@@ -879,18 +879,18 @@ struct KanbanBoardView: View {
             AtomSpacer(props: SpacerProps(minLength: 20))
 
             AtomStack(props: StackProps(axis: "h", spacing: 14)) {
-                DoneArchiveButton {
+                DoneArchiveButton(shortcut: AppShortcut.doneArchive) {
                     withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
                 }
                 AtomButton(
-                    props: ButtonProps(style: "bordered", disabled: isOpeningChatSidebar),
+                    props: ButtonProps(style: "bordered", disabled: isOpeningChatSidebar, shortcut: AppShortcut.chat),
                     common: AtomCommon(testID: "chat-sidebar-button", help: "Open the standalone chat", paddingX: 7, paddingY: 3),
                     action: openChatSidebar
                 ) {
                     AtomLabel(props: LabelProps(text: "Chat", icon: "bubble.left.and.bubble.right", size: 13, weight: "semibold"))
                 }
                 AtomButton(
-                    props: ButtonProps(style: "prominent", disabled: isCreatingNewTask),
+                    props: ButtonProps(style: "prominent", disabled: isCreatingNewTask, shortcut: AppShortcut.newTask),
                     common: AtomCommon(testID: "new-task-button", help: "Create a new task", paddingX: 7, paddingY: 3),
                     action: openNewTask
                 ) {

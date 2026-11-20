@@ -293,8 +293,12 @@ final class ChatEditorTextView: NSTextView {
     var onMentionKey: ((ChatEditorKey) -> Bool)?
 
     override func cancelOperation(_ sender: Any?) {
-        guard let onCancel else { return super.cancelOperation(sender) }
-        onCancel()
+        if let onCancel { return onCancel() }
+        // The window's Escape button (a page's Close, a panel's Cancel) gets the key before the
+        // text view's own completion does: the editor keeps focus under a page that covers it,
+        // and would otherwise take Escape from that page's cancel shortcut.
+        if let event = NSApp.currentEvent, event.type == .keyDown, window?.performKeyEquivalent(with: event) == true { return }
+        super.cancelOperation(sender)
     }
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {

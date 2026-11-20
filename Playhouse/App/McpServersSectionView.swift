@@ -868,17 +868,15 @@ private struct McpServerEditorPanel: View {
                 }
                 Spacer()
                 Button(editable ? "Cancel" : "Close", action: onClose)
-                    .keyboardShortcut(.cancelAction)
                     .buttonHoverPointer()
-                    .nativeHelp(editable ? "Discard changes" : "Close the server")
+                    .shortcutHelp(editable ? "Discard changes" : "Close the server", shortcut: "cancel")
                     .accessibilityIdentifier("mcp-editor-cancel")
                 if editable {
                     Button(server == nil ? "Create" : "Save") { save() }
-                        .keyboardShortcut("s", modifiers: .command)
                         .buttonStyle(.borderedProminent)
                         .disabled(isSaving)
                         .buttonHoverPointer()
-                        .nativeHelp(server == nil ? "Create the server (⌘S)" : "Save the server (⌘S)")
+                        .shortcutHelp(server == nil ? "Create the server" : "Save the server", shortcut: AppShortcut.save)
                         .accessibilityIdentifier("mcp-editor-save")
                 }
             }

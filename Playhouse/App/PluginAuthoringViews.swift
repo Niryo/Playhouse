@@ -103,9 +103,8 @@ struct PluginAuthoringPreview: View {
                         .buttonHoverPointer().nativeHelp(isSaved ? "Reset the draft to the published plugin" : "Delete this unsaved plugin and its conversation")
                 }
                 Button("Publish") { perform("plugin.save") }
-                    .keyboardShortcut("s", modifiers: .command)
                     .disabled(!hasChanges)
-                    .buttonHoverPointer().nativeHelp(hasChanges ? "Publish this plugin draft" : "No unpublished changes")
+                    .buttonHoverPointer().shortcutHelp(hasChanges ? "Publish this plugin draft" : "No unpublished changes", shortcut: AppShortcut.save)
             }.padding()
             Divider()
             if let plugin, plugin.valid {

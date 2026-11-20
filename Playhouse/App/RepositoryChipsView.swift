@@ -159,6 +159,8 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
     var isPickerPresented: Binding<Bool> = .constant(false)
     /// The `Chip.id` of the chip whose settings are open.
     var editingPath: Binding<String?> = .constant(nil)
+    /// The + button's keyboard shortcut: the task header's; the catalog's copy takes none.
+    var addShortcut: String? = nil
     @ViewBuilder var picker: () -> Picker
     @ViewBuilder var settings: (RepositoryChipsModel.Chip) -> Settings
 
@@ -168,7 +170,7 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
         AtomStack(props: StackProps(axis: "h", spacing: 10)) {
             ForEach(model.chips, id: \.id) { chip($0) }
             AtomButton(
-                props: ButtonProps(disabled: model.readOnly),
+                props: ButtonProps(disabled: model.readOnly, shortcut: addShortcut),
                 common: AtomCommon(testID: "\(prefix)add-conversation-repository-button", label: "Add repository", help: "Add a repository"),
                 action: actions.add
             ) {

@@ -242,16 +242,24 @@ struct AtomButton<Content: View>: View {
         styled
             .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
             .modifier(Applied(when: props.controlSize == "large") { $0.controlSize(.large) })
-            .modifier(Applied(when: props.shortcut == "default") { $0.keyboardShortcut(.defaultAction) })
-            .modifier(Applied(when: props.shortcut == "cancel") { $0.keyboardShortcut(.cancelAction) })
+            .keyboardShortcut(shortcut?.keyboardShortcut)
             .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
             .padding(.vertical, overhangs ? -CGFloat(props.emphasis ?? 0) : 0)
             .disabled(props.disabled == true)
             .modifier(Applied(when: props.selected == true) { $0.accessibilityAddTraits(.isSelected) })
-            .atomCommon(common, atom: .button, frame: false)
+            .atomCommon(helpNamingShortcut, atom: .button, frame: false)
             // Outside the button's accessibility element, so the swelling ring
             // never changes the frame the button reports.
             .modifier(Applied(when: props.pulse == true && props.disabled != true) { $0.modifier(AtomPulse()) })
+    }
+
+    private var shortcut: AtomShortcut? { props.shortcut.flatMap(AtomShortcut.init) }
+
+    /// The hover hint ends by naming the shortcut.
+    private var helpNamingShortcut: AtomCommon {
+        var common = common
+        common.help = AtomShortcut.help(common.help, shortcut: props.shortcut)
+        return common
     }
 
     private var isFixedSize: Bool { common.width != nil || common.height != nil }

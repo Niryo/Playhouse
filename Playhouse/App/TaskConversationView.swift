@@ -758,10 +758,9 @@ struct TaskConversationView: View {
             if let selectedChatImage {
                 VStack(alignment: .trailing, spacing: 8) {
                     Button("Close") { self.selectedChatImage = nil }
-                        .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("close-chat-image-viewer")
                         .buttonHoverPointer()
-                        .nativeHelp("Close the full-size image")
+                        .shortcutHelp("Close the full-size image", shortcut: "cancel")
                     Image(nsImage: selectedChatImage)
                         .resizable()
                         .scaledToFit()
