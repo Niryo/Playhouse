@@ -53,7 +53,8 @@ extension PlayhouseUITests {
         func topInViewport(_ candidate: XCUIElement) -> CGFloat { candidate.frame.minY - scrollView.frame.minY }
         // Wheel scrolling keeps each step deterministic: a swipe carries momentum.
         func scrollTranscript(by delta: CGFloat, until condition: () -> Bool, limit: Int = 40, settle: TimeInterval = 0) {
-            for _ in 0..<limit where !condition() {
+            for _ in 0..<limit {
+                guard !condition() else { break }
                 scrollView.scroll(byDeltaX: 0, deltaY: delta)
                 if settle > 0 { _ = waitUntil(condition, timeout: settle) }
             }
@@ -366,7 +367,8 @@ extension PlayhouseUITests {
             candidate.exists && scrollView.frame.intersects(candidate.frame)
         }
         func scrollUp(until condition: () -> Bool) {
-            for _ in 0..<40 where !condition() {
+            for _ in 0..<40 {
+                guard !condition() else { break }
                 scrollView.scroll(byDeltaX: 0, deltaY: 400)
                 _ = waitUntil(condition, timeout: 1)
             }
@@ -676,7 +678,8 @@ extension PlayhouseUITests {
 
         let completedChildRow = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
         let transcriptScrollView = element("conversation-scroll-view")
-        for _ in 0..<8 where !transcriptScrollView.frame.contains(completedChildRow.frame) {
+        for _ in 0..<8 {
+            guard !transcriptScrollView.frame.contains(completedChildRow.frame) else { break }
             transcriptScrollView.scroll(byDeltaX: 0, deltaY: -150)
         }
         completedChildRow.click()

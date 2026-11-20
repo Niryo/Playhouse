@@ -236,7 +236,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ abs(scroll.frame.height - 120) <= 1 }, timeout: 5), "Past its maxHeight the Scroll stays 120 points tall: \(scroll.frame.height)")
         // A row clipped by a scroll view still reports itself hittable, so its frame says where it is.
         XCTAssertGreaterThan(lastRow.frame.maxY, scroll.frame.maxY + 1, "The last row starts below the Scroll's visible area.")
-        for _ in 0..<10 where lastRow.frame.maxY > scroll.frame.maxY + 1 {
+        for _ in 0..<10 {
+            guard lastRow.frame.maxY > scroll.frame.maxY + 1 else { break }
             scroll.scroll(byDeltaX: 0, deltaY: -60)
         }
         XCTAssertLessThanOrEqual(lastRow.frame.maxY, scroll.frame.maxY + 1, "Scrolling inside the Scroll brings its last row into view.")
@@ -247,14 +248,18 @@ extension PlayhouseUITests {
         XCTAssertTrue(paged.waitToExist(timeout: 5))
         XCTAssertEqual(pluginText(pages), "1 pages loaded", "The paged list's end starts out of view.")
         for expected in ["2 pages loaded", "3 pages loaded"] {
-            for _ in 0..<40 where pluginText(pages) != expected {
+            for _ in 0..<40 {
+                guard pluginText(pages) != expected else { break }
                 paged.scroll(byDeltaX: 0, deltaY: -200)
             }
             XCTAssertTrue(waitUntil({ self.pluginText(pages) == expected }, timeout: 5), "Scrolling to the end loads the next page: \(pluginText(pages))")
         }
         // The list is lazy, so the third page's last row is built only once it scrolls near.
         let pagedLastRow = element("scroll-paged-row-60")
-        for _ in 0..<20 where !pagedLastRow.exists { paged.scroll(byDeltaX: 0, deltaY: -200) }
+        for _ in 0..<20 {
+            guard !pagedLastRow.exists else { break }
+            paged.scroll(byDeltaX: 0, deltaY: -200)
+        }
         XCTAssertTrue(pagedLastRow.exists, "The third page's rows are in the list.")
         attachScreenshot(named: "Lazy Scroll appended two pages as its end scrolled into view")
 
@@ -390,7 +395,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(row.exists && rowText.exists, "The Stack page shows a row Stack with a surface.")
         XCTAssertTrue(center.exists && centerText.exists)
         let pageScroll = app.scrollViews.containing(.any, identifier: "plugin-catalog-surface").firstMatch
-        for _ in 0..<10 where center.frame.maxY > pageScroll.frame.maxY - 2 {
+        for _ in 0..<10 {
+            guard center.frame.maxY > pageScroll.frame.maxY - 2 else { break }
             pageScroll.scroll(byDeltaX: 0, deltaY: -60)
         }
         XCTAssertLessThanOrEqual(center.frame.maxY, pageScroll.frame.maxY - 2, "The border-only Stack is in view: \(center.frame) in \(pageScroll.frame)")

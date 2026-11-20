@@ -100,6 +100,10 @@ final class GitConfigReadBarrier {
         return (fileInfo.st_mode & mode_t(S_IFMT)) == mode_t(S_IFIFO)
     }
 }
+/// Parks the app's Git calls for one repository until released, through the `git`
+/// wrapper scripts/test-ui.sh stages from scripts/fixtures/git-hold.sh (the case puts
+/// `GitHoldBarrier.directory` first on the app's PATH). Unlike `GitConfigReadBarrier`
+/// it doesn't depend on a blocked Git seeing FIFO end-of-file.
 final class GitHoldBarrier {
     static let directory = WorkspaceFixture.root.appendingPathComponent("git-hold", isDirectory: true)
     private let holdURL = GitHoldBarrier.directory.appendingPathComponent("hold")
@@ -296,6 +300,8 @@ final class RepositoryAllocationLockBarrier {
 
     deinit { try? release() }
 }
+/// A pipe read while its process runs. A held turn streams every event to its CLI, and a nudge shown in
+/// the conversation streams its own, so an unread pipe fills and blocks the CLI before it can exit.
 final class DrainingPipe: @unchecked Sendable {
     let pipe = Pipe()
     private let lock = NSLock()
@@ -321,6 +327,9 @@ final class DrainingPipe: @unchecked Sendable {
         return String(data: buffer, encoding: .utf8) ?? ""
     }
 }
+/// The plugin fetch case's local HTTP server, inside the test process: the sandboxed
+/// runner can't start `python3` in the VM, but it may listen on loopback. It answers
+/// the routes of `scripts/fixtures/plugin-fetch-server.py` that the UI case reaches.
 final class PluginFetchServer: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "plugin-fetch-server")

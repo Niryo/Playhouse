@@ -695,7 +695,8 @@ extension PlayhouseUITests {
         }
         let lowestTask = app.buttons["Backlog scroll 1"]
         XCTAssertFalse(lowestTask.isHittable, "The final backlog task should begin below the board viewport.")
-        for _ in 0..<20 where !lowestTask.isHittable {
+        for _ in 0..<20 {
+            guard !lowestTask.isHittable else { break }
             boardViewport.scroll(byDeltaX: 0, deltaY: -300)
         }
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
@@ -707,7 +708,8 @@ extension PlayhouseUITests {
         // The newest card lands at the top, so start there; any later vertical scroll would
         // re-sync the stale geometry and hide the regression.
         let newestBacklogTask = app.buttons["Backlog scroll 12"]
-        for _ in 0..<20 where !newestBacklogTask.isHittable {
+        for _ in 0..<20 {
+            guard !newestBacklogTask.isHittable else { break }
             boardViewport.scroll(byDeltaX: 0, deltaY: 300)
         }
         XCTAssertTrue(waitUntil({ newestBacklogTask.isHittable }, timeout: 10), "Scrolling up should return to the top of the backlog.")
@@ -778,7 +780,8 @@ extension PlayhouseUITests {
         let releaseChange = largestLuminanceChange(knobHovered, released)
         XCTAssertLessThan(releaseChange, 0.05, "Releasing the knob should return it to the subdued opacity (change \(releaseChange)).")
         let addBacklogTask = element("add-backlog-task-button")
-        for _ in 0..<20 where !addBacklogTask.isHittable {
+        for _ in 0..<20 {
+            guard !addBacklogTask.isHittable else { break }
             boardViewport.scroll(byDeltaX: 0, deltaY: 300)
         }
         element("add-backlog-task-button").click()
