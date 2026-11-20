@@ -27,14 +27,11 @@ struct PullRequestModePlugin: View {
     private var mode: PullRequestMode { pendingMode ?? savedMode }
 
     /// Shown once the task has started in a repository: while it's worked on,
-    /// and beside its linked pull requests until they have all merged. A task
-    /// in Review or Done with no pull request gets the create button instead.
+    /// beside the create button of a task in Review or Done with no pull
+    /// request, and beside its linked pull requests until they have all merged.
     private var isVisible: Bool {
         guard status != TaskStatus.backlog.rawValue, !repositories.isEmpty else { return false }
-        if linked.isEmpty {
-            return [TaskStatus.inProgress, .blocked, .waitingResponse].map(\.rawValue).contains(status)
-        }
-        return !linked.allSatisfy { $0["pullRequest"]?.object?["merged"] == .bool(true) }
+        return linked.isEmpty || !linked.allSatisfy { $0["pullRequest"]?.object?["merged"] == .bool(true) }
     }
 
     var body: some View {

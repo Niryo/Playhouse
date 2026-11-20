@@ -177,8 +177,9 @@ struct PullRequestsPlugin: View {
 
     /// Repositories PR creation found unchanged drop out of the count, so a
     /// two-repository task that changed one offers a single "PR". While the
-    /// task is worked on with no pull request yet, the mode pill stands in for
-    /// the button: the mode opens the pull request when the task reaches Review.
+    /// task is worked on with no pull request yet, the mode pill alone stands
+    /// in for the button: the mode opens the pull request when the task reaches
+    /// Review. From Review on, the button shows beside the pill.
     private var createButton: CreateButton? {
         let awaiting = repositories.filter { $0["awaitsPullRequest"] == .bool(true) }
         let started = repositories.filter { $0["isPending"] != .bool(true) }
