@@ -996,6 +996,18 @@ extension PlayhouseCLI {
             default:
                 throw CLIError.unknownCommand(args)
             }
+        case "providers":
+            let usage = "Use: playhouse providers list|install <codex|claude>"
+            switch rest.first {
+            case "list":
+                guard rest.count == 1 else { throw CLIError.usage(usage) }
+                return BridgeRequest(command: "providers.list")
+            case "install":
+                guard rest.count == 2 else { throw CLIError.usage(usage) }
+                return BridgeRequest(command: "providers.install", arguments: ["provider": .string(rest[1])])
+            case nil: throw CLIError.usage(usage)
+            default: throw CLIError.unknownCommand(args)
+            }
         case "settings":
             guard let operation = rest.first else { throw CLIError.usage("Missing settings operation.") }
             switch operation {
@@ -1156,10 +1168,12 @@ extension PlayhouseCLI {
                 switch Array(tail.dropFirst()) {
                 case []: return BridgeRequest(command: "conversation.provider.get", arguments: ["taskID": .string(id)])
                 case ["capabilities"]: return BridgeRequest(command: "conversation.provider.capabilities", arguments: ["taskID": .string(id)])
-                case let values where values.count == 2 && values[0] == "set":
-                    return BridgeRequest(command: "conversation.provider.set", arguments: ["taskID": .string(id), "provider": .string(values[1])])
+                case let values where (values.count == 2 || (values.count == 3 && values[2] == "--keep-default")) && values[0] == "set":
+                    return BridgeRequest(command: "conversation.provider.set", arguments: [
+                        "taskID": .string(id), "provider": .string(values[1]), "remembersDefault": .boolean(values.count == 2),
+                    ])
                 default:
-                    throw CLIError.usage("Use: playhouse conversation provider <task-id> [set <codex|claude>|capabilities]")
+                    throw CLIError.usage("Use: playhouse conversation provider <task-id> [set <codex|claude> [--keep-default]|capabilities]")
                 }
             case "goal":
                 guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]") }

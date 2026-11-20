@@ -429,7 +429,7 @@ class BridgeTestCases04:
             expected_status=1, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         self.assert_failure(failed, "settings_required")
-        self.assertIn("repository root folder", failed["error"]["message"].lower())
+        self.assertIn("suggests repositories from", failed["error"]["message"].lower())
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(current["status"], "Waiting Response")
         self.assertEqual(current["repositoryWorktrees"], [])

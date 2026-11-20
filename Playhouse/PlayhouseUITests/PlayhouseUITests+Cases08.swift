@@ -578,41 +578,68 @@ extension PlayhouseUITests {
         XCTAssertEqual(try tasksFromBoardList().count, 0)
         attachScreenshot(named: "Failed task deletion can be retried after repository recovery")
     }
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Before any root is set, opening the Add repository picker from the empty state's + still leaves Set root folder able to bring its folder panel to the front, every time it is clicked.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Launching with no folder set opens the Suggestions from prompt, which asks for the folder that holds the user's Git repositories; Not Now closes it, no root notice sits above the composer, and a send or a schedule without a folder reopens the prompt, keeping the message as the draft and saving no schedule. Cancelling its folder panel returns to the prompt, and choosing a folder there saves it as the default parent.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
+        keepsSuggestionsFolderPrompt = true
         launchApp(defaultParent: nil)
         let initialSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(initialSettings?["defaultParentFolder"] as? String)
+        // A launch with no folder asks where the repositories are.
+        let promptTitle = element("suggestions-folder-prompt-title")
+        XCTAssertTrue(promptTitle.waitToExist(timeout: 10), "Launching without a suggestions folder should open the Suggestions from prompt.")
+        XCTAssertEqual(pluginText(promptTitle), "Suggestions from")
+        let promptMessage = element("suggestions-folder-prompt-message")
+        XCTAssertTrue(pluginText(promptMessage).contains("holds all of your Git repositories"), "The prompt should explain which folder to choose.")
+        attachScreenshot(named: "Launch asks for the folder repository suggestions come from")
+        attachElementScreenshot(app.sheets.firstMatch, named: "Suggestions from prompt")
+        element("suggestions-folder-prompt-later-button").click()
+        XCTAssertTrue(waitUntil({ !promptTitle.exists }, timeout: 5), "Not Now should close the prompt.")
         openNewTaskConversation()
         XCTAssertEqual(try tasksFromBoardList().count, 1, "New Task should create its pending conversation before folder discovery.")
-        XCTAssertTrue(element("repository-root-required-notice").exists)
-        XCTAssertFalse(element("send-message-button").isEnabled)
-        // Opening the picker from the empty state's + first must not leave the root button unable
-        // to show its folder panel.
-        element("empty-conversation-add-repository-button").click()
-        XCTAssertTrue(element("conversation-repository-search").waitToExist(timeout: 5))
-        attachScreenshot(named: "Empty state + opens the picker before a root is set")
-        element("set-conversation-repository-root-button").click()
-        let firstRunPanel = openFolderPanel
-        XCTAssertTrue(firstRunPanel.waitToExist(timeout: 10), "Set root folder should open its panel even after the empty state's + opened the picker.")
-        attachScreenshot(named: "Set root folder opens its panel after the picker was open")
-        XCTAssertTrue(firstRunPanel.buttons["Cancel"].isHittable, "The root folder panel should be in front, not hidden behind the conversation window.")
-        // A click on the conversation window brings it over the panel, which must not leave the
-        // root button doing nothing: clicking it again brings the same panel back to the front.
-        element("message-composer").click()
-        XCTAssertTrue(waitUntil({ !self.openFolderPanel.buttons["Cancel"].isHittable }, timeout: 5), "The conversation window should come in front of the panel.")
-        element("set-conversation-repository-root-button").click()
-        XCTAssertTrue(waitUntil({ self.openFolderPanel.buttons["Cancel"].isHittable }, timeout: 5), "Set root folder should bring its covered panel back to the front.")
-        XCTAssertEqual(app.windows.matching(identifier: "open-panel").count, 1, "Clicking again should reuse the open panel, not stack another.")
-        firstRunPanel.buttons["Cancel"].click()
-        XCTAssertTrue(waitUntil({ !self.openFolderPanel.exists }, timeout: 5))
-        XCTAssertFalse(element("conversation-repository-search").exists, "Canceling root setup should leave the direct-created task and picker closed.")
-        XCTAssertEqual(try tasksFromBoardList().count, 1)
-
-        element("set-conversation-repository-root-button").click()
+        XCTAssertFalse(element("repository-root-required-notice").exists, "No root notice sits above the composer.")
+        XCTAssertFalse(element("set-conversation-repository-root-button").exists)
+        // A send with no folder asks for one instead of sending.
+        let composer = element("message-composer")
+        let draft = "Needs a suggestions folder first."
+        composer.click()
+        composer.typeText(draft)
+        XCTAssertTrue(element("send-message-button").isEnabled, "Send stays available; it asks for the folder.")
+        element("send-message-button").click()
+        XCTAssertTrue(promptTitle.waitToExist(timeout: 5), "Sending without a suggestions folder should open the prompt.")
+        XCTAssertEqual(composer.value as? String, draft, "The message waits in the composer while the folder is chosen.")
+        let draftTaskID = try XCTUnwrap(try tasksFromBoardList().first?["id"] as? String)
+        // Scheduling without a folder asks for it too, and saves no schedule.
+        element("suggestions-folder-prompt-later-button").click()
+        XCTAssertTrue(waitUntil({ !promptTitle.exists }, timeout: 5))
+        let send = element("send-message-button")
+        _ = openScheduleHint()
+        element("schedule-done-button").click()
+        XCTAssertTrue(waitForDisappearance(element("schedule-hint")))
+        XCTAssertTrue(waitUntil({ send.label == "Schedule task" }, timeout: 5))
+        send.click()
+        XCTAssertTrue(promptTitle.waitToExist(timeout: 5), "Scheduling without a suggestions folder should open the prompt.")
+        XCTAssertNil(try taskRecord(id: draftTaskID)?["schedule"] as? [String: Any], "A schedule refused for want of a folder isn't saved.")
+        element("suggestions-folder-prompt-later-button").click()
+        XCTAssertTrue(waitUntil({ !promptTitle.exists }, timeout: 5))
+        _ = openScheduleHint()
+        element("schedule-remove-button").click()
+        XCTAssertTrue(waitForDisappearance(element("schedule-hint")))
+        XCTAssertTrue(waitUntil({ send.label == "Send message" }, timeout: 5))
+        send.click()
+        XCTAssertTrue(promptTitle.waitToExist(timeout: 5))
+        // Cancelling the folder panel comes back to the prompt.
+        element("suggestions-folder-prompt-choose-button").click()
+        XCTAssertTrue(openFolderPanel.waitToExist(timeout: 10), "Choose Folder… should open the folder panel.")
+        XCTAssertEqual(app.windows.matching(identifier: "open-panel").count, 1)
+        openFolderPanel.buttons["Cancel"].click()
+        XCTAssertTrue(promptTitle.waitToExist(timeout: 5), "Cancelling the folder panel should return to the prompt.")
+        element("suggestions-folder-prompt-choose-button").click()
         try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
-        XCTAssertFalse(element("repository-root-required-notice").exists)
-        XCTAssertFalse(element("conversation-repository-search").exists, "Setting the root should leave the repo picker closed.")
+        XCTAssertTrue(waitUntil({ !promptTitle.exists && !self.openFolderPanel.exists }, timeout: 10), "Choosing a folder should close the prompt.")
+        XCTAssertFalse(element("conversation-repository-search").exists, "Choosing the folder should leave the repo picker closed.")
+        composer.click()
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeKey(.delete, modifierFlags: [])
         element("add-conversation-repository-button").click()
         XCTAssertTrue(element("conversation-repository-suggestion-primary").waitToExist(timeout: 10), "Choosing a suggestion folder should populate the conversation picker.")
         let parentVisibleToBridge = waitUntil({
@@ -686,7 +713,9 @@ extension PlayhouseUITests {
             .matching(identifier: "clear-default-parent-folder-button").firstMatch.click()
         let cleared = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(cleared?["defaultParentFolder"] as? String)
-        assertText("default-parent-folder-path", equals: "No default parent folder selected")
+        assertText("default-parent-folder-path", equals: "No folder selected")
+        XCTAssertTrue(reopenedPreferences.staticTexts["Suggestions from"].exists, "Settings names the folder Suggestions from.")
+        XCTAssertFalse(reopenedPreferences.staticTexts["Repository root"].exists)
         attachScreenshot(named: "Workspace settings can be changed and cleared")
         app.typeKey("w", modifierFlags: .command)
         XCTAssertTrue(waitUntil({ !reopenedPreferences.exists }, timeout: 5), "Settings should close before the next UI case launches.")

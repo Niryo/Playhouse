@@ -593,7 +593,7 @@ extension PlayhouseUITests {
         let primaryDataDirectory = try XCTUnwrap(primary["dataDirectory"])
         XCTAssertFalse(loggedStorePaths.contains(where: { $0.hasPrefix(primaryDataDirectory) }), "The test app's log must not route to the primary store.")
     }
-    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured, and such a send runs its provider in the configured repository root rather than the home folder, with instructions saying so. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
+    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while the CLI rejects sends if the configured repository root is missing and the GUI asks for it in the Suggestions from prompt instead of sending. The UI and CLI accept standalone sends after the root is configured, and such a send runs its provider in the configured repository root rather than the home folder, with instructions saying so. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     func test_task_creation_rejects_invalid_title_roots_and_missing_folder() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -607,13 +607,18 @@ extension PlayhouseUITests {
         XCTAssertFalse(repositorySearch.exists, "New Task should keep the repository picker closed by default.")
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitToExist(timeout: 10), "The chat composer should be visible.")
-        XCTAssertTrue(element("repository-root-required-notice").exists, "An unset repository root should show the setup notice.")
+        XCTAssertFalse(element("repository-root-required-notice").exists, "No root notice sits above the composer.")
         XCTAssertFalse(element("no-working-folders-error").exists, "A standalone conversation should not warn that a repository is missing.")
         composer.typeText("A standalone question that needs no repository context.")
-        XCTAssertFalse(element("send-message-button").isEnabled, "Sending must stay disabled until the repository root is configured.")
-        element("set-conversation-repository-root-button").click()
+        element("send-message-button").click()
+        let promptTitle = element("suggestions-folder-prompt-title")
+        XCTAssertTrue(promptTitle.waitToExist(timeout: 5), "Sending without a repository root should ask for it instead of sending.")
+        XCTAssertTrue(element("empty-conversation").exists, "The refused send leaves the conversation empty.")
+        XCTAssertEqual(composer.value as? String, "A standalone question that needs no repository context.", "The refused message stays the draft.")
+        XCTAssertEqual(try taskRecord(id: standaloneTaskID)?["status"] as? String, "Backlog", "The refused send starts no turn.")
+        element("suggestions-folder-prompt-choose-button").click()
         try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
-        XCTAssertFalse(element("repository-root-required-notice").exists)
+        XCTAssertTrue(waitUntil({ !promptTitle.exists }, timeout: 10), "Choosing the folder should close the prompt.")
         XCTAssertFalse(element("conversation-repository-search").exists, "Setting the root should leave the picker closed.")
         XCTAssertTrue(element("send-message-button").isEnabled, "A configured root should permit standalone work without selecting a repository.")
         let standalonePrompt = "A standalone question that needs no repository context."

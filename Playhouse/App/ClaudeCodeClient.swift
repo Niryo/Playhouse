@@ -108,7 +108,13 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    let executableOverride: String?
+    /// The test harness's executable as given; `executableOverride` resolves it on each read,
+    /// so a CLI installed while Playhouse runs is found without a restart.
+    let executableOverrideSetting: String?
+    var executableOverride: String? {
+        ConversationProviderFixture.currentExecutable(executableOverrideSetting, providerMarker: Self.fixtureMarker)
+    }
+    static let fixtureMarker = (name: ".playhouse-claude-fixture-owner", value: "Playhouse test owns this Claude Code protocol fixture (v1).\n")
     var loginProcess: Process?
     let configDirectoryOverride: String?
     let persistsSessions: Bool
@@ -184,10 +190,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         persistsSessions: Bool = true,
         dataDirectory: String? = nil
     ) {
-        self.executableOverride = ConversationProviderFixture.ownedExecutable(
-            executableOverride,
-            providerMarker: (".playhouse-claude-fixture-owner", "Playhouse test owns this Claude Code protocol fixture (v1).\n")
-        )
+        self.executableOverrideSetting = executableOverride
         self.configDirectoryOverride = configDirectoryOverride
         self.persistsSessions = persistsSessions
         self.dataDirectoryOverride = dataDirectory
@@ -761,7 +764,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     }
 
     func makeAuxiliaryClient() -> ConversationProviderClient {
-        ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
+        ClaudeCodeClient(executableOverride: executableOverrideSetting, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
     }
 
     // MARK: - Per-conversation turn results

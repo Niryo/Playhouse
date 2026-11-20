@@ -436,22 +436,6 @@ extension TaskConversationView {
             AtomLabel(props: LabelProps(text: providerNotice, icon: "arrow.triangle.swap", size: 11, weight: "medium", color: "secondary"), common: AtomCommon(testID: "provider-capabilities-notice"))
                 .fixedSize(horizontal: false, vertical: true)
         }
-        if !isRepositoryRootConfigured {
-            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
-                AtomLabel(
-                    props: LabelProps(text: "Set the repository root folder before sending.", icon: "folder.badge.questionmark", size: 11, weight: "medium", color: "orange"),
-                    common: AtomCommon(testID: "repository-root-required-notice")
-                )
-                AtomSpacer(props: SpacerProps(minLength: 0))
-                AtomButton(
-                    props: ButtonProps(style: "bordered"),
-                    common: AtomCommon(testID: "set-conversation-repository-root-button", help: "Choose the folder that contains your repositories."),
-                    action: { chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: false) }
-                ) {
-                    AtomText(props: TextProps(text: "Set root folder…"))
-                }
-            }
-        }
         if let errorMessage {
             AtomLabel(props: LabelProps(text: errorMessage, icon: "exclamationmark.triangle.fill", size: 11, weight: "medium", color: "red"))
                 .fixedSize(horizontal: false, vertical: true)

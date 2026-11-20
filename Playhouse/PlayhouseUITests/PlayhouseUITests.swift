@@ -38,6 +38,9 @@ final class PlayhouseUITests: XCTestCase {
     var claudeFixtureExecutable: String?
     var codexFixtureStateDirectory: URL?
     var launchDefaultParent: String?
+    /// A launch with no suggestions folder opens the Suggestions from prompt over the board; it is
+    /// closed with Not Now unless the case is about it and sets this.
+    var keepsSuggestionsFolderPrompt = false
     var launchWindowTitle: String?
     var repositoryRoot: URL {
         URL(fileURLWithPath: #filePath)

@@ -275,8 +275,10 @@ struct RemoteConversationManager {
             .decoded(BoardTaskRecord.self)
     }
 
-    func setProvider(taskID: UUID, provider: ConversationProvider) async throws -> BoardTaskRecord {
-        try await daemon.call("conversation.provider.set", ["taskID": id(taskID), "provider": .string(provider.rawValue)])
+    func setProvider(taskID: UUID, provider: ConversationProvider, remembersDefault: Bool = true) async throws -> BoardTaskRecord {
+        try await daemon.call("conversation.provider.set", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "remembersDefault": .boolean(remembersDefault),
+        ])
             .decoded(BoardTaskRecord.self)
     }
 
@@ -481,6 +483,15 @@ struct RemoteConversationManager {
         try await daemon.call("mcp.authenticate.wait", [
             "taskID": id(taskID), "provider": .string(provider.rawValue), "name": .string(name),
         ]).decoded(McpLoginResult.self)
+    }
+
+    func providerInstallStatuses() async throws -> [ConversationProviderInstallStatus] {
+        try await daemon.call("providers.list", [:]).decoded([ConversationProviderInstallStatus].self)
+    }
+
+    func installProvider(_ provider: ConversationProvider) async throws -> ConversationProviderInstallStatus {
+        try await daemon.call("providers.install", ["provider": .string(provider.rawValue)])
+            .decoded(ConversationProviderInstallStatus.self)
     }
 
     func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {

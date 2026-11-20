@@ -238,7 +238,9 @@ extension ConversationManager {
     /// Changes the provider that runs the task's next turn. A switch waits for the
     /// current turn, pending questions, queued follow-ups, and background
     /// subagents to settle, and records a boundary in the transcript.
-    func setProvider(taskID: UUID, provider: ConversationProvider) async throws -> BoardTaskRecord {
+    /// `remembersDefault` is false when Playhouse picks the provider itself (an unstarted
+    /// conversation moving to the provider that is installed), which isn't the user's choice.
+    func setProvider(taskID: UUID, provider: ConversationProvider, remembersDefault: Bool = true) async throws -> BoardTaskRecord {
         var task = try tasks.conversationSubject(taskID)
         PlayhouseDiagnostics.record("conversation.provider.switch.started", fields: [
             "taskID": taskID.uuidString, "from": task.conversationProvider.rawValue, "to": provider.rawValue
@@ -248,7 +250,7 @@ extension ConversationManager {
         }
         // The user's explicit choice becomes the default for the next task or
         // chat, so a provider switch doesn't keep reverting to Codex.
-        try? settingsManager.setDefaultConversationProvider(provider.rawValue)
+        if remembersDefault { try? settingsManager.setDefaultConversationProvider(provider.rawValue) }
         guard task.conversationProvider != provider else { return BoardTaskRecord(task: task) }
         guard task.hasConversation else {
             return try await tasks.setConversationProvider(taskID, provider: provider)
@@ -312,5 +314,206 @@ extension ConversationManager {
     static func switchBlocked(_ message: String) -> BridgeCommandError {
         PlayhouseDiagnostics.record("conversation.provider.switch.blocked", fields: ["reason": message])
         return BridgeCommandError(code: "invalid_transition", message: message)
+    }
+}
+
+// MARK: - Installing providers
+
+/// Whether one provider's CLI can be found, and the official installer Playhouse runs for it.
+struct ConversationProviderInstallStatus: Codable, Equatable {
+    let provider: ConversationProvider
+    /// The product the installer adds, such as Claude Code.
+    let productName: String
+    var isInstalled: Bool
+    let installCommand: String
+}
+
+/// Finds and installs the providers' CLIs. The window and the CLI both reach it through the
+/// daemon's `providers` commands, so an install started in either is the one the other sees.
+@MainActor
+enum ConversationProviderInstaller {
+    nonisolated static func productName(_ provider: ConversationProvider) -> String {
+        switch provider {
+        case .claude: "Claude Code"
+        case .codex: "Codex CLI"
+        }
+    }
+
+    /// Each provider's own documented installer: a script that installs the CLI into
+    /// `~/.local/bin`, where Playhouse looks for it, with no prompts.
+    nonisolated static func officialInstallCommand(_ provider: ConversationProvider) -> String {
+        switch provider {
+        case .claude: "curl -fsSL https://claude.ai/install.sh | bash"
+        case .codex: "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"
+        }
+    }
+
+    static func isInstalled(_ provider: ConversationProvider, clients: ConversationClients) -> Bool {
+        switch provider {
+        case .claude: clients.claude.isInstalled
+        case .codex: clients.codex.isInstalled
+        }
+    }
+
+    static func statuses(clients: ConversationClients) -> [ConversationProviderInstallStatus] {
+        ConversationProvider.allCases.map { status($0, clients: clients) }
+    }
+
+    static func status(_ provider: ConversationProvider, clients: ConversationClients) -> ConversationProviderInstallStatus {
+        ConversationProviderInstallStatus(
+            provider: provider, productName: productName(provider),
+            isInstalled: isInstalled(provider, clients: clients),
+            installCommand: officialInstallCommand(provider)
+        )
+    }
+
+    /// Runs the provider's installer unless its CLI is already there, then checks that
+    /// Playhouse now finds it. A second request while one install runs waits for that one.
+    /// `fixtureInstaller` is a test's owned installer script, run with the provider's name
+    /// instead of the network installer.
+    static func install(
+        _ provider: ConversationProvider, clients: ConversationClients, fixtureInstaller: String? = nil
+    ) async throws -> ConversationProviderInstallStatus {
+        if isInstalled(provider, clients: clients) { return status(provider, clients: clients) }
+        let running = runningInstalls[provider] ?? Task {
+            defer { runningInstalls[provider] = nil }
+            try await runInstaller(provider, fixtureInstaller: fixtureInstaller)
+        }
+        runningInstalls[provider] = running
+        try await running.value
+        guard isInstalled(provider, clients: clients) else {
+            PlayhouseDiagnostics.record("provider.install.not_found", fields: ["provider": provider.rawValue])
+            throw BridgeCommandError(
+                code: "operation_failed",
+                message: "The \(productName(provider)) installer finished, but Playhouse couldn't find `\(provider.executableName)` in ~/.local/bin or on PATH."
+            )
+        }
+        AgentUsageStore.shared(scope: clients.codex.runtimeScope).setInstalled(provider, true)
+        return status(provider, clients: clients)
+    }
+
+    private static var runningInstalls: [ConversationProvider: Task<Void, Error>] = [:]
+
+    private static let installTimeout = Duration.seconds(15 * 60)
+
+    private static let fixtureMarker = (name: ".playhouse-provider-installer-fixture-owner", value: "Playhouse test owns this provider installer fixture (v1).\n")
+
+    private static func runInstaller(_ provider: ConversationProvider, fixtureInstaller: String?) async throws {
+        let process = Process()
+        var environment = PlayhouseProcessEnvironment.current
+        let home = NSHomeDirectory()
+        // A window's PATH is launchd's short one; the installers need curl, bash and sh.
+        environment["PATH"] = ClaudeCodeClient.expandedSearchPath(environment["PATH"])
+        environment["HOME"] = environment["HOME"] ?? home
+        if let fixtureInstaller {
+            guard let owned = ConversationProviderFixture.ownedExecutable(fixtureInstaller, providerMarker: fixtureMarker),
+                  owned != ConversationProviderFixture.notInstalledOverride else {
+                throw BridgeCommandError(code: "invalid_argument", message: "The provider installer fixture isn't one a Playhouse test owns.")
+            }
+            let command = ConversationProviderFixture.launchCommand(executable: owned, arguments: [provider.rawValue])
+            process.executableURL = URL(fileURLWithPath: command.executable)
+            process.arguments = command.arguments
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = ["-c", officialInstallCommand(provider)]
+        }
+        process.environment = environment
+        process.currentDirectoryURL = URL(fileURLWithPath: home, isDirectory: true)
+        process.standardInput = FileHandle.nullDevice
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        let collected = InstallerOutput()
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                collected.finish()
+            } else {
+                collected.append(chunk)
+            }
+        }
+        PlayhouseDiagnostics.record("provider.install.started", fields: [
+            "provider": provider.rawValue, "fixture": fixtureInstaller == nil ? "false" : "true",
+        ])
+        // A stuck download would otherwise hold this provider's install forever. The shell's
+        // children (curl and the piped shell) go first, so none is left holding the output open.
+        let timeout = installTimeout
+        let watchdog = Task.detached {
+            try await Task.sleep(for: timeout)
+            guard process.isRunning else { return }
+            let children = Process()
+            children.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            children.arguments = ["-TERM", "-P", String(process.processIdentifier)]
+            try? children.run()
+            children.waitUntilExit()
+            process.terminate()
+        }
+        defer { watchdog.cancel() }
+        let status: Int32 = try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            do { try process.run() } catch {
+                process.terminationHandler = nil
+                continuation.resume(throwing: error)
+            }
+        }
+        // The last output arrives just after exit. A child still holding the pipe open must not
+        // stall the daemon, so the wait for the end of output is short.
+        for _ in 0..<40 where !collected.isFinished {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        output.fileHandleForReading.readabilityHandler = nil
+        guard status == 0 else {
+            let tail = collected.tail
+            PlayhouseDiagnostics.record("provider.install.failed", fields: [
+                "provider": provider.rawValue, "exitStatus": String(status), "output": tail,
+            ])
+            throw BridgeCommandError(
+                code: "operation_failed",
+                message: "Installing \(productName(provider)) failed (exit \(status))." + (tail.isEmpty ? "" : " \(tail)")
+            )
+        }
+        PlayhouseDiagnostics.record("provider.install.succeeded", fields: ["provider": provider.rawValue])
+    }
+
+    /// The installer's combined output, collected off the main thread.
+    private final class InstallerOutput: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        private var finished = false
+
+        func append(_ chunk: Data) {
+            guard !chunk.isEmpty else { return }
+            lock.lock(); data.append(chunk); lock.unlock()
+        }
+
+        /// Marks the end of the output.
+        func finish() {
+            lock.lock(); finished = true; lock.unlock()
+        }
+
+        var isFinished: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return finished
+        }
+
+        /// The last lines, enough to say why an install failed.
+        var tail: String {
+            lock.lock(); defer { lock.unlock() }
+            let text = String(decoding: data, as: UTF8.self)
+                .replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+            return text.split(whereSeparator: \.isNewline).suffix(3).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        }
+    }
+}
+
+extension ConversationProvider {
+    /// The command its CLI installs.
+    var executableName: String {
+        switch self {
+        case .claude: "claude"
+        case .codex: "codex"
+        }
     }
 }

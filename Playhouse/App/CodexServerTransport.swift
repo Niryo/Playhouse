@@ -5,7 +5,7 @@ import Darwin
 
 extension CodexAppServerClient {
     func makeAuxiliaryClient() -> ConversationProviderClient {
-        CodexAppServerClient(codexExecutableOverride: codexExecutableOverride)
+        CodexAppServerClient(codexExecutableOverride: codexExecutableOverrideSetting)
     }
 
     func isProviderUnavailable(_ error: Error) -> Bool {

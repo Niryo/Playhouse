@@ -135,6 +135,9 @@ extension BridgeRequest {
         if let fixtureExecutable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] {
             configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
         }
+        if let installer = environment["PLAYHOUSE_E2E_PROVIDER_INSTALLER"], !installer.isEmpty {
+            configuredRequest.arguments["__providerInstaller"] = .string(installer)
+        }
         // Test overrides for the release feed; the daemon honors them only in a test bundle.
         for (name, argument) in BridgeContract.updateOverrideArguments {
             if let value = environment[name], !value.isEmpty { configuredRequest.arguments[argument] = .string(value) }

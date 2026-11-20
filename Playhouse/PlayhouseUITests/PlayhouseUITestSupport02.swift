@@ -9,10 +9,19 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
+    func dismissSuggestionsFolderPromptIfNeeded() {
+        guard launchDefaultParent == nil, !keepsSuggestionsFolderPrompt else { return }
+        let later = element("suggestions-folder-prompt-later-button")
+        guard later.waitToExist(timeout: 3) else { return }
+        later.click()
+        XCTAssertTrue(waitUntil({ !later.exists }, timeout: 5), "Not Now should close the Suggestions from prompt.")
+    }
+
     func waitForBoardOrAbortSuite() {
         let boardTitle = element("board-title")
         if waitUntil({ self.isPlayhouseFrontmost }, timeout: 3),
            boardTitle.waitToExist(timeout: 6) {
+            dismissSuggestionsFolderPromptIfNeeded()
             return
         }
 
@@ -26,7 +35,10 @@ extension PlayhouseUITests {
 
         let expectedBundleID = Bundle(url: appBundle)?.bundleIdentifier ?? "unknown"
         let frontmostDescription = Self.frontmostApplicationDescription
-        guard !relaunchedAfterMissingWindow else { return }
+        guard !relaunchedAfterMissingWindow else {
+            dismissSuggestionsFolderPromptIfNeeded()
+            return
+        }
         let reason = "Playhouse UI startup failed after a process restart recovery attempt. Expected frontmost app \(expectedBundleID); actual frontmost app: \(frontmostDescription); app state: \(app.state.rawValue); board title not found."
         Self.suiteAbortReason = reason
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())

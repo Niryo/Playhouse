@@ -591,3 +591,99 @@ Playhouse.render(h(DMs));
         self.assert_failure(self.call_cli("agent", "run", "--plugin", "slack-dms", "--provider", "codex", "--prompt", "Go.",
                                           extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"}, expected_status=1)[0], "unavailable")
 
+
+    def provider_install_fixture(self):
+        """A folder this test owns where the installer fixture installs each provider's CLI fixture."""
+        directory = self.data_directory / "provider-install"
+        directory.mkdir()
+        (directory / ".playhouse-bridge-fixture").write_text(
+            "Playhouse bridge tests own this deterministic fixture (v1).\n", encoding="utf-8"
+        )
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        installer = directory / "provider-installer"
+        copy_file(fixtures / "provider-installer-fixture.sh", installer)
+        installer.chmod(0o755)
+        copy_file(fixtures / "codex-app-server-fixture.py", directory / "codex.payload")
+        copy_file(fixtures / "claude-code-fixture.py", directory / "claude.payload")
+        return directory, {
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(directory / "codex"),
+            "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(directory / "claude"),
+            "PLAYHOUSE_E2E_PROVIDER_INSTALLER": str(installer),
+        }
+
+    # case-contract: test_provider_install_from_composer | With neither CLI installed, providers list reports Claude Code and Codex CLI missing with their official curl installers, and the composer shows an Install AI provider button whose menu lists Claude and Codex instead of the provider picker. Installing Codex runs its installer once; Codex is then listed as installed and runs the task's turn without a restart, and the provider menu shows Codex with an Add Claude entry. A new task whose default provider (Claude) is missing starts on the installed Codex instead, without changing the saved default. A failing installer reports its output and leaves Claude missing; adding Claude again installs it and switches the task to Claude. Installing a provider that is already installed doesn't rerun its installer, and an unknown provider is rejected.
+    def test_provider_install_from_composer(self):
+        directory, environment = self.provider_install_fixture()
+        installs = directory / "installs.log"
+
+        def statuses():
+            listed = self.assert_success(self.call_cli("providers", "list", extra_environment=environment)[0])
+            return {status["provider"]: status for status in listed}
+
+        missing = statuses()
+        self.assertEqual(set(missing), {"claude", "codex"})
+        self.assertEqual(missing["claude"]["productName"], "Claude Code")
+        self.assertEqual(missing["codex"]["productName"], "Codex CLI")
+        self.assertEqual(missing["claude"]["installCommand"], "curl -fsSL https://claude.ai/install.sh | bash")
+        self.assertEqual(missing["codex"]["installCommand"], "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh")
+        self.assertFalse(missing["claude"]["isInstalled"])
+        self.assertFalse(missing["codex"]["isInstalled"])
+        task_id = self.create_task("Install a provider", provider="codex")["id"]
+        unavailable, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Before Codex is installed.",
+            expected_status=1, extra_environment=environment,
+        )
+        self.assertFalse(unavailable["ok"])
+        self.assertIn("wasn't found", unavailable["error"]["message"])
+
+        codex = self.assert_success(self.call_cli("providers", "install", "codex", extra_environment=environment)[0])
+        self.assertEqual(codex["provider"], "codex")
+        self.assertTrue(codex["isInstalled"])
+        self.assertEqual(installs.read_text(encoding="utf-8").splitlines(), ["codex"])
+        self.assertTrue(os.access(directory / "codex", os.X_OK), "The installer fixture wrote the Codex executable.")
+        after_codex = statuses()
+        self.assertTrue(after_codex["codex"]["isInstalled"])
+        self.assertFalse(after_codex["claude"]["isInstalled"])
+        # The daemon's Codex client finds the CLI installed after it started, with no restart.
+        # The fixture turn asks its questions and waits for release, which the helper handles; it
+        # runs the fixture from the path the installer wrote.
+        self.complete_fixture_turn(task_id, executable_name="provider-install/codex", message="After Codex is installed.", extra_environment=environment)
+        self.assertTrue(Path(str(directory / "codex") + ".history").exists(), "The installed Codex ran the turn.")
+        events = [event for event in self.diagnostic_events() if event.get("event", "").startswith("provider.install.")]
+        self.assertIn(("provider.install.started", "codex", "true"), [(e["event"], e.get("provider"), e.get("fixture")) for e in events])
+        self.assertIn(("provider.install.succeeded", "codex"), [(e["event"], e.get("provider")) for e in events])
+
+        # A new task on a missing default moves to the installed provider without changing the default.
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        fresh_id = self.create_task("Default provider missing", provider="claude")["id"]
+        adopted = self.assert_success(self.call_cli(
+            "conversation", "provider", fresh_id, "set", "codex", "--keep-default", extra_environment=environment,
+        )[0])
+        self.assertEqual(adopted["conversationProvider"], "codex")
+        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["defaultProvider"], "claude", "--keep-default leaves the default.")
+        self.assert_success(self.call_cli("settings", "set-default-provider", "codex")[0])
+
+        again = self.assert_success(self.call_cli("providers", "install", "codex", extra_environment=environment)[0])
+        self.assertTrue(again["isInstalled"])
+        self.assertEqual(installs.read_text(encoding="utf-8").splitlines(), ["codex"], "An installed provider isn't installed again.")
+
+        (directory / "claude.install-fails").write_text("curl: (6) Could not resolve host: claude.ai\n", encoding="utf-8")
+        failed, _ = self.call_cli("providers", "install", "claude", expected_status=1, extra_environment=environment)
+        self.assert_failure(failed, "operation_failed")
+        self.assertIn("Installing Claude Code failed (exit 7).", failed["error"]["message"])
+        self.assertIn("Could not resolve host: claude.ai", failed["error"]["message"])
+        self.assertFalse(statuses()["claude"]["isInstalled"], "A failed install leaves Claude missing.")
+
+        (directory / "claude.install-fails").unlink()
+        claude = self.assert_success(self.call_cli("providers", "install", "claude", extra_environment=environment)[0])
+        self.assertTrue(claude["isInstalled"])
+        self.assertEqual(installs.read_text(encoding="utf-8").splitlines(), ["codex", "claude", "claude"])
+        self.assertTrue(all(status["isInstalled"] for status in statuses().values()))
+        switched = self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=environment)[0])
+        self.assertEqual(switched["conversationProvider"], "claude")
+        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["defaultProvider"], "claude", "A chosen provider becomes the default.")
+
+        unknown, _ = self.call_cli("providers", "install", "gemini", expected_status=2, extra_environment=environment)
+        self.assert_failure(unknown, "invalid_argument")
+        usage, _ = self.call_cli("providers", "install", expected_status=2, extra_environment=environment)
+        self.assert_failure(usage, "invalid_argument")

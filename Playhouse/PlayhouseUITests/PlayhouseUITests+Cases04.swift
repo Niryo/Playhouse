@@ -909,7 +909,7 @@ extension PlayhouseUITests {
         _ = try runCLI(["settings", "clear-parent"])
         let followUp = "Follow up after the context folder vanished."
         let failure = try runCLI(["conversation", "send", taskID, "--message", followUp], expectedStatus: 1)
-        XCTAssertTrue(((failure["error"] as? [String: Any])?["message"] as? String ?? "").lowercased().contains("repository root folder"))
+        XCTAssertTrue(((failure["error"] as? [String: Any])?["message"] as? String ?? "").lowercased().contains("suggests repositories from"))
         let current = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(current["status"] as? String, "Waiting Response")
         XCTAssertNil(current["pendingSubmittedPrompt"] as? String)

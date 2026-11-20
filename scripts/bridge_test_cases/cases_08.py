@@ -193,11 +193,24 @@ class BridgeTestCases08:
         response, _ = self.call_cli("task", "delete", broken_id)
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(broken_worktree.exists())
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Before any root is set, opening the Add repository picker from the empty state's + still leaves Set root folder able to bring its folder panel to the front, every time it is clicked.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Launching with no folder set opens the Suggestions from prompt, which asks for the folder that holds the user's Git repositories; Not Now closes it, no root notice sits above the composer, and a send or a schedule without a folder reopens the prompt, keeping the message as the draft and saving no schedule. Cancelling its folder panel returns to the prompt, and choosing a folder there saves it as the default parent.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         response, _ = self.call_cli("settings", "get")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
+        # A send with no folder is refused and names the Suggestions from setting, which the
+        # window asks for in its prompt instead.
+        environment = self.install_codex_fixture("codex-fixture-default-parent-required")
+        rootless = self.create_task("Needs a suggestions folder", roots=[])["id"]
+        refused, _ = self.call_cli(
+            "conversation", "send", rootless, "--message", "Needs a suggestions folder first.",
+            expected_status=1, extra_environment=environment,
+        )
+        self.assert_failure(refused, "settings_required")
+        self.assertIn("Suggestions from", refused["error"]["message"])
+        refused_task = self.assert_success(self.call_cli("task", "get", rootless)[0])
+        self.assertIsNone(refused_task.get("schedule"), "A refused send saves no schedule.")
+        self.assertEqual(refused_task["status"], "Backlog", "A refused send starts no turn.")
         self.assertEqual(self.assert_success(response)["appearance"], "dark")
         self.assertNotIn("pullRequestConflictAction", self.assert_success(response))
         self.call_cli("settings", "set-pr-conflict-action", "ask", expected_status=2)

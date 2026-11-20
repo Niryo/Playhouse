@@ -490,6 +490,15 @@ final class PlayhouseBridgeRuntime {
                     ? try await AgentUsageService.login(provider, clients: clients)
                     : try await AgentUsageService.switchAccount(provider, clients: clients)
                 result = .object(["loginURL": url.map(BridgeValue.string) ?? .null])
+            case "providers.list":
+                result = try Self.value(ConversationProviderInstaller.statuses(clients: conversationClients()))
+            case "providers.install":
+                let provider = try ConversationProvider.parse(request.requiredString("provider"))
+                result = try Self.value(await ConversationProviderInstaller.install(
+                    provider, clients: conversationClients(),
+                    // A test's installer fixture stands in for the network installer only in a test bundle.
+                    fixtureInstaller: PlayhouseAppIdentity.isTestBundle ? request.arguments["__providerInstaller"]?.string : nil
+                ))
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
@@ -586,7 +595,8 @@ final class PlayhouseBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 result = try Self.value(await conversations.setProvider(
                     taskID: request.requiredUUID("taskID"),
-                    provider: ConversationProvider.parse(request.requiredString("provider"))
+                    provider: ConversationProvider.parse(request.requiredString("provider")),
+                    remembersDefault: request.arguments["remembersDefault"]?.bool ?? true
                 ))
             case "plugin.mode":
                 if let enabled = request.arguments["enabled"]?.bool {
