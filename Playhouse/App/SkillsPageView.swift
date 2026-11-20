@@ -620,147 +620,21 @@ private struct NewSkillPanel: View {
     }
 }
 
-/// A skill's Markdown as it reads: any frontmatter as a small table of its
-/// entries, then headings, lists, quotes, code, and paragraphs.
+/// A skill's or rule's Markdown as it reads, in a scrolling panel: a Markdown atom that shows
+/// any frontmatter as a small table of its entries, then the formatted instructions.
 struct SkillMarkdownPreview: View {
     let markdown: String
     let identifier: String
 
-    private enum Block {
-        case heading(level: Int, text: String)
-        case paragraph(String)
-        case bullet(String)
-        case numbered(String, String)
-        case quote(String)
-        case code(String)
-        case rule
-    }
-
     var body: some View {
-        let (frontmatter, blocks) = Self.parse(markdown)
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if !frontmatter.isEmpty {
-                    Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 4) {
-                        ForEach(Array(frontmatter.enumerated()), id: \.offset) { _, entry in
-                            GridRow {
-                                Text(entry.key).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                                Text(entry.value).font(.callout).textSelection(.enabled)
-                            }
-                        }
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("\(identifier)-frontmatter")
-                }
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in view(for: block) }
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .hoverRevealScrollers()
+        AtomScroll(props: ScrollProps(inset: 16)) {
+            AtomMarkdown(
+                props: MarkdownProps(text: markdown, selectable: true, frontmatter: "table"),
+                common: AtomCommon(testID: identifier, fillWidth: true)
+            )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 6))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(identifier)
-    }
-
-    @ViewBuilder
-    private func view(for block: Block) -> some View {
-        switch block {
-        case .heading(let level, let text):
-            Self.inline(text)
-                .font(level == 1 ? .title2.weight(.bold) : level == 2 ? .title3.weight(.semibold) : .headline)
-                .padding(.top, 4)
-        case .paragraph(let text):
-            Self.inline(text)
-        case .bullet(let text):
-            HStack(alignment: .firstTextBaseline, spacing: 6) { Text("•"); Self.inline(text) }
-                .padding(.leading, 8)
-        case .numbered(let number, let text):
-            HStack(alignment: .firstTextBaseline, spacing: 6) { Text(number).monospacedDigit(); Self.inline(text) }
-                .padding(.leading, 8)
-        case .quote(let text):
-            Self.inline(text)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 10)
-                .overlay(alignment: .leading) { Rectangle().fill(Color.secondary.opacity(0.4)).frame(width: 3) }
-        case .code(let text):
-            Text(text)
-                .font(.system(.callout, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-        case .rule:
-            Divider()
-        }
-    }
-
-    private static func inline(_ text: String) -> Text {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return Text((try? AttributedString(markdown: text, options: options)) ?? AttributedString(text))
-    }
-
-    private static func parse(_ markdown: String) -> (frontmatter: [(key: String, value: String)], blocks: [Block]) {
-        var frontmatter: [(key: String, value: String)] = []
-        var lines = markdown.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-        if let split = SkillFrontmatter.split(markdown) {
-            frontmatter = SkillFrontmatter.entries(split.header).map { ($0.key, $0.value) }
-            lines = Array(split.lines[split.bodyStart...])
-        }
-        var blocks: [Block] = []
-        var paragraph: [String] = []
-        var code: [String]?
-        func flush() {
-            if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: " "))) }
-            paragraph = []
-        }
-        for raw in lines {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") {
-                if let finished = code {
-                    blocks.append(.code(finished.joined(separator: "\n")))
-                    code = nil
-                } else {
-                    flush()
-                    code = []
-                }
-                continue
-            }
-            if code != nil {
-                code?.append(raw)
-                continue
-            }
-            if line.isEmpty {
-                flush()
-            } else if let hashes = line.firstIndex(where: { $0 != "#" }), hashes != line.startIndex,
-                      line.distance(from: line.startIndex, to: hashes) <= 6, line[hashes] == " " {
-                flush()
-                blocks.append(.heading(level: line.distance(from: line.startIndex, to: hashes),
-                                       text: line[hashes...].trimmingCharacters(in: .whitespaces)))
-            } else if ["---", "***", "___"].contains(line) {
-                flush()
-                blocks.append(.rule)
-            } else if let marker = ["- ", "* ", "+ "].first(where: line.hasPrefix) {
-                flush()
-                blocks.append(.bullet(String(line.dropFirst(marker.count))))
-            } else if let dot = line.firstIndex(of: "."), dot != line.startIndex,
-                      line[..<dot].allSatisfy(\.isNumber), line[line.index(after: dot)...].hasPrefix(" ") {
-                flush()
-                blocks.append(.numbered(String(line[...dot]), line[line.index(after: dot)...].trimmingCharacters(in: .whitespaces)))
-            } else if line.hasPrefix(">") {
-                flush()
-                blocks.append(.quote(line.dropFirst().trimmingCharacters(in: .whitespaces)))
-            } else {
-                paragraph.append(line)
-            }
-        }
-        flush()
-        if let unfinished = code { blocks.append(.code(unfinished.joined(separator: "\n"))) }
-        return (frontmatter, blocks)
     }
 }
 

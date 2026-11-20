@@ -130,7 +130,7 @@
 
       getRootHostContext: function () { return { insideText: false }; },
       getChildHostContext: function (parent, type) {
-        var insideText = type === "Text";
+        var insideText = type === "Text" || type === "Markdown";
         return parent.insideText === insideText ? parent : { insideText: insideText };
       },
       shouldSetTextContent: function () { return false; },
@@ -144,7 +144,7 @@
         return { id: id, type: type };
       },
       createTextInstance: function (text, root, context) {
-        if (!context.insideText) throw new Error("Text \"" + text + "\" must be inside a <Text> atom.");
+        if (!context.insideText) throw new Error("Text \"" + text + "\" must be inside a <Text> or <Markdown> atom.");
         var id = nextID++;
         ops.push({ op: "createText", id: id, text: String(text) });
         return { id: id, type: "#text" };

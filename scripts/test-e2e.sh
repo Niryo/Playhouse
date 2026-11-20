@@ -110,6 +110,14 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/transcript-row-anchors-tests.swift" \
   -o "${transcript_row_anchor_tests}"
 "${transcript_row_anchor_tests}"
+# Pure-logic unit checks of the shared Markdown parser behind the transcript and the Markdown atom.
+markdown_document_tests="${test_output_dir}/markdown-document-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/MarkdownDocument.swift" \
+  "${repository_root}/Playhouse/App/SkillManifest.swift" \
+  "${repository_root}/scripts/unit/markdown-document-tests.swift" \
+  -o "${markdown_document_tests}"
+"${markdown_document_tests}"
 # The CLI's command catalog against its parser: no handled command without a help entry, and
 # no declared command without a handler. Built from the CLI's sources minus its entry point.
 cli_command_catalog_tests="${test_output_dir}/cli-command-catalog-tests"

@@ -463,6 +463,97 @@ extension PlayhouseUITests {
         element("send-message-button").click()
     }
 
+    // case-contract: test_markdown_atom_renders_formatted_markdown | The Plugin Catalog lists the Markdown atom, whose page renders Markdown atoms into formatted native text with no plugin error: its skill sample shows its frontmatter as a table of its entries (release-notes) with no raw --- fences, a heading without its # marks that is taller than the body text, a paragraph whose bold, italic and inline code show without their markers, bullet and numbered list items, a quote, a Swift code block card, a table with its cells and the text after a rule; a Markdown whose frontmatter is hide shows only its body, and a Markdown given raw string children renders them as Markdown (a heading without its ## marks). `plugin render` reports a Markdown atom from its text prop or from its string children with no errors and its props as given, while a frontmatter other than table or hide, a mistyped size or selectable, an atom child, or an event the atom doesn't raise is reported in errors with exit 1.
+    func test_markdown_atom_renders_formatted_markdown() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let row = catalogSidebarRow("plugin-catalog-atom-Markdown")
+        XCTAssertTrue(row.waitToExist(timeout: 15), "The Plugin Catalog lists the Markdown atom.")
+        row.click()
+        let skill = element("markdown-skill")
+        XCTAssertTrue(skill.waitToExist(timeout: 10), "The Markdown page renders its atoms.")
+        XCTAssertFalse(element("plugin-error").exists, "The Markdown page renders without a plugin error.")
+        XCTAssertTrue(element("markdown-skill-frontmatter").staticTexts["release-notes"].exists, "The frontmatter shows as a table of its entries.")
+        XCTAssertFalse(skill.staticTexts["---"].exists, "The raw frontmatter fences don't show.")
+        let heading = skill.staticTexts["Release notes"]
+        XCTAssertTrue(heading.exists, "The heading shows without its # marks.")
+        XCTAssertFalse(skill.staticTexts["# Release notes"].exists, "The heading's marks don't show.")
+        XCTAssertTrue(skill.staticTexts["Summarize merged changes from git log, briefly."].exists,
+                      "Bold, italic and inline code show without their markers.")
+        let item = skill.staticTexts["Group changes by area."]
+        XCTAssertTrue(item.exists, "A bullet list item renders.")
+        XCTAssertGreaterThan(heading.frame.height, item.frame.height, "The heading is larger than the body text.")
+        XCTAssertTrue(skill.staticTexts["Collect the changes"].exists, "A numbered list item renders.")
+        XCTAssertTrue(skill.staticTexts["Keep it short."].exists, "A quote renders without its > mark.")
+        XCTAssertTrue(skill.staticTexts["Swift"].exists, "A fenced block shows as a code card named for its language.")
+        XCTAssertTrue(skill.staticTexts["Area"].exists && skill.staticTexts["App"].exists, "A table shows its header and cells.")
+        XCTAssertTrue(skill.staticTexts["The end."].exists, "The text after a rule renders.")
+        let hidden = element("markdown-hidden-frontmatter")
+        XCTAssertTrue(hidden.staticTexts["Only the body shows."].exists, "A Markdown with frontmatter hide shows its body.")
+        XCTAssertFalse(hidden.staticTexts["hidden"].exists || element("markdown-hidden-frontmatter-frontmatter").exists, "Hidden frontmatter doesn't show.")
+        XCTAssertTrue(element("markdown-children").staticTexts["From string children"].exists, "Raw string children render as Markdown.")
+        attachScreenshot(named: "The Markdown atom renders formatted Markdown")
+        let capture = XCTAttachment(screenshot: skill.screenshot())
+        capture.name = "The Markdown atom's skill sample"
+        capture.lifetime = .keepAlways
+        add(capture)
+
+        let page = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Markdown"])["result"] as? [String: Any])
+        XCTAssertEqual((page["errors"] as? [String])?.isEmpty, true, "The Markdown catalog page renders without errors: \(page)")
+        let tree = try XCTUnwrap(page["tree"] as? [String: Any])
+        let skillProps = try XCTUnwrap(markdownNode("markdown-skill", in: tree)?["props"] as? [String: Any])
+        XCTAssertEqual(skillProps["frontmatter"] as? String, "table")
+        XCTAssertEqual(skillProps["selectable"] as? Bool, true)
+        XCTAssertTrue((skillProps["text"] as? String)?.hasPrefix("---\nname: release-notes\n") == true)
+        let hiddenProps = try XCTUnwrap(markdownNode("markdown-hidden-frontmatter", in: tree)?["props"] as? [String: Any])
+        XCTAssertEqual(hiddenProps["frontmatter"] as? String, "hide")
+        XCTAssertEqual(hiddenProps["size"] as? Double, 11)
+        XCTAssertEqual(hiddenProps["color"] as? String, "secondary")
+        let childrenNode = try XCTUnwrap(markdownNode("markdown-children", in: tree))
+        XCTAssertEqual(childrenNode["type"] as? String, "Markdown")
+        XCTAssertEqual(markdownStrings(childrenNode), "## From string children\nA Markdown atom also reads its raw strings.",
+                       "A Markdown's raw string children are its source.")
+
+        let rendered = try renderMarkdownPlugin(##"Playhouse.render(h(Markdown, { text: "# Title\n**bold** and `code`", size: 14, testID: "doc" }));"##)
+        XCTAssertEqual((rendered["errors"] as? [String])?.isEmpty, true, "A plugin renders a Markdown atom from its text prop: \(rendered)")
+        let doc = try XCTUnwrap(markdownNode("doc", in: try XCTUnwrap(rendered["tree"] as? [String: Any])))
+        XCTAssertEqual(doc["type"] as? String, "Markdown")
+        XCTAssertEqual((doc["props"] as? [String: Any])?["text"] as? String, "# Title\n**bold** and `code`")
+        XCTAssertEqual((doc["props"] as? [String: Any])?["size"] as? Double, 14)
+        let fromStrings = try renderMarkdownPlugin(#"Playhouse.render(h(Markdown, { testID: "doc" }, "- one\n", "- two"));"#)
+        XCTAssertEqual((fromStrings["errors"] as? [String])?.isEmpty, true, "A plugin renders a Markdown atom from string children: \(fromStrings)")
+        XCTAssertEqual(markdownStrings(try XCTUnwrap(markdownNode("doc", in: try XCTUnwrap(fromStrings["tree"] as? [String: Any])))), "- one\n- two")
+
+        for (source, message) in [
+            (#"Playhouse.render(h(Markdown, { frontmatter: "show" }, "x"));"#, #"<Markdown> has an invalid prop: frontmatter: expected "table" or "hide", found "show""#),
+            (#"Playhouse.render(h(Markdown, { size: "large" }, "x"));"#, "<Markdown> has an invalid prop: size: expected a number, found a string"),
+            (#"Playhouse.render(h(Markdown, { selectable: "yes" }, "x"));"#, "<Markdown> has an invalid prop: selectable: expected a boolean, found a string"),
+            (#"Playhouse.render(h(Markdown, null, h(Text, null, "x")));"#, "<Markdown> can't hold <Text>"),
+            (#"Playhouse.render(h(Markdown, { onLink: function () {} }, "x"));"#, #"<Markdown> has no event "onLink""#),
+        ] {
+            let failed = try renderMarkdownPlugin(source, expectedStatus: 1)
+            XCTAssertTrue((failed["errors"] as? [String] ?? []).contains { $0.contains(message) }, "\(source) reports \(message): \(failed)")
+        }
+    }
+
+    func renderMarkdownPlugin(_ source: String, expectedStatus: Int32 = 0) throws -> [String: Any] {
+        let file = dataDirectory.appendingPathComponent("plugin-markdown-\(UUID().uuidString.prefix(8)).js")
+        try source.write(to: file, atomically: true, encoding: .utf8)
+        return try XCTUnwrap(try runCLI(["plugin", "render", "--file", file.path], expectedStatus: expectedStatus)["result"] as? [String: Any])
+    }
+
+    func markdownNode(_ testID: String, in tree: [String: Any]) -> [String: Any]? {
+        if (tree["props"] as? [String: Any])?["testID"] as? String == testID { return tree }
+        for child in tree["children"] as? [[String: Any]] ?? [] {
+            if let found = markdownNode(testID, in: child) { return found }
+        }
+        return nil
+    }
+
+    func markdownStrings(_ node: [String: Any]) -> String {
+        (node["children"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "#text" }.compactMap { $0["text"] as? String }.joined()
+    }
+
     func optimizedContextMode(_ taskID: String) -> String? {
         (try? runCLI(["conversation", "context-mode", taskID])["result"] as? [String: Any])?["mode"] as? String
     }

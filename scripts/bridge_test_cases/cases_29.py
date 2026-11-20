@@ -591,3 +591,35 @@ Playhouse.render(h(DMs));
         self.assert_failure(self.call_cli("agent", "run", "--plugin", "slack-dms", "--provider", "codex", "--prompt", "Go.",
                                           extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"}, expected_status=1)[0], "unavailable")
 
+    # case-contract: test_markdown_atom_renders_formatted_markdown | The Plugin Catalog lists the Markdown atom, whose page renders Markdown atoms into formatted native text with no plugin error: its skill sample shows its frontmatter as a table of its entries (release-notes) with no raw --- fences, a heading without its # marks that is taller than the body text, a paragraph whose bold, italic and inline code show without their markers, bullet and numbered list items, a quote, a Swift code block card, a table with its cells and the text after a rule; a Markdown whose frontmatter is hide shows only its body, and a Markdown given raw string children renders them as Markdown (a heading without its ## marks). `plugin render` reports a Markdown atom from its text prop or from its string children with no errors and its props as given, while a frontmatter other than table or hide, a mistyped size or selectable, an atom child, or an event the atom doesn't raise is reported in errors with exit 1.
+    def test_markdown_atom_renders_formatted_markdown(self):
+        page = self.assert_success(self.call_cli("plugin", "render", "--page", "Markdown")[0])
+        self.assertEqual(page["errors"], [], "The Markdown catalog page renders without errors.")
+        skill = self.plugin_node(page["tree"], "markdown-skill")
+        self.assertEqual(skill["type"], "Markdown")
+        self.assertEqual((skill["props"]["frontmatter"], skill["props"]["selectable"]), ("table", True))
+        self.assertTrue(skill["props"]["text"].startswith("---\nname: release-notes\n"), skill["props"]["text"])
+        hidden = self.plugin_node(page["tree"], "markdown-hidden-frontmatter")
+        self.assertEqual((hidden["props"]["frontmatter"], hidden["props"]["size"], hidden["props"]["color"]), ("hide", 11, "secondary"))
+        children = self.plugin_node(page["tree"], "markdown-children")
+        self.assertEqual(children["type"], "Markdown")
+        self.assertEqual(self.plugin_text(children), "## From string children\nA Markdown atom also reads its raw strings.",
+                         "A Markdown's raw string children are its source.")
+
+        rendered = self.assert_success(self.render_plugin('Playhouse.render(h(Markdown, { text: "# Title\\n**bold** and `code`", size: 14, testID: "doc" }));'))
+        self.assertEqual(rendered["errors"], [], "A plugin renders a Markdown atom from its text prop.")
+        doc = self.plugin_node(rendered["tree"], "doc")
+        self.assertEqual((doc["type"], doc["props"]["text"], doc["props"]["size"]), ("Markdown", "# Title\n**bold** and `code`", 14))
+        from_strings = self.assert_success(self.render_plugin('Playhouse.render(h(Markdown, { testID: "doc" }, "- one\\n", "- two"));'))
+        self.assertEqual(from_strings["errors"], [], "A plugin renders a Markdown atom from string children.")
+        self.assertEqual(self.plugin_text(self.plugin_node(from_strings["tree"], "doc")), "- one\n- two")
+
+        for source, message in [
+            ('Playhouse.render(h(Markdown, { frontmatter: "show" }, "x"));', '<Markdown> has an invalid prop: frontmatter: expected "table" or "hide", found "show"'),
+            ('Playhouse.render(h(Markdown, { size: "large" }, "x"));', "<Markdown> has an invalid prop: size: expected a number, found a string"),
+            ('Playhouse.render(h(Markdown, { selectable: "yes" }, "x"));', "<Markdown> has an invalid prop: selectable: expected a boolean, found a string"),
+            ('Playhouse.render(h(Markdown, null, h(Text, null, "x")));', "<Markdown> can't hold <Text>"),
+            ('Playhouse.render(h(Markdown, { onLink: function () {} }, "x"));', '<Markdown> has no event "onLink"'),
+        ]:
+            failed = self.render_plugin(source, expected_status=1)
+            self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{source} reports {message}: {failed['result']['errors']}")
