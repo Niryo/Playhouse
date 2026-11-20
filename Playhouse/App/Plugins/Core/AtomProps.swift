@@ -391,6 +391,9 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 /// dismissing action should set one. `destructive` gives it the destructive
 /// role (a push button draws its title red). `selected` marks it selected to
 /// accessibility, the current choice of a row of buttons (a ChoiceBar's).
+/// `pulse` draws the eye to it: an accent ring keeps swelling out from its
+/// edge and fading (held still when the system reduces motion; none while
+/// it is disabled).
 struct ButtonProps: AtomPropsDecodable, Equatable {
     var style: String?
     var emphasis: Double?
@@ -400,8 +403,9 @@ struct ButtonProps: AtomPropsDecodable, Equatable {
     var shortcut: String?
     var destructive: Bool?
     var selected: Bool?
+    var pulse: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive, selected }
+    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive, selected, pulse }
 }
 
 /// Opens `url` in the browser; its label is its children.
