@@ -160,7 +160,8 @@ extension PlayhouseUITests {
         let page = app.scrollViews.containing(.any, identifier: "plugin-catalog-js-token-stats").firstMatch
         @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
             XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
-            for _ in 0..<15 where !element.isHittable {
+            for _ in 0..<15 {
+                guard !element.isHittable else { break }
                 page.scroll(byDeltaX: 0, deltaY: element.frame.midY > page.frame.midY ? -250 : 250)
             }
             XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
@@ -1000,6 +1001,80 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !preview.exists }, timeout: 10), "Deleting the plugin closes its open editor.")
         XCTAssertTrue(waitUntil({ (try? editorIDs().isEmpty) == true }, timeout: 10), "Deleting the plugin removes its editor conversation.")
     }
+    // case-contract: test_plugin_editor_opens_long_conversation_with_loader | A plugin editor whose conversation is long opens at once and shows that it is loading until its history arrives: the editor's sixty settled turns, held in Playhouse's own store, are read as the newest page of 80 messages with the 40 before them counted, ending on the newest question and answer, and `plugin edit --id` returns the same editor. While the editor's operation lock is held, as a Save, Discard or starting turn holds it, that history read waits and returns the same page once the lock is released. In the window, the plugin submenu's Edit… opens the editor with its preview while that read waits, and its transcript shows Loading conversation… in place of the empty plugin prompt; once the lock is released the loader goes away and the newest question and answer show. Opening an editor and its loader are Playhouse-owned and provider neutral, so Claude represents both providers.
+    func test_plugin_editor_opens_long_conversation_with_loader() throws {
+        _ = try installClaudeFixture(named: "claude-fixture-plugin-long-editor")
+        func editorIDs() throws -> [String] {
+            let sessions = try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
+            return sessions.filter { $0["authoredPluginID"] as? String == "long-editor" }.compactMap { $0["id"] as? String }
+        }
+        // A menu click that never reaches the app sends no plugin edit; only such a missed click is retried.
+        func editRequests() -> Int {
+            ((try? diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == "bridge.request.started" && $0["command"] as? String == "plugin.edit"
+                    && $0["argument.__guiRuntime"] as? String == "true"
+            }.count
+        }
+        func clickEdit() {
+            for _ in 0..<3 {
+                let before = editRequests()
+                clickInstalledPluginAction("Edit…", pluginRow: "Long editor — Main sidebar")
+                if waitUntil({ editRequests() > before }, timeout: 3) { return }
+            }
+            XCTFail("Edit… never reached the app.")
+        }
+        // A submenu opened while the plugins refresh closes under the click, so the menu settles first.
+        func settlePluginsMenu() {
+            let pluginsMenu = app.menuBars.menuBarItems["Plugins"]
+            XCTAssertTrue(waitUntil({
+                pluginsMenu.click()
+                let found = pluginsMenu.menuItems["Long editor — Main sidebar"].exists
+                self.app.typeKey(.escape, modifierFlags: [])
+                return found
+            }, timeout: 15), "The Plugins menu lists the installed plugin.")
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        try writeInstalledPlugin("long-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Long editor")
+        _ = try runCLI(["plugin", "refresh"])
+        settlePluginsMenu()
+        clickEdit()
+        let preview = element("plugin-creation-preview")
+        XCTAssertTrue(preview.waitToExist(timeout: 10))
+        sendFromComposer("Start the long plugin.")
+        XCTAssertTrue(app.staticTexts["OK."].waitToExist(timeout: 30), "The editor's first turn answers.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "The editor's first turn settles.")
+        let editorID = try XCTUnwrap(try editorIDs().first)
+
+        // Earlier sessions' turns are already in Playhouse's own store; the provider holds none of them.
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before its stored history is seeded.")
+        try seedLongHistory(editorID)
+        launchApp(defaultParent: fixture.parent.path)
+        settlePluginsMenu()
+        // Opening the editor reads its history behind its operation lock, which a Save, Discard or
+        // starting turn holds; held here, the read waits and the editor shows that it is loading.
+        let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: editorID)
+        clickEdit()
+        XCTAssertTrue(preview.waitToExist(timeout: 10), "Edit… opens the editor while its history read waits.")
+        let loader = element("conversation-history-loading")
+        XCTAssertTrue(loader.waitToExist(timeout: 10), "The editor's transcript shows that its conversation is loading.")
+        XCTAssertEqual(accessibleLabelOrValue(of: loader), "Loading conversation…")
+        XCTAssertFalse(element("empty-conversation").exists, "A loading editor does not offer the empty plugin prompt.")
+        XCTAssertFalse(transcriptMessage("Long history assistant 60.").exists, "The history has not arrived while the lock is held.")
+        attachAppWindowScreenshot(named: "Plugin editor loading its long conversation")
+        attachElementScreenshot(element("conversation-scroll-view"), named: "Loading conversation indicator")
+
+        try operationLock.release()
+        XCTAssertTrue(transcriptMessage("Long history assistant 60.").waitToExist(timeout: 20), "The newest answer shows once the history arrives.")
+        let newestQuestion = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", "Long history user 60.")).firstMatch
+        XCTAssertTrue(newestQuestion.waitToExist(timeout: 5), "The newest question shows above it.")
+        XCTAssertTrue(waitUntil({ !loader.exists }, timeout: 5), "The loader goes away with the history.")
+        XCTAssertFalse(element("empty-conversation").exists)
+        let transcript = element("conversation-scroll-view")
+        XCTAssertTrue((transcript.value as? String ?? "").hasSuffix(" of 120 messages"),
+                      "The editor holds its whole long conversation; value=\(transcript.value as? String ?? "nil").")
+        attachAppWindowScreenshot(named: "Plugin editor showing its long conversation")
+    }
     // case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation), then the task card's built-in Pull request mode and Pull requests plugins (inline at the taskItem placement), the board sidebar's built-in Agents info (a section at the mainSidebarBottom placement) and its built-in Scheduled Tasks (a popover at the mainSidebar placement), and the composer's built-in Built-in Commands (headless at the composerActions placement, with its / commands), before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar or on the task card. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A `plugin refresh` with nothing changed still bumps the revision and lists identical plugins, and in the window it leaves an open plugin submenu open. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete, and which labels Built-in Commands Headless (slash commands only), its submenu also offering Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar or the task card is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
     func test_plugin_enable_disable_and_builtins() throws {
         func listed() throws -> [String: [String: Any]] {
@@ -1677,8 +1752,10 @@ function Card() {
     h(Text, { size: 10, testID: "card-status" }, props.task ? props.task.status : "no task"),
     h(Text, { size: 10, testID: "card-probes" }, "probes " + probes[0]),
     h(Text, { size: 10, testID: "card-focus" }, "focus " + focusProbes[0]),
-    // The plugin keeps running as its card changes columns: show only its latest entries.
-    h(Text, { size: 10, testID: "card-log" }, log[0].slice(-3).join(", ")));
+    // The plugin keeps running as its card changes columns: show only its latest entries, on one
+    // line, so a trailing probe up to the throttle's 10 seconds later doesn't re-flow the card's
+    // bottom row under a click aimed at its other controls.
+    h(Text, { size: 10, lineLimit: 1, testID: "card-log" }, log[0].slice(-3).join(", ")));
 }
 Playhouse.render(h(Card));
 """#
@@ -1769,6 +1846,9 @@ Playhouse.render(h(CardButton));
         // A task card plugin with a button opens with its card's task.
         let entry = cardRow.descendants(matching: .any)["plugin-entry-card-button"]
         XCTAssertTrue(entry.waitToExist(timeout: 10), "A popover task card plugin has an entry button on the card.")
+        // The returning pill re-lays out the card's bottom row; a click sent meanwhile lands on the
+        // card and opens its task instead.
+        XCTAssertTrue(waitForStableFrame(entry), "The card's bottom row settles once its mode pill is back.")
         entry.click()
         let buttonTask = element("button-task")
         XCTAssertTrue(waitUntil({ buttonTask.exists && self.pluginText(buttonTask) == "Task card plugin" }, timeout: 10),
@@ -1776,8 +1856,12 @@ Playhouse.render(h(CardButton));
         attachScreenshot(named: "Task card plugin opened from its card button")
         // The board answers a card plugin's alert; a task card has no composer.
         let buttonResult = element("button-result")
-        element("button-compose").click()
-        XCTAssertTrue(waitUntil({ self.pluginText(buttonResult) == "composer: unavailable" }, timeout: 5), "A task card has no composer: \(pluginText(buttonResult))")
+        let composeButton = element("button-compose")
+        XCTAssertTrue(waitForStableFrame(composeButton), "The popover has stopped moving before its button is clicked.")
+        composeButton.click()
+        XCTAssertTrue(waitUntil({ buttonResult.exists && self.pluginText(buttonResult) == "composer: unavailable" }, timeout: 5),
+                      "A task card has no composer: \(buttonResult.exists ? pluginText(buttonResult) : "popover closed")")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The composer click reached no other button, such as moveTask.")
         element("button-alert").click()
         let alert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
         XCTAssertTrue(alert.waitToExist(timeout: 10), "ui.alert from a card plugin shows the board's alert.")

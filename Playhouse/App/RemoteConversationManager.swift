@@ -36,9 +36,14 @@ struct RemoteConversationManager {
     // MARK: - Store-only operations
 
     func modelID(taskID: UUID) throws -> String? { try store.modelID(taskID: taskID) }
+    func modelID(taskID: UUID, provider: ConversationProvider) throws -> String? {
+        try store.modelID(taskID: taskID, provider: provider)
+    }
     func effort(taskID: UUID) throws -> ConversationEffort { try store.effort(taskID: taskID) }
     func contextMode(taskID: UUID) throws -> ConversationContextMode { try store.contextMode(taskID: taskID) }
-    func setModelID(taskID: UUID, modelID: String) async throws { try await store.setModelID(taskID: taskID, modelID: modelID) }
+    func setModelID(taskID: UUID, modelID: String, provider: ConversationProvider? = nil) async throws {
+        try await store.setModelID(taskID: taskID, modelID: modelID, provider: provider)
+    }
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] { try store.cachedModels(taskID: taskID) }
     func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
         try store.cachedModels(taskID: taskID, provider: provider)
@@ -73,11 +78,28 @@ struct RemoteConversationManager {
         if let beforeMessageID { arguments["before"] = .string(beforeMessageID) }
         if let afterMessageID { arguments["after"] = .string(afterMessageID) }
         if let chatPageID { arguments["page"] = .string(chatPageID) }
+        // A read changes no running turn, so it doesn't re-read the runtime state either: the
+        // subscription keeps that current, and a fresh copy re-rendered every view watching it.
         let result = try await daemon.call("conversation.history", arguments) { event in
             if event.type == "action_request" { onActionRequest() }
         }
-        await runtime.refresh()
         return try result.decoded(ConversationHistory.self)
+    }
+
+    /// The newest `messageLimit` messages and the task as the daemon reconciled it for the read,
+    /// so opening a task takes one request rather than a reconcile and then a read.
+    func historyOnOpen(
+        taskID: UUID,
+        messageLimit: Int,
+        onActionRequest: @escaping () -> Void = {}
+    ) async throws -> (history: ConversationHistory, reconciled: BoardTaskRecord?) {
+        let result = try await daemon.call("conversation.history", [
+            "taskID": id(taskID), "deferImages": .boolean(true), "includeTask": .boolean(true),
+            "limit": .string(String(messageLimit)),
+        ]) { event in
+            if event.type == "action_request" { onActionRequest() }
+        }
+        return (try result.decoded(ConversationHistory.self), try? result.object?["task"]?.decoded(BoardTaskRecord.self))
     }
 
     /// The images of messages a history read marked `imagesDeferred`.
@@ -275,11 +297,15 @@ struct RemoteConversationManager {
             .decoded(BoardTaskRecord.self)
     }
 
-    func setProvider(taskID: UUID, provider: ConversationProvider, remembersDefault: Bool = true) async throws -> BoardTaskRecord {
-        try await daemon.call("conversation.provider.set", [
+    /// The saved task and the provider dividers the switch recorded.
+    func setProvider(
+        taskID: UUID, provider: ConversationProvider, remembersDefault: Bool = true
+    ) async throws -> (record: BoardTaskRecord, providerBoundaries: [ConversationProviderBoundary]) {
+        let result = try await daemon.call("conversation.provider.set", [
             "taskID": id(taskID), "provider": .string(provider.rawValue), "remembersDefault": .boolean(remembersDefault),
         ])
-            .decoded(BoardTaskRecord.self)
+        let boundaries = try result.object?["providerBoundaries"].map { try $0.decoded([ConversationProviderBoundary].self) } ?? []
+        return (try result.decoded(BoardTaskRecord.self), boundaries)
     }
 
     // MARK: - Skills, read and managed by the daemon like the CLI's `skills` commands

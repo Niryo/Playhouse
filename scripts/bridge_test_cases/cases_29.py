@@ -36,6 +36,18 @@ Playhouse.service.on("plugin.stateChanged", function (event) {
 });
 """
 
+    # Writes the other plugin's state whenever its own "ball" changes, so two of them would
+    # wake each other forever if a chain of events had no end.
+    PING_PONG_SOURCE = r"""
+Playhouse.service.on("plugin.stateChanged", async function (event) {
+  if (event.key !== "ball") return;
+  var self = Playhouse.props.plugin.id;
+  var hits = ((Playhouse.props.state || {}).hits || 0) + 1;
+  await Playhouse.setState("hits", hits);
+  await Playhouse.bridge("plugin.state.set", { pluginID: self === "ping-service" ? "pong-service" : "ping-service", key: "ball", value: hits });
+});
+"""
+
     HEADLESS_HANDLERS_SOURCE = r"""
 Playhouse.service.on("app.focus", async function () {
   var tasks = await Playhouse.bridge("task.list", {});
@@ -167,7 +179,7 @@ Playhouse.render(h(DMs));
         path.write_text(source, encoding="utf-8")
         return path
 
-    # case-contract: test_plugin_service_events_targeting_and_state | A plugin.json may list "events" (app events from PluginEvent's names, agent.finished included) for a background half next to any presentation, and a headless plugin is valid with only events; an unknown or repeated event, an mcpTools entry that isn't mcp__<server>__<tool>, or a headless plugin with neither commands nor events is reported in its errors. `plugin service --file` runs the script's Playhouse.service.on handlers headlessly in a fresh service runtime per event, where Playhouse.render does nothing: bridge calls are answered, ui calls are refused as unavailable, plugin.services is refused as invalid_argument, mcp.call and agent.run are unavailable unless --mock answers them (also by tool), agent.finished is injected with a fake result whose fields and context reach the handler beside payload, an unknown event is invalid_argument, and the report lists each event's handler count, the bridge calls, the state written and a throwing handler's error (exit 1). In a mounted UI (plugin render) Playhouse.service.on does nothing and mcp.call or agent.run is unavailable unless mocked. In the daemon, app.focus (from the window's activation or plugin event) wakes only the enabled plugins whose manifest lists it, collapsing quick repeats into one trailing run after the cooldown; a plugin's state change is targeted at it, so its own service hears a change made elsewhere while another plugin's service doesn't, and a service never hears its own writes, so a handler that saves on every change doesn't loop; the service writes state that the popover shows from its props, and a disabled plugin's service isn't woken by a focus that still reaches an enabled one.
+    # case-contract: test_plugin_service_events_targeting_and_state | A plugin.json may list "events" (app events from PluginEvent's names, agent.finished included) for a background half next to any presentation, and a headless plugin is valid with only events; an unknown or repeated event, an mcpTools entry that isn't mcp__<server>__<tool>, or a headless plugin with neither commands nor events is reported in its errors. `plugin service --file` runs the script's Playhouse.service.on handlers headlessly in a fresh service runtime per event, where Playhouse.render does nothing: bridge calls are answered, ui calls are refused as unavailable, plugin.services is refused as invalid_argument, mcp.call and agent.run are unavailable unless --mock answers them (also by tool), agent.finished is injected with a fake result whose fields and context reach the handler beside payload, an unknown event is invalid_argument, and the report lists each event's handler count, the bridge calls, the state written and a throwing handler's error (exit 1). In a mounted UI (plugin render) Playhouse.service.on does nothing and mcp.call or agent.run is unavailable unless mocked. In the daemon, app.focus (from the window's activation or plugin event) wakes only the enabled plugins whose manifest lists it, collapsing quick repeats into one trailing run after the cooldown; a plugin's state change is targeted at it, so its own service hears a change made elsewhere while another plugin's service doesn't, and a service never hears its own writes, so a handler that saves on every change doesn't loop; two services that each write the other's state whenever their own changes stop after a bounded chain of events, each running four times for the eight events a chain may reach, instead of waking each other for as long as the daemon lives; the service writes state that the popover shows from its props, and a disabled plugin's service isn't woken by a focus that still reaches an enabled one.
     def test_plugin_service_events_targeting_and_state(self):
         # Manifest validation.
         self.write_installed_plugin("bad-events", self.QUIET_PLUGIN_SOURCE, placement="composerActions", presentation="headless",
@@ -252,6 +264,15 @@ Playhouse.render(h(DMs));
         time.sleep(1)
         self.assertEqual(self.plugin_state("focus-service")["heard"], ["focus-service:note"], "A service never hears its own writes, so it doesn't loop.")
         self.assertNotIn("heard", self.plugin_state("other-service"), "Another plugin's state change doesn't wake this service.")
+        # Two services that keep waking each other stop once their chain of events is long enough.
+        for pinger in ("ping-service", "pong-service"):
+            self.write_installed_plugin(pinger, self.PING_PONG_SOURCE, placement="composerActions", presentation="headless",
+                                        manifest={"events": ["plugin.stateChanged"]})
+        self.assert_success(self.call_cli("plugin", "state", "--id", "ping-service", "--key", "ball", "--value", "0")[0])
+        hits = lambda: (self.plugin_state("ping-service").get("hits"), self.plugin_state("pong-service").get("hits"))
+        self.wait_for(lambda: hits() == (4, 4), "Each service runs four times in the chain.", timeout=30)
+        time.sleep(2)
+        self.assertEqual(hits(), (4, 4), "The chain ends rather than looping for as long as the daemon lives.")
         rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "focus-service")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "service-focused")), "focused 2", "The popover shows what its service saved.")
         self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "service-active")), "service false")
@@ -687,3 +708,36 @@ Playhouse.render(h(DMs));
         self.assert_failure(unknown, "invalid_argument")
         usage, _ = self.call_cli("providers", "install", expected_status=2, extra_environment=environment)
         self.assert_failure(usage, "invalid_argument")
+
+    # case-contract: test_markdown_atom_renders_formatted_markdown | The Plugin Catalog lists the Markdown atom, whose page renders Markdown atoms into formatted native text with no plugin error: its skill sample shows its frontmatter as a table of its entries (release-notes) with no raw --- fences, a heading without its # marks that is taller than the body text, a paragraph whose bold, italic and inline code show without their markers, bullet and numbered list items, a quote, a Swift code block card, a table with its cells and the text after a rule; a Markdown whose frontmatter is hide shows only its body, and a Markdown given raw string children renders them as Markdown (a heading without its ## marks). `plugin render` reports a Markdown atom from its text prop or from its string children with no errors and its props as given, while a frontmatter other than table or hide, a mistyped size or selectable, an atom child, or an event the atom doesn't raise is reported in errors with exit 1.
+    def test_markdown_atom_renders_formatted_markdown(self):
+        page = self.assert_success(self.call_cli("plugin", "render", "--page", "Markdown")[0])
+        self.assertEqual(page["errors"], [], "The Markdown catalog page renders without errors.")
+        skill = self.plugin_node(page["tree"], "markdown-skill")
+        self.assertEqual(skill["type"], "Markdown")
+        self.assertEqual((skill["props"]["frontmatter"], skill["props"]["selectable"]), ("table", True))
+        self.assertTrue(skill["props"]["text"].startswith("---\nname: release-notes\n"), skill["props"]["text"])
+        hidden = self.plugin_node(page["tree"], "markdown-hidden-frontmatter")
+        self.assertEqual((hidden["props"]["frontmatter"], hidden["props"]["size"], hidden["props"]["color"]), ("hide", 11, "secondary"))
+        children = self.plugin_node(page["tree"], "markdown-children")
+        self.assertEqual(children["type"], "Markdown")
+        self.assertEqual(self.plugin_text(children), "## From string children\nA Markdown atom also reads its raw strings.",
+                         "A Markdown's raw string children are its source.")
+
+        rendered = self.assert_success(self.render_plugin('Playhouse.render(h(Markdown, { text: "# Title\\n**bold** and `code`", size: 14, testID: "doc" }));'))
+        self.assertEqual(rendered["errors"], [], "A plugin renders a Markdown atom from its text prop.")
+        doc = self.plugin_node(rendered["tree"], "doc")
+        self.assertEqual((doc["type"], doc["props"]["text"], doc["props"]["size"]), ("Markdown", "# Title\n**bold** and `code`", 14))
+        from_strings = self.assert_success(self.render_plugin('Playhouse.render(h(Markdown, { testID: "doc" }, "- one\\n", "- two"));'))
+        self.assertEqual(from_strings["errors"], [], "A plugin renders a Markdown atom from string children.")
+        self.assertEqual(self.plugin_text(self.plugin_node(from_strings["tree"], "doc")), "- one\n- two")
+
+        for source, message in [
+            ('Playhouse.render(h(Markdown, { frontmatter: "show" }, "x"));', '<Markdown> has an invalid prop: frontmatter: expected "table" or "hide", found "show"'),
+            ('Playhouse.render(h(Markdown, { size: "large" }, "x"));', "<Markdown> has an invalid prop: size: expected a number, found a string"),
+            ('Playhouse.render(h(Markdown, { selectable: "yes" }, "x"));', "<Markdown> has an invalid prop: selectable: expected a boolean, found a string"),
+            ('Playhouse.render(h(Markdown, null, h(Text, null, "x")));', "<Markdown> can't hold <Text>"),
+            ('Playhouse.render(h(Markdown, { onLink: function () {} }, "x"));', '<Markdown> has no event "onLink"'),
+        ]:
+            failed = self.render_plugin(source, expected_status=1)
+            self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{source} reports {message}: {failed['result']['errors']}")

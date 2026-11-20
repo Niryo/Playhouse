@@ -2,7 +2,9 @@
 // native KanbanColumnSection (Playhouse/App/KanbanColumnSection.swift) uses,
 // from the same display models (Playhouse.props.kanbanColumns). The cards a
 // column holds are native and not part of this example. Below the columns, a
-// readout shows the Backlog's Add button running its JavaScript handler.
+// readout shows the Backlog's Add button running its JavaScript handler. An
+// empty Backlog moves that button, pulsing, from its header into its empty
+// state.
 
 function Header(props) {
   var model = props.model, prefix = model.idPrefix;
@@ -12,21 +14,39 @@ function Header(props) {
     h(Spacer, { minLength: 4 }),
     h(Panel, { fill: model.tint, fillOpacity: model.tint ? 0.16 : 0.055, cornerRadius: 100, padding: 3, paddingX: 4 },
       h(Text, { size: 11, weight: "semibold", design: "rounded", color: model.tint || "secondary", testID: prefix + "column-count-" + model.key }, model.count)),
-    model.addHelp ? h(Button, {
+    model.addHelp && !(model.empty && model.empty.action) ? h(Button, {
       style: "bordered", controlSize: "small", testID: prefix + "add-backlog-task-button",
       label: model.addHelp, help: model.addHelp, onPress: props.onAdd
     }, h(Icon, { name: "plus", size: 11, weight: "semibold" })) : null);
 }
 
+function emptyMessage(model) {
+  var empty = model.empty;
+  return [
+    h(Icon, { key: "icon", name: empty.icon, size: 18, weight: "regular", color: model.accent }),
+    h(Text, { key: "title", size: 12, weight: "medium", color: "secondary" }, empty.title),
+    h(Text, { key: "hint", size: 11, color: "tertiary" }, empty.hint)];
+}
+
+// With an action (the empty Backlog), one container holding the message,
+// which reads as the panel's label, and the pulsing Add button beside it.
 function EmptyState(props) {
-  var model = props.model, empty = model.empty;
+  var model = props.model, empty = model.empty, testID = model.idPrefix + "empty-state-" + model.key;
+  if (empty.action && model.addHelp) {
+    return h(Panel, {
+      spacing: 12, fillOpacity: 0, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.10, dash: [5, 4], align: "center",
+      minHeight: 124, fillWidth: true, padding: 0, testID: testID, label: empty.title + ", " + empty.hint
+    },
+      h(Stack, { axis: "v", spacing: 9, align: "center" }, emptyMessage(model)),
+      h(Button, {
+        style: "prominent", controlSize: "small", pulse: true, testID: model.idPrefix + "add-backlog-task-button",
+        label: model.addHelp, help: model.addHelp, onPress: props.onAdd
+      }, h(Label, { text: empty.action, icon: "plus", size: 11, weight: "semibold" })));
+  }
   return h(Panel, {
     spacing: 9, fillOpacity: 0, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.10, dash: [5, 4], align: "center", combine: true,
-    minHeight: 124, fillWidth: true, padding: 0, testID: model.idPrefix + "empty-state-" + model.key
-  },
-    h(Icon, { name: empty.icon, size: 18, weight: "regular", color: model.accent }),
-    h(Text, { size: 12, weight: "medium", color: "secondary" }, empty.title),
-    h(Text, { size: 11, color: "tertiary" }, empty.hint));
+    minHeight: 124, fillWidth: true, padding: 0, testID: testID
+  }, emptyMessage(model));
 }
 
 // A tinted column (Waiting Response) lays a second Panel in its tint, a soft
@@ -39,7 +59,7 @@ function KanbanColumn(props) {
       key: "notice", text: model.notice, icon: "hand.raised.fill", size: 10, weight: "semibold", color: "red",
       paddingX: 3, testID: model.idPrefix + "blocked-waiting-indicator"
     }) : null,
-    model.empty ? h(EmptyState, { key: "empty", model: model }) : null];
+    model.empty ? h(EmptyState, { key: "empty", model: model, onAdd: props.onAdd }) : null];
   if (tint) {
     return h(Panel, {
       fill: "panel", fillOpacity: 0.78, cornerRadius: 16,

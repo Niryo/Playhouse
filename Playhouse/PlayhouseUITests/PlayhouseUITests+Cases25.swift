@@ -379,7 +379,8 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("raw-input-row-\(lastRowID)").exists, "Rows past the first page are not loaded yet.")
         let list = element("raw-input-list")
         let lastRow = element("raw-input-row-\(lastRowID)")
-        for _ in 0..<60 where !lastRow.exists {
+        for _ in 0..<60 {
+            guard !lastRow.exists else { break }
             list.scroll(byDeltaX: 0, deltaY: -800)
         }
         XCTAssertTrue(lastRow.waitToExist(timeout: 10), "Scrolling to the end loads the next page of rows.")
@@ -414,7 +415,8 @@ extension PlayhouseUITests {
         )
         let text = element("raw-input-text")
         let lastLine = element("raw-input-text-line-1000")
-        for _ in 0..<80 where !lastLine.exists {
+        for _ in 0..<80 {
+            guard !lastLine.exists else { break }
             text.scroll(byDeltaX: 0, deltaY: -1500)
         }
         XCTAssertTrue(lastLine.waitToExist(timeout: 10), "Scrolling the text loads its later chunks up to the last line.")

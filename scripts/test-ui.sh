@@ -114,6 +114,7 @@ for fixture in subagent context-compaction tool-activity long-history-success lo
   xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true
 done
 python3 "${repository_root}/scripts/check-test-parity.py"
+python3 "${repository_root}/scripts/check-polling-loops.py"
 
 contract_path="${repository_root}/Playhouse/BridgeTests/BridgeTestContracts.json"
 contract_arguments=("${contract_path}")

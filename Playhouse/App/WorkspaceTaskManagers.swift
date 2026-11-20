@@ -617,7 +617,7 @@ final class WorkspaceManager {
         }
         PlayhouseDiagnostics.record("workspace.changes.read.started", fields: ["taskID": taskID.uuidString])
         let task = try taskManager.taskModel(taskID)
-        let branchFrom = Dictionary(task.repositoryWorktrees.map { (URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path, $0.branchFrom) }) { existing, _ in existing }
+        let branchFrom = Dictionary(task.repositoryWorktrees.map { (URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path, $0.comparisonBase) }) { existing, _ in existing }
         // A Done task's managed worktrees are gone; it has no changes to show until it renews one.
         let scannedRoots = try roots(for: taskID).filter { task.status != .done || FileManager.default.fileExists(atPath: $0) }
         let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: scannedRoots, branchFromByRepository: branchFrom, viewedChanges: task.viewedWorkspaceChanges)
@@ -688,7 +688,7 @@ final class WorkspaceManager {
         let normalizedRepository = URL(fileURLWithPath: repository, isDirectory: true).standardizedFileURL.path
         let branchFrom = task.repositoryWorktrees.first {
             URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path == normalizedRepository
-        }?.branchFrom ?? "HEAD"
+        }?.comparisonBase ?? "HEAD"
         PlayhouseDiagnostics.record("workspace.diff.read.started", fields: [
             "taskID": taskID.uuidString,
             "repositoryPath": repository,

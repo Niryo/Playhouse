@@ -10,7 +10,8 @@
       "empty": {
         "icon": "tray",
         "title": "No tasks yet",
-        "hint": "Create a task to get started"
+        "hint": "Create a task to get started",
+        "action": "New Task"
       }
     },
     {

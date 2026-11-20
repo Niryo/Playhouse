@@ -488,9 +488,7 @@ final class BoardTaskManager {
         resolvedTitle: String? = nil
     ) async throws -> BoardTask {
         let initialTask = try requireTask(id)
-        let initialRecords = initialTask.repositoryWorktrees
-        let pending = initialRecords.filter(\.isPending)
-        guard !pending.isEmpty else { return initialTask }
+        guard initialTask.repositoryWorktrees.contains(where: \.isPending) else { return initialTask }
         let branchTitle: String
         if let resolvedTitle, !resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             branchTitle = resolvedTitle
@@ -503,10 +501,12 @@ final class BoardTaskManager {
             branchTitle = initialTask.title
         }
         return try await withTaskOperationLock(id) {
+            // Read under the lock, so a change saved while it was awaited, such as a chip
+            // working out its defaults, is what starts rather than a reason to fail.
             let task = try requireTask(id)
-            guard task.repositoryWorktrees == initialRecords else {
-                throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while worktrees were being prepared. Try again.")
-            }
+            let initialRecords = task.repositoryWorktrees
+            let pending = initialRecords.filter(\.isPending)
+            guard !pending.isEmpty else { return task }
             return try await withRepositoryAllocationLocks(pending.map(\.repositoryPath)) {
                 var resolved: [RepositoryWorktreeRecord] = []
                 do {

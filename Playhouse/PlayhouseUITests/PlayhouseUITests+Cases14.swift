@@ -218,7 +218,8 @@ extension PlayhouseUITests {
         let userView = element("user-message-\(sourceID)")
         XCTAssertTrue(scrollTranscriptUntilExists(userView))
         let transcriptScrollView = element("conversation-scroll-view")
-        for _ in 0..<4 where userView.frame.midY < transcriptScrollView.frame.minY + 20 {
+        for _ in 0..<4 {
+            guard userView.frame.midY < transcriptScrollView.frame.minY + 20 else { break }
             transcriptScrollView.swipeDown()
         }
         XCTAssertTrue(userView.frame.midY > transcriptScrollView.frame.minY + 20,
@@ -378,7 +379,8 @@ extension PlayhouseUITests {
                 && restoredUserView.frame.minY >= reloadedTranscript.frame.minY + 8
                 && restoredAssistantView.frame.minY < reloadedTranscript.frame.maxY - 40
         }
-        for _ in 0..<6 where !restoredSourceTurnIsInView() {
+        for _ in 0..<6 {
+            guard !restoredSourceTurnIsInView() else { break }
             reloadedTranscript.swipeDown()
         }
         XCTAssertTrue(restoredUserView.waitToExist(timeout: 10))
@@ -396,7 +398,8 @@ extension PlayhouseUITests {
             NSPredicate(format: "value CONTAINS %@", "Comment 1")
         ).firstMatch
         XCTAssertTrue(legacyCommentLink.waitToExist(timeout: 5))
-        for _ in 0..<10 where legacyCommentLink.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+        for _ in 0..<10 {
+            guard legacyCommentLink.frame.maxY > reloadedTranscript.frame.maxY - 8 else { break }
             reloadedTranscript.scroll(byDeltaX: 0, deltaY: -80)
         }
         XCTAssertGreaterThanOrEqual(legacyCommentLink.frame.minY, reloadedTranscript.frame.minY + 8)
@@ -408,7 +411,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("response-comment-hover-card").label.contains(legacyComment))
         XCTAssertTrue(renderedAnnotatedUserView.waitToExist(timeout: 10))
         XCTAssertTrue(renderedCommentResponse.waitToExist(timeout: 10), "The comment reply should render after history reload.")
-        for _ in 0..<25 where renderedAnnotatedUserView.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+        for _ in 0..<25 {
+            guard renderedAnnotatedUserView.frame.maxY > reloadedTranscript.frame.maxY - 8 else { break }
             reloadedTranscript.scroll(byDeltaX: 0, deltaY: -100)
         }
         XCTAssertGreaterThanOrEqual(renderedAnnotatedUserView.frame.minY, reloadedTranscript.frame.minY + 8)
@@ -623,7 +627,7 @@ extension PlayhouseUITests {
                              "Reopening should restore the cross-paragraph highlight on its last paragraph.")
         attachScreenshot(named: "Restored comment spanning two reply paragraphs")
     }
-    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a divided Comment and Side chat pill centered above the selection, and no bubble opens until its Side chat is clicked; clicking it hides the pill and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls, keeping its text clear of the scroller. The bubble shows its messages in 14-point text, the selected text and a compact chat with no subtitle, whose composer has the conversation's model picker and a send button but no Comment button, Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command, the CLI chained with & to another command and the CLI's task prompt with the options that would start a task are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
+    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a divided Comment and Side chat pill centered above the selection, and no bubble opens until its Side chat is clicked; clicking it hides the pill and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls, keeping its text clear of the scroller. The bubble shows its messages in 14-point text, the selected text and a compact chat with no subtitle, whose composer has the conversation's model picker and a send button but no Comment button, Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command, the CLI chained with & to another command and the CLI's task prompt with the options that would start a task are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session. An answer written in Markdown renders formatted in the bubble (a heading and list items without their marks, the heading larger than the items) while the CLI reply keeps the raw Markdown.
     func test_side_chat_forks_claude_conversation_read_only() throws {
         _ = try installClaudeFixture(named: "claude-fixture-side-chat")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
@@ -701,7 +705,16 @@ extension PlayhouseUITests {
         modelMenu.click()
         XCTAssertTrue(waitUntil({ !self.element("side-chat-model-option-\(chosenModelID)").exists }, timeout: 5),
                       "The side chat model picker should close.")
-        _ = sendSideChatMessage("And the second point?", answerIndex: 3, containing: "Side chat follow-up 2 on")
+        let markdownAnswer = sendSideChatMessage("And the second point, as a Markdown list?", answerIndex: 3, containing: "Side chat follow-up 2 on")
+        // A Markdown answer renders formatted: its heading and list items without their marks.
+        XCTAssertTrue(markdownAnswer.staticTexts["Points"].waitToExist(timeout: 5), "The answer's heading renders without its ## marks.")
+        XCTAssertTrue(markdownAnswer.staticTexts["First point"].exists && markdownAnswer.staticTexts["Second point"].exists,
+                      "The answer's list items render as list items.")
+        XCTAssertFalse(markdownAnswer.staticTexts["## Points"].exists || markdownAnswer.staticTexts["- First point"].exists,
+                       "The answer's raw Markdown marks don't show.")
+        XCTAssertGreaterThan(markdownAnswer.staticTexts["Points"].frame.height, markdownAnswer.staticTexts["First point"].frame.height,
+                             "The answer's heading is larger than its list items.")
+        attachElementScreenshot(opened.bubble, named: "Side chat answer rendered as Markdown")
         let claudeHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(claudeFixtureExecutable) + ".history"))) as? [String: Any]
         let followUpArguments = try XCTUnwrap(((claudeHistory?["turns"] as? [[String: Any]])?.last)?["arguments"] as? [String])
         let modelFlag = try XCTUnwrap(followUpArguments.firstIndex(of: "--model"), "The side chat should send its chosen model: \(followUpArguments)")

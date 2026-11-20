@@ -265,16 +265,21 @@ extension ConversationSubject {
     }
 
     var conversationModelID: String? {
-        get {
-            guard let conversationModelIDsData,
-                  let modelIDs = try? JSONDecoder().decode([String: String].self, from: conversationModelIDsData) else { return nil }
-            return modelIDs[conversationProvider.rawValue]
-        }
-        set {
-            var modelIDs = (try? conversationModelIDsData.map { try JSONDecoder().decode([String: String].self, from: $0) }) ?? [:]
-            modelIDs[conversationProvider.rawValue] = newValue
-            conversationModelIDsData = try? JSONEncoder().encode(modelIDs)
-        }
+        get { conversationModelID(for: conversationProvider) }
+        set { setConversationModelID(newValue, for: conversationProvider) }
+    }
+
+    /// The model this conversation chose for one provider, whichever provider runs it now.
+    func conversationModelID(for provider: ConversationProvider) -> String? {
+        guard let conversationModelIDsData,
+              let modelIDs = try? JSONDecoder().decode([String: String].self, from: conversationModelIDsData) else { return nil }
+        return modelIDs[provider.rawValue]
+    }
+
+    func setConversationModelID(_ modelID: String?, for provider: ConversationProvider) {
+        var modelIDs = (try? conversationModelIDsData.map { try JSONDecoder().decode([String: String].self, from: $0) }) ?? [:]
+        modelIDs[provider.rawValue] = modelID
+        conversationModelIDsData = try? JSONEncoder().encode(modelIDs)
     }
 
     /// The native thread or session ID a provider uses for this conversation.

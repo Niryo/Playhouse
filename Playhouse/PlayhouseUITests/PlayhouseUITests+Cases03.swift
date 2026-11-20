@@ -29,7 +29,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(path, fixture.primary.path)
         let taskPrompt = "Please update the README and add concise setup steps for first time contributors tomorrow."
         let generatedBranch = "generated-fixture-title"
-        XCTAssertEqual(record["mergeTarget"] as? String, "main")
+        XCTAssertNil(record["mergeTarget"], "A pending repository's merge target is undecided until its settings open or the task starts.")
         let composer = element("message-composer")
         let composerIsAvailable = waitUntil({ composer.exists && composer.isHittable }, timeout: 15)
         if !composerIsAvailable {
@@ -194,7 +194,10 @@ extension PlayhouseUITests {
         let archiveList = app.scrollViews["done-archive-list"]
         XCTAssertEqual(archiveList.value as? String, "40 tasks loaded", "The archive should fetch one 40-task page initially.")
         XCTAssertFalse(archiveResult.exists, "Older tasks should not be loaded into the first archive page.")
-        for _ in 0..<8 where !archiveResult.isHittable { archiveList.swipeUp() }
+        for _ in 0..<8 {
+            guard !archiveResult.isHittable else { break }
+            archiveList.swipeUp()
+        }
         XCTAssertTrue(waitUntil({ archiveResult.isHittable && archiveList.frame.intersects(archiveResult.frame) }, timeout: 10), "Scrolling should load older completed tasks into the archive viewport.")
         // The archive is a SidePanel atom along the window's trailing edge; its close button slides it away.
         let archivePanel = element("done-archive-panel")

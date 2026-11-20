@@ -450,9 +450,39 @@ source_snapshot_owner_contents="Playhouse Tart owns this reusable source snapsho
 guest_tmp="/tmp/playhouse-ui-tart-${run_id}"
 guest_log="${snapshot_root}/ui-test.log"
 guest_artifacts="${artifact_root}/${run_id}"
+daemon_memory_log="${guest_artifacts}/daemon-memory.log"
+daemon_sampler_pid=""
+
+# Samples the bridge daemon's resident memory every 20 seconds for the whole run.
+# It lives in the run itself, so a VM restart before the run cannot lose it, and
+# it ends with the run even when the run is killed without running its traps.
+start_daemon_sampler() {
+	local runner_pid=$$
+	(
+		while kill -0 "$runner_pid" 2>/dev/null; do
+			for pid in $(pgrep -x playhouse-daemon); do
+				rss_kb="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')"
+				[[ -n "$rss_kb" ]] && printf '%s pid=%s rss_mb=%s\n' "$(date +%H:%M:%S)" "$pid" "$(( rss_kb / 1024 ))"
+			done
+			sleep 20
+		done
+	) > "$daemon_memory_log" 2>/dev/null &
+	daemon_sampler_pid=$!
+}
+
+stop_daemon_sampler() {
+	[[ -n "$daemon_sampler_pid" ]] || return 0
+	kill "$daemon_sampler_pid" >/dev/null 2>&1 || true
+	wait "$daemon_sampler_pid" 2>/dev/null || true
+	daemon_sampler_pid=""
+	printf 'Daemon memory peak: %s MB (%s)\n' \
+		"$(awk -F'rss_mb=' '$2 + 0 > peak { peak = $2 + 0 } END { print peak + 0 }' "$daemon_memory_log" 2>/dev/null || echo 0)" \
+		"$daemon_memory_log"
+}
 
 export_early_failure() {
 	status=$?
+	stop_daemon_sampler >/dev/null 2>&1
 	mkdir -p "$snapshot_root" "$guest_tmp" "$guest_artifacts" 2>/dev/null || exit "$status"
 	if [[ ! -f "$guest_log" ]]; then
 		printf 'Guest UI runner exited before XCTest started (status %s).\n' "$status" > "$guest_log"
@@ -531,8 +561,12 @@ if (( reset_failed == 1 )); then
 	test_status=74
 else
 	set +e
+	start_daemon_sampler
 	PLAYHOUSE_UI_TART_GUEST=1 PLAYHOUSE_UI_TESTS_CONFIRMED=1 PLAYHOUSE_UI_DASHBOARD=0 PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS="${PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS:-180}" TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
 	test_status=${PIPESTATUS[0]}
+	# Not in a pipeline: a subshell could neither wait for the sampler nor clear its PID.
+	stop_daemon_sampler > "${guest_tmp}/daemon-memory-peak.txt"
+	tee -a "$guest_log" < "${guest_tmp}/daemon-memory-peak.txt"
 	set -e
 fi
 if [[ -n "$live_provider" ]]; then

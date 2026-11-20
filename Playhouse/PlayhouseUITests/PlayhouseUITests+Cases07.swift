@@ -253,7 +253,12 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any]
         let concurrentID = try XCTUnwrap(concurrent?["id"] as? String)
         relaunchApp()
-        let barrier = try GitConfigReadBarrier(repositoryURL: fixture.secondary)
+        // A detached HEAD keeps the repository from being recognized without Git, so the
+        // stale request is held inside Git while the newer one lands.
+        let detached = WorkspaceFixture.root.appendingPathComponent("detached-head-\(UUID().uuidString)", isDirectory: true)
+        try runGit(WorkspaceFixture.root, "clone", "--quiet", fixture.secondary.path, detached.path)
+        try runGit(detached, "checkout", "--quiet", "--detach")
+        let barrier = try GitConfigReadBarrier(repositoryURL: detached)
         var staleProcess: RunningCLIProcess?
         var barrierReleased = false
         var continueStaleProcess = false
@@ -264,7 +269,7 @@ extension PlayhouseUITests {
                 process.waitUntilExit()
             }
         }
-        staleProcess = try startCLIProcess(["task", "roots", "set", concurrentID, "--root", fixture.secondary.path])
+        staleProcess = try startCLIProcess(["task", "roots", "set", concurrentID, "--root", detached.path])
         try barrier.waitForReader()
 
         openTask(named: concurrentTitle)
@@ -363,8 +368,9 @@ extension PlayhouseUITests {
         XCTAssertEqual(record["workspaceRoots"] as? [String], [fixture.primary.path])
         XCTAssertEqual(record["contextFolders"] as? [String], [])
         let branch = try XCTUnwrap(primary["branch"] as? String)
-        let mergeFrom = try XCTUnwrap(primary["branchFrom"] as? String)
-        let mergeTo = try XCTUnwrap(primary["mergeTarget"] as? String)
+        // Selecting the repository ran no Git; opening its settings works the defaults out.
+        XCTAssertEqual(primary["branchFrom"] as? String, "")
+        XCTAssertNil(primary["mergeTarget"])
         badge.click()
         app.activate()
         let branchValue = element("conversation-repository-branch-value")
@@ -373,9 +379,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(branchValue.waitToExist(timeout: 5), app.debugDescription)
         XCTAssertTrue(branchFromValue.waitToExist(timeout: 5), app.debugDescription)
         XCTAssertTrue(mergeTargetValue.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "main"))
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "mergeTarget", expected: "main"))
         XCTAssertEqual(accessibleLabelOrValue(of: branchValue), branch, app.debugDescription)
-        XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), mergeFrom, app.debugDescription)
-        XCTAssertEqual(accessibleLabelOrValue(of: mergeTargetValue), mergeTo, app.debugDescription)
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: branchFromValue) == "main" }, timeout: 5), app.debugDescription)
+        XCTAssertEqual(accessibleLabelOrValue(of: mergeTargetValue), "main", app.debugDescription)
         XCTAssertTrue(app.staticTexts["Branch name"].exists)
         XCTAssertTrue(app.staticTexts["Branch from"].exists)
         XCTAssertTrue(app.staticTexts["Merge to"].exists)
@@ -541,7 +549,7 @@ extension PlayhouseUITests {
             && secondaryBranches.allSatisfy { !self.element("conversation-repository-badge-secondary-\($0)").exists } }, timeout: 10), "Replace should remove the previous repository badges.")
         attachScreenshot(named: "Replace left only alternate attached")
     }
-    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
+    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; a field saved while the repository's default branch-from and merge target are still being worked out waits for them and saves the typed value alongside the resolved defaults; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
     func test_task_repository_settings_validate_persist_and_lock_after_start() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -559,14 +567,42 @@ extension PlayhouseUITests {
         XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.height, 20, "The repository chip's remove button should be an easy target.")
         attachScreenshot(named: "Repository chip with enlarged remove button", fullScreen: true)
 
-        let initial = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
-        let initialBranch = try XCTUnwrap(initial["branch"] as? String)
-        let initialBranchFrom = try XCTUnwrap(initial["branchFrom"] as? String)
+        // Opening the settings works the defaults out; holding the task's operation lock keeps
+        // them from being saved, so a field saved meanwhile has to wait for them.
+        let undecided = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(undecided["branchFrom"] as? String, "")
+        XCTAssertNil(undecided["mergeTarget"])
+        let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
+        var operationLockReleased = false
+        defer {
+            if !operationLockReleased { try? operationLock.release() }
+        }
         badge.click()
         let initialBranchValue = element("conversation-repository-branch-value")
         let branchEdit = element("conversation-repository-branch-edit")
         XCTAssertTrue(initialBranchValue.waitToExist(timeout: 5), app.debugDescription)
         XCTAssertTrue(branchEdit.exists)
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "",
+                       "The defaults can't be saved while the task's operation lock is held.")
+        branchEdit.click()
+        replaceText(element("conversation-repository-branch"), with: "saved-before-defaults")
+        element("conversation-repository-branch-save").click()
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branch"] as? String, "auto")
+        XCTAssertFalse(element("codex-chat-error").exists, "A field saved before the defaults are known must wait for them, not fail.")
+        try operationLock.release()
+        operationLockReleased = true
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branch", expected: "saved-before-defaults"))
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "main"))
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "mergeTarget", expected: "main"))
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("conversation-repository-branch-from-value")) == "main" }, timeout: 5),
+                      "The popover should show the resolved branch-from once it is saved.")
+        XCTAssertEqual(accessibleLabelOrValue(of: initialBranchValue), "saved-before-defaults")
+        XCTAssertFalse(element("codex-chat-error").exists, app.debugDescription)
+        attachScreenshot(named: "A branch saved before the defaults resolved keeps them")
+        let initialBranch = "saved-before-defaults"
+        let initialBranchFrom = "main"
         let settingsTitle = element("conversation-repository-settings-title")
         XCTAssertGreaterThanOrEqual(app.popovers.firstMatch.frame.width, 340, "The repository settings popover should be roomier than before.")
         XCTAssertGreaterThanOrEqual(settingsTitle.frame.height, 17, "The repository settings title should use a larger font.")

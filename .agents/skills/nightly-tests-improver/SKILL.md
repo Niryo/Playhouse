@@ -80,21 +80,23 @@ Principles that made the previous rounds work:
    each carried failure and open item: fixed (and how), still open (and why), or no
    longer applicable.
 
-2. **Full run with instrumentation.** Start the daemon memory sampler in the VM,
-   then run the full suite:
+2. **Full run with instrumentation.** The full suite now takes about three hours, longer
+   than one background command may run (2 hours), so run it as four alphabetical parts
+   taken from the contract, one after another, each with every case of its part:
 
    ```bash
    export PATH=/opt/homebrew/bin:$PATH
-   tart exec playhouse-ui /bin/bash -c 'rm -f /tmp/daemon-mem.log; nohup bash -c "while true; do p=\$(pgrep -x playhouse-daemon | tail -1); [ -n \"\$p\" ] && echo \"\$(date +%H:%M:%S) pid=\$p rss_mb=\$(( \$(ps -o rss= -p \$p) / 1024 ))\"; sleep 20; done" > /tmp/daemon-mem.log 2>&1 &'
-   scripts/test-ui-tart.sh > "$SCRATCH/full1.log" 2>&1
+   python3 -c 'import json,sys; ids=sorted(c["id"] for c in json.load(open("Playhouse/BridgeTests/BridgeTestContracts.json"))); k=-(-len(ids)//4); [open(f"{sys.argv[1]}/part{i+1}.txt","w").write("\n".join(ids[i*k:(i+1)*k])+"\n") for i in range(4)]' "$SCRATCH"
+   scripts/test-ui-tart.sh $(sed 's/^/--case /' "$SCRATCH/part1.txt") > "$SCRATCH/full1-part1.log" 2>&1
    ```
 
-   Run it in the background and wait for completion; a full run takes about 50
-   minutes. Collect from the log: `Visible UI suite:` totals, every
+   Run each part in the background and wait for completion. Collect from the log: `Visible UI suite:` totals, every
    `Test Case ... (passed|failed) (N seconds)` line (the per-case duration table),
    the xcodebuild invocation (confirms `-test-timeouts-enabled YES` and the
-   allowances), and from the VM: `/tmp/daemon-mem.log` (peak RSS; it should stay
-   under about 100 MB for the whole run), the daemon log
+   allowances), the `Daemon memory peak:` line and the run's `daemon-memory.log` in
+   its artifacts directory (the runner samples the daemon's RSS every 20 seconds
+   inside the run itself, so a VM restart before the run cannot lose it; it should stay
+   under about 100 MB for the whole run), and from the VM the daemon log
    `/private/tmp/playhouse-bridge/501/<hash>.sock.log` (every `listening` line is
    a daemon start; one without an `idle, exiting` before it is a death), and the
    artifacts directory on the host under
@@ -147,7 +149,7 @@ Principles that made the previous rounds work:
    ready into one invocation rather than one VM session per case. For
    order-dependent failures rerun the alphabetical prefix that reproduced it, or the
    specific earlier case that leaks state. If memory or a stall was involved, keep
-   the sampler running and read it. If a fix does not change the outcome, revert it.
+   reading the run's `daemon-memory.log`. If a fix does not change the outcome, revert it.
    Repeat steps 3 and 4 on whatever is still red until every failed case passes in
    a focused run. Do not start another full run while any known failure is open.
 
@@ -191,7 +193,7 @@ Principles that made the previous rounds work:
 
 9. **Confirm.** Skip this step if step 2 was green and nothing the suite depends
    on has changed since. Otherwise run the full suite once more on the final tree
-   with the sampler. It must execute every contract case with no failure, skip, or
+   (in the same four parts). Together the four logs must execute every contract case exactly once with no failure, skip, or
    incomplete result, and the daemon peak must stay flat. If it is not green, go
    back to steps 3 and 4 for only the cases that failed in this run, fix them with
    focused runs until all are green, rerun the review in step 8 for those fixes,

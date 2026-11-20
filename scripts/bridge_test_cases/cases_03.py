@@ -576,16 +576,19 @@ class BridgeTestCases03:
         self.assertFalse(task["repositoryWorktrees"][0]["isPending"])
         self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(existing))
         self.assertFalse(task["repositoryWorktrees"][0]["createdByPlayhouse"])
-    # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | The conversation picker can add multiple repositories; unset branch settings display defaults and persist pending auto records resolved to local main without creating branches or worktrees before the first send.
+    # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | The conversation picker can add multiple repositories; they persist as pending auto records whose unset branch-from and merge target stay undecided, so adding them runs no Git (also when a repository's branch refs are packed), without creating branches or worktrees before the first send.
     def test_task_creation_creates_worktrees_in_multiple_repositories(self):
         branch_token = uuid.uuid4().hex[:8]
         title = f"Multi repository {branch_token}"
         generated_branch = f"multi-repository-{branch_token}"
+        # After `git gc` a branch lives only in packed-refs; it is still read without Git.
+        self.run_git(self.secondary, "pack-refs", "--all")
         task = self.create_repo_task(title, [self.secondary, self.primary])
         self.assertEqual([item["repositoryPath"] for item in task["repositoryWorktrees"]], [str(self.secondary), str(self.primary)])
         self.assertEqual([item["branch"] for item in task["repositoryWorktrees"]], ["auto", "auto"])
         self.assertTrue(all(item["isPending"] for item in task["repositoryWorktrees"]))
-        self.assertEqual([item["branchFrom"] for item in task["repositoryWorktrees"]], ["main", "main"])
+        self.assertEqual([item["branchFrom"] for item in task["repositoryWorktrees"]], ["", ""])
+        self.assertEqual([item.get("mergeTarget") for item in task["repositoryWorktrees"]], [None, None])
         for repository in [self.secondary, self.primary]:
             self.assertFalse(self.branch_exists(repository, generated_branch))
         self.assertEqual(task["workspaceRoots"], [str(self.secondary), str(self.primary)])

@@ -458,7 +458,7 @@ final class PlayhouseBridgeRuntime {
                 }
                 result = try Self.value(["page": page])
             case "task.rename", "task.repository.add", "task.repository.add-batch", "task.repository.add-worktree", "task.repository.replace",
-                 "task.repository.recent", "task.repository.edit", "task.repository.renew", "task.repository.remove",
+                 "task.repository.recent", "task.repository.edit", "task.repository.resolve", "task.repository.renew", "task.repository.remove",
                  "task.prompt.save", "task.draft.save", "task.comments.save", "task.comments.edit",
                  "task.roots.get", "workspace.roots", "task.roots.set", "task.terminal",
                  "task.changes.list", "task.changes.mark-viewed", "task.changes.mark-all-viewed",
@@ -502,12 +502,16 @@ final class PlayhouseBridgeRuntime {
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
-                _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
+                // Tests slow the read down to see what a window shows until it answers.
+                if let delay = PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_HISTORY_READ_DELAY_SECONDS"].flatMap(TimeInterval.init), delay > 0 {
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+                let reconciled = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
                 let conversations = ConversationManager(
                     tasks: taskManager, clients: clients, settingsManager: settings, defersHistoryImages: request.defersHistoryImages
                 )
                 let messageLimit = try request.optionalHistoryLimit("limit")
-                result = try Self.value(await conversations.history(
+                let history = try Self.value(await conversations.history(
                     taskID: taskID,
                     onActionRequest: {
                         eventHandler(BridgeEvent(requestID: request.id, type: "action_request", payload: .object([:])))
@@ -518,6 +522,14 @@ final class PlayhouseBridgeRuntime {
                     chatPageID: request.arguments["page"]?.string,
                     includesImageData: true
                 ))
+                // A window opening the task reads the record this read reconciled, rather than
+                // reconciling it again in a request of its own.
+                if request.arguments["includeTask"]?.bool == true, case .object(var object) = history {
+                    object["task"] = try Self.value(reconciled)
+                    result = .object(object)
+                } else {
+                    result = history
+                }
             case "conversation.images":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = try Self.value(await conversations.messageImages(
@@ -593,11 +605,16 @@ final class PlayhouseBridgeRuntime {
                 ])
             case "conversation.provider.set":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
-                result = try Self.value(await conversations.setProvider(
-                    taskID: request.requiredUUID("taskID"),
+                let taskID = try request.requiredUUID("taskID")
+                let record = try await conversations.setProvider(
+                    taskID: taskID,
                     provider: ConversationProvider.parse(request.requiredString("provider")),
                     remembersDefault: request.arguments["remembersDefault"]?.bool ?? true
-                ))
+                )
+                guard case .object(var fields) = try Self.value(record) else { throw BridgeCommandError(code: "internal_error", message: "The task record could not be encoded.") }
+                // The dividers as recorded, which replace the ones a window drew when it showed the switch.
+                fields["providerBoundaries"] = try Self.value(await conversations.providerBoundaries(taskID: taskID))
+                result = .object(fields)
             case "plugin.mode":
                 if let enabled = request.arguments["enabled"]?.bool {
                     settings.setPluginAddMode(enabled)

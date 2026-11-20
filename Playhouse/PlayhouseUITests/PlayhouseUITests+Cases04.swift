@@ -235,6 +235,94 @@ extension PlayhouseUITests {
         let fresh = try XCTUnwrap(try runCLI(["task", "create", "--title", "Fresh after migration UI", "--prompt", "Fixture task description."])["result"] as? [String: Any])
         XCTAssertNil(try pullRequestMode(taskID: try XCTUnwrap(fresh["id"] as? String)), "A task created afterward still starts in Manual.")
     }
+    // case-contract: test_pull_request_mode_chosen_in_review_opens_pull_request | A task that reached Review in Manual mode with no pull request gets one when another mode is chosen for it in Review, with no click: choosing a mode there does what reaching Review in it would. While its branch can't be published (no Git remote), choosing Green opens nothing and records the failure, and a Green pass that then finds no linked pull request (here on focus) records that and stops instead of polling. Once the branch is publishable, choosing PR opens the pull request exactly once and starts no autopilot pass, and choosing Merge afterward opens no second one and merges the green pull request; the task stays in Review.
+    func test_pull_request_mode_chosen_in_review_opens_pull_request() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: []).merging(Self.prCheckCooldownEnvironment) { $1 }
+        ghEnvironment["PLAYHOUSE_E2E_PR_AUTOPILOT_POLL_SECONDS"] = "2"
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "PR mode chosen in Review UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        addTeardownBlock { [self] in try? runGit(fixture.primary, "remote", "remove", "origin") }
+        func events(_ name: String, _ fields: [String: String] = [:]) -> [[String: Any]] {
+            ((try? self.diagnosticEvents()) ?? []).filter { event in
+                event["event"] as? String == name && event["taskID"] as? String == taskID
+                    && fields.allSatisfy { event[$0.key] as? String == $0.value }
+            }
+        }
+        let createLogURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"]))
+        let createdNumbers = {
+            ((try? String(contentsOf: createLogURL, encoding: .utf8)) ?? "").split(separator: "\n")
+                .filter { $0.hasPrefix("created\t") }.compactMap { $0.split(separator: "\t").last.map(String.init) }
+        }
+
+        openTask(named: "PR mode chosen in Review UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR mode chosen in Review UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        XCTAssertTrue(waitUntil({ !events("plugin.pull_request_mode.review", ["mode": "manual"]).isEmpty }, timeout: 15), "The task reaches Review in Manual mode.")
+        XCTAssertTrue(element("task-create-pr-\(taskID)").waitToExist(timeout: 5), "Manual mode leaves the task in Review with no pull request.")
+        revealOnBoard(element("task-card-\(taskID)"))
+        attachScreenshot(named: "Review task with no pull request, in Manual mode")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Review task with no pull request, in Manual mode (card)")
+
+        // The branch has no remote to publish to: choosing Green tries to open the pull
+        // request, records why it couldn't, and follows nothing.
+        try selectPullRequestMode("autopilot", taskID: taskID)
+        XCTAssertTrue(waitUntil({ !events("task.review.auto_pr.failed", ["trigger": "mode"]).isEmpty }, timeout: 15), "Choosing Green in Review tries to open the pull request.")
+        XCTAssertFalse(events("plugin.pull_request_mode.chosen", ["mode": "autopilot"]).isEmpty)
+        XCTAssertEqual(createdNumbers(), [])
+        XCTAssertTrue(events("plugin.pull_request_mode.follow").isEmpty, "A pull request that couldn't be opened isn't followed.")
+        // A Green pass with no linked pull request (here on focus) stops: nothing it can
+        // poll for would link one.
+        activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({ !events("plugin.pull_request_mode.no_pull_request", ["trigger": "focus"]).isEmpty }, timeout: 15), "A pass with no linked pull request says so.")
+        XCTAssertEqual(events("plugin.pull_request_mode.followed", ["trigger": "focus"]).last?["action"] as? String, "inactive")
+        XCTAssertFalse(waitUntil({ !events("plugin.pull_request_mode.follow", ["trigger": "poll"]).isEmpty }, timeout: 5), "A pass with no linked pull request isn't polled again.")
+        XCTAssertTrue(element("task-create-pr-\(taskID)").exists, "The task still has no pull request.")
+        revealOnBoard(element("task-card-\(taskID)"))
+        attachScreenshot(named: "Green chosen while the branch can't be published: still no pull request")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Green chosen while the branch can't be published: still no pull request (card)")
+
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let remoteRoot = dataDirectory.appendingPathComponent("mode-in-review-remotes", isDirectory: true)
+        try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+        try WorkspaceFixture.ownerContents.write(to: remoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+        let remote = remoteRoot.appendingPathComponent("repository-0.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try runGit(remote, "init", "--bare")
+        try runGit(worktree, "remote", "add", "origin", remote.path)
+        try runGit(worktree, "push", "origin", "main")
+        // GitHub rejects a pull request whose branch has no commits.
+        try "Mode chosen in Review change.\n".write(to: worktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
+
+        // Choosing PR in Review opens the pull request with no other click, and follows nothing.
+        try selectPullRequestMode("pr", taskID: taskID)
+        let prLink = app.links["task-pr-link-\(taskID)-501"]
+        XCTAssertTrue(prLink.waitToExist(timeout: 60), "Choosing PR in Review opens the pull request.")
+        XCTAssertEqual(createdNumbers(), ["501"])
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        XCTAssertTrue(events("plugin.pull_request_mode.follow", ["trigger": "mode"]).isEmpty, "PR mode opens the pull request but doesn't follow it.")
+        revealOnBoard(element("task-card-\(taskID)"))
+        attachScreenshot(named: "Choosing PR in Review opened the pull request")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Choosing PR in Review opened the pull request (card)")
+
+        // Choosing Merge afterward opens no second pull request and merges the green one.
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
+        try "501=unmerged\n501.checks=success\n501.threads=0\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        try selectPullRequestMode("merge", taskID: taskID)
+        XCTAssertTrue(element("task-complete-merged-pr-\(taskID)").waitToExist(timeout: 30), "Choosing Merge in Review merges the green pull request.")
+        XCTAssertEqual(events("plugin.pull_request_mode.follow", ["trigger": "mode"]).last?["mode"] as? String, "merge")
+        XCTAssertEqual(createdNumbers(), ["501"], "The pull request is opened exactly once.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "Merging leaves the task in Review.")
+        revealOnBoard(element("task-card-\(taskID)"))
+        attachScreenshot(named: "Choosing Merge in Review merged the green pull request")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "Choosing Merge in Review merged the green pull request (card)")
+    }
     // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); each pass records its result, and a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
     func test_task_pr_autopilot_fixes_red_pull_request_until_green() throws {
         let executable = try makeCodexFixture(emptyQuestions: false)

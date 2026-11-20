@@ -26,6 +26,10 @@ extension PlayhouseUITests {
         }
     }
 
+    /// Clicks a few points into the first characters of highlighted text, selecting nothing; the
+    /// bubble reopens once the double-click interval passes, so callers wait for it. The text is
+    /// scrolled into view first: after a send the transcript follows the newest turn, and a click
+    /// on text above the viewport would land on whatever covers that point.
     func clickHighlightedText(_ text: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let scrollView = element("conversation-scroll-view")
         if scrollView.exists {
@@ -77,12 +81,18 @@ extension PlayhouseUITests {
             .matching(Self.textPredicate(containing: text, caseInsensitive: true))
             .firstMatch
     }
+    /// Matches an element whose label, text value, or (optionally) title contains `text`.
+    /// `value CONTAINS` raises inside the app on a numeric value, such as the board's
+    /// horizontal scroll bar, and that aborts the whole query until it times out, so a
+    /// value is compared only on element types whose value is text.
     static func textPredicate(containing text: String, caseInsensitive: Bool, includeTitle: Bool = false) -> NSPredicate {
         let contains = caseInsensitive ? "CONTAINS[c]" : "CONTAINS"
         let format = "label \(contains) %@ OR (NOT (elementType IN %@) AND value \(contains) %@)" + (includeTitle ? " OR title \(contains) %@" : "")
         let arguments: [Any] = includeTitle ? [text, numericValueElementTypes, text, text] : [text, numericValueElementTypes, text]
         return NSPredicate(format: format, argumentArray: arguments)
     }
+    /// Empty for an element that does not exist (yet), so it can be polled:
+    /// reading `label` of a missing element fails the test on the spot.
     func accessibleLabelOrValue(of element: XCUIElement) -> String {
         guard element.exists else { return "" }
         if !element.label.isEmpty { return element.label }
@@ -96,6 +106,11 @@ extension PlayhouseUITests {
         }
         return !element.exists
     }
+    /// How purple a board column's own surface reads: the mean of blue and red
+    /// over green, sampled along a strip just inside its top edge, above its
+    /// header and inside its padding, so only the column's fill shows there. The
+    /// strip must lie within `container` (the scroll area showing the column), so
+    /// a clipped column never samples whatever is drawn beyond it.
     func columnPurpleness(_ column: XCUIElement, visibleIn container: XCUIElement) throws -> CGFloat {
         XCTAssertTrue(column.waitToExist(timeout: 10), "\(column) should exist before sampling its tint.")
         let strip = CGRect(x: column.frame.minX + column.frame.width * 0.2, y: column.frame.minY + 4, width: column.frame.width * 0.6, height: 6)
@@ -113,6 +128,7 @@ extension PlayhouseUITests {
         }
         return try XCTUnwrap(samples > 0 ? total / samples : nil, "No pixels sampled in \(column).")
     }
+    /// A scroll view's vertical scroller. Its frame is reported whether or not it is drawn.
     func verticalScroller(of scrollView: XCUIElement) throws -> XCUIElement {
         let bars = scrollView.scrollBars.allElementsBoundByIndex
         return try XCTUnwrap(bars.first { $0.frame.height > $0.frame.width }, "\(scrollView) should expose a vertical scroller: \(bars.map(\.frame)).")
@@ -124,6 +140,8 @@ extension PlayhouseUITests {
     func captureScreenBitmap() throws -> NSBitmapImageRep {
         try screenBitmap(XCUIScreen.main.screenshot())
     }
+    /// Luminance samples across `region` (screen points) of a screen capture, in reading order, so
+    /// two captures of the same unscrolled region compare pixel for pixel.
     func luminance(in region: CGRect, of bitmap: NSBitmapImageRep) throws -> [CGFloat] {
         let screenFrame = try XCTUnwrap(NSScreen.main?.frame)
         let scaleX = CGFloat(bitmap.pixelsWide) / screenFrame.width
@@ -138,9 +156,15 @@ extension PlayhouseUITests {
         XCTAssertFalse(samples.isEmpty, "No pixels sampled in \(region).")
         return samples
     }
+    /// The largest per-pixel luminance change between two samplings of the same region.
     func largestLuminanceChange(_ first: [CGFloat], _ second: [CGFloat]) -> CGFloat {
         zip(first, second).map { abs($0 - $1) }.max() ?? 0
     }
+    /// Asserts that `scrollView`'s scroller stays hidden while the pointer is over `elsewhere`,
+    /// shows at a subdued opacity for as long as the pointer rests over `scrollView`, and hides
+    /// again once the pointer returns to `elsewhere`. Each sampling waits out AppKit's own fade
+    /// after a scroll, so a scroller that only flashed reads as hidden. Returns the change that
+    /// revealing the scroller made, which sizes a subdued scroller for later comparisons.
     @discardableResult
     func assertScrollerRevealsOnlyOnHover(_ scrollView: XCUIElement, elsewhere: XCUIElement, named name: String) throws -> CGFloat {
         let strip = try verticalScroller(of: scrollView).frame.intersection(scrollView.frame)
@@ -170,6 +194,10 @@ extension PlayhouseUITests {
     func visibleSidebarBottom() -> CGFloat {
         min(element(withAccessibilityLabel: "Kanban sidebar").frame.maxY, app.windows["main"].frame.maxY)
     }
+    /// Attaches the app as it looks now. On macOS a capture is always the whole screen, where the
+    /// app's window is a small part of a large desktop; unless `fullScreen` asks for the desktop,
+    /// the image is cut down to the app's windows and popovers at the screen's own pixel density,
+    /// so text in a showcase screenshot stays readable.
     func attachScreenshot(named name: String, fullScreen: Bool = false) {
         let screenshot = XCUIScreen.main.screenshot()
         let attachment = (fullScreen ? nil : appWindowsImage(of: screenshot)).map { XCTAttachment(image: $0) }
@@ -213,11 +241,25 @@ extension PlayhouseUITests {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+    /// Attaches the region around `elements` at native pixel density, for changed UI
+    /// that is small within its window.
+    func attachScreenshot(named name: String, around elements: [XCUIElement]) {
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = regionImage(of: screenshot, frames: elements.map(\.frame)).map { XCTAttachment(image: $0) }
+            ?? XCTAttachment(screenshot: screenshot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+    /// `screenshot` cropped to the union of the app's windows and popovers (such as the side chat
+    /// bubble, which can reach past its window), with a small margin, or nil when it can't tell.
     func appWindowsImage(of screenshot: XCUIScreenshot) -> NSImage? {
+        regionImage(of: screenshot, frames: (app.windows.allElementsBoundByIndex + app.popovers.allElementsBoundByIndex).map(\.frame))
+    }
+    func regionImage(of screenshot: XCUIScreenshot, frames: [CGRect]) -> NSImage? {
         guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let screen = NSScreen.main?.frame, screen.width > 0 else { return nil }
-        let frames = (app.windows.allElementsBoundByIndex + app.popovers.allElementsBoundByIndex)
-            .map(\.frame).filter { !$0.isEmpty && $0.width > 1 && $0.height > 1 }
+        let frames = frames.filter { !$0.isEmpty && $0.width > 1 && $0.height > 1 }
         guard let first = frames.first else { return nil }
         let region = frames.dropFirst().reduce(first) { $0.union($1) }
             .insetBy(dx: -16, dy: -16)

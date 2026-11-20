@@ -269,6 +269,27 @@ extension BoardTaskManager {
         return try get(id)
     }
 
+    /// Works out a pending worktree's undecided branch-from and merge target (see
+    /// `RepositoryWorktreeRecord.hasUndecidedDefaults`) and saves them, so its settings
+    /// show what the task will start from. A record that changed meanwhile is left to the newer change.
+    @discardableResult
+    func resolveRepositoryDefaults(_ id: UUID, worktree selector: RepositoryWorktreeSelector) async throws -> BoardTaskRecord {
+        let initialTask = try requireTask(id)
+        let initialRecord = try repositoryRecord(selector, in: initialTask)
+        guard initialRecord.hasUndecidedDefaults else { return BoardTaskRecord(task: initialTask) }
+        let resolved = try await worktreeService.resolvingDefaults(of: initialRecord)
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            if let index = task.repositoryWorktrees.firstIndex(where: { $0 == initialRecord }) {
+                var repositories = task.repositoryWorktrees
+                repositories[index] = resolved
+                task.repositoryWorktrees = repositories
+                try await saveTaskContext(taskID: id)
+            }
+            return BoardTaskRecord(task: task)
+        }
+    }
+
     @discardableResult
     func updateRepository(
         _ id: UUID,
@@ -303,7 +324,7 @@ extension BoardTaskManager {
                 try await withRepositoryAllocationLocks([validated.repositoryPath]) {
                     let task = try requireTask(id)
                     guard task.status != .done,
-                          let index = task.repositoryWorktrees.firstIndex(where: { $0 == initialRecord }) else {
+                          let index = task.repositoryWorktrees.firstIndex(where: { $0 == initialRecord || initialRecord.isUndecidedForm(of: $0) }) else {
                         throw BridgeCommandError(code: "invalid_transition", message: "Repository settings changed while they were being validated. Try again.")
                     }
                     var validated = validated

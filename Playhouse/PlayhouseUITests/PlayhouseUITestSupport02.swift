@@ -78,6 +78,7 @@ extension PlayhouseUITests {
     func makeGitHubStateFixture() throws -> [String: String] {
         try makeGitHubStateFixture(expectedNumbers: [123, 456])
     }
+    /// PATH that resolves `git` to the staged hold wrapper first; see `GitHoldBarrier`.
     func makeGitHoldEnvironment() throws -> [String: String] {
         let directory = GitHoldBarrier.directory
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: directory.appendingPathComponent("git").path), "The prepared git hold wrapper is missing or not executable.")
@@ -205,6 +206,11 @@ extension PlayhouseUITests {
         element("add-conversation-repository-button").click()
         XCTAssertTrue(waitUntil({ !self.element("conversation-repository-search").exists }, timeout: 5), "The conversation repository picker should close.")
     }
+    /// Clicks a text field once it has settled, confirms it took keyboard focus
+    /// (retrying the click once), then types. A click that lands while the
+    /// form is still scrolling into place can leave the field unfocused, and
+    /// typeText then fails with "Neither element nor any descendant has
+    /// keyboard focus".
     func typeIntoField(_ field: XCUIElement, text: String, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(field.waitToExist(timeout: 5), "Text field is missing.", file: file, line: line)
         waitForStableFrame(field)
@@ -215,9 +221,15 @@ extension PlayhouseUITests {
         }
         field.typeText(text)
     }
+    /// Selects a question option once the form has settled. The question form
+    /// arrives with a transcript reload that scrolls it; a click issued the
+    /// moment the title exists can land before the option is in place, leaving
+    /// nothing selected and a Submit click that does nothing.
     func selectQuestionOption(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
         selectQuestionOption(app.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch, named: label, file: file, line: line)
     }
+    /// The same, for an option named by its accessibility identifier, where
+    /// several questions in one form offer the same label.
     func selectQuestionOption(identifier: String, file: StaticString = #filePath, line: UInt = #line) {
         selectQuestionOption(element(identifier), named: identifier, file: file, line: line)
     }
@@ -231,6 +243,10 @@ extension PlayhouseUITests {
             "Clicking the question option should select it: \(label)", file: file, line: line
         )
     }
+    /// Scrolls the conversation until `target` lies inside its visible area. The transcript
+    /// follows its newest content, so a layout change below a question form (a queued
+    /// follow-up bar, a live activity row) can push the form's first options above the
+    /// viewport, where a click lands on the header instead. True once it is fully visible.
     func revealInConversation(_ target: XCUIElement) -> Bool {
         let scrollView = element("conversation-scroll-view")
         guard scrollView.exists else { return true }
@@ -249,6 +265,8 @@ extension PlayhouseUITests {
         let viewport = scrollView.frame
         return target.exists && target.frame.minY >= viewport.minY && target.frame.maxY <= viewport.maxY
     }
+    /// Waits until `target`'s frame has stopped changing for 0.4 s. A click sent the instant a
+    /// control appears can land where the control was a frame earlier.
     @discardableResult
     func waitForStableFrame(_ target: XCUIElement, timeout: TimeInterval = 5) -> Bool {
         var previous = CGRect.null
@@ -261,11 +279,19 @@ extension PlayhouseUITests {
             return !frame.isEmpty && Date().timeIntervalSince(stableSince) >= 0.4
         }, timeout: timeout)
     }
+    /// Opens a slide-up panel (skills, rules, MCP) with one click on `control`
+    /// and waits for it to finish sliding in, so the next click lands on a
+    /// control that has stopped moving. One click must be enough, including
+    /// right after another panel closed: a closed panel's overlay must not catch
+    /// clicks, even while its scrim is still fading out.
     func openPanel(_ identifier: String, with control: XCUIElement, timeout: TimeInterval = 5) -> Bool {
         let panel = element(identifier)
         control.click()
         return panel.waitToExist(timeout: timeout) && waitForStableFrame(panel)
     }
+    /// The composer saves the task (which shows its chips) before it writes the remembered
+    /// repositories, so a chip appearing does not mean the setting is saved yet. Waits for the
+    /// saved value instead of reading it once.
     func assertLastSelectedRepositories(
         _ expected: [String],
         timeout: TimeInterval = 10,
@@ -294,6 +320,7 @@ extension PlayhouseUITests {
         }
         return Set(values.keys)
     }
+    /// The stored draft state of a task, for failure messages.
     func draftStateSummary(_ id: String) -> String {
         let record = (try? taskRecord(id: id)) ?? nil
         return "status=\(String(describing: record?["status"])) hasUnsentDraft=\(String(describing: record?["hasUnsentDraft"])) savedPrompt=\(String(describing: record?["savedPrompt"])) pending=\(String(describing: record?["pendingSubmittedPrompt"]))"
@@ -375,6 +402,9 @@ extension PlayhouseUITests {
         field.typeKey("a", modifierFlags: .command)
         field.typeText(value)
     }
+    /// Leaves the open task for the board. Right after a turn ends the back
+    /// button can be re-rendered and swallow a click, so wait for it to be
+    /// hittable and confirm the board actually appeared.
     func returnToBoard() {
         let backToBoard = element("back-to-board-button")
         XCTAssertTrue(waitUntil({ backToBoard.isHittable }, timeout: 5), "The back-to-board button never became clickable.")
@@ -403,14 +433,17 @@ extension PlayhouseUITests {
         if !card.isHittable {
             let board = element("board-columns-scroll-view")
             if horizontalRecovery {
-                for _ in 0..<6 where !card.isHittable {
+                for _ in 0..<6 {
+                    guard !card.isHittable else { break }
                     board.swipeLeft()
                 }
-                for _ in 0..<6 where !card.isHittable {
+                for _ in 0..<6 {
+                    guard !card.isHittable else { break }
                     board.swipeRight()
                 }
             }
-            for _ in 0..<12 where !card.isHittable {
+            for _ in 0..<12 {
+                guard !card.isHittable else { break }
                 board.scroll(byDeltaX: 0, deltaY: -300)
                 board.swipeUp()
             }
@@ -423,11 +456,17 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Clicking the task card title should open the task.")
         waitForConversationLoad()
     }
+    /// The history, pending question and unsent draft land after the task view
+    /// appears; reading or scrolling the transcript before then sees an empty task.
     func waitForConversationLoad(file: StaticString = #filePath, line: UInt = #line) {
         let transcript = element("conversation-scroll-view")
         XCTAssertTrue(waitUntil({ transcript.exists && transcript.value as? String != "Loading conversation history" }, timeout: 15),
                       "The opened conversation's history should finish loading.", file: file, line: line)
     }
+    /// Scrolls the board's columns sideways until `target` lies fully inside the
+    /// visible board. With the persistent sidebar, a narrow screen (the UI VM's is
+    /// 1024 points) clips the Review column's trailing edge, where a card's PR
+    /// controls sit: they stay in the hierarchy but take no hover or click.
     func revealOnBoard(_ target: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let board = element("board-columns-scroll-view")
         XCTAssertTrue(target.waitToExist(timeout: 5), "Board control is missing: \(target.identifier)", file: file, line: line)
@@ -445,6 +484,9 @@ extension PlayhouseUITests {
         }
         XCTAssertTrue(board.frame.contains(target.frame), "\(target.identifier) should be scrolled into the visible board; control=\(target.frame), board=\(board.frame).", file: file, line: line)
     }
+    /// Opens a board card through its title. The card's center can sit on one
+    /// of its own controls (the token counter button opens Token stats), so a
+    /// plain card.click() may open that control instead of the task.
     func clickTaskCardTitle(_ card: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let cardTitle = element(card.identifier.replacingOccurrences(of: "task-card-", with: "task-title-"))
         XCTAssertTrue(cardTitle.waitToExist(timeout: 5), "Task card title is missing: \(card.identifier)", file: file, line: line)
@@ -563,6 +605,8 @@ extension PlayhouseUITests {
         let doneTarget = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5)).withOffset(CGVector(dx: -48, dy: 0))
         source.press(forDuration: 0.5, thenDragTo: doneTarget, withVelocity: .default, thenHoldForDuration: 1.5)
     }
+    /// Starts a full-screen capture that fires while a following blocking gesture is still
+    /// in progress, so a mid-drag state can be attached once the gesture returns.
     func startDelayedScreenCapture(afterSeconds delay: Int) -> (process: Process, file: URL)? {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("playhouse-capture-\(UUID().uuidString).png")
         let process = Process()
@@ -585,6 +629,8 @@ extension PlayhouseUITests {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+    /// The Done drawer shows only a thin sliver beside the columns while nothing is dragged,
+    /// just left of the board's vertical scroller, which keeps the window edge.
     func assertDoneDrawerResting(_ moment: String, file: StaticString = #filePath, line: UInt = #line) {
         let drawer = element("task-done-drop-target")
         let board = element("board-columns-scroll-view")
@@ -593,7 +639,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(drawer.waitToExist(timeout: 5), "The Done drawer should exist \(moment).", file: file, line: line)
         // In a window narrower than the columns the board scrolls sideways, and the gutter left
         // for the drawer clears the last column once the board is scrolled to its trailing end.
-        for _ in 0..<10 where lastColumn.frame.maxX > drawer.frame.minX {
+        for _ in 0..<10 {
+            guard lastColumn.frame.maxX > drawer.frame.minX else { break }
             board.scroll(byDeltaX: -400, deltaY: 0)
         }
         // The sliver is 5 points wide and sits left of a scroller lane of 11 to 16 points.
@@ -609,6 +656,9 @@ extension PlayhouseUITests {
         }
         XCTAssertGreaterThanOrEqual(drawer.frame.minX, lastColumn.frame.maxX, "The Done drawer must sit beside the board columns, never over them \(moment).", file: file, line: line)
     }
+    /// Installs the Claude Code protocol fixture for this case and returns the
+    /// environment a CLI-driven turn needs. Must run before `launchApp` so the
+    /// app's own turns use it too.
     func installClaudeFixture(named name: String) throws -> [String: String] {
         let executable = dataDirectory.appendingPathComponent(name)
         try copyFixtureFile(
@@ -622,6 +672,12 @@ extension PlayhouseUITests {
         claudeFixtureExecutable = executable.path
         return ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
     }
+    /// The usage dot is one flat hue, so the dominant channel says where on the
+    /// green-to-red heatmap it currently sits. `leftEdgeFraction` restricts the
+    /// sample to a left-hand slice of `element`'s screenshot — used to read the
+    /// CPU bar's color off the stable task card instead of the thin animated
+    /// bar sub-view itself, whose identity can transiently drop out of the
+    /// accessibility tree between an existence check and a screenshot fetch.
     func isGreenDominant(_ element: XCUIElement, leftEdgeFraction: CGFloat = 1.0) -> Bool {
         guard element.exists else { return false }
         let image = element.screenshot().image
@@ -721,6 +777,13 @@ extension PlayhouseUITests {
         assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.80, rgb: (177, 54, 171), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.80, rgb: (240, 82, 121), accuracy: 30, file: file, line: line)
     }
+    /// The activity section renders open while a turn runs and collapses once it
+    /// settles, so a test that needs the details open must expand only when the
+    /// disclosure is actually collapsed; clicking blindly can close it instead.
+    /// Reports whether the section ended up open, so a caller can assert that its
+    /// own check really inspected an open section. The chevron is the anchor, not
+    /// the details container: when every activity in flight renders outside the
+    /// section, an open section has no children and does not resolve.
     @discardableResult
     func expandActivityDetails(_ disclosure: XCUIElement? = nil, timeout: TimeInterval = 10) -> Bool {
         let control = disclosure ?? element("codex-activity-disclosure")
@@ -735,6 +798,7 @@ extension PlayhouseUITests {
             return (control.value as? String ?? "").hasPrefix("Expanded")
         }, timeout: timeout)
     }
+    /// An agent row's metadata line, read from the row's button beside its icon.
     func subagentRowMetadata(_ row: XCUIElement) -> String {
         [row.value as? String, row.buttons.firstMatch.label].compactMap { $0 }.joined(separator: "\n")
     }
@@ -822,6 +886,8 @@ extension PlayhouseUITests {
     func repositoryTitle() -> XCUIElement {
         element("empty-conversation-repository-title")
     }
+    /// Playhouse's own prompts render as muted automatic messages: the history entry that holds `text`
+    /// is shown under the `playhouse-message-` identifier with its label, never as the user's bubble.
     @discardableResult
     func assertAutomaticMessageBubble(taskID: String, containing text: String, sender: String = "Playhouse", file: StaticString = #filePath, line: UInt = #line) throws -> XCUIElement {
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any], file: file, line: line)
@@ -838,17 +904,21 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("user-message-\(id)").exists, "An automatic message is not rendered as the user's own bubble.", file: file, line: line)
         return element("playhouse-message-\(id)")
     }
+    /// The transcript's last row: the newest message, which can be the reply to a status nudge
+    /// sent after the turn the test is watching.
     func latestMessageRow(titled title: String) throws -> XCUIElement {
         let id = try taskID(named: title)
         let history = try XCTUnwrap(try runCLI(["conversation", "history", id])["result"] as? [String: Any])
         return try transcriptRow(for: try XCTUnwrap((history["messages"] as? [[String: Any]])?.last))
     }
+    /// The transcript element a history message renders as.
     func transcriptRow(for message: [String: Any]) throws -> XCUIElement {
         let isAutomatic = (message["role"] as? String) == "user"
             && ((message["text"] as? String) ?? "").contains("Playhouse internal outcome nudge:")
         let prefix = isAutomatic ? "playhouse-message-" : ((message["role"] as? String) == "assistant" ? "assistant-message-" : "user-message-")
         return element(prefix + (try XCTUnwrap(message["id"] as? String)))
     }
+    /// History without the status nudges Playhouse sent and the agent's replies to them.
     func ordinaryMessages(_ messages: [[String: Any]]) -> [[String: Any]] {
         var kept: [[String: Any]] = []
         var inNudge = false
@@ -860,12 +930,16 @@ extension PlayhouseUITests {
         }
         return kept
     }
+    /// Whether a transcript message shows this text, as a message group's label
+    /// or as a text view's value.
     func transcriptContains(_ text: String) -> Bool {
         app.groups.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch.exists
             || app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)).firstMatch.exists
             || app.textViews.matching(NSPredicate(format: "value CONTAINS %@", text)).firstMatch.exists
             || app.otherElements.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch.exists
     }
+    /// Refreshes a standalone chat through its visible navigation controls. The board's
+    /// Chat button moves off-screen while the 460-point sidebar and 980-point board coexist.
     func refreshStandaloneChatSidebar() {
         let backButton = element("back-to-board-button")
         XCTAssertTrue(waitUntil({ backButton.exists && backButton.isHittable }, timeout: 5), "The sidebar should offer a visible way back to the board.")
@@ -881,6 +955,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10), "The standalone chat should reopen from the board.")
         waitForConversationLoad()
     }
+    /// Waits for transcript text, scrolling down on each miss: the lazy transcript
+    /// only exposes rows near the viewport.
     func transcriptShows(_ text: String, timeout: TimeInterval) -> Bool {
         waitUntil({
             if self.transcriptContains(text) { return true }
@@ -888,6 +964,8 @@ extension PlayhouseUITests {
             return false
         }, timeout: timeout)
     }
+    /// Runs `body` against the app's SQLite conversation store, which the app
+    /// and its bridge daemon share in WAL mode.
     func withConversationDatabase<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
         var database: OpaquePointer?
         let path = dataDirectory.appendingPathComponent("Conversations-v1.sqlite").path
@@ -899,6 +977,7 @@ extension PlayhouseUITests {
         sqlite3_busy_timeout(database, 30_000)
         return try body(database)
     }
+    /// Rows of a query against the conversation store, as text columns.
     func conversationRows(_ sql: String) throws -> [[String?]] {
         try withConversationDatabase { database in
             var statement: OpaquePointer?
@@ -922,6 +1001,7 @@ extension PlayhouseUITests {
             }
         }
     }
+    /// The task's stored conversation state, or nil before anything is recorded.
     func conversationState(_ taskID: String) throws -> [String: Any]? {
         guard FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("Conversations-v1.sqlite").path) else { return nil }
         return try withConversationDatabase { database in
@@ -1055,6 +1135,10 @@ extension PlayhouseUITests {
             }
         }
     }
+    /// Scrolls `scrollView` until `element` sits fully inside it, or, for an element taller than
+    /// the scroll view, until its top edge is at the scroll view's top. Custom accessibility
+    /// elements, such as one paragraph of a reply's shared text, are not scrolled into view by a
+    /// click.
     @discardableResult
     func scrollFullyIntoView(_ element: XCUIElement, in scrollView: XCUIElement, margin: CGFloat = 8) -> Bool {
         for _ in 0..<40 {
@@ -1082,6 +1166,9 @@ extension PlayhouseUITests {
         }
         return false
     }
+    /// Opening a conversation renders only its newest turn, and older batches load as the
+    /// reader scrolls up. Scrolls up as a reader would until every message is rendered, so
+    /// an earlier turn can be asserted. The scroll view reports "Showing latest N of M".
     @discardableResult
     func revealWholeTranscript(step: CGFloat = 400, timeout: TimeInterval = 20) -> Bool {
         let scrollView = element("conversation-scroll-view")
@@ -1099,6 +1186,11 @@ extension PlayhouseUITests {
         let counts = renderedCounts()
         return counts.count == 2 && counts[0] == counts[1]
     }
+    /// Settled turns render lazily, so a row of an earlier turn exists only while it is near the
+    /// viewport. Scrolls the transcript up, then back down, as a reader looking for it would,
+    /// until `target` exists, then brings it into the viewport. A row found well outside the
+    /// viewport may be one that renders only until it is measured and then becomes a box, so
+    /// callers that go on to read it need it in view, where it stays rendered.
     @discardableResult
     func scrollTranscriptUntilExists(_ target: XCUIElement) -> Bool {
         let scrollView = element("conversation-scroll-view")
@@ -1116,6 +1208,8 @@ extension PlayhouseUITests {
         }
         return found()
     }
+    /// Scrolls until `target`'s top lies inside the conversation's viewport, then waits for the
+    /// transcript to settle the rows around it.
     func bringIntoTranscriptViewport(_ target: XCUIElement, scrollView: XCUIElement) {
         for _ in 0..<12 {
             // A streaming transcript can scroll the lazy row away between an existence
@@ -1130,6 +1224,11 @@ extension PlayhouseUITests {
         }
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
     }
+    /// Settled turns render lazily, so a check over the whole revealed transcript has to look at
+    /// it a viewport at a time. Scrolls the conversation to its top, then down to its bottom in
+    /// steps shorter than the viewport, checking `found` at every step, and reports whether it
+    /// held at any step and whether the scan covered the whole transcript. The scroller's value
+    /// reports the position, 0 at the top and 1 at the bottom.
     func scanTranscript(_ found: () -> Bool) -> (found: Bool, coveredWholeTranscript: Bool) {
         if found() { return (true, true) }
         let scrollView = element("conversation-scroll-view")
@@ -1143,7 +1242,8 @@ extension PlayhouseUITests {
         // Reaching the top of the rendered messages reveals the batch above them, so the top of
         // the transcript is the top once every message is rendered.
         let revealed = revealWholeTranscript(step: 3000)
-        for _ in 0..<40 where (position() ?? 0) > 0.001 {
+        for _ in 0..<40 {
+            guard (position() ?? 0) > 0.001 else { break }
             scrollView.scroll(byDeltaX: 0, deltaY: 3000)
         }
         let reachedTop = revealed && (position() ?? 1) <= 0.001
@@ -1159,14 +1259,18 @@ extension PlayhouseUITests {
         }
         return (found(), false)
     }
+    /// Whether `found` holds anywhere in the transcript, scanning it a viewport at a time.
     func transcriptScan(_ found: () -> Bool) -> Bool {
         scanTranscript(found).found
     }
+    /// Asserts that `found` holds nowhere in the transcript. The scan must have covered it
+    /// from its top to its bottom, so a scan cut short cannot pass as an absence.
     func assertTranscriptLacks(_ message: String, file: StaticString = #filePath, line: UInt = #line, _ found: () -> Bool) {
         let scan = scanTranscript(found)
         XCTAssertTrue(scan.coveredWholeTranscript, "The transcript scan must reach both its top and its bottom: \(message)", file: file, line: line)
         XCTAssertFalse(scan.found, message, file: file, line: line)
     }
+    /// A user message in the transcript, which is exposed as a labeled group.
     func transcriptMessage(_ text: String) -> XCUIElement {
         app.groups[text].firstMatch
     }

@@ -109,11 +109,12 @@ extension BoardTaskManager {
         }
     }
 
-    func setConversationModelID(_ id: UUID, modelID: String) async throws {
+    /// Without `provider`, the choice is the current provider's.
+    func setConversationModelID(_ id: UUID, modelID: String, provider: ConversationProvider? = nil) async throws {
         try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
             let previous = task.conversationModelIDsData
-            task.conversationModelID = modelID
+            task.setConversationModelID(modelID, for: provider ?? task.conversationProvider)
             do {
                 try await saveTaskContext(taskID: id)
             } catch {

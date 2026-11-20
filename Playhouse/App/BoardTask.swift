@@ -466,6 +466,24 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
     /// Whether a pull request is linked to this worktree.
     var hasPullRequest: Bool { pullRequestNumber != nil && pullRequestURL != nil }
 
+    /// A pending worktree added without a branch-from or merge target leaves them empty
+    /// rather than asking Git for the repository's defaults, which takes a noticeable
+    /// moment. Opening its settings or starting the task works them out.
+    var hasUndecidedDefaults: Bool { isPending && (branchFrom.isEmpty || mergeTarget == nil) }
+
+    /// Whether `other` is this record with only its undecided defaults since worked out,
+    /// which an edit read before them can still apply to.
+    func isUndecidedForm(of other: RepositoryWorktreeRecord) -> Bool {
+        guard hasUndecidedDefaults else { return false }
+        var decided = other
+        if branchFrom.isEmpty { decided.branchFrom = "" }
+        if mergeTarget == nil { decided.mergeTarget = nil }
+        return decided == self
+    }
+
+    /// The ref the record's changes are measured against: its branch-from, or HEAD while undecided.
+    var comparisonBase: String { branchFrom.isEmpty ? "HEAD" : branchFrom }
+
     /// The linked pull request's state as the card shows it: open, merged or closed.
     var pullRequestState: String? {
         guard hasPullRequest else { return nil }

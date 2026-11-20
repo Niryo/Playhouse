@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
+    // case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread. The switch is shown at once from what is cached, and its settled check reads only the newest page of history instead of composing the whole transcript: while Claude's live model list and capabilities are still loading, the switched task already reads Claude's cached models and the remembered Claude model, and the window shows the divider, that model and an enabled provider menu, with Claude's notice following once its capabilities load. A rejected switch leaves the provider unchanged. A saved switch returns the dividers it recorded, and switching back returns none.
     func test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary() throws {
         let executablePath = try makeCodexFixture(emptyQuestions: false).path
         codexFixtureExecutable = executablePath
@@ -67,15 +67,92 @@ extension PlayhouseUITests {
         let queued = try XCTUnwrap(try runCLI(["conversation", "queue", taskID, "--message", "Queued before switching."])["result"] as? [String: Any])
         let blockedByQueue = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 1)
         XCTAssertTrue(((blockedByQueue["error"] as? [String: Any])?["message"] as? String ?? "").contains("queued follow-ups"))
+        XCTAssertEqual(try taskRecord(id: taskID)?["conversationProvider"] as? String, "codex", "A rejected switch leaves the provider unchanged.")
         _ = try runCLI(["conversation", "queue-remove", taskID, try XCTUnwrap(queued["id"] as? String)])
 
+        // Claude's model list and a remembered Claude model, cached by an earlier Claude task.
+        let claudeEnvironment = ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": claudeExecutable.path]
+        let claudeSeed = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude models seed", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let claudeSeedID = try XCTUnwrap(claudeSeed["id"] as? String)
+        let claudeModels = try XCTUnwrap((try runCLI(
+            ["conversation", "models", claudeSeedID], extraEnvironment: claudeEnvironment
+        )["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        let remembered = try XCTUnwrap(claudeModels.first { ($0["isDefault"] as? Bool) == false })
+        let rememberedName = try XCTUnwrap(remembered["name"] as? String)
+        _ = try runCLI(["conversation", "model", claudeSeedID, "set", try XCTUnwrap(remembered["id"] as? String)], extraEnvironment: claudeEnvironment)
+        // Claude's live model list and capabilities stay loading until the test releases them.
+        let metadataPause = URL(fileURLWithPath: claudeExecutable.path + ".metadata-pause")
+        let metadataReady = URL(fileURLWithPath: claudeExecutable.path + ".metadata-ready")
+        let metadataRelease = URL(fileURLWithPath: claudeExecutable.path + ".metadata-release")
+        try Data().write(to: metadataPause, options: .atomic)
+        defer {
+            try? FileManager.default.removeItem(at: metadataPause)
+            try? Data().write(to: metadataRelease, options: .atomic)
+        }
+
         XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu is enabled once the turn settles.")
+        let modelPicker = element("model-picker-menu")
+
         providerMenu.click()
         let claudeChoice = app.menuItems["conversation-provider-claude"]
         XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
         claudeChoice.click()
         let boundary = element("provider-boundary-claude")
         XCTAssertTrue(boundary.waitToExist(timeout: 10), "A settled switch shows a provider boundary.")
+        XCTAssertTrue(
+            waitUntil({ FileManager.default.fileExists(atPath: metadataReady.path) }, timeout: 10),
+            "Claude's live model list starts loading after the switch."
+        )
+        XCTAssertTrue(
+            waitUntil({ modelPicker.label.hasPrefix("Model: \(rememberedName),") }, timeout: 3),
+            "While Claude's models still load, the composer shows the remembered Claude model from the cached list: \(modelPicker.label)"
+        )
+        XCTAssertTrue(
+            waitUntil({ providerMenu.isEnabled && providerMenu.label.contains("Claude") }, timeout: 3),
+            "The switch is done without waiting for Claude's models or capabilities: \(providerMenu.label)"
+        )
+        XCTAssertFalse(element("provider-capabilities-notice").exists, "Claude's notice waits for its capabilities.")
+        attachScreenshot(named: "Switched to Claude while its models and capabilities still load")
+        attachScreenshot(named: "Composer controls switched to Claude while loading", around: [providerMenu, modelPicker])
+        try Data().write(to: metadataRelease, options: .atomic)
+        let notice = element("provider-capabilities-notice")
+        XCTAssertTrue(notice.waitToExist(timeout: 15), "Claude's notice arrives once its capabilities load.")
+        // The notice's text is its accessibility value.
+        XCTAssertTrue(waitUntil({ (notice.value as? String ?? "").hasPrefix("Claude uses its own settings") }, timeout: 5),
+                      "The notice is Claude's: \(notice.value as? String ?? "")")
+        try? FileManager.default.removeItem(at: metadataPause)
+        XCTAssertTrue(waitUntil({
+            ((try? self.diagnosticEvents()) ?? []).contains {
+                $0["event"] as? String == "conversation.models.read.succeeded" && $0["taskID"] as? String == taskID && $0["provider"] as? String == "claude"
+            }
+        }, timeout: 15), "Claude's live model list loads after the release.")
+        // The window applies the live list just after the daemon returns it, so a reset would show within a moment.
+        XCTAssertFalse(
+            waitUntil({ !modelPicker.label.hasPrefix("Model: \(rememberedName),") }, timeout: 1.5),
+            "Claude's live model list keeps the remembered model: \(modelPicker.label)"
+        )
+        attachScreenshot(named: "Claude's notice after its capabilities load")
+        attachScreenshot(named: "Composer controls with Claude's notice", around: [providerMenu, modelPicker, notice])
+        let cachedModels = try XCTUnwrap((try runCLI(
+            ["conversation", "models", taskID, "--cached"], extraEnvironment: claudeEnvironment
+        )["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(cachedModels.compactMap { $0["id"] as? String }, claudeModels.compactMap { $0["id"] as? String }, "The switched task reads Claude's cached models.")
+        let events = try diagnosticEvents()
+        let started = try XCTUnwrap(events.lastIndex {
+            $0["event"] as? String == "conversation.provider.switch.started" && $0["taskID"] as? String == taskID
+        })
+        let succeeded = try XCTUnwrap(events[started...].firstIndex {
+            $0["event"] as? String == "conversation.provider.switch.succeeded" && $0["taskID"] as? String == taskID
+        })
+        let settledReads = events[started..<succeeded].filter {
+            $0["event"] as? String == "conversation.history.read" && $0["taskID"] as? String == taskID
+        }
+        XCTAssertEqual(
+            settledReads.map { "\($0["source"] as? String ?? "")/\($0["messageLimit"] as? String ?? "")" }, ["stored-page/80"],
+            "The switch checks that the conversation settled from its newest page, without composing the whole transcript."
+        )
         XCTAssertEqual(boundary.label, "Conversation switched to Claude")
         XCTAssertGreaterThan(boundary.frame.minY, codexReply.frame.maxY, "The boundary follows the last Codex reply.")
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "Earlier replies stay labeled Codex.")
@@ -100,6 +177,51 @@ extension PlayhouseUITests {
         XCTAssertEqual(try taskRecord(id: taskID)?["codexThreadID"] as? String, codexThread, "The next Codex turn completes in the same thread.")
         XCTAssertFalse(element("provider-boundary-claude").exists)
         XCTAssertFalse(transcriptContains("playhouse-handoff-context"))
+    }
+    // case-contract: test_conversation_provider_switch_rejected_by_daemon_rolls_back | With a Codex fixture turn ended on an unanswered non-blocking question and the task Waiting Response, the daemon rejects a switch to Claude with its pending-question reason, leaves the task on Codex, and fresh history shows no provider divider. The window, whose provider menu stays enabled in that state, shows the daemon's reason after the click and returns to Codex: the menu reads Codex, no divider remains, and the model picker shows the Codex model it showed before the click.
+    func test_conversation_provider_switch_rejected_by_daemon_rolls_back() throws {
+        let created = try runCLI(["task", "create", "--title", "Rejected provider switch", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question-queued").path
+        // Claude is installed, so the menu offers it as a provider rather than as Add Claude.
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-rejected-switch")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Rejected provider switch")
+        element("message-composer").click()
+        element("message-composer").typeText("Ask a queued async question.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("async-question-item_playhouse_async_question").waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID))?["status"] as? String) == "Waiting Response"
+        }, timeout: 10), "The turn ends with its question unanswered.")
+        let providerMenu = element("conversation-provider-menu")
+        let modelPicker = element("model-picker-menu")
+        XCTAssertTrue(waitUntil({ providerMenu.isEnabled && providerMenu.label.contains("Codex") }, timeout: 10),
+                      "The window offers the switch while the question waits: \(providerMenu.label)")
+        let codexModelLabel = modelPicker.label
+        providerMenu.click()
+        let claudeChoice = app.menuItems["conversation-provider-claude"]
+        XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
+        claudeChoice.click()
+        let switchError = element("codex-chat-error")
+        XCTAssertTrue(switchError.waitToExist(timeout: 10), "A rejected switch shows the daemon's reason.")
+        XCTAssertTrue(switchError.label.contains("pending question"), switchError.label)
+        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Codex") && providerMenu.isEnabled }, timeout: 5),
+                      "A rejected switch returns to Codex: \(providerMenu.label)")
+        XCTAssertTrue(waitForDisappearance(element("provider-boundary-claude"), timeout: 5), "A rejected switch leaves no divider.")
+        XCTAssertTrue(waitUntil({ modelPicker.label == codexModelLabel }, timeout: 5),
+                      "A rejected switch restores the Codex model: \(modelPicker.label) vs \(codexModelLabel)")
+        XCTAssertEqual(try taskRecord(id: taskID)?["conversationProvider"] as? String, "codex", "A rejected switch leaves the task on Codex.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((history["providerBoundaries"] as? [Any])?.count, 0, "A rejected switch records no divider.")
+        attachScreenshot(named: "A rejected switch returns to Codex with the reason")
+        attachScreenshot(named: "Composer controls after the rejected switch", around: [switchError, providerMenu, modelPicker])
     }
     // case-contract: test_conversation_transcript_reopens_from_local_store | Playhouse stores every conversation turn in its own transcript store, for Codex and Claude alike. After a Codex turn and, following a provider switch, a Claude turn, a fresh daemon serves the same messages, roles, texts, providers and order without asking Codex for its thread history: Codex replies stay labeled Codex with the model that wrote them, Claude replies stay labeled Claude, and a limited read returns only the latest page with the count of earlier messages and keeps the Codex-to-Claude boundary after the last Codex message.
     func test_conversation_transcript_reopens_from_local_store() throws {
@@ -635,7 +757,8 @@ extension PlayhouseUITests {
             let target = label(title)
             func ready() -> Bool { target.exists && target.isHittable && anchors.frame.contains(target.frame) }
             for delta: CGFloat in [150, -150] {
-                for _ in 0..<40 where !ready() {
+                for _ in 0..<40 {
+                    guard !ready() else { break }
                     anchors.scroll(byDeltaX: 0, deltaY: delta)
                     _ = waitUntil(ready, timeout: 0.3)
                 }
@@ -828,7 +951,8 @@ extension PlayhouseUITests {
 
         // Scrolling on from there loads what follows, and the labels follow the transcript.
         let renderedAfterJump = renderedCount()
-        for _ in 0..<80 where renderedCount() <= 44 {
+        for _ in 0..<80 {
+            guard renderedCount() <= 44 else { break }
             let before = renderedCount()
             scrollView.scroll(byDeltaX: 0, deltaY: -400)
             _ = waitUntil({ renderedCount() != before }, timeout: 0.5)
@@ -872,7 +996,8 @@ extension PlayhouseUITests {
         attachScreenshot(named: "chat-page-anchors-after-jump-to-bottom")
         // It also returns from the newest messages scrolled up, where Latest is not offered.
         scrollView.scroll(byDeltaX: 0, deltaY: 3_000)
-        for _ in 0..<5 where wideReply.exists && scrollView.frame.intersects(wideReply.frame) {
+        for _ in 0..<5 {
+            guard wideReply.exists && scrollView.frame.intersects(wideReply.frame) else { break }
             scrollView.scroll(byDeltaX: 0, deltaY: 1_500)
         }
         XCTAssertFalse(wideReply.exists && scrollView.frame.intersects(wideReply.frame), "Scrolling up should take the last reply out of view.")

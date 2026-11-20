@@ -218,7 +218,8 @@ extension PlayhouseUITests {
             reveal(row)
             // Like clickAnchor, hover the row's visible frame: inside the nested
             // comparison scroll view XCTest may report no hit point for it.
-            for _ in 0..<3 where !detail.exists {
+            for _ in 0..<3 {
+                guard !detail.exists else { break }
                 row.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).hover()
                 if detail.waitToExist(timeout: 3) { break }
                 js("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
@@ -1018,7 +1019,8 @@ extension PlayhouseUITests {
             candidate.exists && scrollView.frame.intersects(candidate.frame)
         }
         func scrollUp(until condition: () -> Bool) {
-            for _ in 0..<60 where !condition() {
+            for _ in 0..<60 {
+                guard !condition() else { break }
                 scrollView.scroll(byDeltaX: 0, deltaY: 400)
                 _ = waitUntil(condition, timeout: 1)
             }

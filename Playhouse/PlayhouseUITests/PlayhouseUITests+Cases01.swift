@@ -883,11 +883,13 @@ extension PlayhouseUITests {
         XCTAssertEqual(started["createdByPlayhouse"] as? Bool, false)
         attachScreenshot(named: "Task start reuses the existing branch worktree")
     }
-    // case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | The conversation picker can add multiple repositories; unset branch settings display defaults and persist pending auto records resolved to local main without creating branches or worktrees before the first send.
+    // case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | The conversation picker can add multiple repositories; they persist as pending auto records whose unset branch-from and merge target stay undecided, so adding them runs no Git (also when a repository's branch refs are packed), without creating branches or worktrees before the first send.
     func test_task_creation_creates_worktrees_in_multiple_repositories() throws {
         let branchToken = String(UUID().uuidString.prefix(8)).lowercased()
         let taskTitle = "Multi repository UI \(branchToken)"
         let generatedBranch = "multi-repository-ui-\(branchToken)"
+        // After `git gc` a branch lives only in packed-refs; it is still read without Git.
+        try runGit(fixture.secondary, "pack-refs", "--all")
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
         chooseRepositorySuggestion("secondary")
@@ -903,7 +905,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(records.map { $0["branch"] as? String }, ["auto", "auto"])
         XCTAssertEqual(records.map { $0["isPending"] as? Bool }, [true, true])
         XCTAssertEqual(records.map { $0["worktreePath"] as? String }, [fixture.secondary.path, fixture.primary.path])
-        XCTAssertEqual(records.map { $0["branchFrom"] as? String }, ["main", "main"])
+        XCTAssertEqual(records.map { $0["branchFrom"] as? String }, ["", ""])
+        XCTAssertEqual(records.map { $0["mergeTarget"] as? String }, [nil, nil])
         for repository in [fixture.secondary, fixture.primary] {
             XCTAssertEqual(try runGitOutput(repository, "branch", "--list", generatedBranch).trimmingCharacters(in: .whitespacesAndNewlines), "")
         }

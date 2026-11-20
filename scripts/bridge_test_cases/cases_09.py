@@ -632,7 +632,7 @@ class BridgeTestCases09:
             "The page keeps every turn, with the user's own prompts.",
         )
         self.assertEqual(self.chat_page_texts(earlier_page["id"], environment), ["Name a moon of Mars.", "Before restart.", "After restart."])
-    # case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
+    # case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread. The switch is shown at once from what is cached, and its settled check reads only the newest page of history instead of composing the whole transcript: while Claude's live model list and capabilities are still loading, the switched task already reads Claude's cached models and the remembered Claude model, and the window shows the divider, that model and an enabled provider menu, with Claude's notice following once its capabilities load. A rejected switch leaves the provider unchanged. A saved switch returns the dividers it recorded, and switching back returns none.
     def test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary(self):
         task = self.create_task("Provider switch task")
         self.complete_fixture_turn(task["id"], message="Start with Codex.")
@@ -647,6 +647,7 @@ class BridgeTestCases09:
         blocked_by_queue, _ = self.call_cli("conversation", "provider", task["id"], "set", "claude", expected_status=1, extra_environment=fixture_environment)
         self.assert_failure(blocked_by_queue, "invalid_transition")
         self.assertIn("queued follow-ups", blocked_by_queue["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["conversationProvider"], "codex", "A rejected switch leaves the provider unchanged.")
         self.assert_success(self.call_cli("conversation", "queue-remove", task["id"], queued["id"], extra_environment=fixture_environment)[0])
 
         process, executable, active, release = self.start_progress_fixture_turn(task["id"], "codex-fixture-hold-release")
@@ -661,7 +662,44 @@ class BridgeTestCases09:
             stdout, stderr = process.communicate(timeout=30)
         self.assertEqual(process.returncode, 0, f"Held Codex turn failed: {stdout}; {stderr}")
 
-        switched = self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude", extra_environment=fixture_environment)[0])
+        # Claude's model list and a remembered Claude model, cached by an earlier Claude task.
+        claude_environment = self.install_claude_fixture("claude-fixture-provider-switch")
+        switch_environment = {**fixture_environment, **claude_environment}
+        claude_task = self.create_task("Claude models seed", provider="claude")
+        claude_models = self.assert_success(self.call_cli("conversation", "models", claude_task["id"], extra_environment=switch_environment)[0])["models"]
+        remembered = next(model for model in claude_models if not model["isDefault"])
+        self.assert_success(self.call_cli("conversation", "model", claude_task["id"], "set", remembered["id"], extra_environment=switch_environment)[0])
+        claude_executable = claude_environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        metadata_pause = Path(claude_executable + ".metadata-pause")
+        metadata_ready = Path(claude_executable + ".metadata-ready")
+        metadata_pause.touch()
+        try:
+            switched = self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude", extra_environment=switch_environment)[0])
+            cached = self.assert_success(self.call_cli("conversation", "models", task["id"], "--cached", extra_environment=switch_environment)[0])["models"]
+            self.assertEqual([model["id"] for model in cached], [model["id"] for model in claude_models], "The switched task reads Claude's cached models.")
+            remembered_read = self.assert_success(self.call_cli("conversation", "model", task["id"], extra_environment=switch_environment)[0])
+            self.assertEqual(remembered_read["modelID"], remembered["id"], "The switched task reads the remembered Claude model.")
+            self.assertFalse(metadata_ready.exists(), "Neither the switch nor the cached reads wait for Claude's live models or capabilities.")
+        finally:
+            metadata_pause.unlink(missing_ok=True)
+            Path(claude_executable + ".metadata-release").touch()
+        events = self.diagnostic_events()
+        started = max(
+            index for index, event in enumerate(events)
+            if event.get("event") == "conversation.provider.switch.started" and event.get("taskID") == task["id"]
+        )
+        succeeded = next(
+            index for index in range(started, len(events))
+            if events[index].get("event") == "conversation.provider.switch.succeeded" and events[index].get("taskID") == task["id"]
+        )
+        settled_reads = [
+            event for event in events[started:succeeded]
+            if event.get("event") == "conversation.history.read" and event.get("taskID") == task["id"]
+        ]
+        self.assertEqual(
+            [(event["source"], event["messageLimit"]) for event in settled_reads], [("stored-page", "80")],
+            "The switch checks that the conversation settled from its newest page, without composing the whole transcript.",
+        )
         self.assertEqual(switched["conversationProvider"], "claude")
         self.assertEqual(switched["codexThreadID"], codex_thread, "Switching keeps the Codex thread for a later return.")
         self.assertIsNone(switched.get("claudeSessionID"), "Claude starts its session on its first turn.")
@@ -670,6 +708,7 @@ class BridgeTestCases09:
         self.assertEqual(len(boundaries), 1, history)
         self.assertEqual(boundaries[0]["provider"], "claude")
         self.assertEqual(boundaries[0]["afterMessageID"], history["messages"][-1]["id"], "The boundary follows the last Codex reply.")
+        self.assertEqual(switched["providerBoundaries"], boundaries, "The switch returns the dividers it recorded.")
         self.assertEqual(history["messages"][-1]["role"], "assistant")
         self.assertTrue(all(message.get("provider") == "codex" for message in history["messages"]), "Earlier replies stay labeled Codex.")
         orders = [message["timelineOrder"] for message in history["messages"]]
@@ -680,6 +719,7 @@ class BridgeTestCases09:
         self.assertEqual(returned["conversationProvider"], "codex")
         returned_history = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)[0])
         self.assertEqual(returned_history["providerBoundaries"], [], "Returning before any Claude turn removes the empty boundary.")
+        self.assertEqual(returned["providerBoundaries"], [], "Switching back returns no divider.")
         self.complete_fixture_turn(task["id"], message="Continue with Codex.")
         after = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(after["codexThreadID"], codex_thread, "The next Codex turn resumes the same thread.")
@@ -690,6 +730,29 @@ class BridgeTestCases09:
             any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
+    # case-contract: test_conversation_provider_switch_rejected_by_daemon_rolls_back | With a Codex fixture turn ended on an unanswered non-blocking question and the task Waiting Response, the daemon rejects a switch to Claude with its pending-question reason, leaves the task on Codex, and fresh history shows no provider divider. The window, whose provider menu stays enabled in that state, shows the daemon's reason after the click and returns to Codex: the menu reads Codex, no divider remains, and the model picker shows the Codex model it showed before the click.
+    def test_conversation_provider_switch_rejected_by_daemon_rolls_back(self):
+        task_id = self.create_task("Rejected provider switch", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-async-question-queued"
+        copy_file(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        first = self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Ask a queued async question.", extra_environment=env)[0])
+        self.assertTrue(any(message["id"] == "item_playhouse_async_question" for message in first["messages"]))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and self.assert_success(self.call_cli("task", "get", task_id)[0])["status"] != "Waiting Response":
+            time.sleep(0.05)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        rejected, _ = self.call_cli("conversation", "provider", task_id, "set", "claude", expected_status=1, extra_environment=env)
+        self.assert_failure(rejected, "invalid_transition")
+        self.assertIn("pending question", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["conversationProvider"], "codex", "A rejected switch leaves the task on Codex.")
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertEqual(history["providerBoundaries"], [], "A rejected switch records no divider.")
     # case-contract: test_conversation_transcript_reopens_from_local_store | Playhouse stores every conversation turn in its own transcript store, for Codex and Claude alike. After a Codex turn and, following a provider switch, a Claude turn, a fresh daemon serves the same messages, roles, texts, providers and order without asking Codex for its thread history: Codex replies stay labeled Codex with the model that wrote them, Claude replies stay labeled Claude, and a limited read returns only the latest page with the count of earlier messages and keeps the Codex-to-Claude boundary after the last Codex message.
     def test_conversation_transcript_reopens_from_local_store(self):
         codex = self.data_directory / "codex-fixture-local-store"
@@ -736,7 +799,7 @@ class BridgeTestCases09:
         requested = methods.read_text(encoding="utf-8").split()
         for method in ("thread/read", "thread/turns/list", "thread/items/list"):
             self.assertNotIn(method, requested, "Reading the transcript never asks Codex for its thread history.")
-    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a divided Comment and Side chat pill centered above the selection, and no bubble opens until its Side chat is clicked; clicking it hides the pill and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls, keeping its text clear of the scroller. The bubble shows its messages in 14-point text, the selected text and a compact chat with no subtitle, whose composer has the conversation's model picker and a send button but no Comment button, Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command, the CLI chained with & to another command and the CLI's task prompt with the options that would start a task are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
+    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a divided Comment and Side chat pill centered above the selection, and no bubble opens until its Side chat is clicked; clicking it hides the pill and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls, keeping its text clear of the scroller. The bubble shows its messages in 14-point text, the selected text and a compact chat with no subtitle, whose composer has the conversation's model picker and a send button but no Comment button, Skills button or Plan and Goal buttons. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command, the CLI chained with & to another command and the CLI's task prompt with the options that would start a task are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session. An answer written in Markdown renders formatted in the bubble (a heading and list items without their marks, the heading larger than the items) while the CLI reply keeps the raw Markdown.
     def test_side_chat_forks_claude_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat")
         source_session = task["claudeSessionID"]
@@ -778,17 +841,18 @@ class BridgeTestCases09:
         # Each message may pick its own model and effort; the task keeps its own.
         follow_up = self.assert_success(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"],
-            "--message", "And the second point?", "--model", "claude-sonnet-4-6", "--effort", "high",
+            "--message", "And the second point, as a Markdown list?", "--model", "claude-sonnet-4-6", "--effort", "high",
             extra_environment=environment,
         )[0])
         self.assertEqual(follow_up["sideChatID"], opened["sideChatID"])
-        self.assertEqual(follow_up["reply"], f"Side chat follow-up 2 on {fork_session}: And the second point?")
+        self.assertEqual(follow_up["reply"], f"Side chat follow-up 2 on {fork_session}: And the second point, as a Markdown list?\n\n## Points\n\n- First point\n- Second point",
+                         "The side chat keeps a Markdown answer as raw Markdown for the client to render.")
         resumed = json.loads(fixture_history.read_text(encoding="utf-8"))["turns"][-1]
         self.assertEqual(resumed["sessionID"], fork_session)
         self.assertEqual(resumed["arguments"][resumed["arguments"].index("--resume") + 1], fork_session)
         self.assertNotIn("--fork-session", resumed["arguments"])
         self.assertNotIn("--session-id", resumed["arguments"])
-        self.assertEqual(resumed["userText"], "And the second point?")
+        self.assertEqual(resumed["userText"], "And the second point, as a Markdown list?")
         self.assertEqual(resumed["arguments"][resumed["arguments"].index("--model") + 1], "claude-sonnet-4-6")
         self.assertEqual(resumed["effort"], "high")
 

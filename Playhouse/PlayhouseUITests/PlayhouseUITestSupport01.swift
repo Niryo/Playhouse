@@ -243,6 +243,8 @@ extension PlayhouseUITests {
             attachAppWindowScreenshot(named: "\(display) task deleted (\(scenario.name)) with no error")
         }
     }
+    /// Opens `title`'s conversation after its first turn, selects all of the reply's text and
+    /// returns the task ID, the reply's text element and the side chat bubble that opened on it.
     func openSideChatOnReply(
         title: String, beforeOpening: (String) throws -> Void = { _ in }
     ) throws -> (taskID: String, reply: XCUIElement, bubble: XCUIElement) {
@@ -265,6 +267,7 @@ extension PlayhouseUITests {
         let bubble = try waitForSideChatBubble(at: replyText, hintScreenshot: "Comment and Side chat pill above the selected reply")
         return (taskID, replyText, bubble)
     }
+    /// Sends `message` from the open side chat bubble and returns the answer element at `index`.
     func sendSideChatMessage(_ message: String, answerIndex index: Int, containing expected: String) -> XCUIElement {
         let input = element("side-chat-input")
         XCTAssertTrue(input.waitToExist(timeout: 5))
@@ -279,6 +282,9 @@ extension PlayhouseUITests {
         XCTAssertTrue((input.value as? String ?? "").isEmpty, "Sending should clear the side chat composer.")
         return answer
     }
+    /// Sends a held fixture turn from the window, reopens the conversation so it
+    /// no longer reads that turn's stream, and checks that the turn's progress
+    /// still reaches it before the turn ends.
     func assertTurnProgressReachesReopenedConversation(provider: String, fixtureSource: String, executableName: String, activityID: String, modelID: String? = nil) throws {
         let display = provider == "claude" ? "Claude" : "Codex"
         let source = WorkspaceFixture.root.appendingPathComponent(fixtureSource)
@@ -369,6 +375,10 @@ extension PlayhouseUITests {
         XCTAssertTrue(visibleText(finalText).waitToExist(timeout: 30), "The reopened conversation should show the final answer once the turn settles.")
         XCTAssertTrue(waitUntil({ ((try? revision()) ?? 0) > progressedRevision }, timeout: 10), "The revision should rise again when the turn ends.")
     }
+    /// Scrolls the transcript as far down as the wheel goes and checks that its bottom is real
+    /// content. A newest turn that fits the viewport keeps its question pinned near the top, which
+    /// fails if the room below the turn is too small; a taller one ends at its last row, which
+    /// fails on blank overscroll below a turn whose question has scrolled away.
     func assertTranscriptEndsWithoutOverscroll(
         question: XCUIElement, lastRow: XCUIElement, in scrollView: XCUIElement, turnFitsViewport: Bool,
         file: StaticString = #filePath, line: UInt = #line
@@ -396,6 +406,8 @@ extension PlayhouseUITests {
                                      file: file, line: line)
         }
     }
+    /// Runs a tool-call turn and a later turn from the composer, then checks that the earlier
+    /// turn shows each call inline, after the message written before it, with IN and OUT blocks.
     func assertEarlierTurnToolCallsRenderInline(provider: String, executableName: String, callIDs: [String], summaries: [String]) throws {
         let display = provider == "claude" ? "Claude" : "Codex"
         let source = WorkspaceFixture.root.appendingPathComponent(provider == "claude" ? "claude-fixture-ui" : "codex-fixture-ui")
@@ -522,6 +534,7 @@ extension PlayhouseUITests {
                       "The earlier turn's calls should still render inline after reopening the task.")
         XCTAssertTrue(text(of: element("conversation-tool-call-input-\(callIDs[0])")).contains("git status --short"))
     }
+    /// Expands the latest turn's Worked for summary when it is collapsed.
     func expandLatestWorkedFor() -> Bool {
         let disclosure = element("codex-activity-disclosure")
         guard waitUntil({ disclosure.exists && disclosure.label.hasPrefix("Worked for") }, timeout: 15) else { return false }
@@ -533,6 +546,8 @@ extension PlayhouseUITests {
         }
         return element("codex-activity-details").waitToExist(timeout: 5)
     }
+    /// Sends an ordinary turn from the composer, then checks that the earlier nudged
+    /// turn's work stays visible, its call now renders inline, and the nudge Playhouse sent stays shown.
     func sendLaterTurnAndAssertNudgedCallInline(taskID: String, callID: String, visibleTexts: [String]) throws {
         let message = "Thanks, that's all."
         let composer = element("message-composer")
@@ -588,6 +603,8 @@ extension PlayhouseUITests {
         composer.typeKey("a", modifierFlags: .command)
         composer.typeText(text)
     }
+    /// Dismisses an open schedule hint with Escape (its Done button is disabled while the title is empty), then
+    /// returns from the task conversation to the Scheduled Tasks page, which is hidden while a task is open.
     func closeScheduleHintAndReturnToPage() {
         let hint = element("schedule-hint")
         if hint.exists {
@@ -671,6 +688,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(item.waitToExist(timeout: 3), "\(title) should be in the row's menu.")
         item.click()
     }
+    /// The fixture log's size as the app formats it; the log is built the same
+    /// way as WASTE_LOG in scripts/fixtures/claude-code-fixture.py.
     enum WasteFixture {
         static var logLength: String {
             var length = 0
@@ -683,6 +702,9 @@ extension PlayhouseUITests {
             return length.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
         }
     }
+    /// Runs one Claude fixture turn whose session file logs every request (see
+    /// write_waste_session in scripts/fixtures/claude-code-fixture.py), with the
+    /// app reading the same Claude config directory the turn wrote to.
     func runClaudeTokenWasteTurn(title: String) throws -> (taskID: String, environment: [String: String]) {
         var environment = try installClaudeFixture(named: "claude-fixture-ui-token-waste")
         // The CLI forwards CLAUDE_CONFIG_DIR with its requests; the window's own
@@ -705,16 +727,19 @@ extension PlayhouseUITests {
         statsAction.click()
         XCTAssertTrue(element("token-stats-section-overview").waitToExist(timeout: 10), "Token Stats opens on its Overview section.")
     }
+    /// `section` is the section's identifier suffix: wasters, tools, overhead or overview.
     func showTokenStatsSection(_ section: String) {
         let tab = element("token-stats-section-\(section)")
         XCTAssertTrue(tab.waitToExist(timeout: 5), "Token Stats should offer its \(section) section.")
         tab.click()
     }
+    /// Rows of the raw input list are drawn lazily; scrolls the list until one is on screen.
     func revealRawInputRow(_ identifier: String) {
         let row = element(identifier)
         let list = element("raw-input-list")
         XCTAssertTrue(list.waitToExist(timeout: 10))
-        for _ in 0..<20 where !row.exists {
+        for _ in 0..<20 {
+            guard !row.exists else { break }
             list.scroll(byDeltaX: 0, deltaY: -300)
         }
         XCTAssertTrue(row.waitToExist(timeout: 5), "\(identifier) should be on screen after scrolling the list.")
@@ -724,6 +749,9 @@ extension PlayhouseUITests {
         let tokens = try XCTUnwrap((report["duplicates"] as? [[String: Any]])?.first?["tokensPerCopy"] as? Int)
         return tokens.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
     }
+    /// The pid, parent pid and working directory a running CPU-attribution
+    /// fixture child recorded for itself. The sandboxed UI runner can't list
+    /// the daemon's descendants with `ps`, so the child reports them.
     func cpuAttributionChild(executable: URL, kind: String) -> (pid: Int32, parentPID: Int32, workingDirectory: String)? {
         let record = URL(fileURLWithPath: executable.path + ".cpu-child-\(kind).json")
         guard let data = try? Data(contentsOf: record),
@@ -741,6 +769,8 @@ extension PlayhouseUITests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try skillManifest(name, description).write(to: directory.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
     }
+    /// A committed repository in this case's data directory, so a task worktree
+    /// checks its skills out without touching the shared fixture.
     func makeSkillRepository(_ name: String, skills: [String: String], links: [String: String] = [:]) throws -> URL {
         let repository = dataDirectory.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -760,6 +790,7 @@ extension PlayhouseUITests {
         try runGit(repository, "-c", "user.name=Playhouse Test", "-c", "user.email=playhouse@example.com", "commit", "-q", "-m", "Skills fixture")
         return repository
     }
+    /// A task whose repositories already have their managed worktrees.
     func createSkillsTask(_ title: String, repositories: [URL], provider: String? = nil) throws -> [String: Any] {
         var command = ["task", "create", "--title", title, "--prompt", "Fixture task description."]
         if let provider { command += ["--provider", provider] }
@@ -1010,6 +1041,7 @@ extension PlayhouseUITests {
     func boardTaskRecords() throws -> [[String: Any]] {
         try XCTUnwrap((try runCLI(["board", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
     }
+    /// The store folder Playhouse keeps a repository's private skills in.
     func privateSkillStore(_ repository: URL) -> URL {
         let digest = SHA256.hash(data: Data(repository.path.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
         return dataDirectory.appendingPathComponent("private-skills/\(repository.lastPathComponent)-\(digest)", isDirectory: true)
@@ -1023,6 +1055,7 @@ extension PlayhouseUITests {
         if let taskID { command += ["--task", taskID] }
         return try XCTUnwrap(try runCLI(command)["result"] as? [String: Any])
     }
+    /// Every rule in the catalog by ID, across repositories, global and managed.
     func rulesByID(_ catalog: [String: Any]) -> [String: [String: Any]] {
         let sections = (catalog["repositories"] as? [[String: Any]]) ?? []
         let rules = sections.flatMap { ($0["rules"] as? [[String: Any]]) ?? [] }
@@ -1036,9 +1069,14 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("rules-page").waitToExist(timeout: 10), "The Rules picker shows the rules.", file: file, line: line)
         XCTAssertTrue(waitUntil({ !self.element("rules-loading").exists }, timeout: 10), "The rules finish loading.", file: file, line: line)
     }
+    /// Opens a rule's actions menu, waiting out a closing panel's animation and
+    /// clicking again if the first click landed while it was still on screen.
     func openRuleActions(_ key: String, file: StaticString = #filePath, line: UInt = #line) {
         app.activate()
         let actions = element("rule-actions-\(key)")
+        // Another row's hint, opened where the pointer last rested (say, after an error banner
+        // pushed the rows down under it), can cover this row's menu; leaving the list closes it.
+        if actions.exists, !actions.isHittable { element("skills-title").hover() }
         XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("rule-editor-panel").exists && !self.element("new-rule-panel").exists }, timeout: 10),
                       "\(key) should have an actions menu.", file: file, line: line)
         actions.click()
@@ -1069,6 +1107,7 @@ extension PlayhouseUITests {
         if let taskID { command += ["--task", taskID] }
         return try XCTUnwrap(try runCLI(command)["result"] as? [String: Any])
     }
+    /// Every server in the catalog by ID, across repositories, global and managed.
     func mcpServersByID(_ catalog: [String: Any]) -> [String: [String: Any]] {
         let sections = (catalog["repositories"] as? [[String: Any]]) ?? []
         let servers = sections.flatMap { ($0["servers"] as? [[String: Any]]) ?? [] }
@@ -1082,6 +1121,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("mcp-page").waitToExist(timeout: 10), "The MCP picker shows the servers.", file: file, line: line)
         XCTAssertTrue(waitUntil({ !self.element("mcp-loading").exists }, timeout: 10), "The servers finish loading.", file: file, line: line)
     }
+    /// Opens a server's actions menu, waiting out a closing panel's animation, and clicks its
+    /// `identifier` item, or the item titled `title` when no item carries that identifier.
     func clickMcpMenuItem(server key: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         let actions = element("mcp-actions-\(key)")
         // Another row's hint, opened where the pointer last rested, can cover this row's
@@ -1102,11 +1143,14 @@ extension PlayhouseUITests {
         field.typeKey(.delete, modifierFlags: [])
         if !text.isEmpty { field.typeText(text) }
     }
+    /// Points a live case's task at the selected real provider.
     func useLiveProvider(taskID: String) throws {
         guard let liveProvider else { return }
         let switched = try XCTUnwrap(try runCLI(["conversation", "provider", taskID, "set", liveProvider])["result"] as? [String: Any])
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
+    /// Commits, props and event values cross as JavaScript values, not JSON
+    /// strings, but keep JSON.stringify's rules. Mirrors the CLI case's check.
     func assertPluginValuesCrossWithJSONRules() throws {
         func node(_ testID: String, in tree: Any?) -> [String: Any]? {
             guard let object = tree as? [String: Any] else { return nil }
@@ -1177,6 +1221,7 @@ extension PlayhouseUITests {
             XCTAssertTrue((invalid["errors"] as? [String] ?? []).contains { $0.contains(message) }, "\(source) reports \(message): \(invalid)")
         }
     }
+    /// Writes a plugin folder the way an authoring agent does: plugin.json and index.js.
     /// `extra` adds manifest keys, such as `events` and `mcpTools`.
     func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension", commands: [[String: Any]]? = nil, extra: [String: Any] = [:]) throws {
         let folder = pluginsFolder.appendingPathComponent(id, isDirectory: true)
@@ -1226,6 +1271,7 @@ extension PlayhouseUITests {
         let plugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
         return plugins.filter { $0["builtIn"] as? Bool != true }.compactMap { $0["id"] as? String }
     }
+    /// Starts the fetch fixture server for this case and returns its base URL and a closed port's.
     func startPluginFetchServer() throws -> (base: String, closed: String) {
         let server = try PluginFetchServer()
         addTeardownBlock { withExtendedLifetime(server) {} }
@@ -1239,17 +1285,26 @@ extension PlayhouseUITests {
         XCTAssertTrue(item.waitToExist(timeout: 5), "The Debug menu has Highlight Native Atoms.")
         item.click()
     }
+    /// A Plugin Catalog sidebar row, scrolled into view: the sidebar lists more
+    /// atoms and examples than fit, and a row scrolled away has no frame to click.
+    /// The sidebar is the scroll view holding the atom rows.
     func catalogSidebarRow(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         let row = element(identifier)
         let sidebar = app.scrollViews.containing(NSPredicate(format: "identifier BEGINSWITH %@", "plugin-catalog-atom-")).firstMatch
         XCTAssertTrue(sidebar.waitToExist(timeout: 10), "The Plugin Catalog shows its sidebar.", file: file, line: line)
+        // The sidebar runs under the window's titlebar, where a row still counts as hittable
+        // but a click lands on the titlebar, so the row's center must sit below it.
+        let window = app.windows.containing(.any, identifier: identifier).firstMatch
+        func clickable() -> Bool {
+            row.exists && row.isHittable && row.frame.midY > window.frame.minY + 52
+        }
         // One check per scroll: up first, then down past where it started.
         var scrolls = 0
-        while !(row.exists && row.isHittable), scrolls < 20 {
+        while !clickable(), scrolls < 20 {
             sidebar.scroll(byDeltaX: 0, deltaY: scrolls < 10 ? 200 : -200)
             scrolls += 1
         }
-        XCTAssertTrue(row.exists && row.isHittable, "\(identifier) should be on screen after scrolling the catalog sidebar.", file: file, line: line)
+        XCTAssertTrue(clickable(), "\(identifier) should be on screen, below the titlebar, after scrolling the catalog sidebar.", file: file, line: line)
         return row
     }
     func clickPluginsMenuItem(_ title: String) {
@@ -1261,6 +1316,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(item.waitToExist(timeout: 5), "The Plugins menu has \(title).")
         item.click()
     }
+    /// A rendered Text atom's string: SwiftUI exposes it as the value or, for some elements, the label.
     func pluginText(_ element: XCUIElement) -> String {
         let value = element.value as? String ?? ""
         return value.isEmpty ? element.label : value
