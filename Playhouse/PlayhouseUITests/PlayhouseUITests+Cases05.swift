@@ -510,13 +510,48 @@ extension PlayhouseUITests {
         try runGit(fixture.secondary, "show-ref", "--verify", "--quiet", "refs/heads/\(dirtyBranch)")
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. The board's scroller stays hidden until the pointer is over the board, then shows at a subdued opacity while the pointer rests there, and hides again once the pointer leaves; holding its knob makes it clearly more opaque than the same knob hovered, and releasing returns it to the subdued opacity. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. The board's scroller stays hidden until the pointer is over the board, then shows at a subdued opacity while the pointer rests there, and hides again once the pointer leaves; holding its knob makes it clearly more opaque than the same knob hovered, and releasing returns it to the subdued opacity. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation. While the Backlog is still empty, its Add button sits, pulsing (its pixels change over time), inside its empty state and not in its header; once the Backlog has a task, the Add button returns to the header row beside its count and no longer pulses.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
         codexFixtureExecutable = waitingFixture.path
         launchApp(defaultParent: fixture.parent.path)
+        // The empty Backlog points at creating a task: its Add button pulses in
+        // its empty state rather than sitting in its header.
+        let emptyBacklog = element("empty-state-backlog")
+        let addTask = element("add-backlog-task-button")
+        XCTAssertTrue(emptyBacklog.waitToExist(timeout: 10), "An empty Backlog shows its empty state.")
+        XCTAssertTrue(addTask.waitToExist(timeout: 5))
+        XCTAssertTrue(emptyBacklog.frame.contains(addTask.frame), "The empty Backlog's Add button \(addTask.frame) sits in its empty state \(emptyBacklog.frame).")
+        XCTAssertGreaterThan(addTask.frame.minY, element("column-count-backlog").frame.maxY, "The empty Backlog's header has no Add button.")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "add-backlog-task-button").count, 1, "The empty Backlog has exactly one Add button.")
+        // Its label is its help, so the New Task title shows only in its width.
+        let titleWidth = ("New Task" as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold)]).width
+        XCTAssertGreaterThan(addTask.frame.width, titleWidth + 12, "The empty state's Add button is wide enough for its icon and New Task title (\(addTask.frame.width)).")
+        element("column-heading-backlog").hover()
+        func pulseChange(_ button: XCUIElement) throws -> CGFloat {
+            let ring = button.frame.insetBy(dx: -10, dy: -10)
+            var frames: [[CGFloat]] = []
+            for _ in 0..<5 {
+                frames.append(try luminance(in: ring, of: captureScreenBitmap()))
+                Thread.sleep(forTimeInterval: 0.23)
+            }
+            return zip(frames, frames.dropFirst()).map { largestLuminanceChange($0, $1) }.max() ?? 0
+        }
+        let emptyPulse = try pulseChange(addTask)
+        attachScreenshot(named: "Empty board: pulsing New Task button in the Backlog empty state")
+        attachElementScreenshot(emptyBacklog, named: "Empty Backlog: pulsing New Task button in the empty state")
+        XCTAssertGreaterThan(emptyPulse, 0.06, "The empty Backlog's Add button should pulse (change \(emptyPulse)).")
         try createTaskFixture(title: "Status transitions", roots: [fixture.primary.path])
+        XCTAssertTrue(waitForDisappearance(emptyBacklog, timeout: 5), "A Backlog with a task has no empty state.")
+        XCTAssertTrue(addTask.waitToExist(timeout: 5))
+        XCTAssertEqual(addTask.frame.midY, element("column-count-backlog").frame.midY, accuracy: 4, "The Add button returns to the header beside the count.")
+        element("column-heading-backlog").hover()
+        Thread.sleep(forTimeInterval: 0.5)
+        let headerPulse = try pulseChange(addTask)
+        attachScreenshot(named: "Board with a task: Backlog Add button back in the header")
+        attachRegionScreenshot([element("column-heading-backlog"), addTask], named: "Backlog with a task: Add button back in the header")
+        XCTAssertLessThan(headerPulse, 0.03, "The header's Add button should not pulse (change \(headerPulse)).")
         try createTaskFixture(title: "Searchable board card", roots: [fixture.alternate.path])
         let titleElement = app.staticTexts["Searchable board card"]
         XCTAssertTrue(titleElement.waitToExist(timeout: 5), "The task card should expose its rendered title text.")
