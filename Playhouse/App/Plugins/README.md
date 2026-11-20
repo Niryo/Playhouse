@@ -16,7 +16,9 @@ archive exist only as native SwiftUI built from the same atoms
 `Playhouse/App/TokenStatsView.swift`, `SkillsPageHeader` and
 `SkillGalleryView` in `Playhouse/App/SkillGalleryView.swift`,
 `RepositoryChipsView` and `RepositoryPickerView` in
-`Playhouse/App/RepositoryChipsView.swift`).
+`Playhouse/App/RepositoryChipsView.swift`). The skill and rule editors'
+previews (`SkillMarkdownPreview` in `Playhouse/App/SkillsPageView.swift`) and
+the side chat's replies are built from the `Markdown` atom.
 
 | Path | What it is |
 | --- | --- |
@@ -149,7 +151,7 @@ function Counter() {
 Playhouse.render(h(Counter));
 ```
 
-Raw strings may only appear inside a `Text`, and only `Stack`, `Button`,
+Raw strings may only appear inside a `Text` or a `Markdown`, and only `Stack`, `Button`,
 `Link`, `Card`, `Disclosure`, `Panel`, `Scroll`, `PressArea`, `Overlay`, `Popover`, `Modal`, `Page` and `SidePanel` take atom children. An unknown atom, an unknown prop, a prop
 with the wrong type, or an event the atom doesn't raise is an error. The commit stops at that op, and
 the ops before it stay applied. The catalog shows the error under whatever
@@ -171,7 +173,7 @@ exits 1 when the plugin reported errors.
 ## Atoms
 
 These are exactly the atoms the task item, the Agents info section, the
-Token Stats modal, the Skills page, the repository chips and picker, the composer and the Done archive are built from, and that present the board's modal, page and side panel. Every atom also takes these common props:
+Token Stats modal, the Skills page, the skill and rule previews, the repository chips and picker, the composer and the Done archive are built from, and that present the board's modal, page and side panel. Every atom also takes these common props:
 
 | Common prop | |
 | --- | --- |
@@ -196,6 +198,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | --- | --- | --- | --- |
 | `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels), `summary` (one accessibility element that reads only as its `label`, hiding its children, for a notice whose combined texts would otherwise hide the label); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary`. `scrollID` names it as a place a `Scroll` around it can scroll to | | atoms |
 | `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits`, `align` (how wrapped lines line up: `leading` default, `center`, `trailing`) | | strings |
+| `Markdown` | `text` (or string children) in Markdown, rendered as formatted blocks: headings (`#` to `######`), bullet (`-`, `*`, `+`) and numbered list items, `>` quotes, fenced code (a card with its language and a copy button), pipe tables (with `:` column alignment), rules (`---`, `***`, `___`) and paragraphs, with **bold**, *italic*, `` `code` `` and links inline (a link opens in the default browser when it is `http`, `https` or `mailto`; any other scheme does nothing). Lists don't nest and raw HTML shows as text. `size` (body text, 13 default; headings scale from it: +4 bold, +2 semibold, then bold), `color` (the prose), `selectable` (lets the reader select its text), `frontmatter` (what a leading `---` YAML block shows as: `table`, a small table of its entries, whose accessibility identifier is the atom's `testID` plus `-frontmatter`, or `hide`; unset, the block is ordinary Markdown, a rule and paragraphs; any other value is an error). With a `testID`, its code cards' language and copy button and its tables' cells are identified `<testID>-code-block-language-<line>`, `<testID>-code-block-copy-<line>` and `<testID>-table-<line>-cell-<row>-<column>`. The transcript renders replies with the same parser and inline styling (`MarkdownDocument`, `MarkdownInlineText`) | | strings |
 | `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color`, `original` (draw the asset in its own colors, as the board's logo) | | |
 | `Image` | `url` (required: `https`, `http` to IP addresses and local hosts as for `fetch`, a `file://` path or a `data:image/…` URL; any other is an error), `size` (a square of that many points; otherwise the common `width` and `height` frame it, or it takes the width it is offered at the picture's aspect ratio), `contentMode` (`fill` default, covering the frame and cropping; `fit`, showing all of it), `cornerRadius`, `circle` (clipped to a circle, as a profile picture), `placeholder` (an SF Symbol shown on a faint fill while it loads and when it fails; a failed load is never an error); the window loads and caches the picture natively (`AtomImageLoader` in `Atoms/`: decoded pictures in memory, responses in a URL cache that honors the server's cache headers, one request shared by concurrent copies, a failure remembered for a minute), so a re-render or another copy of the URL doesn't load it again, and `plugin render` reports it without loading it; decorative unless it has a `label` | | |
 | `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color`; SwiftUI's label for an `Icon` and a `Text` in a row `Stack` (see Composite atoms below) | | |
@@ -714,7 +717,7 @@ way, as plain JavaScript values. The root container is node `0`.
 | Op | Fields | Meaning |
 | --- | --- | --- |
 | `create` | `id`, `type`, `props`, `events` | A new atom node. `props` are the JSON props; function props are not sent, only their names in `events`. |
-| `createText` | `id`, `text` | A raw string node, only inside a `Text`. |
+| `createText` | `id`, `text` | A raw string node, only inside a `Text` or a `Markdown`. |
 | `update` | `id`, `props`, `events` | Replaces an atom's props. Only sent when its JSON props or event names changed. |
 | `text` | `id`, `text` | Sets a raw string node's text. |
 | `append` | `parent`, `child` | Appends (or moves to the end). |

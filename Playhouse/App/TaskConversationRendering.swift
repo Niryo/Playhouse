@@ -152,36 +152,12 @@ struct ComposerDraftScope<Content: View>: View {
     var body: some View { content() }
 }
 
-enum MarkdownTableColumnAlignment {
-    case leading, center, trailing
-
-    var textAlignment: TextAlignment {
-        switch self {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
-        }
-    }
-}
-
-struct AssistantMarkdownBlock: Identifiable {
-    enum Kind {
-        case heading(Int)
-        case listItem
-        case orderedListItem(number: Int)
-        case codeBlock(language: String?)
-        case table(headers: [String], alignments: [MarkdownTableColumnAlignment], rows: [[String]])
-        case paragraph
-    }
-
-    let id: Int
-    let kind: Kind
-    let text: String
-
+/// The transcript's sizes for each block: larger than the app's body text, for reading replies.
+extension MarkdownBlock {
     var font: NSFont {
         switch kind {
         case .heading(let level): NSFont.systemFont(ofSize: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
-        case .listItem, .orderedListItem, .paragraph: NSFont.systemFont(ofSize: 16)
+        case .listItem, .orderedListItem, .quote, .paragraph, .rule: NSFont.systemFont(ofSize: 16)
         case .codeBlock: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
         case .table: NSFont.systemFont(ofSize: 14)
         }
@@ -191,8 +167,8 @@ struct AssistantMarkdownBlock: Identifiable {
 /// A reply's Markdown blocks as rendered: runs of prose share one text view, while each code
 /// block and table keeps its own card.
 enum AssistantMarkdownSegment: Identifiable {
-    case prose([AssistantMarkdownBlock])
-    case card(AssistantMarkdownBlock)
+    case prose([MarkdownBlock])
+    case card(MarkdownBlock)
 
     var id: Int {
         switch self {
@@ -201,16 +177,15 @@ enum AssistantMarkdownSegment: Identifiable {
         }
     }
 
-    static func segments(of blocks: [AssistantMarkdownBlock]) -> [AssistantMarkdownSegment] {
+    static func segments(of blocks: [MarkdownBlock]) -> [AssistantMarkdownSegment] {
         var segments: [AssistantMarkdownSegment] = []
-        var prose: [AssistantMarkdownBlock] = []
+        var prose: [MarkdownBlock] = []
         for block in blocks {
-            switch block.kind {
-            case .codeBlock, .table:
+            if block.kind.isCard {
                 if !prose.isEmpty { segments.append(.prose(prose)) }
                 prose.removeAll()
                 segments.append(.card(block))
-            case .heading, .listItem, .orderedListItem, .paragraph:
+            } else {
                 prose.append(block)
             }
         }
@@ -253,7 +228,7 @@ final class ReplyRenderCache<Value> {
 /// positions in the combined text.
 struct AssistantProseLayout {
     private struct PlacedBlock {
-        let block: AssistantMarkdownBlock
+        let block: MarkdownBlock
         /// The block's own text, after any list marker.
         let contentRange: NSRange
         /// The whole line, list marker included.
@@ -276,26 +251,29 @@ struct AssistantProseLayout {
     static let bulletFont = NSFont.systemFont(ofSize: 16, weight: .black)
     /// Indent shared by every item, so bullets and numbers line up down a list.
     private static let listIndent: CGFloat = 26
+    /// A quote's indent; it reads as a quote by its dimmed color and indent alone.
+    private static let quoteIndent: CGFloat = 16
 
-    private static func isListItem(_ kind: AssistantMarkdownBlock.Kind) -> Bool {
+    private static func isListItem(_ kind: MarkdownBlock.Kind) -> Bool {
         switch kind {
         case .listItem, .orderedListItem: true
-        case .heading, .paragraph, .codeBlock, .table: false
+        case .heading, .quote, .paragraph, .codeBlock, .table, .rule: false
         }
     }
 
     private static let cache = ReplyRenderCache<AssistantProseLayout>(countLimit: 2000)
 
     /// The layout for these blocks, kept for `slot` until their text or comments change.
-    static func cached(slot: String, blocks: [AssistantMarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) -> AssistantProseLayout {
+    static func cached(slot: String, blocks: [MarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) -> AssistantProseLayout {
         var key = ""
         for block in blocks {
             let kind = switch block.kind {
             case .heading(let level): "h\(level)"
             case .listItem: "li"
             case .orderedListItem(let number): "ol\(number)"
+            case .quote: "q"
             case .paragraph: "p"
-            case .codeBlock, .table: "card"
+            case .codeBlock, .table, .rule: "card"
             }
             key += "\(block.id)\u{1}\(kind)\u{1}\(block.text)\u{2}"
         }
@@ -305,7 +283,7 @@ struct AssistantProseLayout {
         return cache.value(slot: slot, key: key) { AssistantProseLayout(blocks: blocks, responseAnnotations: responseAnnotations) }
     }
 
-    init(blocks: [AssistantMarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) {
+    init(blocks: [MarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) {
         let text = NSMutableAttributedString()
         var placed: [PlacedBlock] = []
         for (index, block) in blocks.enumerated() {
@@ -318,13 +296,17 @@ struct AssistantProseLayout {
             case .heading: style.paragraphSpacing = 8
             case .listItem, .orderedListItem:
                 style.paragraphSpacing = next.map(Self.isListItem) == true ? 6 : 14
-            case .paragraph, .codeBlock, .table:
+            case .quote, .paragraph, .codeBlock, .table, .rule:
                 style.paragraphSpacing = next.map(Self.isListItem) == true ? 10 : 14
+            }
+            if case .quote = block.kind {
+                style.firstLineHeadIndent = Self.quoteIndent
+                style.headIndent = Self.quoteIndent
             }
             let marker: (text: String, font: NSFont)? = switch block.kind {
             case .listItem: ("•", Self.bulletFont)
             case .orderedListItem(let number): ("\(number).", Self.markerFont)
-            case .heading, .paragraph, .codeBlock, .table: nil
+            case .heading, .quote, .paragraph, .codeBlock, .table, .rule: nil
             }
             if let marker {
                 // Wrapped lines align under the text, past the widest marker ("10.", "100.").
@@ -340,7 +322,7 @@ struct AssistantProseLayout {
                 ]))
             }
             let content = NSMutableAttributedString(
-                attributedString: TaskConversationView.markdownNSAttributedString(block.text, baseFont: block.font)
+                attributedString: MarkdownInlineText.nsAttributedString(block.text, baseFont: block.font)
             )
             // Replaced here rather than by the text view, so offsets count the visible labels.
             SelectableAnnotationText.replaceResponseAnnotationMarkers(in: content, references: responseAnnotations)
@@ -349,6 +331,11 @@ struct AssistantProseLayout {
                 if font == nil { content.addAttribute(.font, value: block.font, range: range) }
             }
             content.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: content.length))
+            if case .quote = block.kind {
+                content.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: content.length)) { color, range, _ in
+                    if color == nil { content.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range) }
+                }
+            }
             text.append(content)
             placed.append(PlacedBlock(
                 block: block,
@@ -398,7 +385,8 @@ struct AssistantProseLayout {
             case .heading: ("assistant-markdown-heading-\(placed.block.id)", content)
             case .listItem: ("assistant-markdown-list-item-\(placed.block.id)", content)
             case .orderedListItem(let number): ("assistant-markdown-ordered-list-item-\(placed.block.id)", "\(number). " + content)
-            case .paragraph, .codeBlock, .table: ("assistant-markdown-paragraph-\(placed.block.id)", content)
+            case .quote: ("assistant-markdown-quote-\(placed.block.id)", content)
+            case .paragraph, .codeBlock, .table, .rule: ("assistant-markdown-paragraph-\(placed.block.id)", content)
             }
             return CommentTrackingTextView.AccessibilityBlock(identifier: identifier, label: label, range: placed.lineRange)
         }
@@ -410,6 +398,9 @@ struct CodeBlockCardView: View {
     let code: String
     let language: String?
     let font: NSFont
+    /// Starts the card's accessibility identifiers (`<prefix>-…-<blockID>`); nil leaves them unset.
+    /// A Markdown atom passes its own testID, so its cards never match the transcript's.
+    var identifierPrefix: String? = "assistant-markdown"
 
     @State private var didCopy = false
     @State private var copyFeedbackToken = UUID()
@@ -426,7 +417,7 @@ struct CodeBlockCardView: View {
                     .font(.system(size: 12, weight: .semibold))
                 Text(languageDisplayName)
                     .font(.system(size: 12, weight: .medium))
-                    .accessibilityIdentifier("assistant-markdown-code-block-language-\(blockID)")
+                    .cardIdentifier(identifierPrefix.map { "\($0)-code-block-language-\(blockID)" })
                 Spacer()
                 Button {
                     NSPasteboard.general.clearContents()
@@ -445,7 +436,7 @@ struct CodeBlockCardView: View {
                 .buttonHoverPointer()
                 .nativeHelp("Copy code")
                 .accessibilityLabel("Copy code")
-                .accessibilityIdentifier("assistant-markdown-code-block-copy-\(blockID)")
+                .cardIdentifier(identifierPrefix.map { "\($0)-code-block-copy-\(blockID)" })
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)

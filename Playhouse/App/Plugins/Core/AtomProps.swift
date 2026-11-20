@@ -9,6 +9,7 @@ import Foundation
 enum AtomType: String, CaseIterable, Sendable {
     case stack = "Stack"
     case text = "Text"
+    case markdown = "Markdown"
     case icon = "Icon"
     case image = "Image"
     case label = "Label"
@@ -53,15 +54,15 @@ enum AtomType: String, CaseIterable, Sendable {
         case .popover, .modal: ["onDismiss"]
         case .stepSlider: ["onChange"]
         case .scroll: ["onEndReached"]
-        case .stack, .text, .icon, .image, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
+        case .stack, .text, .markdown, .icon, .image, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
         }
     }
 
-    /// Whether the atom shows atom children. A Text holds only raw strings.
+    /// Whether the atom shows atom children. A Text or Markdown holds only raw strings.
     var takesAtomChildren: Bool {
         switch self {
         case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .overlay, .popover, .modal, .page, .sidePanel: true
-        case .text, .icon, .image, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
+        case .text, .markdown, .icon, .image, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
         }
     }
 
@@ -71,19 +72,22 @@ enum AtomType: String, CaseIterable, Sendable {
     var isContainer: Bool {
         switch self {
         case .stack, .panel, .card, .scroll, .disclosure, .overlay, .popover, .modal, .page, .sidePanel: true
-        case .text, .icon, .image, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
+        case .text, .markdown, .icon, .image, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
              .toggle, .textField, .segmented, .menu, .pressArea, .editor, .stepSlider: false
         }
     }
+
+    /// Whether the atom shows its raw string children (`PluginNode.textType`) as its text.
+    var takesStrings: Bool { self == .text || self == .markdown }
 
     /// Checks that `parent` shows a `child` node of that type (`PluginNode.textType` for raw strings).
     static func validateChild(parent: String, child: String) throws {
         if parent == "#root" { return }
         let isText = child == "#text"
         guard let atom = AtomType(rawValue: parent),
-              isText ? atom == .text : atom.takesAtomChildren else {
+              isText ? atom.takesStrings : atom.takesAtomChildren else {
             throw PluginTreeError(message: isText
-                ? "<\(parent)> can't hold a string; put it in a <Text>."
+                ? "<\(parent)> can't hold a string; put it in a <Text> or <Markdown>."
                 : "<\(parent)> can't hold <\(child)>.")
         }
     }
@@ -92,6 +96,7 @@ enum AtomType: String, CaseIterable, Sendable {
         switch self {
         case .stack: Self.keys(StackProps.CodingKeys.self)
         case .text: Self.keys(TextProps.CodingKeys.self)
+        case .markdown: Self.keys(MarkdownProps.CodingKeys.self)
         case .icon: Self.keys(IconProps.CodingKeys.self)
         case .image: Self.keys(ImageProps.CodingKeys.self)
         case .label: Self.keys(LabelProps.CodingKeys.self)
@@ -144,6 +149,7 @@ enum AtomType: String, CaseIterable, Sendable {
             switch atom {
             case .stack: _ = try StackProps.decode(props)
             case .text: _ = try TextProps.decode(props)
+            case .markdown: _ = try MarkdownProps.decode(props).validateFrontmatter()
             case .icon: _ = try IconProps.decode(props)
             case .image: _ = try ImageProps.decode(props).validateURL()
             case .label: _ = try LabelProps.decode(props)
@@ -310,6 +316,36 @@ struct TextProps: AtomPropsDecodable, Equatable {
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits, align
+    }
+}
+
+/// Markdown, from `text` or the atom's raw string children, rendered as
+/// formatted blocks: headings, bullet and numbered lists, quotes, fenced code
+/// (in a card with a copy button), pipe tables, rules and paragraphs, with
+/// bold, italic, inline code and links (opened in the default browser).
+/// `size` is the body text's point size (13 by default); headings scale from
+/// it. `color` colors the prose. `selectable` lets the reader select its text.
+/// `frontmatter` decides what a leading `---` YAML block shows as: "table"
+/// (a small table of its entries) or "hide"; unset, it is plain Markdown.
+struct MarkdownProps: AtomPropsDecodable, Equatable {
+    var text: String?
+    var size: Double?
+    var color: String?
+    var selectable: Bool?
+    var frontmatter: String?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case text, size, color, selectable, frontmatter }
+
+    static let frontmatterModes = ["table", "hide"]
+
+    /// Checks `frontmatter` names a mode, so a typo isn't silently shown as Markdown.
+    @discardableResult
+    func validateFrontmatter() throws -> Self {
+        if let frontmatter, !Self.frontmatterModes.contains(frontmatter) {
+            throw PluginTreeError(message:
+                "<Markdown> has an invalid prop: frontmatter: expected \"table\" or \"hide\", found \"\(frontmatter)\"")
+        }
+        return self
     }
 }
 

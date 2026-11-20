@@ -152,6 +152,9 @@ struct TableBlockView: View {
     let alignments: [MarkdownTableColumnAlignment]
     let rows: [[String]]
     let font: NSFont
+    /// Starts the card's accessibility identifiers (`<prefix>-…-<blockID>`); nil leaves them unset.
+    /// A Markdown atom passes its own testID, so its cards never match the transcript's.
+    var identifierPrefix: String? = "assistant-markdown"
 
     private func alignment(forColumn column: Int) -> MarkdownTableColumnAlignment {
         column < alignments.count ? alignments[column] : .leading
@@ -174,7 +177,7 @@ struct TableBlockView: View {
     /// The vertical `fixedSize` lets a cell take the full height of its wrapped text; without it
     /// the `Grid` row settles on a shorter height and long cells are cut off with an ellipsis.
     private func cellText(_ cell: String, weight: Font.Weight = .regular) -> some View {
-        let formatted = TaskConversationView.markdownNSAttributedString(cell, baseFont: font)
+        let formatted = MarkdownInlineText.nsAttributedString(cell, baseFont: font)
         return Text((try? AttributedString(formatted, including: \.appKit)) ?? AttributedString(cell))
             .font(.system(size: font.pointSize, weight: weight))
             .fixedSize(horizontal: false, vertical: true)
@@ -188,7 +191,7 @@ struct TableBlockView: View {
                         .multilineTextAlignment(alignment(forColumn: column).textAlignment)
                         .frame(maxWidth: .infinity, alignment: frameAlignment(forColumn: column))
                         .padding(8)
-                        .accessibilityIdentifier("assistant-markdown-table-\(blockID)-header-\(column)")
+                        .cardIdentifier(identifierPrefix.map { "\($0)-table-\(blockID)-header-\(column)" })
                 }
             }
             .background(WorkspaceTheme.inputBackground)
@@ -202,7 +205,7 @@ struct TableBlockView: View {
                             .multilineTextAlignment(alignment(forColumn: column).textAlignment)
                             .frame(maxWidth: .infinity, alignment: frameAlignment(forColumn: column))
                             .padding(8)
-                            .accessibilityIdentifier("assistant-markdown-table-\(blockID)-cell-\(rowIndex)-\(column)")
+                            .cardIdentifier(identifierPrefix.map { "\($0)-table-\(blockID)-cell-\(rowIndex)-\(column)" })
                     }
                 }
                 if rowIndex < rows.count - 1 {
@@ -213,7 +216,7 @@ struct TableBlockView: View {
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.secondary.opacity(0.25)))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("assistant-markdown-table-\(blockID)")
+        .cardIdentifier(identifierPrefix.map { "\($0)-table-\(blockID)" })
     }
 }
 
