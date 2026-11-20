@@ -227,21 +227,28 @@ extension TaskConversationView {
     /// Shows the cached provider model list and remembered selection without a
     /// bridge round trip, so the picker never has to fall back to the literal
     /// "Default" placeholder just because the live fetch hasn't returned yet.
+    /// Reads for the provider the window shows, which a switch changes before it is saved.
     func primeModelOptionsFromCache() {
-        selectedModelID = (try? conversationManager.modelID(taskID: task.id)) ?? ""
+        selectedModelID = (try? conversationManager.modelID(taskID: task.id, provider: provider)) ?? ""
         selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
-        if let cachedModels = try? conversationManager.cachedModels(taskID: task.id), !cachedModels.isEmpty {
+        if let cachedModels = try? conversationManager.cachedModels(taskID: task.id, provider: provider), !cachedModels.isEmpty {
             modelOptions = cachedModels.newestVersionPerFamily()
         }
     }
 
     func loadModels() async {
         primeModelOptionsFromCache()
+        // The daemon lists the saved provider's models; a switch still saving loads them once saved.
+        guard !isSwitchingProvider else { return }
+        let refreshedProvider = provider
         let selectionAtRefreshStart = selectedModelID
         do {
-            modelOptions = try await conversationManager.models(taskID: task.id)
+            let models = try await conversationManager.models(taskID: task.id)
+            // A switch while the list loaded shows the other provider's models instead.
+            guard provider == refreshedProvider else { return }
+            modelOptions = models
             if selectedModelID == selectionAtRefreshStart {
-                selectedModelID = (try? conversationManager.modelID(taskID: task.id)) ?? selectedModelID
+                selectedModelID = (try? conversationManager.modelID(taskID: task.id, provider: provider)) ?? selectedModelID
             }
             if !currentEffortChoices.contains(selectedEffort) {
                 selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
@@ -305,9 +312,11 @@ extension TaskConversationView {
         let effortChanged = selectedEffort != pickerEffort
         selectedModelID = pickerModelID
         selectedEffort = pickerEffort
+        // The choice is the shown provider's, even while a switch to it is being saved.
+        let modelProvider = provider
         Task { @MainActor in
             do {
-                try await conversationManager.setModelID(taskID: task.id, modelID: pickerModelID)
+                try await conversationManager.setModelID(taskID: task.id, modelID: pickerModelID, provider: modelProvider)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -911,27 +920,88 @@ extension TaskConversationView {
             : "Wait for the current turn, questions, and queued follow-ups to finish before switching"
     }
 
+    /// The transcript is Playhouse's own and stays as it is: a switch only decides who
+    /// runs the next turn. So the window shows the switch at once, from what it already
+    /// holds (the cached models, the remembered model and the divider), while the daemon
+    /// saves it. The provider's live model list and its notice follow in the background.
     func switchProvider(to newProvider: ConversationProvider) {
         guard newProvider != provider, canSwitchProvider else { return }
+        let shownBoundaries = providerBoundaries
+        let shownModels = modelOptions
+        let shownModelID = selectedModelID
+        let shownNotice = providerNotice
+        providerBoundaries = providerBoundaries(afterSwitchingTo: newProvider)
         isSwitchingProvider = true
-        Task { @MainActor in
-            defer { isSwitchingProvider = false }
+        switchedProvider = newProvider
+        isEnteringGoal = false
+        errorMessage = nil
+        providerNotice = nil
+        modelOptions = []
+        primeModelOptionsFromCache()
+        providerSwitch = Task { @MainActor in
+            defer {
+                isSwitchingProvider = false
+                providerSwitch = nil
+            }
             do {
-                _ = try await conversationManager.setProvider(taskID: task.id, provider: newProvider)
-                isEnteringGoal = false
-                errorMessage = nil
-                providerNotice = nil
-                modelOptions = []
-                await loadConversation()
-                await loadModels()
-                await loadProviderNotice()
+                providerBoundaries = try await conversationManager.setProvider(taskID: task.id, provider: newProvider).providerBoundaries
             } catch {
+                // The switch didn't happen, so the window shows what it showed before.
+                switchedProvider = nil
+                providerBoundaries = shownBoundaries
+                modelOptions = shownModels
+                selectedModelID = shownModelID
+                providerNotice = shownNotice
                 errorMessage = error.localizedDescription
+                return
+            }
+            if task.conversationProvider == newProvider {
+                switchedProvider = nil
+            } else {
+                // The task model reports the saved switch, or another client's switch since, on
+                // its next change. Should those two writes merge into no change at all, the
+                // window stops showing its own switch here rather than go on showing it.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    if !isSwitchingProvider, switchedProvider == newProvider { switchedProvider = nil }
+                }
+            }
+            Task { await loadModels() }
+            Task { await loadProviderNotice() }
+            // Goals are Codex's, so the goal follows the provider too.
+            Task { @MainActor in
+                let goal = try? await conversationManager.goal(taskID: task.id)
+                guard provider == newProvider else { return }
+                activeGoal = goal
+                goalStatusUpdatedAt = .now
             }
         }
     }
+
+    /// The dividers once the conversation switches to `newProvider`, as the daemon records
+    /// the switch: a switch still waiting for its first message is replaced instead of
+    /// leaving an empty divider, and returning to the latest message's provider leaves none.
+    /// They show only until the switch is saved, which returns the recorded dividers.
+    func providerBoundaries(afterSwitchingTo newProvider: ConversationProvider) -> [ConversationProviderBoundary] {
+        guard let lastMessage = messages.last else { return providerBoundaries }
+        var boundaries = providerBoundaries
+        var latestProvider = provider
+        if boundaries.last?.afterMessageID == lastMessage.id {
+            boundaries.removeLast()
+            latestProvider = boundaries.last?.provider ?? lastMessage.provider ?? newProvider
+        }
+        if latestProvider != newProvider {
+            boundaries.append(ConversationProviderBoundary(
+                id: "provider-boundary-switch-\(UUID().uuidString)", provider: newProvider, afterMessageID: lastMessage.id
+            ))
+        }
+        return boundaries
+    }
+
     func loadProviderNotice() async {
+        let noticeProvider = provider
         guard let capabilities = try? await conversationManager.providerCapabilities(taskID: task.id),
+              provider == noticeProvider,
               let current = capabilities.first(where: { $0.provider == provider }) else { return }
         if let error = current.error, !current.isAvailable {
             providerNotice = error

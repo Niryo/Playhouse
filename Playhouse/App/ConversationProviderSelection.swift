@@ -75,16 +75,22 @@ extension ConversationManager {
     }
 
     func modelID(taskID: UUID) throws -> String? {
+        try modelID(taskID: taskID, provider: tasks.conversationSubject(taskID).conversationProvider)
+    }
+
+    /// The model the conversation would run with `provider`, which need not be the
+    /// provider it runs now: a window shows a switch before the switch is saved.
+    func modelID(taskID: UUID, provider: ConversationProvider) throws -> String? {
         let task = try tasks.conversationSubject(taskID)
-        let key = selectedModelKey(for: task.conversationProvider)
-        if let conversationModelID = task.conversationModelID {
-            return supersededSelection(conversationModelID, provider: task.conversationProvider, key: nil)
+        let key = selectedModelKey(for: provider)
+        if let conversationModelID = task.conversationModelID(for: provider) {
+            return supersededSelection(conversationModelID, provider: provider, key: nil)
         }
-        if let historicalModelID = latestTranscriptModelID(taskID: taskID, provider: task.conversationProvider) {
-            return supersededSelection(historicalModelID, provider: task.conversationProvider, key: nil)
+        if let historicalModelID = latestTranscriptModelID(taskID: taskID, provider: provider) {
+            return supersededSelection(historicalModelID, provider: provider, key: nil)
         }
         if let selectedModelID = preferences.string(forKey: key) {
-            return supersededSelection(selectedModelID, provider: task.conversationProvider, key: key)
+            return supersededSelection(selectedModelID, provider: provider, key: key)
         }
         return nil
     }
@@ -135,10 +141,11 @@ extension ConversationManager {
         return try await tasks.setConversationContextMode(taskID, mode: mode)
     }
 
-    func setModelID(taskID: UUID, modelID: String) async throws {
-        let task = try tasks.conversationSubject(taskID)
-        try await tasks.setConversationModelID(taskID, modelID: modelID)
-        preferences.set(modelID, forKey: selectedModelKey(for: task.conversationProvider))
+    /// Without `provider`, the choice is the current provider's.
+    func setModelID(taskID: UUID, modelID: String, provider: ConversationProvider? = nil) async throws {
+        let provider = try provider ?? tasks.conversationSubject(taskID).conversationProvider
+        try await tasks.setConversationModelID(taskID, modelID: modelID, provider: provider)
+        preferences.set(modelID, forKey: selectedModelKey(for: provider))
     }
     // MARK: - Providers
 
@@ -280,7 +287,15 @@ extension ConversationManager {
         return record
     }
 
-    /// Returns the visible history once nothing is still running or waiting.
+    /// The provider dividers a history read shows, from the newest page alone.
+    func providerBoundaries(taskID: UUID) async throws -> [ConversationProviderBoundary] {
+        try await history(taskID: taskID, messageLimit: 1).providerBoundaries
+    }
+
+    /// Returns the newest page of history once nothing is still running or waiting.
+    /// A page is enough: it carries the saved question request and every subagent's
+    /// activity, and a question still waiting for its answer is the latest turn's.
+    /// Composing a long conversation in full held up every switch for its length.
     func requireSettledConversation(_ task: any ConversationSubject) async throws -> ConversationHistory {
         let client = client(for: task)
         if try tasks.hasConversationTurnReservation(task.id) || activeSendTaskIDs.contains(task.id) {
@@ -297,7 +312,7 @@ extension ConversationManager {
         if !(try tasks.queuedConversationMessages(taskID: task.id)).isEmpty {
             throw Self.switchBlocked("Send or remove the queued follow-ups before switching providers.")
         }
-        let history = try await self.history(taskID: task.id)
+        let history = try await self.history(taskID: task.id, messageLimit: Self.settledCheckMessageLimit)
         if history.pendingUserInputRequest != nil {
             throw Self.switchBlocked("Answer the pending structured question before switching providers.")
         }
@@ -308,6 +323,9 @@ extension ConversationManager {
         }
         return history
     }
+
+    /// The page the settled check reads; any page holding the latest turn will do.
+    static let settledCheckMessageLimit = 80
 
     static func switchBlocked(_ message: String) -> BridgeCommandError {
         PlayhouseDiagnostics.record("conversation.provider.switch.blocked", fields: ["reason": message])

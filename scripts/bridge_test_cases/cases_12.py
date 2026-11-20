@@ -260,7 +260,13 @@ class BridgeTestCases12:
         )[0])
         self.assertEqual(older["earlierMessageCount"], 0)
         self.assertEqual([message["text"] for message in older["messages"]], [message["text"] for message in messages[:40]])
-        paged_reads = [event for event in self.diagnostic_events()
+        events = self.diagnostic_events()
+        # The switch's own settled check reads a page too; only the paging reads after it count here.
+        switch_succeeded = max(
+            index for index, event in enumerate(events)
+            if event.get("event") == "conversation.provider.switch.succeeded" and event.get("taskID") == task_id.upper()
+        )
+        paged_reads = [event for event in events[switch_succeeded:]
                        if event.get("event") == "conversation.history.read" and event.get("taskID") == task_id.upper()
                        and event.get("messageLimit") == "80"]
         self.assertEqual([read["source"] for read in paged_reads], ["stored-page", "stored-page"],

@@ -584,10 +584,15 @@ final class PlayhouseBridgeRuntime {
                 ])
             case "conversation.provider.set":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
-                result = try Self.value(await conversations.setProvider(
-                    taskID: request.requiredUUID("taskID"),
+                let taskID = try request.requiredUUID("taskID")
+                let record = try await conversations.setProvider(
+                    taskID: taskID,
                     provider: ConversationProvider.parse(request.requiredString("provider"))
-                ))
+                )
+                guard case .object(var fields) = try Self.value(record) else { throw BridgeCommandError(code: "internal_error", message: "The task record could not be encoded.") }
+                // The dividers as recorded, which replace the ones a window drew when it showed the switch.
+                fields["providerBoundaries"] = try Self.value(await conversations.providerBoundaries(taskID: taskID))
+                result = .object(fields)
             case "plugin.mode":
                 if let enabled = request.arguments["enabled"]?.bool {
                     settings.setPluginAddMode(enabled)

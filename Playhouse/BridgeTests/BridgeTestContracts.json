@@ -581,7 +581,11 @@
   },
   {
     "id": "test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary",
-    "expectation": "After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread."
+    "expectation": "After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread. The switch is shown at once from what is cached, and its settled check reads only the newest page of history instead of composing the whole transcript: while Claude's live model list and capabilities are still loading, the switched task already reads Claude's cached models and the remembered Claude model, and the window shows the divider, that model and an enabled provider menu, with Claude's notice following once its capabilities load. A rejected switch leaves the provider unchanged. A saved switch returns the dividers it recorded, and switching back returns none."
+  },
+  {
+    "id": "test_conversation_provider_switch_rejected_by_daemon_rolls_back",
+    "expectation": "With a Codex fixture turn ended on an unanswered non-blocking question and the task Waiting Response, the daemon rejects a switch to Claude with its pending-question reason, leaves the task on Codex, and fresh history shows no provider divider. The window, whose provider menu stays enabled in that state, shows the daemon's reason after the click and returns to Codex: the menu reads Codex, no divider remains, and the model picker shows the Codex model it showed before the click."
   },
   {
     "id": "test_claude_answer_stays_final_around_outcome_report",
