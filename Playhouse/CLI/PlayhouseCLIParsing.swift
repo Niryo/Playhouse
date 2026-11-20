@@ -1065,13 +1065,14 @@ extension PlayhouseCLI {
                 return BridgeRequest(command: "conversation.events.subscribe", arguments: ["taskID": .string(id)])
             case "history":
                 let options = Array(tail.dropFirst())
-                let flags = try parseFlags(options.filter { $0 != "--defer-images" }, valueFlags: ["--limit", "--before", "--after", "--page"])
+                let flags = try parseFlags(options.filter { $0 != "--defer-images" && $0 != "--include-task" }, valueFlags: ["--limit", "--before", "--after", "--page"])
                 var arguments: [String: BridgeValue] = ["taskID": .string(id)]
                 if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
                 if let before = flags["--before"]?.first { arguments["before"] = .string(before) }
                 if let after = flags["--after"]?.first { arguments["after"] = .string(after) }
                 if let page = flags["--page"]?.first { arguments["page"] = .string(page) }
                 if options.contains("--defer-images") { arguments["deferImages"] = .boolean(true) }
+                if options.contains("--include-task") { arguments["includeTask"] = .boolean(true) }
                 return BridgeRequest(command: "conversation.history", arguments: arguments)
             case "images":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])

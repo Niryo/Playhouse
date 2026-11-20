@@ -72,6 +72,19 @@ enum PluginServiceHost {
 
     private static var running: [UUID: (taskID: String?, task: Task<Void, Never>)] = [:]
 
+    /// How many events in a row may each be raised by a service's reaction to the one
+    /// before. A service's requests carry the depth of the event it heard (`__pluginEventDepth`),
+    /// so two services that keep waking each other, or one that wakes itself through
+    /// another event, stop here instead of running for as long as the daemon lives.
+    /// The depth never resets along a context's life: work that reuses its context (the
+    /// pull request mode's polls) stays at its depth, but a chain that keeps going deeper,
+    /// such as many fix turns each raising a move, ends here (`plugin.event.dropped`).
+    static let maximumEventDepth = 8
+
+    static func eventDepth(of request: BridgeRequest) -> Int {
+        request.arguments["__pluginEventDepth"]?.int ?? 0
+    }
+
     static func publish(_ event: PluginEvent) {
         if let forward {
             forward(event)
@@ -82,11 +95,21 @@ enum PluginServiceHost {
             PlayhouseDiagnostics.record("plugin.event.dropped", fields: ["name": event.name, "reason": "no-origin-request"])
             return
         }
+        let depth = eventDepth(of: origin)
+        guard depth < maximumEventDepth else {
+            PlayhouseDiagnostics.record("plugin.event.dropped", fields: [
+                "name": event.name, "target": event.pluginID ?? "", "reason": "event-chain-too-deep", "depth": String(depth)
+            ])
+            return
+        }
         PlayhouseDiagnostics.record("plugin.event.published", fields: [
             "name": event.name, "taskID": event.payload["taskID"]?.string ?? "", "to": event.payload["to"]?.string ?? "",
             "target": event.pluginID ?? ""
         ])
-        let context = PluginServiceContext(origin: origin)
+        // What the services do in reaction is one event further down the chain.
+        var reacting = origin
+        reacting.arguments["__pluginEventDepth"] = .integer(depth + 1)
+        let context = PluginServiceContext(origin: reacting)
         let taskID = event.payload["taskID"]?.string
         for service in services where accepts(service, event) {
             start(service, event, context: context, taskID: taskID)

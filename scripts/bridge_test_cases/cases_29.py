@@ -36,6 +36,18 @@ Playhouse.service.on("plugin.stateChanged", function (event) {
 });
 """
 
+    # Writes the other plugin's state whenever its own "ball" changes, so two of them would
+    # wake each other forever if a chain of events had no end.
+    PING_PONG_SOURCE = r"""
+Playhouse.service.on("plugin.stateChanged", async function (event) {
+  if (event.key !== "ball") return;
+  var self = Playhouse.props.plugin.id;
+  var hits = ((Playhouse.props.state || {}).hits || 0) + 1;
+  await Playhouse.setState("hits", hits);
+  await Playhouse.bridge("plugin.state.set", { pluginID: self === "ping-service" ? "pong-service" : "ping-service", key: "ball", value: hits });
+});
+"""
+
     HEADLESS_HANDLERS_SOURCE = r"""
 Playhouse.service.on("app.focus", async function () {
   var tasks = await Playhouse.bridge("task.list", {});
@@ -167,7 +179,7 @@ Playhouse.render(h(DMs));
         path.write_text(source, encoding="utf-8")
         return path
 
-    # case-contract: test_plugin_service_events_targeting_and_state | A plugin.json may list "events" (app events from PluginEvent's names, agent.finished included) for a background half next to any presentation, and a headless plugin is valid with only events; an unknown or repeated event, an mcpTools entry that isn't mcp__<server>__<tool>, or a headless plugin with neither commands nor events is reported in its errors. `plugin service --file` runs the script's Playhouse.service.on handlers headlessly in a fresh service runtime per event, where Playhouse.render does nothing: bridge calls are answered, ui calls are refused as unavailable, plugin.services is refused as invalid_argument, mcp.call and agent.run are unavailable unless --mock answers them (also by tool), agent.finished is injected with a fake result whose fields and context reach the handler beside payload, an unknown event is invalid_argument, and the report lists each event's handler count, the bridge calls, the state written and a throwing handler's error (exit 1). In a mounted UI (plugin render) Playhouse.service.on does nothing and mcp.call or agent.run is unavailable unless mocked. In the daemon, app.focus (from the window's activation or plugin event) wakes only the enabled plugins whose manifest lists it, collapsing quick repeats into one trailing run after the cooldown; a plugin's state change is targeted at it, so its own service hears a change made elsewhere while another plugin's service doesn't, and a service never hears its own writes, so a handler that saves on every change doesn't loop; the service writes state that the popover shows from its props, and a disabled plugin's service isn't woken by a focus that still reaches an enabled one.
+    # case-contract: test_plugin_service_events_targeting_and_state | A plugin.json may list "events" (app events from PluginEvent's names, agent.finished included) for a background half next to any presentation, and a headless plugin is valid with only events; an unknown or repeated event, an mcpTools entry that isn't mcp__<server>__<tool>, or a headless plugin with neither commands nor events is reported in its errors. `plugin service --file` runs the script's Playhouse.service.on handlers headlessly in a fresh service runtime per event, where Playhouse.render does nothing: bridge calls are answered, ui calls are refused as unavailable, plugin.services is refused as invalid_argument, mcp.call and agent.run are unavailable unless --mock answers them (also by tool), agent.finished is injected with a fake result whose fields and context reach the handler beside payload, an unknown event is invalid_argument, and the report lists each event's handler count, the bridge calls, the state written and a throwing handler's error (exit 1). In a mounted UI (plugin render) Playhouse.service.on does nothing and mcp.call or agent.run is unavailable unless mocked. In the daemon, app.focus (from the window's activation or plugin event) wakes only the enabled plugins whose manifest lists it, collapsing quick repeats into one trailing run after the cooldown; a plugin's state change is targeted at it, so its own service hears a change made elsewhere while another plugin's service doesn't, and a service never hears its own writes, so a handler that saves on every change doesn't loop; two services that each write the other's state whenever their own changes stop after a bounded chain of events, each running four times for the eight events a chain may reach, instead of waking each other for as long as the daemon lives; the service writes state that the popover shows from its props, and a disabled plugin's service isn't woken by a focus that still reaches an enabled one.
     def test_plugin_service_events_targeting_and_state(self):
         # Manifest validation.
         self.write_installed_plugin("bad-events", self.QUIET_PLUGIN_SOURCE, placement="composerActions", presentation="headless",
@@ -252,6 +264,15 @@ Playhouse.render(h(DMs));
         time.sleep(1)
         self.assertEqual(self.plugin_state("focus-service")["heard"], ["focus-service:note"], "A service never hears its own writes, so it doesn't loop.")
         self.assertNotIn("heard", self.plugin_state("other-service"), "Another plugin's state change doesn't wake this service.")
+        # Two services that keep waking each other stop once their chain of events is long enough.
+        for pinger in ("ping-service", "pong-service"):
+            self.write_installed_plugin(pinger, self.PING_PONG_SOURCE, placement="composerActions", presentation="headless",
+                                        manifest={"events": ["plugin.stateChanged"]})
+        self.assert_success(self.call_cli("plugin", "state", "--id", "ping-service", "--key", "ball", "--value", "0")[0])
+        hits = lambda: (self.plugin_state("ping-service").get("hits"), self.plugin_state("pong-service").get("hits"))
+        self.wait_for(lambda: hits() == (4, 4), "Each service runs four times in the chain.", timeout=30)
+        time.sleep(2)
+        self.assertEqual(hits(), (4, 4), "The chain ends rather than looping for as long as the daemon lives.")
         rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "focus-service")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "service-focused")), "focused 2", "The popover shows what its service saved.")
         self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "service-active")), "service false")

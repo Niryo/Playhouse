@@ -264,7 +264,28 @@ enum PlayhouseBridgeDaemonMain {
             PluginServiceHost.scriptServices = { await JavaScriptPluginService.services($0) }
         }
         startScheduleTicker(environment: environment)
+        exitOnceBuildIsRemoved(lifecycle: lifecycle)
         RunLoop.current.run()
+    }
+
+    /// A test build's daemon leaves once its app bundle is deleted (an E2E build cache
+    /// pruned, a test VM snapshot replaced). Idle exit alone can't end a daemon that
+    /// background work keeps busy, and nothing can reach a deleted build's daemon again.
+    /// An installed app's daemon is left alone: an update replaces its bundle in place.
+    /// The daemon sits in its app's `Contents/MacOS`, so `Bundle.main` is that app and the
+    /// path watched is the app's own executable, which goes with the rest of the build.
+    private static func exitOnceBuildIsRemoved(lifecycle: DaemonLifecycle) {
+        guard BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier),
+              let executable = Bundle.main.executablePath else { return }
+        let watchdog = Thread {
+            while FileManager.default.fileExists(atPath: executable) {
+                Thread.sleep(forTimeInterval: 30)
+            }
+            daemonLog("its build at \(executable) was removed; exiting")
+            lifecycle.shutDown()
+        }
+        watchdog.name = "playhouse-daemon.build-watchdog"
+        watchdog.start()
     }
 
     /// Takes the socket's instance lock for the life of this process. It is closed on exec, so

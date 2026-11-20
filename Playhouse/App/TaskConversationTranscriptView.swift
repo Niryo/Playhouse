@@ -64,7 +64,11 @@ extension TaskConversationView {
                             }
                         }
                     } else {
-                        if activeGoal?.status != "complete" && !isLoadingHistory {
+                        // No messages yet may only mean the first read hasn't come back: an
+                        // empty state then would claim the conversation is empty while it loads.
+                        if !hasLoadedConversation && !isNewTask {
+                            conversationHistoryLoadingPlaceholder
+                        } else if activeGoal?.status != "complete" && (isNewTask || !isLoadingHistory) {
                             emptyConversationPlaceholder
                         }
                         if shouldShowActivityDisclosure {
@@ -147,6 +151,20 @@ extension TaskConversationView {
                 scroll.pin(.bottom, animated: true)
             }
         }
+    }
+
+    /// Shown in place of the transcript until the conversation's opening history read answers.
+    var conversationHistoryLoadingPlaceholder: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading conversation…")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 280)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("conversation-history-loading")
     }
 
     /// Shown in place of the transcript while the conversation has no messages.

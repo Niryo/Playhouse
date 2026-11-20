@@ -186,8 +186,8 @@ enum CLICommandCatalog {
         command("plugin author", "--placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions|taskItem> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>]",
                 "Start authoring a new plugin at a placement.", internalUse),
 
-        command("conversation history", "<task-id> [--limit <messages>] [--before <message-id> | --after <message-id> | --page <chat-page-id>] [--defer-images]",
-                "Read a task's conversation.", board),
+        command("conversation history", "<task-id> [--limit <messages>] [--before <message-id> | --after <message-id> | --page <chat-page-id>] [--defer-images] [--include-task]",
+                "Read a task's conversation; --include-task also returns the task as the read reconciled it.", board),
         command("conversation outline", "<task-id>",
                 "Map a task's conversation by position: each turn's user message, its agent messages and tool calls, and its final answer.", readBoard),
         command("conversation read", "<task-id> [--at <position>[,<position>...]] [--from <position>] [--to <position>] [--kinds <user,steer,agent,final,plan,subagent,playhouse,tool>] [--include-tools]",
