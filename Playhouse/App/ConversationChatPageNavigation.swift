@@ -315,6 +315,55 @@ extension TaskConversationView {
         }
     }
 
+    /// Right above the standalone chat's composer: a plus button that starts a new page, and once
+    /// pressed, that page's separator, which the user can remove before sending. The next message
+    /// then runs without the last page's context; sending or removing the page brings the button back.
+    @ViewBuilder
+    var newChatPageControl: some View {
+        if task.isStandaloneChat, !isReadOnly {
+            if startsNewChatPage {
+                newChatPageSeparator(removable: true)
+            } else if !messages.isEmpty, !sendsNewChatPage, !isResponding {
+                // The plus sits on a page rule, so it reads as the place a new page would begin.
+                AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: "new-chat-page-rule", paddingY: 2)) {
+                    transcriptRule(opacity: 0.13)
+                    NewChatPageButton {
+                        startsNewChatPage = true
+                        returnToLatestMessages()
+                        isComposerFocused = true
+                    }
+                    transcriptRule(opacity: 0.13)
+                }
+            }
+        }
+    }
+
+    /// The separator of a page the user started, titled "New page" until its first turn names it.
+    func newChatPageSeparator(removable: Bool) -> some View {
+        AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(testID: "new-chat-page-separator", paddingY: 5)) {
+            transcriptRule(opacity: 0.13)
+            AtomText(props: TextProps(text: StandaloneChatManager.newPageTitle, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "new-chat-page-title"))
+                .layoutPriority(1)
+            if removable {
+                Button {
+                    startsNewChatPage = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .nativeHelp("Remove the new page: the next message continues the current page")
+                .accessibilityLabel("Remove new page")
+                .accessibilityIdentifier("new-chat-page-remove")
+            }
+            transcriptRule(opacity: 0.13)
+        }
+    }
+
     /// Whether the chat has page labels to offer: only the standalone chat has pages, and a
     /// narrow chat keeps its width for messages.
     func offersChatPageAnchors(transcriptWidth: CGFloat) -> Bool {
@@ -419,6 +468,29 @@ extension TaskConversationView {
             .accessibilityIdentifier("chat-jump-to-latest")
             .padding(.bottom, 10)
         }
+    }
+}
+
+/// The small plus above the standalone chat's composer that starts a new page.
+struct NewChatPageButton: View {
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(isHovering ? Color.primary : Color.secondary)
+                .frame(width: 22, height: 22)
+                .background(Color.primary.opacity(isHovering ? 0.12 : 0.06), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .onHover { isHovering = $0 }
+        .nativeHelp("New page: your next message starts a new topic without the current page's context")
+        .accessibilityLabel("New page")
+        .accessibilityIdentifier("new-chat-page-button")
     }
 }
 

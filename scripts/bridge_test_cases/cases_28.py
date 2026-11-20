@@ -25,6 +25,145 @@ class BridgeTestCases28:
         self.assertTrue(matches, f"The Claude fixture never received a turn ending with {message!r}.")
         return matches[-1]
 
+    # case-contract: test_standalone_chat_new_page_skips_last_page_context | A standalone chat's next message can start a new page, so it runs without the last page's context. Without it, a message continues the active page and resumes that page's provider session. The CLI's conversation send --new-page, and in the chat the small New page plus button, centered on a page rule right above the composer (absent from an empty chat), open a page titled "New page" that Playhouse marks as the user's own, before the turn, whose turn starts a fresh provider session, never resuming the last page's: its prompt carries a Playhouse page header naming that "New page" as the current page, telling the agent the user started it for a new topic and to name it in close-turn, and listing the earlier page by title and ID only so it can still be read, while none of the last page's turns travel with it. While the turn runs it is already on that page, still titled "New page" with no messages, and the chat shows a "New page" separator without a remove button above the sent message and no plus button. The agent's close-turn --new-title names that page instead of opening another one, so the chat gains exactly one page, holding the turn, the earlier page keeps its own messages, and the next message without New page resumes the new page's session; a close-turn with --continues true and no title leaves the page to the fallback classifier, which names it from the message, so it never keeps its placeholder title. A New page send that fails leaves its empty page, which another New page send reuses, running there in a fresh session that opens with the New page header again and names it, and a send without New page instead removes it and continues the page before it, resuming that page's session; in the chat, a New page send that fails keeps its removable New page separator, so the next message still starts that page. In the chat, pressing the button replaces it with a "New page" separator with a remove button; removing it brings the button back and the next message continues the active page, and once a message is sent with it the turn sits under the page's separator showing its real title and the button comes back; no plus button shows while any turn runs, a plain one included. --new-page on a board task is invalid_argument. The page is opened in Playhouse's provider-neutral turn path before the provider session is chosen and the header reaches either provider as the same seeded context, so one representative provider (Claude) covers the case.
+    def test_standalone_chat_new_page_skips_last_page_context(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable, environment = self.optimized_claude_fixture("claude-fixture-chat-new-page")
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        first_prompt = "Name the largest moon of Jupiter."
+        new_page_prompt = "Suggest a quick pasta dinner."
+        header_line = "The user started this new page for their message"
+
+        def send(message, *extra):
+            self.assert_success(self.call_cli(
+                "conversation", "send", chat_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        def status():
+            return self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+
+        def pages():
+            return self.assert_success(self.call_cli("chat", "page", "list", extra_environment=environment)[0])["pages"]
+
+        def page_texts(page_id):
+            read = self.assert_success(self.call_cli("chat", "page", "read", page_id, extra_environment=environment)[0])
+            return [message["text"] for message in read["messages"]]
+
+        send(first_prompt)
+        first_page = status()["activePage"]
+        first_turn = self.claude_turn_ending(executable, first_prompt)
+
+        # Without New page, the next message continues the active page in its own session.
+        send(new_page_prompt)
+        continued = self.claude_turn_ending(executable, new_page_prompt)
+        self.assertTrue(continued["resumed"], "A message without New page resumes the active page's session.")
+        self.assertEqual(continued["sessionID"], first_turn["sessionID"])
+        self.assertNotIn(header_line, continued["userText"])
+        self.assertEqual(status()["activePage"]["id"], first_page["id"], "The message stays on the active page.")
+
+        # New page: a fresh session that gets the page header but none of the last page's turns.
+        # While the turn runs, it is already on the user's page, still titled "New page".
+        hold = Path(str(executable) + ".hold-new-page")
+        hold.touch()
+        command = ("conversation", "send", chat_id, "--message", new_page_prompt, "--new-page")
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            self.wait_for(lambda: Path(str(executable) + ".new-page-active").exists(), "The New page turn is held.", timeout=30)
+            running = status()["activePage"]
+            self.assertEqual(running["title"], "New page", "The running turn is on the user's page.")
+            self.assertEqual(running["messageCount"], 0)
+            self.assertNotEqual(running["id"], first_page["id"])
+        finally:
+            Path(str(executable) + ".new-page-release").write_text("Release the New page turn.\n", encoding="utf-8")
+        self.finish_cli(process, command)
+        fresh = self.claude_turn_ending(executable, new_page_prompt)
+        self.assertFalse(fresh["resumed"], "A New page message never resumes the last page's session.")
+        self.assertNotEqual(fresh["sessionID"], first_turn["sessionID"])
+        self.assertIn('Current page: "New page" (id: ', fresh["userText"], "The header names the user's new page.")
+        self.assertIn(header_line, fresh["userText"], "The header tells the agent the user started a new topic.")
+        self.assertIn(f'- "{first_page["title"]}" (id: {first_page["id"]}, ', fresh["userText"],
+                      "The earlier page stays listed by title and ID, so the agent can still read it.")
+        for earlier in ("Ganymede", "Cacio e pepe", first_prompt):
+            self.assertNotIn(earlier, fresh["userText"], "None of the last page's turns travel with a New page message.")
+        close_turns = [item for item in fresh["reportCommands"] if " chat page close-turn " in item["command"]]
+        self.assertEqual(len(close_turns), 1)
+        self.assertIn("--continues false", close_turns[0]["command"])
+
+        settled = status()
+        self.assertFalse(settled["missedPreviousPageSignal"])
+        new_page = settled["activePage"]
+        self.assertEqual(new_page["id"], running["id"], "The turn is filed on the page it ran on.")
+        self.assertEqual(new_page["title"], "Pasta dinner", "close-turn names the user's page.")
+        listed = pages()
+        self.assertEqual([page["id"] for page in listed], [new_page["id"], first_page["id"]],
+                         "close-turn names the user's page rather than opening another one.")
+        self.assertEqual(page_texts(new_page["id"]), [new_page_prompt, "Cacio e pepe takes fifteen minutes."],
+                         "The New page turn is filed on the new page.")
+        self.assertEqual(len(page_texts(first_page["id"])), 4, "The earlier page keeps its own messages.")
+        self.assertIsNotNone(listed[1]["closedAt"], "The earlier page is closed.")
+
+        # The next message without New page continues the new page's own session.
+        send(new_page_prompt)
+        follow_up = self.claude_turn_ending(executable, new_page_prompt)
+        self.assertTrue(follow_up["resumed"])
+        self.assertEqual(follow_up["sessionID"], fresh["sessionID"])
+        self.assertEqual(status()["activePage"]["id"], new_page["id"])
+
+        # A New page send that fails leaves its empty page; trying New page again reuses it.
+        def failed_new_page_send():
+            Path(str(executable) + ".fail-new-page").touch()
+            self.call_cli("conversation", "send", chat_id, "--message", new_page_prompt, "--new-page",
+                          expected_status=1, extra_environment=environment)
+            return status()["activePage"]
+        failed = failed_new_page_send()
+        self.assertEqual((failed["title"], failed["messageCount"]), ("New page", 0))
+        self.assertEqual(failed_new_page_send()["id"], failed["id"], "Retrying New page reuses its unfilled page.")
+        self.assertEqual(len(pages()), 3)
+        # Sending without New page then undoes that page and continues the page before it.
+        send(new_page_prompt)
+        undone = self.claude_turn_ending(executable, new_page_prompt)
+        self.assertTrue(undone["resumed"], "Without New page the message continues the earlier page's session.")
+        self.assertEqual(undone["sessionID"], fresh["sessionID"])
+        self.assertNotIn(header_line, undone["userText"])
+        self.assertEqual(status()["activePage"]["id"], new_page["id"])
+        self.assertEqual([page["id"] for page in pages()], [new_page["id"], first_page["id"]],
+                         "The unfilled New page is gone.")
+        # A failed New page send followed by another New page send runs on the kept page, fresh.
+        kept = failed_new_page_send()
+        send(new_page_prompt, "--new-page")
+        retried = self.claude_turn_ending(executable, new_page_prompt)
+        self.assertFalse(retried["resumed"], "The retried New page message starts a fresh session.")
+        self.assertNotEqual(retried["sessionID"], fresh["sessionID"])
+        self.assertIn(header_line, retried["userText"], "The retry opens with the New page header again.")
+        self.assertNotIn("Cacio e pepe", retried["userText"])
+        retried_page = status()["activePage"]
+        self.assertEqual(retried_page["id"], kept["id"], "The retry lands on the kept page.")
+        self.assertEqual(retried_page["title"], "Pasta dinner")
+        self.assertEqual(len(pages()), 3)
+
+        # An agent that closes a New page turn with --continues true and no title leaves the page
+        # to the fallback classifier, which names it from the message.
+        Path(str(executable) + ".continue-new-page").touch()
+        send(new_page_prompt, "--new-page")
+        named = None
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            named = status()
+            if not named["missedPreviousPageSignal"] and named["activePage"]["title"] != "New page":
+                break
+            time.sleep(0.1)
+        self.assertEqual(named["activePage"]["title"], "Classified pasta", "The user's page never keeps its placeholder title.")
+        self.assertNotEqual(named["activePage"]["id"], retried_page["id"])
+        self.assertEqual(page_texts(named["activePage"]["id"]), [new_page_prompt, "Cacio e pepe takes fifteen minutes."])
+        self.assertEqual(len(pages()), 4)
+
+        # Chat pages belong to the standalone chat only.
+        board_task = self.create_task("New page rejection")
+        self.assert_failure(self.call_cli(
+            "conversation", "send", board_task["id"], "--message", "Hello", "--new-page", expected_status=2,
+        )[0], "invalid_argument")
+
     # case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, carries the latest plan in full, states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
     def test_claude_optimized_follow_up_starts_fresh_seeded_session(self):
         executable, environment = self.optimized_claude_fixture("claude-fixture-optimized-follow-up")

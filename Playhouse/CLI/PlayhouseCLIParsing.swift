@@ -1254,7 +1254,7 @@ extension PlayhouseCLI {
             case "send":
                 let options = Array(tail.dropFirst())
                 let flags = try parseFlags(
-                    options.filter { $0 != "--defer-images" },
+                    options.filter { $0 != "--defer-images" && $0 != "--new-page" },
                     valueFlags: ["--message", "--mode", "--model", "--answer", "--image", "--context-page"]
                 )
                 var answers: [String: [String]] = [:]
@@ -1284,6 +1284,8 @@ extension PlayhouseCLI {
                     sendArguments["contextPages"] = .array(contextPages.map(BridgeValue.string))
                 }
                 if options.contains("--defer-images") { sendArguments["deferImages"] = .boolean(true) }
+                // Standalone chat only: the turn starts a new page without the last page's context.
+                if options.contains("--new-page") { sendArguments["newPage"] = .boolean(true) }
                 return BridgeRequest(command: "conversation.send", arguments: sendArguments)
             default: throw CLIError.unknownCommand(args)
             }

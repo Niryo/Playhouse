@@ -714,7 +714,11 @@ enum ConversationHandoff {
     /// only when the user's message actually continues it. Pages the user explicitly attached
     /// to this turn (`fullPages`) still travel whole, under a Playhouse page marker rather
     /// than a line that reads as something the user typed.
-    static func chatPageContext(current: ChatPage?, recentPages: [StandaloneChatPage], fullPages: [ChatPage]) -> String? {
+    /// `currentIsUserNewPage` says the user started the current page with New page for this
+    /// message, so the agent treats it as a new topic and names the page.
+    static func chatPageContext(
+        current: ChatPage?, currentIsUserNewPage: Bool = false, recentPages: [StandaloneChatPage], fullPages: [ChatPage]
+    ) -> String? {
         var sections: [String] = []
         if let current {
             var header = ["Playhouse chat page metadata, not part of the user's message. This standalone chat is split into titled pages, and each page is its own conversation. This session has not loaded any page's turns."]
@@ -725,7 +729,11 @@ enum ConversationHandoff {
             if !recentPages.isEmpty {
                 header.append("Recent pages, newest first:\n" + recentPages.map { "- \(chatPageLabel($0))" }.joined(separator: "\n"))
             }
-            header.append("If the user's message continues the current page or a recent page and this excerpt is not enough, run chat page read <page-id> to load that page before answering. Otherwise do not load any page.")
+            if currentIsUserNewPage {
+                header.append("The user started this new page for their message, so treat it as a new topic rather than a continuation of the previous page. Name the page in this turn's close-turn with --continues false --new-title \"<short title>\"; Playhouse gives this page that title instead of opening another one. You can still read an earlier page with chat page read <page-id> when the message asks about it.")
+            } else {
+                header.append("If the user's message continues the current page or a recent page and this excerpt is not enough, run chat page read <page-id> to load that page before answering. Otherwise do not load any page.")
+            }
             sections.append(header.joined(separator: "\n\n"))
         }
         // Attached pages share one transcript budget, so several never outgrow a single page.

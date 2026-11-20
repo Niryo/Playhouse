@@ -29,6 +29,7 @@ extension PlayhouseBridgeRuntime {
                 userInputAnswers: try request.optionalStringArrays("answers"),
                 statusBeforeSubmission: request.arguments["statusBeforeSubmission"]?.string.flatMap(TaskStatus.init(rawValue:)),
                 contextPageIDs: request.arguments["contextPages"]?.strings ?? [],
+                startsNewChatPage: request.arguments["newPage"]?.bool == true,
                 onTurnStarting: reportsTurnStarting ? {
                     eventHandler(BridgeEvent(requestID: request.id, type: "turn_starting", payload: .object([:])))
                 } : nil,
