@@ -1292,13 +1292,19 @@ extension PlayhouseUITests {
         let row = element(identifier)
         let sidebar = app.scrollViews.containing(NSPredicate(format: "identifier BEGINSWITH %@", "plugin-catalog-atom-")).firstMatch
         XCTAssertTrue(sidebar.waitToExist(timeout: 10), "The Plugin Catalog shows its sidebar.", file: file, line: line)
+        // The sidebar runs under the window's titlebar, where a row still counts as hittable
+        // but a click lands on the titlebar, so the row's center must sit below it.
+        let window = app.windows.containing(.any, identifier: identifier).firstMatch
+        func clickable() -> Bool {
+            row.exists && row.isHittable && row.frame.midY > window.frame.minY + 52
+        }
         // One check per scroll: up first, then down past where it started.
         var scrolls = 0
-        while !(row.exists && row.isHittable), scrolls < 20 {
+        while !clickable(), scrolls < 20 {
             sidebar.scroll(byDeltaX: 0, deltaY: scrolls < 10 ? 200 : -200)
             scrolls += 1
         }
-        XCTAssertTrue(row.exists && row.isHittable, "\(identifier) should be on screen after scrolling the catalog sidebar.", file: file, line: line)
+        XCTAssertTrue(clickable(), "\(identifier) should be on screen, below the titlebar, after scrolling the catalog sidebar.", file: file, line: line)
         return row
     }
     func clickPluginsMenuItem(_ title: String) {

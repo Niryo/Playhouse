@@ -526,6 +526,11 @@ class BridgeTestHelpers01:
             self.complete_fixture_turn(task["id"])
             task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         return task
+    def resolve_repository_defaults(self, task_id, repository):
+        """Works out a pending repository's default branches, as opening its chip does."""
+        response, _ = self.call_cli("task", "repository", "resolve", task_id, "--repo", str(repository))
+        task = self.assert_success(response)
+        return next(item for item in task["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
     def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review", extra_environment=None, while_turn_held=None, outcome="completed"):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / executable_name

@@ -36,6 +36,11 @@ extension PlayhouseBridgeRuntime {
                 branch: request.requiredString("branch"), branchFrom: request.requiredString("branchFrom"),
                 mergeTarget: request.arguments["mergeTarget"]?.string
             ))
+        case "task.repository.resolve":
+            try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
+            return try Self.value(await taskManager.resolveRepositoryDefaults(
+                request.requiredUUID("taskID"), worktree: Self.worktreeSelector(request)
+            ))
         case "task.repository.renew":
             try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
             return try Self.value(await workspaces.renewRepository(Self.worktreeSelector(request), on: request.requiredUUID("taskID")))

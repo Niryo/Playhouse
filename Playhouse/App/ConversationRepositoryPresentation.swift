@@ -17,14 +17,23 @@ extension TaskConversationView {
 
     func saveConversationRepository(_ original: RepositoryWorktreeRecord, field: String) {
         let branch = editedBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-        let branchFrom = editedBranchFrom.trimmingCharacters(in: .whitespacesAndNewlines)
-        let mergeTarget = editedMergeTarget.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !branch.isEmpty, !branchFrom.isEmpty else {
+        var branchFrom = editedBranchFrom.trimmingCharacters(in: .whitespacesAndNewlines)
+        var mergeTarget = editedMergeTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A field saved before the chip worked its defaults out waits for them below.
+        let awaitsDefaults = currentRepositoryRecord(original).hasUndecidedDefaults
+        guard !branch.isEmpty, !branchFrom.isEmpty || awaitsDefaults else {
             errorMessage = "Branch and merge-from values can't be empty."
             return
         }
         Task { @MainActor in
             do {
+                if awaitsDefaults {
+                    let saved = try await BoardTaskManager(modelContext: modelContext)
+                        .resolveRepositoryDefaults(task.id, worktree: .record(currentRepositoryRecord(original)))
+                    let resolved = saved.repositoryWorktrees.first { $0.isSameWorktree(as: original) }
+                    if branchFrom.isEmpty { branchFrom = resolved?.branchFrom ?? "" }
+                    if mergeTarget.isEmpty { mergeTarget = resolved?.mergeTarget ?? "" }
+                }
                 let current = currentRepositoryRecord(original)
                 let index = task.repositoryWorktrees.firstIndex { $0.isSameWorktree(as: current) }
                 let saved = try await BoardTaskManager(modelContext: modelContext).updateRepository(
@@ -49,6 +58,25 @@ extension TaskConversationView {
                 errorMessage = nil
             } catch {
                 errorMessage = "Couldn't save repository settings: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// A pending repository added without branch settings works them out when its settings
+    /// open, rather than when it was added; the popover then shows them.
+    func resolveRepositoryDefaults(_ repository: RepositoryWorktreeRecord) {
+        guard repository.hasUndecidedDefaults, !isReadOnly else { return }
+        Task { @MainActor in
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext)
+                    .resolveRepositoryDefaults(task.id, worktree: .record(repository))
+                // A field the user began editing meanwhile keeps what they typed.
+                guard repositoryBeingEdited?.isSameWorktree(as: repository) == true else { return }
+                let current = currentRepositoryRecord(repository)
+                if editingRepositoryField != "from" { editedBranchFrom = current.branchFrom }
+                if editingRepositoryField != "to" { editedMergeTarget = current.mergeTarget ?? "" }
+            } catch {
+                errorMessage = "Couldn't read the repository's default branches: \(error.localizedDescription)"
             }
         }
     }

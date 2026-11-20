@@ -151,6 +151,18 @@ enum PlayhouseWorktreeManager {
     }
 
     static func pendingRecord(spec: RepositoryWorktreeSpec) throws -> RepositoryWorktreeRecord {
+        let isUnset = { (value: String?) in value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true }
+        let requestedBranch = spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // With nothing chosen, nothing needs Git yet: the defaults wait in the record
+        // until its settings open or the task starts (`resolvingDefaults(of:)`).
+        if isUnset(spec.branchFrom), isUnset(spec.mergeTarget),
+           requestedBranch.isEmpty || RepositoryWorktreeRecord.isAutomaticBranch(requestedBranch),
+           let repository = knownRepositoryRoot(spec.repositoryPath) {
+            return RepositoryWorktreeRecord(
+                repositoryPath: repository, branch: "auto", worktreePath: repository,
+                branchFrom: "", createdByPlayhouse: false, mergeTarget: nil, isPending: true
+            )
+        }
         let repository = try repositoryRoot(spec.repositoryPath)
         let defaults = try defaultBranchOptionsIfNeeded(repository: repository, spec: spec)
         let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom, defaults: defaults)
@@ -174,6 +186,54 @@ enum PlayhouseWorktreeManager {
             mergeTarget: mergeTarget,
             isPending: true
         )
+    }
+
+    /// A pending record with its undecided branch-from and merge target filled in from
+    /// the repository's defaults; anything already chosen is kept.
+    static func resolvingDefaults(of record: RepositoryWorktreeRecord) throws -> RepositoryWorktreeRecord {
+        guard record.hasUndecidedDefaults else { return record }
+        let repository = try repositoryRoot(record.repositoryPath)
+        let defaults = try defaultBranches(repository: repository)
+        var resolved = record
+        if resolved.branchFrom.isEmpty {
+            resolved.branchFrom = try resolveBase(repository: repository, requested: nil, defaults: defaults)
+        }
+        if resolved.mergeTarget == nil {
+            resolved.mergeTarget = try resolveMergeTarget(repository: repository, requested: nil, defaults: defaults)
+        }
+        return resolved
+    }
+
+    /// The top level of the repository at `path` without running Git, when its files alone
+    /// show a checked-out branch with a commit, whose defaults are then sure to resolve: a
+    /// `.git` directory whose HEAD names a branch with a loose or packed ref, resolved through
+    /// symlinks as `git rev-parse --show-toplevel` reports it. Anything else (a detached HEAD,
+    /// an unborn branch, a linked worktree, a subfolder) is left to Git. Git's ownership
+    /// and object checks are not repeated here; they surface when the defaults resolve.
+    private static func knownRepositoryRoot(_ path: String) -> String? {
+        let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        let gitDirectory = url.appendingPathComponent(".git", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: gitDirectory.path, isDirectory: &isDirectory), isDirectory.boolValue,
+              let head = try? String(contentsOf: gitDirectory.appendingPathComponent("HEAD"), encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        guard head.hasPrefix("ref: ") else { return nil }
+        let ref = String(head.dropFirst(5))
+        guard ref.hasPrefix("refs/heads/"), !ref.contains("..") else { return nil }
+        let isCommitID = { (value: Substring) in (value.count == 40 || value.count == 64) && value.allSatisfy(\.isHexDigit) }
+        if let loose = try? String(contentsOf: gitDirectory.appendingPathComponent(ref), encoding: .utf8) {
+            guard isCommitID(Substring(loose.trimmingCharacters(in: .whitespacesAndNewlines))) else { return nil }
+        } else {
+            // `git gc` and `git pack-refs` move branch refs into one file.
+            guard let packed = try? String(contentsOf: gitDirectory.appendingPathComponent("packed-refs"), encoding: .utf8),
+                  packed.split(whereSeparator: \.isNewline).contains(where: { line in
+                      let fields = line.split(separator: " ", maxSplits: 1)
+                      return fields.count == 2 && fields[1] == ref && isCommitID(fields[0])
+                  }) else { return nil }
+        }
+        guard let resolved = realpath(url.path, nil) else { return nil }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true).standardizedFileURL.path
     }
 
     /// The base for follow-up work after a task's pull request merged: the merge target as
@@ -729,6 +789,14 @@ struct PlayhouseWorktreeService {
         try await perform("worktree.prepare", fields: ["repositoryPath": spec.repositoryPath]) {
             try await PlayhouseBackgroundOperation.run {
                 try PlayhouseWorktreeManager.pendingRecord(spec: spec)
+            }
+        }
+    }
+
+    func resolvingDefaults(of record: RepositoryWorktreeRecord) async throws -> RepositoryWorktreeRecord {
+        try await perform("worktree.resolve_defaults", fields: ["repositoryPath": record.repositoryPath]) {
+            try await PlayhouseBackgroundOperation.run {
+                try PlayhouseWorktreeManager.resolvingDefaults(of: record)
             }
         }
     }

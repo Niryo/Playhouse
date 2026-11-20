@@ -127,6 +127,8 @@ enum CLICommandCatalog {
                 "Add another worktree, on its own new branch, of a repository the task already has.", task),
         command("task repository edit", "<task-id> (--repo <path>|--worktree <path>) --branch <name> --branch-from <ref> [--merge-target <ref>]",
                 "Change a worktree's branch, base and merge target before it starts.", task),
+        command("task repository resolve", "<task-id> (--repo <path>|--worktree <path>) [--worktree-branch <branch>]",
+                "Work out a worktree's default branch-from and merge target before it starts, when they are still empty.", task),
         command("task repository remove", "<task-id> (--repo <path>|--worktree <path>) [--worktree-branch <branch>]",
                 "Remove a repository's worktree from the task; with several worktrees of one repository, pass --worktree.", task),
         command("task repository renew", "<task-id> (--repo <path>|--worktree <path>) [--worktree-branch <branch>]",

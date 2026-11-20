@@ -64,10 +64,11 @@ extension TaskConversationView {
                             }
                         }
                     } else {
-                        // No messages yet may only mean the first read hasn't come back: an
-                        // empty state then would claim the conversation is empty while it loads.
+                        // Until the first history read lands the conversation is not known to be
+                        // empty, so it shows that it is loading rather than the empty prompt. A new
+                        // task has nothing to read: it shows its empty state at once.
                         if !hasLoadedConversation && !isNewTask {
-                            conversationHistoryLoadingPlaceholder
+                            ConversationHistoryLoadingIndicator()
                         } else if activeGoal?.status != "complete" && (isNewTask || !isLoadingHistory) {
                             emptyConversationPlaceholder
                         }
@@ -151,20 +152,6 @@ extension TaskConversationView {
                 scroll.pin(.bottom, animated: true)
             }
         }
-    }
-
-    /// Shown in place of the transcript until the conversation's opening history read answers.
-    var conversationHistoryLoadingPlaceholder: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Loading conversation…")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, minHeight: 280)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("conversation-history-loading")
     }
 
     /// Shown in place of the transcript while the conversation has no messages.
@@ -288,6 +275,12 @@ extension TaskConversationView {
             URL(fileURLWithPath: $0.repositoryPath).lastPathComponent
         }
         guard repositoryNames.isEmpty else { return repositoryNames }
+        // A new task opens before its saved repositories are attached; naming them meanwhile
+        // keeps the empty state from flashing "No repository selected" first.
+        if isApplyingSavedRepositories {
+            let savedNames = validLastSelectedRepositoryURLs.map(\.lastPathComponent)
+            if !savedNames.isEmpty { return savedNames }
+        }
         return task.workspaceRootPaths.compactMap { path in
             let repositoryURL = URL(fileURLWithPath: path, isDirectory: true)
             let gitMarker = repositoryURL.appendingPathComponent(".git")
@@ -750,6 +743,35 @@ private struct EmptyConversationAddRepositoryPrompt: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .accessibilityIdentifier("empty-conversation-add-repository-caption")
+        }
+    }
+}
+
+/// Stands in for the transcript while a conversation's first history read is under way. It shows
+/// only once the read has taken a moment, so a conversation that opens quickly doesn't flash it.
+private struct ConversationHistoryLoadingIndicator: View {
+    static let delay: Duration = .milliseconds(300)
+    @State private var isShown = false
+
+    var body: some View {
+        ZStack {
+            if isShown {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading conversation…")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Loading conversation…")
+                .accessibilityIdentifier("conversation-history-loading")
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 280)
+        .task {
+            try? await Task.sleep(for: Self.delay)
+            isShown = true
         }
     }
 }

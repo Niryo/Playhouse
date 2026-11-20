@@ -458,7 +458,7 @@ final class PlayhouseBridgeRuntime {
                 }
                 result = try Self.value(["page": page])
             case "task.rename", "task.repository.add", "task.repository.add-batch", "task.repository.add-worktree", "task.repository.replace",
-                 "task.repository.recent", "task.repository.edit", "task.repository.renew", "task.repository.remove",
+                 "task.repository.recent", "task.repository.edit", "task.repository.resolve", "task.repository.renew", "task.repository.remove",
                  "task.prompt.save", "task.draft.save", "task.comments.save", "task.comments.edit",
                  "task.roots.get", "workspace.roots", "task.roots.set", "task.terminal",
                  "task.changes.list", "task.changes.mark-viewed", "task.changes.mark-all-viewed",

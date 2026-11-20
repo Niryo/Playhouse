@@ -305,6 +305,9 @@ def side_chat_respond(user_text, instructions, turn, prior_turns):
     else:
         earlier = sum(1 for prior in prior_turns if prior.get("sessionID") == session)
         reply = f"Side chat follow-up {earlier + 1} on {session}: {question}"
+        if "markdown list" in question.lower():
+            # A block-Markdown answer, which the side chat renders formatted.
+            reply += "\n\n## Points\n\n- First point\n- Second point"
     turn["sideChatReply"] = reply
     text("msg_side_chat", reply)
     return []
