@@ -635,7 +635,8 @@ extension PlayhouseUITests {
             let target = label(title)
             func ready() -> Bool { target.exists && target.isHittable && anchors.frame.contains(target.frame) }
             for delta: CGFloat in [150, -150] {
-                for _ in 0..<40 where !ready() {
+                for _ in 0..<40 {
+                    guard !ready() else { break }
                     anchors.scroll(byDeltaX: 0, deltaY: delta)
                     _ = waitUntil(ready, timeout: 0.3)
                 }
@@ -828,7 +829,8 @@ extension PlayhouseUITests {
 
         // Scrolling on from there loads what follows, and the labels follow the transcript.
         let renderedAfterJump = renderedCount()
-        for _ in 0..<80 where renderedCount() <= 44 {
+        for _ in 0..<80 {
+            guard renderedCount() <= 44 else { break }
             let before = renderedCount()
             scrollView.scroll(byDeltaX: 0, deltaY: -400)
             _ = waitUntil({ renderedCount() != before }, timeout: 0.5)
@@ -872,7 +874,8 @@ extension PlayhouseUITests {
         attachScreenshot(named: "chat-page-anchors-after-jump-to-bottom")
         // It also returns from the newest messages scrolled up, where Latest is not offered.
         scrollView.scroll(byDeltaX: 0, deltaY: 3_000)
-        for _ in 0..<5 where wideReply.exists && scrollView.frame.intersects(wideReply.frame) {
+        for _ in 0..<5 {
+            guard wideReply.exists && scrollView.frame.intersects(wideReply.frame) else { break }
             scrollView.scroll(byDeltaX: 0, deltaY: 1_500)
         }
         XCTAssertFalse(wideReply.exists && scrollView.frame.intersects(wideReply.frame), "Scrolling up should take the last reply out of view.")

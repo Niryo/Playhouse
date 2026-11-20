@@ -44,6 +44,7 @@ architecture="$(uname -m)"
 python3 "${repository_root}/scripts/check-test-parity.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
 python3 "${repository_root}/scripts/check-hover-scrollers.py"
+python3 "${repository_root}/scripts/check-polling-loops.py"
 python3 "${repository_root}/scripts/check-e2e-locking.py"
 python3 "${repository_root}/scripts/check-e2e-build-cache.py"
 report_phase build

@@ -661,17 +661,15 @@ extension PlayhouseUITests {
         let restoredSecondAchievement = restoredAchievementRows.element(boundBy: 1)
         let restoredFirstAchievement = restoredAchievementRows.element(boundBy: 0)
         XCTAssertTrue(restoredFollowup.waitToExist(timeout: 10))
-        for _ in 0..<8 where !waitUntil({
-            restoredFirstAchievement.frame.maxY < restoredFollowup.frame.minY
-        }, timeout: 1) {
+        for _ in 0..<8 {
+            guard !waitUntil({ restoredFirstAchievement.frame.maxY < restoredFollowup.frame.minY }, timeout: 1) else { break }
             reopenedConversation.swipeDown()
         }
         XCTAssertTrue(waitUntil({
             restoredFirstAchievement.frame.maxY < restoredFollowup.frame.minY
         }, timeout: 10), "The first Goal achievement should remain before the follow-up in the archived conversation.")
-        for _ in 0..<8 where !waitUntil({
-            restoredFollowup.frame.maxY < restoredSecondAchievement.frame.minY
-        }, timeout: 1) {
+        for _ in 0..<8 {
+            guard !waitUntil({ restoredFollowup.frame.maxY < restoredSecondAchievement.frame.minY }, timeout: 1) else { break }
             reopenedConversation.swipeUp()
         }
         XCTAssertTrue(waitUntil({

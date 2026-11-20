@@ -160,7 +160,8 @@ extension PlayhouseUITests {
         let page = app.scrollViews.containing(.any, identifier: "plugin-catalog-js-token-stats").firstMatch
         @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
             XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
-            for _ in 0..<15 where !element.isHittable {
+            for _ in 0..<15 {
+                guard !element.isHittable else { break }
                 page.scroll(byDeltaX: 0, deltaY: element.frame.midY > page.frame.midY ? -250 : 250)
             }
             XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
@@ -1677,8 +1678,10 @@ function Card() {
     h(Text, { size: 10, testID: "card-status" }, props.task ? props.task.status : "no task"),
     h(Text, { size: 10, testID: "card-probes" }, "probes " + probes[0]),
     h(Text, { size: 10, testID: "card-focus" }, "focus " + focusProbes[0]),
-    // The plugin keeps running as its card changes columns: show only its latest entries.
-    h(Text, { size: 10, testID: "card-log" }, log[0].slice(-3).join(", ")));
+    // The plugin keeps running as its card changes columns: show only its latest entries, on one
+    // line, so a trailing probe up to the throttle's 10 seconds later doesn't re-flow the card's
+    // bottom row under a click aimed at its other controls.
+    h(Text, { size: 10, lineLimit: 1, testID: "card-log" }, log[0].slice(-3).join(", ")));
 }
 Playhouse.render(h(Card));
 """#
@@ -1769,6 +1772,9 @@ Playhouse.render(h(CardButton));
         // A task card plugin with a button opens with its card's task.
         let entry = cardRow.descendants(matching: .any)["plugin-entry-card-button"]
         XCTAssertTrue(entry.waitToExist(timeout: 10), "A popover task card plugin has an entry button on the card.")
+        // The returning pill re-lays out the card's bottom row; a click sent meanwhile lands on the
+        // card and opens its task instead.
+        XCTAssertTrue(waitForStableFrame(entry), "The card's bottom row settles once its mode pill is back.")
         entry.click()
         let buttonTask = element("button-task")
         XCTAssertTrue(waitUntil({ buttonTask.exists && self.pluginText(buttonTask) == "Task card plugin" }, timeout: 10),
@@ -1776,8 +1782,12 @@ Playhouse.render(h(CardButton));
         attachScreenshot(named: "Task card plugin opened from its card button")
         // The board answers a card plugin's alert; a task card has no composer.
         let buttonResult = element("button-result")
-        element("button-compose").click()
-        XCTAssertTrue(waitUntil({ self.pluginText(buttonResult) == "composer: unavailable" }, timeout: 5), "A task card has no composer: \(pluginText(buttonResult))")
+        let composeButton = element("button-compose")
+        XCTAssertTrue(waitForStableFrame(composeButton), "The popover has stopped moving before its button is clicked.")
+        composeButton.click()
+        XCTAssertTrue(waitUntil({ buttonResult.exists && self.pluginText(buttonResult) == "composer: unavailable" }, timeout: 5),
+                      "A task card has no composer: \(buttonResult.exists ? pluginText(buttonResult) : "popover closed")")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The composer click reached no other button, such as moveTask.")
         element("button-alert").click()
         let alert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
         XCTAssertTrue(alert.waitToExist(timeout: 10), "ui.alert from a card plugin shows the board's alert.")

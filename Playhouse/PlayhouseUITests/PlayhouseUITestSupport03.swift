@@ -9,6 +9,8 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
+    /// The effort a model-effort slider reports. Its accessibility value is the
+    /// step index; efforts are offered in the same order for every model.
     func effortTitle(of slider: XCUIElement) -> String? {
         if let title = slider.value as? String { return title }
         guard let index = (slider.value as? NSNumber)?.intValue else { return nil }
@@ -112,6 +114,8 @@ extension PlayhouseUITests {
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         return try XCTUnwrap(result["tasks"] as? [[String: Any]])
     }
+    /// The shared Codex servers and Claude runs this case's data folder recorded, with their
+    /// manifests' paths.
     func agentManifests() -> [(kind: String, path: URL, manifest: [String: Any])] {
         var manifests: [(String, URL, [String: Any])] = []
         let codexRuns = dataDirectory.appendingPathComponent("codex-runs", isDirectory: true)
@@ -130,6 +134,7 @@ extension PlayhouseUITests {
         }
         return manifests
     }
+    /// The process a manifest recorded, while it still runs as that process (same start time).
     func agentIsAlive(_ process: [String: Any]?) -> Bool {
         guard let pid = (process?["pid"] as? NSNumber)?.int32Value,
               let startTime = (process?["startTime"] as? NSNumber)?.int64Value else { return false }
@@ -147,6 +152,7 @@ extension PlayhouseUITests {
             }
         }
     }
+    /// A private bridge service, so a case can kill its daemon without touching the UI runner's.
     func restartServiceEnvironment(_ extra: [String: String] = [:]) -> [String: String] {
         ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).restart-\(UUID().uuidString.prefix(8))"].merging(extra) { _, new in new }
     }
@@ -168,6 +174,7 @@ extension PlayhouseUITests {
         kill(pid_t(pid), SIGKILL)
         XCTAssertTrue(waitUntil({ kill(pid_t(pid), 0) != 0 }, timeout: 10), "The killed daemon should exit.")
     }
+    /// Opens the chat sidebar on a private service whose chat turns run in the restart fixture.
     func launchRestartFixtureChat(provider: String = "claude") throws -> (executable: String, environment: [String: String], chatID: String) {
         let executable = WorkspaceFixture.root.appendingPathComponent("\(provider)-fixture-reattach").path
         if provider == "codex" { codexFixtureExecutable = executable } else { claudeFixtureExecutable = executable }
@@ -190,12 +197,15 @@ extension PlayhouseUITests {
         let page = (try? runCLI(["chat", "page", "read", pageID], extraEnvironment: environment))?["result"] as? [String: Any]
         return (page?["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
     }
+    /// Sends a chat message from the sidebar composer and waits for the restart fixture to hold its turn.
     func startRestartChatTurn(_ executable: String, _ text: String) {
         try? FileManager.default.removeItem(atPath: executable + ".reattach-ready")
         sendFromComposer(text)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20),
                       "The chat turn \(text) runs.")
     }
+    /// Has the restart fixture's held chat turn run its real close-turn (a new titled page when
+    /// `newTitle` is set) and waits for it; the turn itself keeps running.
     func closeHeldChatTurn(_ executable: String, newTitle: String? = nil) {
         let output = executable + ".reattach-close-turn-output"
         let before = jsonLines(output).count
@@ -204,6 +214,8 @@ extension PlayhouseUITests {
         let result = jsonLines(output).last as? [String: Any]
         XCTAssertEqual(result?["returncode"] as? Int, 0, "close-turn succeeds: \(String(describing: result))")
     }
+    /// One ordinary chat turn that runs close-turn (opening a new page titled `newTitle` when
+    /// set) and is filed by the daemon that sent it. Returns the text the provider received.
     func sendFiledRestartChatTurn(
         _ executable: String, _ text: String, newTitle: String? = nil, environment: [String: String]
     ) -> String {
@@ -220,6 +232,8 @@ extension PlayhouseUITests {
         }, timeout: 30), "The chat turn finishes.")
         return received
     }
+    /// Puts a filed chat page back in the state an earlier build left after losing its turn:
+    /// no message on the page and no close-turn record naming it.
     func unfileChatPageForLegacyState(_ pageID: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
@@ -257,6 +271,7 @@ extension PlayhouseUITests {
         let send = element("send-message-button")
         if send.waitToExist(timeout: 3) { send.click() } else { element("continue-response-button").click() }
     }
+    /// Command-Return steers the running turn with the composer's text.
     func steerFromComposer(_ text: String) {
         let composer = element("message-composer")
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
@@ -276,6 +291,7 @@ extension PlayhouseUITests {
     func taskRecord(named title: String) throws -> [String: Any]? {
         try tasksFromBoardList().first { $0["title"] as? String == title }
     }
+    /// Every daemon process that wrote to this service's socket log (each logs on start).
     func daemonLogProcessIDs(service: String) -> Set<Int> {
         let digest = SHA256.hash(data: Data(service.utf8)).map { String(format: "%02x", $0) }.joined()
         let log = "/tmp/playhouse-bridge/\(getuid())/\(digest.prefix(32)).sock.log"
@@ -285,6 +301,8 @@ extension PlayhouseUITests {
             Range($0.range(at: 1), in: text).flatMap { Int(text[$0]) }
         })
     }
+    /// The daemon's process ID, or nil while nothing answers on that service.
+    /// Unlike `runCLI`, a failed connection isn't a test failure here.
     func daemonProcessID(environment: [String: String]) throws -> Int? {
         let process = Process()
         process.executableURL = cliURL
@@ -332,6 +350,8 @@ extension PlayhouseUITests {
             }
         }, timeout: timeout)
     }
+    /// How many turns a provider fixture has received whose prompt contains `text`, not
+    /// counting page classifier calls. The Claude fixture records `userText`, Codex `userMessage`.
     func fixtureTurnCount(_ executable: URL, containing text: String) -> Int {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
               let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -341,10 +361,15 @@ extension PlayhouseUITests {
             return prompt.contains(text) && !prompt.hasPrefix("Classify the latest user message")
         }.count
     }
+    /// No provider turn is running. The send button can't tell: it is disabled whenever the
+    /// composer is empty.
     func noTurnIsRunning() -> Bool {
         guard let runtime = try? runCLI(["conversation", "runtime"])["result"] as? [String: Any] else { return false }
         return (runtime["activeThreadIDs"] as? [String] ?? []).isEmpty && !element("pause-response-button").exists
     }
+    /// The suite must never reach an installed Codex, Claude or GitHub CLI: every provider or
+    /// `gh` process a case starts, from the app or from the daemon on its behalf, is one of its
+    /// own fixtures. A task left in PR mode reaches `gh` on its way to Review.
     func providerFixtureViolations() -> [String] {
         guard let events = try? diagnosticEvents() else {
             // A case that launched the app always has a diagnostics log to check.
@@ -373,6 +398,7 @@ extension PlayhouseUITests {
         let record = try XCTUnwrap(taskRecord(named: title), "No task named \(title) exists in the real store.")
         return try XCTUnwrap(record["id"] as? String)
     }
+    /// Recreates a standalone chat stored as a hidden board task and returns its ID.
     func seedLegacyStandaloneChatTask(sessionID: String = "legacy-chat-session") throws -> String {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-legacy-standalone-chat-task")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled legacy chat seeder should be executable.")
@@ -389,6 +415,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(seed.terminationStatus, 0, "The legacy hidden chat task should be seeded: \(seedText)")
         return try XCTUnwrap(seedText.split(whereSeparator: \.isNewline).last.map(String.init))
     }
+    /// An open pill's option once its slide-in has finished, so a click lands on it.
     func settledPillOption(_ mode: String, taskID: String) -> XCUIElement {
         let option = element("task-pr-mode-\(mode)-\(taskID)")
         XCTAssertTrue(option.waitToExist(timeout: 5), "The open pill should offer \(mode).")
@@ -409,6 +436,7 @@ extension PlayhouseUITests {
         let result = try runCLI(["plugin", "state", "--id", "pull-request-mode"])["result"] as? [String: Any]
         return (result?["state"] as? [String: Any])?[taskID] as? String
     }
+    /// Opens a task card's PR mode pill, chooses `mode`, and waits for it to fold back onto it.
     func selectPullRequestMode(_ mode: String, taskID: String) throws {
         let pill = element("task-pr-mode-\(taskID)")
         XCTAssertTrue(pill.waitToExist(timeout: 5), "The task card should show its PR mode pill.")
@@ -534,6 +562,7 @@ extension PlayhouseUITests {
     func finishCLIProcess(_ running: RunningCLIProcess, expectedStatus: Int32? = 0) throws -> [String: Any] {
         try finishCLIProcessCapturingEvents(running, expectedStatus: expectedStatus).response
     }
+    /// The final response plus every streamed event line printed before it.
     func finishCLIProcessCapturingEvents(
         _ running: RunningCLIProcess,
         expectedStatus: Int32? = 0
@@ -647,6 +676,8 @@ extension PlayhouseUITests {
             .map(\.frame)
             .sorted { $0.minY < $1.minY }
     }
+    /// Whether the chat sidebar shows a message containing `text` below the separator of the
+    /// newest page titled `title`, so an identical message of an earlier page can't stand in for it.
     func chatTranscriptShows(_ text: String, belowPage title: String) -> Bool {
         guard let separator = chatPageSeparators(title).last else { return false }
         return chatTranscriptSnapshot(.group)
@@ -762,6 +793,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Adding the comment should close the comment popover.", file: file, line: line)
         XCTAssertFalse(element("side-chat-user-message-0").exists, "A comment is never sent to a side chat.", file: file, line: line)
     }
+    /// Opens the side chat bubble for the current selection and returns it. A selection shows only
+    /// the Side chat hint, above the selected text; the bubble opens once the hint is clicked, and
+    /// the hint goes away. With `selection`, the hint must sit above that text and the bubble must
+    /// be attached to it: overlapping it horizontally and just above or below it. The bubble is
+    /// never smaller than its compact size nor bigger than its grown one.
     @discardableResult
     func waitForSideChatBubble(
         at selection: XCUIElement? = nil, centered: Bool = false, hintScreenshot: String? = nil,
@@ -853,6 +889,10 @@ extension PlayhouseUITests {
             .matching(NSPredicate(format: "label == %@", label))
             .firstMatch
     }
+    /// Whether a screenshot of `element` has a pixel within a small tolerance of an sRGB color.
+    /// The expected color is converted into the screenshot's own color space (the Tart VM's
+    /// display profile) and compared with raw pixels; converting each pixel to sRGB instead
+    /// shifts it by more than the tolerance.
     func screenshotContains(srgb expected: (Int, Int, Int), in element: XCUIElement, tolerance: Int = 10) -> Bool {
         let image = element.screenshot().image
         guard let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first
@@ -874,6 +914,10 @@ extension PlayhouseUITests {
         }
         return false
     }
+    /// The digits the shell printed between `marker` and a `;` in a terminal's text, latest first.
+    /// Row breaks are ignored, since the shell's line editor can leave output on a row that
+    /// continues the wrapped command. The echoed command holds `%s` there, never digits, and
+    /// the `;` keeps a following prompt from running into the number.
     func terminalNumber(after marker: String, in terminal: XCUIElement) -> String? {
         guard let text = (terminal.value as? String)?.replacingOccurrences(of: "\n", with: ""),
               let range = text.range(of: marker, options: .backwards) else { return nil }
@@ -881,6 +925,8 @@ extension PlayhouseUITests {
         guard !digits.isEmpty, text[digits.endIndex...].first == ";" else { return nil }
         return String(digits)
     }
+    /// The diff header's report of which Monaco load rendered the open diff, and of which
+    /// file it rendered, once the editor has finished presenting it.
     func monacoEditorStatus(timeout: TimeInterval = 10) -> String {
         var status = ""
         _ = waitUntil({
@@ -889,6 +935,7 @@ extension PlayhouseUITests {
         }, timeout: timeout)
         return status
     }
+    /// The diff text Monaco has actually rendered, which lands after the editor applies it.
     func renderedDiffValue(timeout: TimeInterval = 10) -> String {
         var value = ""
         _ = waitUntil({
@@ -897,6 +944,9 @@ extension PlayhouseUITests {
         }, timeout: timeout)
         return value
     }
+    /// Hovers the control until its native tooltip becomes visible outside it. Retries with
+    /// several XCUI hover moves inside it, because AppKit starts the tooltip delay from a move
+    /// inside the control.
     func assertNativeHelpText(for element: XCUIElement, equals expected: String) {
         for attempt in 0..<3 {
             // Tooltips only show for the active app's key window.
@@ -958,6 +1008,9 @@ extension PlayhouseUITests {
             NSCursor.currentSystem != nil && !self.systemCursorIsPointingHand() && !self.systemCursorIsColumnResize()
         }, timeout: 3), "The window's title bar should show the arrow, not the pointing hand: \(systemCursorDescription())")
     }
+    /// The tooltip counts as shown only when its own text is on screen: as a help tag in the
+    /// accessibility tree, or read off the screen. The control shows only "PR", so the help text
+    /// cannot come from anywhere but the tooltip; a changed-pixels check would pass on any update.
     func nativeHelpTextIsVisible(_ expected: String) -> Bool {
         helpTagIsShowing(expected) || screenTextContains(expected)
     }
@@ -987,6 +1040,8 @@ extension PlayhouseUITests {
             .matching(Self.textPredicate(containing: text, caseInsensitive: false, includeTitle: true))
             .firstMatch.exists
     }
+    /// Hovers the control with the same real mouse movement as `assertNativeHelpText` and asserts
+    /// that no tooltip containing `text` ever appears.
     func assertNoNativeHelpText(whileHovering element: XCUIElement, containing text: String) {
         app.activate()
         movePointerToHelpRunway(below: element)
@@ -1032,6 +1087,7 @@ extension PlayhouseUITests {
     static func isOrangePixel(_ color: NSColor) -> Bool {
         color.redComponent > 0.45 && color.redComponent > color.greenComponent + 0.08 && color.greenComponent > color.blueComponent + 0.08
     }
+    /// Counts pixels matching `matches`, sampling every `step` pixels; 0 when the image cannot be read.
     func pixelCount(in image: NSImage, step: Int = 1, maxXFraction: CGFloat = 1.0, where matches: (NSColor) -> Bool) -> Int {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
         let bitmap = NSBitmapImageRep(cgImage: cgImage)
@@ -1045,6 +1101,7 @@ extension PlayhouseUITests {
         }
         return count
     }
+    /// The horizontal span, in points, of the pixels that differ from the image's corner (its background).
     func inkWidth(of image: NSImage, pointWidth: CGFloat, threshold: CGFloat = 0.25) -> CGFloat? {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil), cgImage.width > 0 else { return nil }
         let bitmap = NSBitmapImageRep(cgImage: cgImage)
@@ -1065,6 +1122,7 @@ extension PlayhouseUITests {
         guard let first = columns.first, let last = columns.last else { return 0 }
         return CGFloat(last - first + 1) * pointWidth / CGFloat(cgImage.width)
     }
+    /// Sampled pixels whose summed RGB change exceeds `threshold`; nil when either image is unreadable or the sizes differ.
     func changedPixelCount(before: NSImage, after: NSImage, step: Int, threshold: CGFloat) -> Int? {
         guard let beforeCG = before.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let afterCG = after.cgImage(forProposedRect: nil, context: nil, hints: nil),
@@ -1084,6 +1142,11 @@ extension PlayhouseUITests {
         }
         return changed
     }
+    /// Checks the user bubble by comparing its colors with each other rather than with exact
+    /// values, because an element screenshot's color conversion shifts absolute gray levels.
+    /// The fill is the dominant neutral gray and is lighter than the transcript background (read
+    /// from the bottom-left timestamp row). The text is much lighter, the left and right edges
+    /// carry a lighter stroke, and no blue accent remains.
     func assertGrayBorderedUserBubble(_ image: NSImage, file: StaticString = #filePath, line: UInt = #line) {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             XCTFail("Could not read user bubble pixels.", file: file, line: line)

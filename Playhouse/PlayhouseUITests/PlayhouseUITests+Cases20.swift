@@ -592,7 +592,8 @@ extension PlayhouseUITests {
         attachElementScreenshot(timestamp, named: "Codex message timestamp detail")
         let firstReply = app.groups["assistant-message-\(firstReplyItem)"]
         let transcriptScrollView = element("conversation-scroll-view")
-        for _ in 0..<10 where !firstReply.exists {
+        for _ in 0..<10 {
+            guard !firstReply.exists else { break }
             transcriptScrollView.scroll(byDeltaX: 0, deltaY: 400)
             _ = waitUntil({ firstReply.exists }, timeout: 1)
         }

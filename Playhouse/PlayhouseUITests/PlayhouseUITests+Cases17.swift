@@ -159,7 +159,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ isInView(line(27)) }, timeout: 5), "Following should continue as later lines arrive; line=\(line(27).frame), viewport=\(scrollView.frame).")
 
         // Scrolling up stops following: the next stage leaves the reader where they were.
-        for _ in 0..<10 where !isOutOfView(line(27)) {
+        for _ in 0..<10 {
+            guard !isOutOfView(line(27)) else { break }
             scrollView.scroll(byDeltaX: 0, deltaY: 200)
         }
         XCTAssertTrue(isOutOfView(line(27)), "Scrolling up should move the newest line out of view.")
@@ -182,7 +183,8 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Scrolled up while the reply keeps streaming")
 
         // Scrolling back to the bottom resumes following.
-        for _ in 0..<30 where !isInView(line(35)) {
+        for _ in 0..<30 {
+            guard !isInView(line(35)) else { break }
             scrollView.scroll(byDeltaX: 0, deltaY: -300)
         }
         for _ in 0..<3 { scrollView.scroll(byDeltaX: 0, deltaY: -300) }
@@ -606,7 +608,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ reopenedLiveCount() > settledCount }, timeout: 10),
                       "Scrolling up should reveal the long turn's earlier replies.")
         reopenedLive.scroll(byDeltaX: 0, deltaY: 40_000)
-        for _ in 0..<40 where !element("user-message-\(liveQuestionID)").exists {
+        for _ in 0..<40 {
+            guard !element("user-message-\(liveQuestionID)").exists else { break }
             reopenedLive.scroll(byDeltaX: 0, deltaY: 1500)
             _ = waitUntil({ self.element("user-message-\(liveQuestionID)").exists }, timeout: 0.5)
         }
@@ -662,7 +665,8 @@ extension PlayhouseUITests {
             candidate.exists && scrollView.frame.intersects(candidate.frame)
         }
         func scrollTranscript(by delta: CGFloat, until condition: () -> Bool, limit: Int = 40, settle: TimeInterval = 0) {
-            for _ in 0..<limit where !condition() {
+            for _ in 0..<limit {
+                guard !condition() else { break }
                 scrollView.scroll(byDeltaX: 0, deltaY: delta)
                 // Revealing messages and restoring their anchor is asynchronous;
                 // scrolling again before it lands would move past the anchor.

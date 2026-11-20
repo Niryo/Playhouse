@@ -218,7 +218,8 @@ extension PlayhouseUITests {
         let userView = element("user-message-\(sourceID)")
         XCTAssertTrue(scrollTranscriptUntilExists(userView))
         let transcriptScrollView = element("conversation-scroll-view")
-        for _ in 0..<4 where userView.frame.midY < transcriptScrollView.frame.minY + 20 {
+        for _ in 0..<4 {
+            guard userView.frame.midY < transcriptScrollView.frame.minY + 20 else { break }
             transcriptScrollView.swipeDown()
         }
         XCTAssertTrue(userView.frame.midY > transcriptScrollView.frame.minY + 20,
@@ -378,7 +379,8 @@ extension PlayhouseUITests {
                 && restoredUserView.frame.minY >= reloadedTranscript.frame.minY + 8
                 && restoredAssistantView.frame.minY < reloadedTranscript.frame.maxY - 40
         }
-        for _ in 0..<6 where !restoredSourceTurnIsInView() {
+        for _ in 0..<6 {
+            guard !restoredSourceTurnIsInView() else { break }
             reloadedTranscript.swipeDown()
         }
         XCTAssertTrue(restoredUserView.waitToExist(timeout: 10))
@@ -396,7 +398,8 @@ extension PlayhouseUITests {
             NSPredicate(format: "value CONTAINS %@", "Comment 1")
         ).firstMatch
         XCTAssertTrue(legacyCommentLink.waitToExist(timeout: 5))
-        for _ in 0..<10 where legacyCommentLink.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+        for _ in 0..<10 {
+            guard legacyCommentLink.frame.maxY > reloadedTranscript.frame.maxY - 8 else { break }
             reloadedTranscript.scroll(byDeltaX: 0, deltaY: -80)
         }
         XCTAssertGreaterThanOrEqual(legacyCommentLink.frame.minY, reloadedTranscript.frame.minY + 8)
@@ -408,7 +411,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("response-comment-hover-card").label.contains(legacyComment))
         XCTAssertTrue(renderedAnnotatedUserView.waitToExist(timeout: 10))
         XCTAssertTrue(renderedCommentResponse.waitToExist(timeout: 10), "The comment reply should render after history reload.")
-        for _ in 0..<25 where renderedAnnotatedUserView.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+        for _ in 0..<25 {
+            guard renderedAnnotatedUserView.frame.maxY > reloadedTranscript.frame.maxY - 8 else { break }
             reloadedTranscript.scroll(byDeltaX: 0, deltaY: -100)
         }
         XCTAssertGreaterThanOrEqual(renderedAnnotatedUserView.frame.minY, reloadedTranscript.frame.minY + 8)
