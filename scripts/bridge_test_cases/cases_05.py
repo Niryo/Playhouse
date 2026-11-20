@@ -224,6 +224,90 @@ class BridgeTestCases05:
             manual_created["repositoryWorktrees"][0]["pullRequestNumber"], 702,
             "The manual create flow must still work unchanged when Auto PR stays off.",
         )
+    # case-contract: test_pull_request_mode_chosen_in_review_opens_pull_request | A task that reached Review in Manual mode with no pull request gets one when another mode is chosen for it in Review, with no click: choosing a mode there does what reaching Review in it would. While its branch can't be published (no Git remote), choosing Green opens nothing and records the failure, and a Green pass that then finds no linked pull request (here on focus) records that and stops instead of polling. Once the branch is publishable, choosing PR opens the pull request exactly once and starts no autopilot pass, and choosing Merge afterward opens no second one and merges the green pull request; the task stays in Review.
+    def test_pull_request_mode_chosen_in_review_opens_pull_request(self):
+        gh_directory = self.data_directory / "mode-in-review-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        service_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "901",
+            # The pull request summary turn runs on the task's own fixture.
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture"),
+            "PLAYHOUSE_E2E_PR_AUTOPILOT_POLL_SECONDS": "2",
+        }
+
+        def events(name, **fields):
+            return [event for event in self.diagnostic_events() if event.get("event") == name and event.get("taskID") == task["id"]
+                    and all(event.get(key) == value for key, value in fields.items())]
+
+        def created_numbers():
+            lines = create_log.read_text(encoding="utf-8").splitlines() if create_log.exists() else []
+            return [line.split("\t")[2] for line in lines if line.startswith("created\t")]
+
+        task = self.create_repo_task("PR mode chosen in Review", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.wait_for(lambda: events("plugin.pull_request_mode.review", mode="manual"), "The task reaches Review in Manual mode.")
+        self.assertIsNone(task["repositoryWorktrees"][0].get("pullRequestNumber"), "Manual mode opens no pull request on Review.")
+
+        # The branch has no remote to publish to: choosing Green tries to open the pull
+        # request, records why it couldn't, and follows nothing.
+        self.set_pull_request_mode(task["id"], "autopilot", extra_environment=service_environment)
+        self.wait_for(lambda: events("task.review.auto_pr.failed", trigger="mode"), "Choosing Green in Review tries to open the pull request.")
+        self.assertTrue(events("plugin.pull_request_mode.chosen", mode="autopilot"), "The plugin records the mode chosen in Review.")
+        self.assertEqual(created_numbers(), [])
+        self.assertEqual(events("plugin.pull_request_mode.follow"), [], "A pull request that couldn't be opened isn't followed.")
+        # A Green pass with no linked pull request (here on focus) stops: nothing it can
+        # poll for would link one.
+        self.assert_success(self.call_cli("plugin", "event", "app.focus", extra_environment=service_environment)[0])
+        self.wait_for(lambda: events("plugin.pull_request_mode.no_pull_request", trigger="focus"), "A pass with no linked pull request says so.")
+        self.assertEqual(events("plugin.pull_request_mode.followed", trigger="focus")[-1]["action"], "inactive")
+        time.sleep(5)
+        self.assertEqual(events("plugin.pull_request_mode.follow", trigger="poll"), [], "A pass with no linked pull request isn't polled again.")
+
+        remote_root = self.data_directory / "mode-in-review-remotes"
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        remote = remote_root / "mode-in-review.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+
+        def remove_fixture_origin():
+            # A worktree shares its source repository's git config; remove the remote only if it is still this case's.
+            current = subprocess.run(["git", "-C", str(self.primary), "remote", "get-url", "origin"], check=False, capture_output=True, text=True)
+            if current.returncode == 0 and current.stdout.strip() == str(remote):
+                self.run_git(self.primary, "remote", "remove", "origin")
+        self.addCleanup(remove_fixture_origin)
+        self.run_git(worktree, "remote", "add", "origin", str(remote))
+        self.run_git(worktree, "push", "origin", "main")
+        # GitHub rejects a pull request whose branch has no commits.
+        (worktree / "task-change.txt").write_text("Mode chosen in Review change.\n", encoding="utf-8")
+
+        # Choosing PR in Review opens the pull request with no click, and follows nothing.
+        self.set_pull_request_mode(task["id"], "pr", extra_environment=service_environment)
+        opened = self.wait_for(lambda: (lambda record: record if record["repositoryWorktrees"][0].get("pullRequestNumber") else None)(
+            self.assert_success(self.call_cli("task", "get", task["id"])[0])), "Choosing PR in Review opens the pull request.", timeout=60)
+        self.assertEqual(opened["repositoryWorktrees"][0]["pullRequestNumber"], 901)
+        self.assertEqual(opened["status"], "Review")
+        self.assertEqual(created_numbers(), ["901"])
+        self.assertEqual(events("plugin.pull_request_mode.follow", trigger="mode"), [], "PR mode opens the pull request but doesn't follow it.")
+
+        # Choosing Merge afterward opens no second pull request and merges the green one.
+        gh_state.write_text("901=unmerged\n901.checks=success\n901.threads=0\n", encoding="utf-8")
+        self.set_pull_request_mode(task["id"], "merge", extra_environment=service_environment)
+        self.wait_for(lambda: "merged\t901\t--squash" in create_log.read_text(encoding="utf-8").splitlines(),
+                      "Choosing Merge in Review merges the green pull request.", timeout=30)
+        self.assertEqual(events("plugin.pull_request_mode.follow", trigger="mode")[-1]["mode"], "merge")
+        self.assertEqual(created_numbers(), ["901"], "The pull request is opened exactly once.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review", "Merging leaves the task in Review.")
     # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); each pass records its result, and a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
     def test_task_pr_autopilot_fixes_red_pull_request_until_green(self):
         missing, _ = self.call_cli("task", "pr", "autopilot", str(uuid.uuid4()), expected_status=3)
