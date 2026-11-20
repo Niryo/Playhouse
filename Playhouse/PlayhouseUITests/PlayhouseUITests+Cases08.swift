@@ -587,7 +587,8 @@ extension PlayhouseUITests {
         // A launch with no folder asks where the repositories are.
         let promptTitle = element("suggestions-folder-prompt-title")
         XCTAssertTrue(promptTitle.waitToExist(timeout: 10), "Launching without a suggestions folder should open the Suggestions from prompt.")
-        XCTAssertEqual(pluginText(promptTitle), "Suggestions from")
+        XCTAssertEqual(pluginText(promptTitle), "Where do your repositories live?")
+        XCTAssertFalse(app.sheets.firstMatch.staticTexts["Suggestions from"].exists, "The prompt's question is its only title.")
         let promptMessage = element("suggestions-folder-prompt-message")
         XCTAssertTrue(pluginText(promptMessage).contains("holds all of your Git repositories"), "The prompt should explain which folder to choose.")
         attachScreenshot(named: "Launch asks for the folder repository suggestions come from")

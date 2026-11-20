@@ -330,7 +330,7 @@ struct SuggestionsFolderPromptModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .atomModal(
-                ModalProps(isPresented: isPresented, width: 440, title: "Suggestions from", subtitle: "Where do your repositories live?", icon: "folder.badge.gearshape"),
+                ModalProps(isPresented: isPresented, width: 440, title: "Where do your repositories live?", icon: "folder.badge.gearshape"),
                 common: AtomCommon(testID: "suggestions-folder-prompt"),
                 onDismiss: { isPresented = false }
             ) {
