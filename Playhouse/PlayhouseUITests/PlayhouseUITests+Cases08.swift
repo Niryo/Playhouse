@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, a repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch stores origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
+    // case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, adding a repository runs no Git: the pending record leaves its branch-from and merge target undecided until its chip's settings open (`task repository resolve`) or the task starts. Opening them saves and shows the defaults, and resolving again leaves them as saved, while resolving a repository the task lacks fails as not found. A repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch resolves to origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
     func test_task_repository_default_branch_from_uses_fresh_origin() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -20,7 +20,11 @@ extension PlayhouseUITests {
             XCTAssertTrue(badge.waitToExist(timeout: 5))
             badge.click()
             XCTAssertTrue(branchFromValue.waitToExist(timeout: 5), app.debugDescription)
-            XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), expected, app.debugDescription)
+            // Opening the chip's settings is what works the default out with Git.
+            XCTAssertTrue(
+                waitUntil({ accessibleLabelOrValue(of: branchFromValue) == expected }, timeout: 10),
+                "The chip's settings should show the resolved default \(expected): \(app.debugDescription)"
+            )
             attachScreenshot(named: screenshot)
             app.typeKey(.escape, modifierFlags: [])
             XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
@@ -31,8 +35,17 @@ extension PlayhouseUITests {
             "task", "create", "--title", localTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
         ])["result"] as? [String: Any]
         let localTaskID = try XCTUnwrap(localTask?["id"] as? String)
-        XCTAssertEqual(try repositoryRecord(taskID: localTaskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "main")
+        // Adding the repository runs no Git: its defaults wait until the chip opens or the task starts.
+        let undecided = try XCTUnwrap(repositoryRecord(taskID: localTaskID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(undecided["branchFrom"] as? String, "")
+        XCTAssertNil(undecided["mergeTarget"] as? String)
         showBranchFrom(taskTitle: localTitle, expected: "main", screenshot: "Without an origin the default branch-from stays local")
+        XCTAssertTrue(waitForRepositoryValue(taskID: localTaskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "main"))
+        XCTAssertTrue(waitForRepositoryValue(taskID: localTaskID, repositoryPath: fixture.primary.path, key: "mergeTarget", expected: "main"))
+        // Reopening shows the saved defaults; a repository the task lacks has none to resolve.
+        showBranchFrom(taskTitle: localTitle, expected: "main", screenshot: "Reopened settings keep the resolved branch-from")
+        let missing = try runCLI(["task", "repository", "resolve", localTaskID, "--repo", fixture.custom.path], expectedStatus: 3)
+        XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
 
         let remote = runDirectory.appendingPathComponent("default-branch-from-origin.git", isDirectory: true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
@@ -52,8 +65,9 @@ extension PlayhouseUITests {
         try setPullRequestMode("manual", taskID: taskID)
         let pending = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         XCTAssertEqual(pending["isPending"] as? Bool, true)
-        XCTAssertEqual(pending["branchFrom"] as? String, "origin/main")
+        XCTAssertEqual(pending["branchFrom"] as? String, "")
         showBranchFrom(taskTitle: title, expected: "origin/main", screenshot: "With an origin the default branch-from is origin's branch")
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "origin/main"))
 
         // Origin moves ahead without this repository fetching, and local main gains an unpushed commit.
         let clone = runDirectory.appendingPathComponent("default-branch-from-clone", isDirectory: true)
@@ -103,7 +117,8 @@ extension PlayhouseUITests {
         ])["result"] as? [String: Any]
         let offlineID = try XCTUnwrap(offline?["id"] as? String)
         try setPullRequestMode("manual", taskID: offlineID)
-        XCTAssertEqual(try repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "origin/main")
+        // Never opened, so the first send works the default out as the task starts.
+        XCTAssertEqual(try repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "")
         try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
         openTask(named: offlineTitle)
         try completeCurrentTaskWithFixtureAnswers(taskTitle: offlineTitle)
@@ -130,6 +145,9 @@ extension PlayhouseUITests {
         let badge = element("conversation-repository-badge-primary")
         XCTAssertTrue(badge.waitToExist(timeout: 5))
         badge.click()
+        // Opening the settings works the defaults out with Git; let that finish so the
+        // barrier below holds the save's own Git call.
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "main"))
         element("conversation-repository-branch-edit").click()
         replaceText(element("conversation-repository-branch"), with: "stale-ui-edit")
 
@@ -732,15 +750,33 @@ extension PlayhouseUITests {
         element("back-to-board-button").click()
         assertScreenshotIfVisible(named: "Repository suggestions exclude nested and symlinked folders")
     }
-    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to twenty repositories that keeps repositories after they are removed from the selection; the task repository recent command lists those that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge and the header shows no suggestion chips; removing a repository through its badge makes the add-repository picker list it under Recent before anything is typed, clicking it adds it back to the task and saved selection, and typing a query replaces the recent list with the regular search suggestions.
+    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused; while they are still attaching, its empty-state heading already names them and offers no add-repository prompt, and attaching them runs no Git, leaving their branch-from and merge target undecided. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to twenty repositories that keeps repositories after they are removed from the selection; the task repository recent command lists those that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge and the header shows no suggestion chips; removing a repository through its badge makes the add-repository picker list it under Recent before anything is typed, clicking it adds it back to the task and saved selection, and typing a query replaces the recent list with the regular search suggestions.
     func test_new_task_remembers_last_selected_repositories() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
 
+        // Holding the repository's allocation lock keeps the saved repositories attaching, so the
+        // heading is seen while they are still on their way rather than after they landed.
+        let allocationLock = try RepositoryAllocationLockBarrier(dataDirectory: dataDirectory, repositoryURL: fixture.secondary)
+        var allocationLockReleased = false
+        defer {
+            if !allocationLockReleased { try? allocationLock.release() }
+        }
         openNewTaskConversation()
         XCTAssertFalse(element("conversation-repository-search").exists, "Saved repositories should apply without opening the picker.")
+        let attachingTask = try XCTUnwrap(tasksFromBoardList().first)
+        XCTAssertEqual((attachingTask["repositoryWorktrees"] as? [Any])?.count, 0, "The saved repositories should still be attaching.")
+        let heading = element("empty-conversation-repository-title")
+        XCTAssertTrue(heading.waitToExist(timeout: 5))
+        XCTAssertEqual(accessibleLabelOrValue(of: heading), "secondary · primary",
+                       "While the saved repositories attach, the heading names them instead of No repository selected.")
+        XCTAssertFalse(element("empty-conversation-add-repository-button").exists, "No add-repository prompt while the saved repositories attach.")
+        attachScreenshot(named: "A new task names its saved repositories while they attach")
+        try allocationLock.release()
+        allocationLockReleased = true
         XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-primary").waitToExist(timeout: 10))
+        XCTAssertEqual(accessibleLabelOrValue(of: heading), "secondary · primary")
         let firstTask = try XCTUnwrap(tasksFromBoardList().first)
         let firstTaskID = try XCTUnwrap(firstTask["id"] as? String)
         let firstRoots = try XCTUnwrap(firstTask["workspaceRoots"] as? [String])
@@ -748,8 +784,9 @@ extension PlayhouseUITests {
         XCTAssertEqual(firstRoots, [fixture.secondary.path, fixture.primary.path])
         XCTAssertEqual(firstRepositories.map { $0["repositoryPath"] as? String }, [fixture.secondary.path, fixture.primary.path])
         XCTAssertEqual(firstRepositories.map { $0["branch"] as? String }, ["auto", "auto"])
-        XCTAssertEqual(firstRepositories.map { $0["branchFrom"] as? String }, ["main", "main"])
-        XCTAssertEqual(firstRepositories.map { $0["mergeTarget"] as? String }, ["main", "main"])
+        // Attaching ran no Git: the defaults wait until a chip opens or the task starts.
+        XCTAssertEqual(firstRepositories.map { $0["branchFrom"] as? String }, ["", ""])
+        XCTAssertEqual(firstRepositories.map { $0["mergeTarget"] as? String }, [nil, nil])
         assertLastSelectedRepositories([fixture.secondary.path, fixture.primary.path])
         element("back-to-board-button").click()
         assertCLIError(try runCLI(["task", "get", firstTaskID], expectedStatus: 3), code: "not_found")
