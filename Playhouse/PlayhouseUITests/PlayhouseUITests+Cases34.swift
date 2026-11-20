@@ -3,6 +3,243 @@ import Foundation
 import XCTest
 
 extension PlayhouseUITests {
+    // case-contract: test_standalone_chat_new_page_skips_last_page_context | A standalone chat's next message can start a new page, so it runs without the last page's context. Without it, a message continues the active page and resumes that page's provider session. The CLI's conversation send --new-page, and in the chat the small New page plus button right above the composer (absent from an empty chat), open a page titled "New page" that Playhouse marks as the user's own, before the turn, whose turn starts a fresh provider session, never resuming the last page's: its prompt carries a Playhouse page header naming that "New page" as the current page, telling the agent the user started it for a new topic and to name it in close-turn, and listing the earlier page by title and ID only so it can still be read, while none of the last page's turns travel with it. While the turn runs it is already on that page, still titled "New page" with no messages, and the chat shows a "New page" separator without a remove button above the sent message and no plus button. The agent's close-turn --new-title names that page instead of opening another one, so the chat gains exactly one page, holding the turn, the earlier page keeps its own messages, and the next message without New page resumes the new page's session; a close-turn with --continues true and no title leaves the page to the fallback classifier, which names it from the message, so it never keeps its placeholder title. A New page send that fails leaves its empty page, which another New page send reuses, running there in a fresh session that opens with the New page header again and names it, and a send without New page instead removes it and continues the page before it, resuming that page's session; in the chat, a New page send that fails keeps its removable New page separator, so the next message still starts that page. In the chat, pressing the button replaces it with a "New page" separator with a remove button; removing it brings the button back and the next message continues the active page, and once a message is sent with it the turn sits under the page's separator showing its real title and the button comes back; no plus button shows while any turn runs, a plain one included. --new-page on a board task is invalid_argument. The page is opened in Playhouse's provider-neutral turn path before the provider session is chosen and the header reaches either provider as the same seeded context, so one representative provider (Claude) covers the case.
+    func test_standalone_chat_new_page_skips_last_page_context() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-ui-chat-new-page")
+        let executable = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]))
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        let firstPrompt = "Name the largest moon of Jupiter."
+        let newPagePrompt = "Suggest a quick pasta dinner."
+        let newPageAnswer = "Cacio e pepe takes fifteen minutes."
+        let headerLine = "The user started this new page for their message"
+        let composer = element("message-composer")
+        let button = element("new-chat-page-button")
+        let separator = element("new-chat-page-separator")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        XCTAssertFalse(button.exists, "An empty chat has no page to leave, so it offers no New page button.")
+
+        func fixtureTurns(endingWith prompt: String) -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter {
+                let text = ($0["userText"] as? String) ?? ""
+                return text.hasSuffix(prompt) && !text.hasPrefix("Classify the latest user message")
+            }
+        }
+        func send(_ prompt: String) {
+            let before = fixtureTurns(endingWith: prompt).count
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({
+                fixtureTurns(endingWith: prompt).count > before && self.noTurnIsRunning()
+            }, timeout: 30), "The chat turn \(prompt) should finish.")
+        }
+        func status() throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        }
+        func activePage() throws -> [String: Any] {
+            try XCTUnwrap(try status()["activePage"] as? [String: Any])
+        }
+        func page(_ id: String) throws -> [String: Any] {
+            try XCTUnwrap((try runCLI(["chat", "page", "read", id])["result"] as? [String: Any])?["page"] as? [String: Any])
+        }
+        func pageTexts(_ id: String) throws -> [String] {
+            try XCTUnwrap((try runCLI(["chat", "page", "read", id])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+                .compactMap { $0["text"] as? String }
+        }
+        func pageIDs() throws -> [String] {
+            try XCTUnwrap((try runCLI(["chat", "page", "list"])["result"] as? [String: Any])?["pages"] as? [[String: Any]])
+                .compactMap { $0["id"] as? String }
+        }
+
+        send(firstPrompt)
+        let firstPage = try activePage()
+        let firstSession = try XCTUnwrap(fixtureTurns(endingWith: firstPrompt).last?["sessionID"] as? String)
+        XCTAssertTrue(button.waitToExist(timeout: 10), "The New page button shows right above the composer.")
+        XCTAssertLessThan(button.frame.maxY, composer.frame.minY, "The button sits above the composer.")
+        attachScreenshot(named: "standalone-chat-new-page-button")
+        attachElementScreenshot(button, named: "standalone-chat-new-page-button-close-up")
+
+        // Pressing it adds the New page separator in its place; removing it brings the button back.
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5), "Pressing New page adds a page separator.")
+        XCTAssertEqual(element("new-chat-page-title").value as? String ?? element("new-chat-page-title").label, "New page")
+        XCTAssertTrue(element("new-chat-page-remove").exists, "The new page can be removed.")
+        XCTAssertFalse(button.exists, "The button gives way to the new page's separator.")
+        XCTAssertLessThan(separator.frame.maxY, composer.frame.minY, "The separator sits above the composer.")
+        attachScreenshot(named: "standalone-chat-new-page-separator")
+        attachRegionScreenshot([separator, composer], named: "standalone-chat-new-page-separator-close-up")
+        element("new-chat-page-remove").click()
+        XCTAssertTrue(button.waitToExist(timeout: 5), "Removing the new page brings the button back.")
+        XCTAssertFalse(separator.exists)
+
+        // With the page removed, the message continues the active page in its session.
+        send(newPagePrompt)
+        let continued = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(continued["resumed"] as? Bool, true, "A message without New page resumes the active page's session.")
+        XCTAssertEqual(continued["sessionID"] as? String, firstSession)
+        XCTAssertFalse((continued["userText"] as? String ?? "").contains(headerLine))
+        XCTAssertEqual(try activePage()["id"] as? String, firstPage["id"] as? String)
+
+        // New page, then a message: a fresh session without the last page's turns. While the
+        // turn runs, its page's separator stays above it, without a remove button or the plus.
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5))
+        let hold = URL(fileURLWithPath: executable.path + ".hold-new-page")
+        let active = URL(fileURLWithPath: executable.path + ".new-page-active")
+        let release = URL(fileURLWithPath: executable.path + ".new-page-release")
+        try Data("Hold the New page turn.\n".utf8).write(to: hold)
+        let before = fixtureTurns(endingWith: newPagePrompt).count
+        composer.click()
+        composer.typeText(newPagePrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 30), "The New page turn is held.")
+        let sentMessages = app.groups.matching(NSPredicate(format: "label CONTAINS %@", newPagePrompt))
+        func newestSentMessage() throws -> XCUIElement {
+            try XCTUnwrap(sentMessages.allElementsBoundByIndex.max { $0.frame.minY < $1.frame.minY })
+        }
+        XCTAssertTrue(separator.waitToExist(timeout: 10), "The running turn shows the new page's separator.")
+        XCTAssertFalse(element("new-chat-page-remove").exists, "A sent message's page can no longer be removed.")
+        XCTAssertFalse(button.exists, "No New page button while the turn runs.")
+        XCTAssertLessThan(separator.frame.maxY, try newestSentMessage().frame.minY,
+                          "The separator sits above the sent message.")
+        let running = try activePage()
+        XCTAssertEqual(running["title"] as? String, "New page", "The running turn is on the user's page.")
+        XCTAssertEqual(running["messageCount"] as? Int, 0)
+        attachScreenshot(named: "standalone-chat-new-page-turn-running")
+        attachRegionScreenshot([separator, try newestSentMessage()], named: "standalone-chat-new-page-turn-running-close-up")
+        try Data("Release the New page turn.\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({
+            fixtureTurns(endingWith: newPagePrompt).count > before && self.noTurnIsRunning()
+        }, timeout: 30), "The New page turn should finish.")
+        let fresh = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        let freshText = fresh["userText"] as? String ?? ""
+        XCTAssertEqual(fresh["resumed"] as? Bool, false, "A New page message never resumes the last page's session.")
+        XCTAssertNotEqual(fresh["sessionID"] as? String, firstSession)
+        XCTAssertTrue(freshText.contains("Current page: \"New page\" (id: "), "The header names the user's new page.")
+        XCTAssertTrue(freshText.contains(headerLine), "The header tells the agent the user started a new topic.")
+        XCTAssertTrue(freshText.contains("- \"\(firstPage["title"] as? String ?? "")\" (id: \(firstPage["id"] as? String ?? ""), "),
+                      "The earlier page stays listed by title and ID.")
+        for earlier in ["Ganymede", newPageAnswer, firstPrompt] {
+            XCTAssertFalse(freshText.contains(earlier), "None of the last page's turns travel with a New page message.")
+        }
+        XCTAssertEqual(try status()["missedPreviousPageSignal"] as? Bool, false)
+        let newPage = try activePage()
+        XCTAssertEqual(newPage["id"] as? String, running["id"] as? String, "The turn is filed on the page it ran on.")
+        XCTAssertEqual(newPage["title"] as? String, "Pasta dinner", "close-turn names the user's page.")
+        XCTAssertEqual(try pageIDs(), [newPage["id"] as? String, firstPage["id"] as? String].compactMap { $0 },
+                       "close-turn names the user's page rather than opening another one.")
+        XCTAssertEqual(try pageTexts(newPage["id"] as? String ?? ""), [newPagePrompt, newPageAnswer], "The New page turn is filed on the new page.")
+        XCTAssertEqual(try pageTexts(firstPage["id"] as? String ?? "").count, 4, "The earlier page keeps its own messages.")
+        XCTAssertNotNil(try page(firstPage["id"] as? String ?? "")["closedAt"] as? String, "The earlier page is closed.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Pasta dinner") }, timeout: 10),
+                      "The sent turn sits under its page's separator, showing the page's real title.")
+        XCTAssertTrue(chatTranscriptShows(newPageAnswer, belowPage: "Pasta dinner"))
+        XCTAssertFalse(separator.exists, "Sending the message uses up the new page.")
+        XCTAssertTrue(button.waitToExist(timeout: 10), "The button comes back once the message is sent.")
+        attachScreenshot(named: "standalone-chat-new-page-titled-after-send")
+        let titledSeparator = element("chat-sidebar").descendants(matching: .staticText)
+            .matching(NSPredicate(format: "identifier == %@ AND (label == %@ OR value == %@)", "chat-page-separator", "Pasta dinner", "Pasta dinner"))
+            .firstMatch
+        attachRegionScreenshot([titledSeparator, try newestSentMessage(), button], named: "standalone-chat-new-page-titled-close-up")
+
+        // The next message without New page continues the new page's session. No plus button
+        // shows while any turn runs, a plain one included.
+        try Data("Hold the plain turn.\n".utf8).write(to: hold)
+        let beforeFollowUp = fixtureTurns(endingWith: newPagePrompt).count
+        composer.click()
+        composer.typeText(newPagePrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 30), "The plain turn is held.")
+        XCTAssertFalse(button.exists, "No New page button while a plain turn runs.")
+        XCTAssertFalse(separator.exists, "A plain turn starts no new page.")
+        try Data("Release the plain turn.\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({
+            fixtureTurns(endingWith: newPagePrompt).count > beforeFollowUp && self.noTurnIsRunning()
+        }, timeout: 30), "The plain turn should finish.")
+        let followUp = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(followUp["resumed"] as? Bool, true)
+        XCTAssertEqual(followUp["sessionID"] as? String, fresh["sessionID"] as? String)
+        XCTAssertEqual(try activePage()["id"] as? String, newPage["id"] as? String)
+
+        // A New page send that fails leaves its empty page; trying New page again reuses it.
+        func failedNewPageSend() throws -> [String: Any] {
+            try Data("Fail the New page turn.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".fail-new-page"))
+            _ = try runCLI(["conversation", "send", chatID, "--message", newPagePrompt, "--new-page"], expectedStatus: 1)
+            return try activePage()
+        }
+        let failed = try failedNewPageSend()
+        XCTAssertEqual(failed["title"] as? String, "New page")
+        XCTAssertEqual(failed["messageCount"] as? Int, 0)
+        XCTAssertEqual(try failedNewPageSend()["id"] as? String, failed["id"] as? String, "Retrying New page reuses its unfilled page.")
+        XCTAssertEqual(try pageIDs().count, 3)
+        // Sending from the chat without New page then undoes that page and continues the page before it.
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        XCTAssertFalse(separator.exists)
+        send(newPagePrompt)
+        let undone = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(undone["resumed"] as? Bool, true, "Without New page the message continues the earlier page's session.")
+        XCTAssertEqual(undone["sessionID"] as? String, fresh["sessionID"] as? String)
+        XCTAssertFalse((undone["userText"] as? String ?? "").contains(headerLine))
+        XCTAssertEqual(try activePage()["id"] as? String, newPage["id"] as? String)
+        XCTAssertEqual(try pageIDs(), [newPage["id"] as? String, firstPage["id"] as? String].compactMap { $0 },
+                       "The unfilled New page is gone.")
+
+        // A New page send from the chat that fails keeps its New page, so the next message
+        // still starts it, on the same page, in a fresh session.
+        try Data("Fail the New page turn.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".fail-new-page"))
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5))
+        send(newPagePrompt)
+        XCTAssertTrue(separator.waitToExist(timeout: 10), "The failed send keeps its New page separator.")
+        XCTAssertTrue(element("new-chat-page-remove").exists, "The kept New page can still be removed.")
+        XCTAssertFalse(button.exists)
+        let failedInChat = try activePage()
+        XCTAssertEqual(failedInChat["title"] as? String, "New page")
+        XCTAssertEqual(failedInChat["messageCount"] as? Int, 0)
+        attachScreenshot(named: "standalone-chat-new-page-kept-after-failed-send")
+        send(newPagePrompt)
+        let retried = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(retried["resumed"] as? Bool, false, "The retried New page message starts a fresh session.")
+        XCTAssertNotEqual(retried["sessionID"] as? String, fresh["sessionID"] as? String)
+        XCTAssertTrue((retried["userText"] as? String ?? "").contains(headerLine), "The retry opens with the New page header again.")
+        XCTAssertFalse((retried["userText"] as? String ?? "").contains(newPageAnswer))
+        let retriedPage = try activePage()
+        XCTAssertEqual(retriedPage["id"] as? String, failedInChat["id"] as? String, "The retry lands on the kept page.")
+        XCTAssertEqual(retriedPage["title"] as? String, "Pasta dinner")
+        XCTAssertEqual(try pageIDs().count, 3)
+
+        // An agent that closes a New page turn with --continues true and no title leaves the
+        // page to the fallback classifier, which names it from the message.
+        try Data("Continue the New page turn.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".continue-new-page"))
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5))
+        send(newPagePrompt)
+        XCTAssertTrue(waitUntil({
+            ((try? status())?["missedPreviousPageSignal"] as? Bool) == false
+                && ((try? activePage())?["title"] as? String) == "Classified pasta"
+        }, timeout: 30), "The user's page never keeps its placeholder title.")
+        let named = try activePage()
+        XCTAssertNotEqual(named["id"] as? String, retriedPage["id"] as? String)
+        XCTAssertEqual(try pageTexts(named["id"] as? String ?? ""), [newPagePrompt, newPageAnswer])
+        XCTAssertEqual(try pageIDs().count, 4)
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Classified pasta") }, timeout: 10),
+                      "The classifier's title replaces New page in the transcript.")
+
+        // Chat pages belong to the standalone chat only.
+        let boardTask = try XCTUnwrap((try runCLI(["task", "create", "--title", "New page rejection", "--prompt", "Fixture task description."])["result"] as? [String: Any])?["id"] as? String)
+        assertCLIError(try runCLI(["conversation", "send", boardTask, "--message", "Hello", "--new-page"], expectedStatus: 2), code: "invalid_argument")
+    }
+
     // case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, carries the latest plan in full, states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
     func test_claude_optimized_follow_up_starts_fresh_seeded_session() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-optimized-follow-up")

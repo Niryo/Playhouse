@@ -103,6 +103,7 @@ struct RemoteConversationManager {
         modelID: String? = nil,
         statusBeforeSubmission: TaskStatus? = nil,
         contextPageIDs: [String] = [],
+        startsNewChatPage: Bool = false,
         onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (ConversationUserInputRequest) -> Void = { _ in }
@@ -122,6 +123,8 @@ struct RemoteConversationManager {
         if let statusBeforeSubmission { arguments["statusBeforeSubmission"] = .string(statusBeforeSubmission.rawValue) }
         // Standalone chat only: pages an annotation quotes, carried for this turn.
         if !contextPageIDs.isEmpty { arguments["contextPages"] = .array(contextPageIDs.map(BridgeValue.string)) }
+        // Standalone chat only: the turn opens a new page, without the last page's context.
+        if startsNewChatPage { arguments["newPage"] = .boolean(true) }
         let forward = forwardUpdates(onUpdate)
         do {
             let result = try await daemon.call("conversation.send", arguments) { event in

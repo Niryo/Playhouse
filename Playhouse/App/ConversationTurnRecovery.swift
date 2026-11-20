@@ -525,7 +525,10 @@ extension ConversationManager {
             .prefix(ConversationHandoff.recentChatPageLimit)
         // A brand-new chat has nothing to point at yet.
         if let current, current.messages.isEmpty, recentPages.isEmpty, attached.isEmpty { return nil }
-        return ConversationHandoff.chatPageContext(current: current, recentPages: Array(recentPages), fullPages: attached)
+        let currentIsUserNewPage = current != nil && (try? chatManager.unstartedUserNewPage())??.id == headerPageID
+        return ConversationHandoff.chatPageContext(
+            current: current, currentIsUserNewPage: currentIsUserNewPage, recentPages: Array(recentPages), fullPages: attached
+        )
     }
 
     /// Files a finished chat turn and settles its page decision. Both GUI and CLI sends pass

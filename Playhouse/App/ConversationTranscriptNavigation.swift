@@ -320,7 +320,11 @@ extension TaskConversationView {
     /// The rows above a message: its page separator and the activity disclosure.
     @ViewBuilder
     func transcriptLeadingRows(for message: ConversationMessage, context: TranscriptRowContext) -> some View {
-        if let page = standaloneChatPageSeparator(before: message) {
+        if sendsNewChatPage, task.isStandaloneChat, message.id == context.latestTurnStartID {
+            // The turn's page is filed when the turn ends; until then its separator is the new page's.
+            newChatPageSeparator(removable: false)
+                .id("new-chat-page-separator-\(message.id)")
+        } else if let page = standaloneChatPageSeparator(before: message) {
             // A message written during a turn is queued or steers it, and neither carries a page.
             standaloneChatPageSeparator(page, canRecall: page.id != activeChatPageID && !isReadOnly && !isResponding)
                 .id("chat-page-separator-\(page.id)-\(message.id)")

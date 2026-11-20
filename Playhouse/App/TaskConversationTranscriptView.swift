@@ -608,6 +608,7 @@ extension TaskConversationView {
             if !waitingFollowUps.isEmpty {
                 queuedFollowUpList
             }
+            newChatPageControl
 
             ComposerView(model: composerModel, actions: composerActions, header: {
         recalledChatPageChips

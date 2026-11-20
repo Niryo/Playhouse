@@ -60,6 +60,9 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
             1 for turn in history.get("turns", [])
             if (turn.get("userText") or "").startswith("Classify the latest user message for Playhouse's continuous chat page index.")
         )
+        if runtime.CHAT_NEW_PAGE_PROMPT in user_text:
+            runtime.text("msg_page_classification", '{"continues":false,"title":"Classified pasta"}')
+            return commands
         if classifier_attempts == 0:
             runtime.text("msg_page_classification", '{"continues":false,"title":"Ignored extra field","unexpected":true}')
             return commands
@@ -91,6 +94,32 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
             commands.append({"command": close_turn,
                              "output": runtime.run_tool("toolu_close_first", "Bash", {"command": close_turn}, close_turn)})
         runtime.text("msg_chat_close_first_answer", runtime.CHAT_CLOSE_FIRST_ANSWER)
+    elif user_text.rstrip().endswith(runtime.CHAT_NEW_PAGE_PROMPT):
+        # `.hold-new-page` keeps the turn running, with `.new-page-active` present, until
+        # `.new-page-release` appears, so a test can look at the chat while the turn runs.
+        hold = runtime.Path(str(runtime.sys.argv[0]) + ".hold-new-page")
+        if hold.exists():
+            hold.unlink(missing_ok=True)
+            active = runtime.Path(str(runtime.sys.argv[0]) + ".new-page-active")
+            release = runtime.Path(str(runtime.sys.argv[0]) + ".new-page-release")
+            active.write_text("The new page turn is held.\n", encoding="utf-8")
+            deadline = runtime.time.monotonic() + 30
+            while not release.exists() and runtime.time.monotonic() < deadline:
+                runtime.time.sleep(0.02)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+        close_turn = runtime.report_command(instructions, " chat page close-turn ")
+        # `.continue-new-page` closes the turn with --continues true and no title, as an agent
+        # that ignores the header might, leaving the page for the fallback classifier to name.
+        continue_marker = runtime.Path(str(runtime.sys.argv[0]) + ".continue-new-page")
+        if continue_marker.exists():
+            continue_marker.unlink(missing_ok=True)
+        elif close_turn and runtime.CHAT_NEW_PAGE_HEADER in user_text:
+            close_turn = close_turn.replace("--continues true", f"--continues false --new-title {runtime.shlex.quote(runtime.CHAT_NEW_PAGE_TITLE)}")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": runtime.run_tool("toolu_new_page_close_turn", "Bash", {"command": close_turn}, close_turn)})
+        runtime.text("msg_chat_new_page_answer", runtime.CHAT_NEW_PAGE_ANSWER)
     elif user_text.rstrip().endswith(runtime.CHAT_NOTICE_PROMPT):
         # Mirrors the observed incident: the turn ends on close-turn, so Claude Code adds its
         # synthetic "no visible output" message to the same turn and Claude answers again.

@@ -87,6 +87,8 @@ enum StandaloneChatStoreError: LocalizedError {
 
 final class StandaloneChatManager {
     static let defaultChatID = "default"
+    /// The title a page the user starts carries until its first turn names it.
+    static let newPageTitle = "New page"
     private static let pageFileProcessLock = NSLock()
     private static let pageFileBackfillLock = NSLock()
 
@@ -186,6 +188,14 @@ final class StandaloneChatManager {
         CREATE TABLE IF NOT EXISTS chat_inflight_turn (
             chat_id TEXT PRIMARY KEY,
             started_at TEXT NOT NULL
+        );
+        """)
+        // The page the user last started with the composer's New page button. While no turn has
+        // filled it, its first turn names it and a send without New page undoes it.
+        try exec("""
+        CREATE TABLE IF NOT EXISTS chat_user_new_page (
+            chat_id TEXT PRIMARY KEY,
+            page_id TEXT NOT NULL
         );
         """)
         try exec("CREATE TABLE IF NOT EXISTS chat_archive_migrations (version INTEGER PRIMARY KEY);")
@@ -357,11 +367,17 @@ final class StandaloneChatManager {
     /// appends to the current active page, creating one if this is the very first turn.
     @discardableResult
     func resolveTurnPage(chatID: String = defaultChatID, provider: String, continues: Bool, newTitle: String?) throws -> StandaloneChatPage {
+        let title = newTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // The page the user started for this turn is already the turn's own page: a title names it.
+        if let userPage = try unstartedUserNewPage(chatID: chatID) {
+            if !title.isEmpty { try setPageTitle(pageID: userPage.id, title: title) }
+            return try page(id: userPage.id)
+        }
         if !continues {
-            guard let newTitle, !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard !title.isEmpty else {
                 throw StandaloneChatStoreError.queryFailed("A new page requires --new-title when --continues is false.")
             }
-            return try createPage(chatID: chatID, title: newTitle, provider: provider)
+            return try createPage(chatID: chatID, title: title, provider: provider)
         }
         if let active = try activePage(chatID: chatID) { return active }
         return try createPage(chatID: chatID, title: "New conversation", provider: provider, closingCurrentActivePage: false)
@@ -556,6 +572,79 @@ final class StandaloneChatManager {
             try? exec("ROLLBACK;")
             throw error
         }
+    }
+
+    /// The page the user started with New page, while it is the active page and no turn has
+    /// filled it yet.
+    func unstartedUserNewPage(chatID: String = defaultChatID) throws -> StandaloneChatPage? {
+        var pageID: String?
+        try withStatement("SELECT page_id FROM chat_user_new_page WHERE chat_id = ?;", bindings: [.text(chatID)]) { statement in
+            if sqlite3_step(statement) == SQLITE_ROW { pageID = columnText(statement, 0) }
+        }
+        guard let pageID, let active = try activePage(chatID: chatID), active.id == pageID, active.messageCount == 0 else { return nil }
+        return active
+    }
+
+    /// Starts the page a user's New page send runs on, titled `newPageTitle`, so its turn gets a
+    /// fresh session without the last page's turns. A New page that no turn has filled yet, left
+    /// by a send that failed, is reused, so retrying never leaves empty pages behind; it drops the
+    /// session that failed send started, so the retry again opens with the New page header.
+    /// Playhouse starts this page, not the agent, so unlike `chat page new` it records no page
+    /// signal: the turn still owes its own close-turn, and the fallback classifier names the
+    /// page when that never comes.
+    func startUserNewPage(chatID: String = defaultChatID, provider: String) throws -> StandaloneChatPage {
+        if let unstarted = try unstartedUserNewPage(chatID: chatID) {
+            guard unstarted.providerSessionID != nil else { return unstarted }
+            try exec("UPDATE chat_pages SET provider_session_id = NULL WHERE id = ?;", bindings: [.text(unstarted.id)])
+            if isOutsideTransaction { try syncPageFile(pageID: unstarted.id) }
+            return try page(id: unstarted.id)
+        }
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            let previousPageID = try activePage(chatID: chatID)?.id
+            try clearPendingFallback(chatID: chatID)
+            try setLastTurnMissedSignal(false, chatID: chatID)
+            let page = try createPage(chatID: chatID, title: Self.newPageTitle, provider: provider)
+            try exec(
+                "INSERT INTO chat_user_new_page (chat_id, page_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET page_id = excluded.page_id;",
+                bindings: [.text(chatID), .text(page.id)]
+            )
+            try exec("COMMIT;")
+            if let previousPageID { try syncPageFile(pageID: previousPageID) }
+            try syncPageFile(pageID: page.id)
+            return page
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Undoes a user's New page that no turn ever filled, as when its send failed and the user
+    /// then sent without New page: the empty page goes and the page it closed is the active page
+    /// again, so the message continues it. Returns whether a page was undone.
+    @discardableResult
+    func discardUnstartedUserNewPage(chatID: String = defaultChatID) throws -> Bool {
+        guard let unstarted = try unstartedUserNewPage(chatID: chatID) else { return false }
+        var reopenedPageID: String?
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            try exec("DELETE FROM chat_user_new_page WHERE chat_id = ?;", bindings: [.text(chatID)])
+            try exec("DELETE FROM chat_pages WHERE id = ? AND message_count = 0;", bindings: [.text(unstarted.id)])
+            reopenedPageID = try queryPages(
+                "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? AND closed_at IS NOT NULL ORDER BY created_at DESC LIMIT 1;",
+                bindings: [.text(chatID)]
+            ).first?.id
+            if let reopenedPageID {
+                try exec("UPDATE chat_pages SET closed_at = NULL WHERE id = ?;", bindings: [.text(reopenedPageID)])
+            }
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+        try? FileManager.default.removeItem(at: pageFileURL(pageID: unstarted.id))
+        if let reopenedPageID { try syncPageFile(pageID: reopenedPageID) }
+        return true
     }
 
     /// Applies a classifier result only if its exact pending turn is still the

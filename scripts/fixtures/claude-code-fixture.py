@@ -97,6 +97,12 @@ CHAT_CLOSING = "Tell me if you want the upgrade command."
 # A chat turn that runs close-turn first and answers after it, as the instructions ask.
 CHAT_CLOSE_FIRST_PROMPT = "Name the largest moon of Jupiter."
 CHAT_CLOSE_FIRST_ANSWER = "Ganymede is the largest moon of Jupiter."
+# A chat turn the user may send on a page they started with New page. Told so by the page header,
+# it names that page in close-turn, as the instructions ask; otherwise it continues the page.
+CHAT_NEW_PAGE_PROMPT = "Suggest a quick pasta dinner."
+CHAT_NEW_PAGE_ANSWER = "Cacio e pepe takes fifteen minutes."
+CHAT_NEW_PAGE_TITLE = "Pasta dinner"
+CHAT_NEW_PAGE_HEADER = "The user started this new page for their message"
 # A chat turn that answers, runs close-turn last, and then gets Claude Code's own notice.
 CHAT_NOTICE_PROMPT = "Name the largest moon of Saturn."
 CHAT_NOTICE_ANSWER = "Titan is the largest moon of Saturn."
@@ -1007,6 +1013,17 @@ def main():
                 history_path.write_text(json.dumps(history), encoding="utf-8")
                 write({"type": "result", "subtype": "error", "is_error": True,
                        "result": "Fixture provider echoed Answer: Green and the private recovery prompt."})
+                continue
+            # `.fail-new-page` makes the next New page prompt's turn fail before it answers.
+            fail_new_page = Path(str(sys.argv[0]) + ".fail-new-page")
+            if user_text.rstrip().endswith(CHAT_NEW_PAGE_PROMPT) and fail_new_page.exists():
+                fail_new_page.unlink(missing_ok=True)
+                turn["failure"] = "The fixture failed the New page turn on purpose."
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
+                history["turns"].append(turn)
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+                write({"type": "result", "subtype": "error", "is_error": True,
+                       "result": "The fixture failed the New page turn on purpose."})
                 continue
             prior_turns = json.loads(history_path.read_text(encoding="utf-8")).get("turns", []) if history_path.exists() else []
             previous_prompt = next((

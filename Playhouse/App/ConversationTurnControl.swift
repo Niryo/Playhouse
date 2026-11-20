@@ -400,6 +400,7 @@ extension ConversationManager {
         retainQueuedMessagesOnFailure: Bool = true,
         statusBeforeSubmission: TaskStatus? = nil,
         contextPageIDs: [String] = [],
+        startsNewChatPage: Bool = false,
         onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in },
@@ -433,6 +434,12 @@ extension ConversationManager {
             throw BridgeCommandError(
                 code: "invalid_argument",
                 message: "Chat pages belong to the standalone chat, so a task conversation cannot take --context-page."
+            )
+        }
+        guard !startsNewChatPage || task.isStandaloneChat else {
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "Chat pages belong to the standalone chat, so a task conversation cannot take --new-page."
             )
         }
         // After validation, so a rejected send leaves the recent mentions as they were.
@@ -525,6 +532,7 @@ extension ConversationManager {
                         deferMissingOutcomeStatus: true,
                         statusBeforeSubmission: statusBeforeSubmission,
                         contextPageIDs: contextPageIDs,
+                        startsNewChatPage: startsNewChatPage,
                         onTurnStarting: onTurnStarting,
                         onUpdate: onUpdate,
                         onUserInput: onUserInput,

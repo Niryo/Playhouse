@@ -434,14 +434,18 @@ final class PlayhouseBridgeRuntime {
                 if !continues, (request.arguments["newTitle"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw BridgeCommandError(code: "invalid_argument", message: "A new page requires --new-title when --continues is false.")
                 }
+                let newTitle = (request.arguments["newTitle"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                // A page the user started with New page must not keep its placeholder title: left
+                // untitled here, its turn counts as unclassified, so the fallback classifier names it.
+                let leavesUserNewPageUntitled = try newTitle.isEmpty && chatManager.unstartedUserNewPage() != nil
                 let page = try chatManager.resolveTurnPage(
                     provider: settings.defaultConversationProvider.rawValue,
                     continues: continues,
-                    newTitle: request.arguments["newTitle"]?.string
+                    newTitle: newTitle
                 )
                 // Kept with its page and time, so the turn it settles can still be filed on
                 // that page by a daemon that took the turn over after a restart.
-                try chatManager.recordTurnSignal(pageID: page.id)
+                if !leavesUserNewPageUntitled { try chatManager.recordTurnSignal(pageID: page.id) }
                 if let summaryHint = request.arguments["summaryHint"]?.string, !summaryHint.isEmpty {
                     try chatManager.setSummary(pageID: page.id, summary: summaryHint)
                 }
