@@ -69,6 +69,8 @@
 		A1000000000000000000F403 /* AgentRunHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F403 /* AgentRunHost.swift */; };
 		A1000000000000000000F601 /* ContextCompaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F601 /* ContextCompaction.swift */; };
 		A1000000000000000000F701 /* TranscriptRowAnchors.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F701 /* TranscriptRowAnchors.swift */; };
+		A1000000000000000000F803 /* MarkdownInlineText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F803 /* MarkdownInlineText.swift */; };
+		A1000000000000000000F802 /* MarkdownDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F802 /* MarkdownDocument.swift */; };
 		A1000000000000000000001C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* GRDB */; };
 		A1000000000000000000F501 /* TaskItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F501 /* TaskItemView.swift */; };
 		A100000000000000000000DB /* DebugConversationImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000DB /* DebugConversationImport.swift */; };
@@ -269,6 +271,8 @@
 		A2000000000000000000F403 /* AgentRunHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRunHost.swift; sourceTree = "<group>"; };
 		A2000000000000000000F601 /* ContextCompaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextCompaction.swift; sourceTree = "<group>"; };
 		A2000000000000000000F701 /* TranscriptRowAnchors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptRowAnchors.swift; sourceTree = "<group>"; };
+		A2000000000000000000F803 /* MarkdownInlineText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownInlineText.swift; sourceTree = "<group>"; };
+		A2000000000000000000F802 /* MarkdownDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownDocument.swift; sourceTree = "<group>"; };
 		A2000000000000000000F501 /* TaskItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskItemView.swift; sourceTree = "<group>"; };
 		A200000000000000000000DB /* DebugConversationImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConversationImport/DebugConversationImport.swift; sourceTree = "<group>"; };
 		B20000000000000000000001 /* ConversationMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMessages.swift; sourceTree = "<group>"; };
@@ -642,6 +646,8 @@
 				A2000000000000000000F403 /* AgentRunHost.swift */,
 				A2000000000000000000F601 /* ContextCompaction.swift */,
 				A2000000000000000000F701 /* TranscriptRowAnchors.swift */,
+				A2000000000000000000F803 /* MarkdownInlineText.swift */,
+				A2000000000000000000F802 /* MarkdownDocument.swift */,
 				A200000000000000000000DB /* DebugConversationImport.swift */,
 				A2000000000000000000F501 /* TaskItemView.swift */,
 				A200000000000000000000F1 /* Plugins */,
@@ -1074,6 +1080,8 @@
 				A1000000000000000000F403 /* AgentRunHost.swift in Sources */,
 				A1000000000000000000F601 /* ContextCompaction.swift in Sources */,
 				A1000000000000000000F701 /* TranscriptRowAnchors.swift in Sources */,
+				A1000000000000000000F803 /* MarkdownInlineText.swift in Sources */,
+				A1000000000000000000F802 /* MarkdownDocument.swift in Sources */,
 				A100000000000000000000DB /* DebugConversationImport.swift in Sources */,
 				B10000000000000000000004 /* PlayhouseStore.swift in Sources */,
 				B10000000000000000000005 /* PullRequestServices.swift in Sources */,

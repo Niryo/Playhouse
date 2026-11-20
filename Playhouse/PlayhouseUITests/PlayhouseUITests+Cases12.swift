@@ -844,7 +844,7 @@ extension PlayhouseUITests {
         openTask(named: "Prompted UI")
         XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String) == "Full description of the work" }, timeout: 10),
                       "The created task's composer should hold its saved description.")
-        XCTAssertTrue(element("empty-conversation").exists, "A description saved on create must not have been sent.")
+        XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10), "A description saved on create must not have been sent.")
         attachScreenshot(named: "Task created with a prompt shows its description unsent in the composer")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))

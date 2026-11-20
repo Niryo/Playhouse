@@ -405,6 +405,9 @@ struct PullRequestAutopilotOutcome: Codable, Sendable {
     let reason: String?
     /// The PRs this pass merged (merge mode); nil when it merged none.
     var mergedPullRequests: [Int]? = nil
+    /// True when the pass was inactive because the Review task has no linked
+    /// pull request, which no later pass can change by itself.
+    var noPullRequest: Bool? = nil
 }
 
 /// What the review sync did to one PR-linked repository: pr-merged, no-remote,

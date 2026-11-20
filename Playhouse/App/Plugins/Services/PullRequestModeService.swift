@@ -51,10 +51,12 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
 /// - the task reached Review: create its pull requests unless the mode is
 ///   manual, then (Green and Merge) follow them;
 /// - the app came to the front: follow every Green or Merge task in Review;
-/// - the user chose Green or Merge for a task in Review: follow it with a fresh
-///   set of fix attempts.
+/// - the user chose a mode for a task in Review: as on reaching Review, create
+///   its pull requests unless the mode is manual, then (Green and Merge) follow
+///   them with a fresh set of fix attempts.
 /// Following is one `task.pr.autopilot` pass (fix a red PR, merge a green one
-/// in Merge mode); a pass that finds checks still running looks again later.
+/// in Merge mode); a pass that finds checks still running looks again later,
+/// and one that finds no linked pull request stops.
 @MainActor
 final class PullRequestModeService: PluginService {
     let pluginID = BuiltInPlugins.pullRequestModeID
@@ -86,9 +88,12 @@ final class PullRequestModeService: PluginService {
         case PluginEvent.pluginStateChanged:
             guard event.payload["pluginID"]?.string == pluginID, let taskID = event.payload["key"]?.string else { return }
             guard let task = try? await context.call("task.get", ["taskID": .string(taskID)]).object,
-                  task["status"]?.string == TaskStatus.review.rawValue,
-                  await mode(of: task, context: context).followsPullRequests else { return }
-            follow(taskID, trigger: "mode", context: context, resetAttempts: true)
+                  task["status"]?.string == TaskStatus.review.rawValue else { return }
+            // A task that reached Review in Manual mode has no pull request yet:
+            // choosing another mode there does what reaching Review in it would.
+            let mode = await mode(of: task, context: context)
+            PlayhouseDiagnostics.record("plugin.pull_request_mode.chosen", fields: ["taskID": taskID, "mode": mode.rawValue])
+            await open(taskID, mode: mode, trigger: "mode", context: context, resetAttempts: true)
         default:
             return
         }
@@ -98,14 +103,20 @@ final class PullRequestModeService: PluginService {
         guard let task = try? await context.call("task.get", ["taskID": .string(taskID)]).object else { return }
         let mode = await mode(of: task, context: context)
         PlayhouseDiagnostics.record("plugin.pull_request_mode.review", fields: ["taskID": taskID, "mode": mode.rawValue])
+        await open(taskID, mode: mode, trigger: "review", context: context, resetAttempts: false)
+    }
+
+    /// Opens the pull requests a Review task still waits for unless the mode
+    /// is manual, then (Green and Merge) follows them.
+    private func open(_ taskID: String, mode: PullRequestMode, trigger: String, context: PluginServiceContext, resetAttempts: Bool) async {
         guard mode != .manual else { return }
         do {
             _ = try await context.call("task.pr.create", ["taskID": .string(taskID), "ifNeeded": .bool(true)])
         } catch {
-            PlayhouseDiagnostics.record("task.review.auto_pr.failed", fields: ["taskID": taskID, "error": "\(error)"])
+            PlayhouseDiagnostics.record("task.review.auto_pr.failed", fields: ["taskID": taskID, "trigger": trigger, "error": "\(error)"])
             return
         }
-        if mode.followsPullRequests { follow(taskID, trigger: "review", context: context) }
+        if mode.followsPullRequests { follow(taskID, trigger: trigger, context: context, resetAttempts: resetAttempts) }
     }
 
     private func followReviewTasks(context: PluginServiceContext) async {
@@ -176,6 +187,10 @@ final class PullRequestModeService: PluginService {
             // The fix turn ended; its push usually leaves the checks running,
             // which the next pass finds and polls.
             await followNow(taskID, trigger: "fixed", context: context, resetAttempts: false)
+        case "inactive" where outcome["noPullRequest"]?.bool == true:
+            // No later pass links a pull request by itself: reaching Review, or
+            // choosing a mode in Review, opens it and follows it then.
+            PlayhouseDiagnostics.record("plugin.pull_request_mode.no_pull_request", fields: ["taskID": taskID, "trigger": trigger])
         case "inactive" where outcome["taskStatus"]?.string == TaskStatus.review.rawValue:
             // Still in Review but skipped: the turn that moved it there lets go
             // of the task just after, so that pass looks again soon; others wait

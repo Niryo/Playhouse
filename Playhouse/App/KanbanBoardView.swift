@@ -91,18 +91,21 @@ private struct ChatSidebarClip: Shape {
     }
 }
 
-/// The standalone chat's conversation. The board re-renders on every frame of a chat resize, and
-/// a conversation view rebuilt from it, closures and all, re-ran its whole transcript each time;
-/// compared by the chat it shows, it updates only from its own state and the chat's model. Any
-/// input added here that can change must also be compared in `==`, or its changes are ignored. The
-/// closures only reach the board's state storage, so an older copy of them stays valid.
+/// A standalone chat's conversation: the chat sidebar's, or a plugin editor's. The board re-renders
+/// on every frame of a chat resize and on every runtime change of any task, and a conversation view
+/// rebuilt from it, closures and all, re-ran its whole transcript each time; compared by the chat it
+/// shows, it updates only from its own state and the chat's model. Any input added here that can
+/// change must also be compared in `==`, or its changes are ignored. The closures only reach the
+/// board's state storage, so an older copy of them stays valid.
 struct StandaloneChatPanel: View, Equatable {
     let chat: StandaloneChat
+    /// A new plugin editor's starting prompt.
+    var initialDraft: String? = nil
     let onOpenTask: (UUID, String) -> Void
     let onClose: () -> Void
 
     static func == (lhs: StandaloneChatPanel, rhs: StandaloneChatPanel) -> Bool {
-        lhs.chat === rhs.chat
+        lhs.chat === rhs.chat && lhs.initialDraft == rhs.initialDraft
     }
 
     var body: some View {
@@ -110,6 +113,7 @@ struct StandaloneChatPanel: View, Equatable {
             task: chat, isNewTask: false,
             conflictResolutionRequested: false,
             onConflictResolutionChecked: { _ in },
+            initialDraft: initialDraft,
             onOpenTask: onOpenTask,
             onBack: onClose
         )
@@ -282,18 +286,16 @@ struct KanbanBoardView: View {
                 })
             } else if let pluginChat, let pluginID = pluginChat.authoredPluginID {
                 HStack(spacing: 0) {
-                    TaskConversationView(task: pluginChat, isNewTask: false,
-                        conflictResolutionRequested: false, onConflictResolutionChecked: { _ in },
-                        initialDraft: pluginInitialDraft, onOpenTask: openTask(_:sending:),
-                        onBack: {
-                            if let folder = pluginChat.contextFolderPaths.first {
-                                let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
-                                let data = draftData.deletingLastPathComponent().deletingLastPathComponent()
-                                let library = PluginLibrary(dataDirectory: data.path)
-                                if library.hasDraftChanges(id: pluginID) { showPluginDraftNotice = true; return }
-                            }
-                            self.pluginChat = nil; pluginInitialDraft = nil
-                        })
+                    StandaloneChatPanel(chat: pluginChat, initialDraft: pluginInitialDraft, onOpenTask: openTask(_:sending:)) {
+                        if let folder = pluginChat.contextFolderPaths.first {
+                            let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
+                            let data = draftData.deletingLastPathComponent().deletingLastPathComponent()
+                            let library = PluginLibrary(dataDirectory: data.path)
+                            if library.hasDraftChanges(id: pluginID) { showPluginDraftNotice = true; return }
+                        }
+                        self.pluginChat = nil; pluginInitialDraft = nil
+                    }
+                        .equatable()
                         .id(pluginChat.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     Divider()

@@ -11,6 +11,9 @@ struct KanbanColumnModel: Codable, Equatable {
         var icon: String
         var title: String
         var hint: String
+        /// The title of the pulsing Add button it shows instead of the
+        /// header's, so an empty Backlog points at creating a task.
+        var action: String?
     }
 
     var idPrefix: String
@@ -21,7 +24,8 @@ struct KanbanColumnModel: Codable, Equatable {
     /// The status color, as #RRGGBB.
     var accent: String
     var count: String
-    /// The Add button's help; only the Backlog has one.
+    /// The Add button's help; only the Backlog has one, in its header while
+    /// it has tasks and in its empty state (`Empty.action`) while it has none.
     var addHelp: String?
     /// The red line under the header (the Blocked column's).
     var notice: String?
@@ -42,7 +46,8 @@ struct KanbanColumnModel: Codable, Equatable {
         empty = taskCount > 0 ? nil : Empty(
             icon: status == .done ? "checkmark.circle" : "tray",
             title: "No tasks yet",
-            hint: status == .backlog ? "Create a task to get started" : "Drop a task here"
+            hint: status == .backlog ? "Create a task to get started" : "Drop a task here",
+            action: status == .backlog ? "New Task" : nil
         )
     }
 }
@@ -50,7 +55,8 @@ struct KanbanColumnModel: Codable, Equatable {
 /// A board column's frame, composed only of plugin atoms (Plugins/Atoms), so a
 /// plugin building it from the same atoms looks identical: a Panel holding the
 /// header (status dot, title, count, the Backlog's Add button), the Blocked
-/// notice, then the cards or the empty state. A tinted column lays a second
+/// notice, then the cards or the empty state; an empty Backlog moves its Add
+/// button, pulsing, into the empty state. A tinted column lays a second
 /// Panel in its tint (a soft wash and hairline border) over the first. The
 /// cards are native (`TaskCardView`) and arrive through `cards`.
 struct KanbanColumnSection<Cards: View>: View {
@@ -117,7 +123,7 @@ struct KanbanColumnSection<Cards: View>: View {
                     common: AtomCommon(testID: "\(prefix)column-count-\(model.key)")
                 )
             }
-            if let help = model.addHelp {
+            if let help = model.addHelp, model.empty?.action == nil {
                 AtomButton(
                     props: ButtonProps(style: "bordered", controlSize: "small"),
                     common: AtomCommon(testID: "\(prefix)add-backlog-task-button", label: help, help: help),
@@ -129,14 +135,40 @@ struct KanbanColumnSection<Cards: View>: View {
         }
     }
 
+    @ViewBuilder
     private func emptyState(_ empty: KanbanColumnModel.Empty) -> some View {
-        AtomPanel(
-            props: PanelProps(spacing: 9, fillOpacity: 0, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.10, dash: [5, 4], align: "center", combine: true),
-            common: AtomCommon(testID: "\(prefix)empty-state-\(model.key)", minHeight: 124, fillWidth: true, padding: 0)
-        ) {
-            AtomIcon(props: IconProps(name: empty.icon, size: 18, weight: "regular", color: model.accent))
-            AtomText(props: TextProps(text: empty.title, size: 12, weight: "medium", color: "secondary"))
-            AtomText(props: TextProps(text: empty.hint, size: 11, color: "tertiary"))
+        if let action = empty.action, let help = model.addHelp {
+            // One container, so the button stays its own element beside the
+            // message, which reads as the panel's label.
+            AtomPanel(
+                props: PanelProps(spacing: 12, fillOpacity: 0, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.10, dash: [5, 4], align: "center"),
+                common: AtomCommon(testID: "\(prefix)empty-state-\(model.key)", label: "\(empty.title), \(empty.hint)", minHeight: 124, fillWidth: true, padding: 0)
+            ) {
+                AtomStack(props: StackProps(axis: "v", spacing: 9, align: "center")) {
+                    emptyMessage(empty)
+                }
+                AtomButton(
+                    props: ButtonProps(style: "prominent", controlSize: "small", pulse: true),
+                    common: AtomCommon(testID: "\(prefix)add-backlog-task-button", label: help, help: help),
+                    action: onAdd
+                ) {
+                    AtomLabel(props: LabelProps(text: action, icon: "plus", size: 11, weight: "semibold"))
+                }
+            }
+        } else {
+            AtomPanel(
+                props: PanelProps(spacing: 9, fillOpacity: 0, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.10, dash: [5, 4], align: "center", combine: true),
+                common: AtomCommon(testID: "\(prefix)empty-state-\(model.key)", minHeight: 124, fillWidth: true, padding: 0)
+            ) {
+                emptyMessage(empty)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func emptyMessage(_ empty: KanbanColumnModel.Empty) -> some View {
+        AtomIcon(props: IconProps(name: empty.icon, size: 18, weight: "regular", color: model.accent))
+        AtomText(props: TextProps(text: empty.title, size: 12, weight: "medium", color: "secondary"))
+        AtomText(props: TextProps(text: empty.hint, size: 11, color: "tertiary"))
     }
 }

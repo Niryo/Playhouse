@@ -641,10 +641,15 @@ class BridgeTestCases07:
 
         concurrent_task = self.create_repo_task("Concurrent root edit", [self.primary])
         concurrent_id = concurrent_task["id"]
-        barrier = GitConfigReadBarrier(self.secondary)
+        # A detached HEAD keeps the repository from being recognized without Git, so the
+        # stale request is held inside Git while the newer one lands.
+        detached = self.fixture / "detached-head-repo"
+        self.run_git(self.fixture, "clone", "--quiet", str(self.secondary), str(detached))
+        self.run_git(detached, "checkout", "--quiet", "--detach")
+        barrier = GitConfigReadBarrier(detached)
         stale_command = [
             "task", "roots", "set", concurrent_id,
-            "--root", self.secondary,
+            "--root", str(detached),
         ]
         stale_process = None
         continue_stale_process = False
@@ -753,11 +758,37 @@ class BridgeTestCases07:
         self.assertEqual([item["repositoryPath"] for item in self.assert_success(fresh)["repositoryWorktrees"]], [str(self.primary)])
         settings, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(settings)["lastSelectedRepositories"], [str(self.primary)])
-    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
+    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; a field saved while the repository's default branch-from and merge target are still being worked out waits for them and saves the typed value alongside the resolved defaults; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
     def test_task_repository_settings_validate_persist_and_lock_after_start(self):
         task = self.create_repo_task("Repository settings", [self.primary])
         task_id = task["id"]
-        initial = task["repositoryWorktrees"][0]
+        undecided = task["repositoryWorktrees"][0]
+        self.assertEqual((undecided["branchFrom"], undecided.get("mergeTarget")), ("", None))
+        # Working the defaults out waits on the task's operation lock to save them, and an
+        # edit saved meanwhile waits behind it, keeping the typed branch with those defaults.
+        operation_lock = TaskOperationLockBarrier(self.data_directory, task_id)
+        resolve_command = ["task", "repository", "resolve", task_id, "--repo", self.primary]
+        resolve_process = self.start_cli(*resolve_command)
+        held_edit_command = [
+            "task", "repository", "edit", task_id, "--repo", self.primary,
+            "--branch", "saved-before-defaults", "--branch-from", "main",
+        ]
+        held_edit_process = self.start_cli(*held_edit_command)
+        try:
+            time.sleep(0.5)
+            self.assertIsNone(resolve_process.poll(), "Resolving should wait on the held task operation lock to save.")
+            self.assertIsNone(held_edit_process.poll(), "An edit should wait on the held task operation lock.")
+            waiting = self.assert_success(self.call_cli("task", "get", task_id)[0])["repositoryWorktrees"][0]
+            self.assertEqual((waiting["branch"], waiting["branchFrom"]), ("auto", ""))
+        finally:
+            operation_lock.release()
+        self.assert_success(self.finish_cli(resolve_process, resolve_command)[0])
+        # Whichever saves first, the other still lands: resolving defaults is not a conflicting change.
+        self.assert_success(self.finish_cli(held_edit_process, held_edit_command)[0])
+        saved = self.assert_success(self.call_cli("task", "get", task_id)[0])["repositoryWorktrees"][0]
+        self.assertEqual(saved["branch"], "saved-before-defaults")
+        self.assertEqual((saved["branchFrom"], saved["mergeTarget"]), ("main", "main"))
+        initial = saved
         edit_command = [
             "task", "repository", "edit", task_id,
             "--repo", self.primary,
@@ -926,10 +957,21 @@ class BridgeTestCases07:
             self.assertEqual(upstream.stdout.strip(), "", "The remote branch-from must not become the task branch's upstream.")
         finally:
             self.run_git(self.primary, "remote", "remove", "origin")
-    # case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, a repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch stores origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
+    # case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, adding a repository runs no Git: the pending record leaves its branch-from and merge target undecided until its chip's settings open (`task repository resolve`) or the task starts. Opening them saves and shows the defaults, and resolving again leaves them as saved, while resolving a repository the task lacks fails as not found. A repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch resolves to origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
     def test_task_repository_default_branch_from_uses_fresh_origin(self):
         without_origin = self.create_repo_task("Default branch-from without origin", [self.primary])
-        self.assertEqual(without_origin["repositoryWorktrees"][0]["branchFrom"], "main")
+        # Adding the repository runs no Git: its defaults wait until its settings open or the task starts.
+        self.assertEqual(without_origin["repositoryWorktrees"][0]["branchFrom"], "")
+        self.assertIsNone(without_origin["repositoryWorktrees"][0].get("mergeTarget"))
+        resolved = self.resolve_repository_defaults(without_origin["id"], self.primary)
+        self.assertEqual(resolved["branchFrom"], "main")
+        self.assertEqual(resolved["mergeTarget"], "main")
+        fresh_local = self.assert_success(self.call_cli("task", "get", without_origin["id"])[0])["repositoryWorktrees"][0]
+        self.assertEqual((fresh_local["branchFrom"], fresh_local["mergeTarget"]), ("main", "main"))
+        again = self.resolve_repository_defaults(without_origin["id"], self.primary)
+        self.assertEqual(again, fresh_local, "Resolving decided defaults again leaves them as saved.")
+        missing, _ = self.call_cli("task", "repository", "resolve", without_origin["id"], "--repo", str(self.custom), expected_status=3)
+        self.assert_failure(missing, "not_found")
 
         remote = self.data_directory / "default-branch-from-origin.git"
         subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
@@ -943,7 +985,8 @@ class BridgeTestCases07:
             self.set_pull_request_mode(task_id, "manual")
             pending = task["repositoryWorktrees"][0]
             self.assertTrue(pending["isPending"])
-            self.assertEqual(pending["branchFrom"], "origin/main")
+            self.assertEqual(pending["branchFrom"], "")
+            self.assertEqual(self.resolve_repository_defaults(task_id, self.primary)["branchFrom"], "origin/main")
             fresh, _ = self.call_cli("task", "get", task_id)
             self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], "origin/main")
 
@@ -982,7 +1025,8 @@ class BridgeTestCases07:
             offline = self.create_repo_task("Default branch-from while offline", [self.primary])
             offline_id = offline["id"]
             self.set_pull_request_mode(offline_id, "manual")
-            self.assertEqual(offline["repositoryWorktrees"][0]["branchFrom"], "origin/main")
+            # Never resolved, so the first send works the default out as the task starts.
+            self.assertEqual(offline["repositoryWorktrees"][0]["branchFrom"], "")
             self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
             self.complete_fixture_turn(offline_id)
             offline_started = self.assert_success(self.call_cli("task", "get", offline_id)[0])["repositoryWorktrees"][0]
@@ -1000,8 +1044,8 @@ class BridgeTestCases07:
             "task", "repository", "edit", task_id,
             "--repo", self.primary,
             "--branch", "stale-edit",
-            "--branch-from", initial["branchFrom"],
-            "--merge-target", initial["mergeTarget"],
+            "--branch-from", "main",
+            "--merge-target", "main",
         ]
         barrier = GitConfigReadBarrier(self.primary)
         stale_process = None

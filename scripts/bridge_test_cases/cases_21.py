@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases21:
-    # case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows a Backlog column with its Add button and its empty state, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, a Waiting Response column washed in its purple accent (a tint Panel filling the column with a soft fill and hairline border in the accent, its pixels visibly purple beside the other columns, and its count in the accent) and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for the Backlog the Add button), then the notice and the empty state, which is a dashed Panel with centered content; only the tinted column nests that content in its tint Panel. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
+    # case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows an empty Backlog column whose empty state holds its Add button (a prominent, pulsing New Task button beside the No tasks yet message, the empty state one container labeled by that message) and whose header has none, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, a Waiting Response column washed in its purple accent (a tint Panel filling the column with a soft fill and hairline border in the accent, its pixels visibly purple beside the other columns, and its count in the accent) and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for a Backlog with tasks the Add button), then the notice and the empty state, which is a dashed Panel with centered content (for the empty Backlog its message Stack and the Add Button with pulse set); only the tinted column nests that content in its tint Panel. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. Rendered with a Backlog that has tasks, the JavaScript Backlog has no empty state and its header ends with the plain bordered small Add button, without pulse, whose onPress still runs. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
     def test_plugin_kanban_column_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "add-backlog-task-button:onPress")[0])
         self.assertEqual(rendered["errors"], [])
@@ -30,17 +30,24 @@ class BridgeTestCases21:
         self.assertEqual((backlog["props"]["spacing"], backlog["props"]["padding"], backlog["props"]["cornerRadius"], backlog["props"]["minHeight"]), (13, 14, 16, 170))
         self.assertEqual([child["type"] for child in backlog["children"]], ["Stack", "Panel"], "The header, then the empty state.")
         header = backlog["children"][0]
-        self.assertEqual([child["type"] for child in header["children"]], ["Panel", "Text", "Spacer", "Panel", "Button"], "Dot, title, spacer, count, Add.")
+        self.assertEqual([child["type"] for child in header["children"]], ["Panel", "Text", "Spacer", "Panel"], "Dot, title, spacer, count; an empty Backlog's Add sits in its empty state.")
         dot = header["children"][0]
         self.assertEqual((dot["props"]["fill"], dot["props"]["width"], dot["props"]["height"]), ("#8591A8", 8, 8))
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "column-heading-backlog")), "BACKLOG")
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "column-count-backlog")), "0")
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "column-count-in-progress")), "2")
-        add = self.plugin_node(tree, "add-backlog-task-button")
-        self.assertEqual((add["props"]["style"], add["props"]["controlSize"], add["props"]["label"], add["events"]), ("bordered", "small", "Add task to Backlog", ["onPress"]))
         empty = self.plugin_node(tree, "empty-state-backlog")
         self.assertEqual((empty["props"]["dash"], empty["props"]["align"], empty["props"]["minHeight"]), ([5, 4], "center", 124))
-        self.assertEqual([self.plugin_text(child) for child in empty["children"] if child["type"] == "Text"], ["No tasks yet", "Create a task to get started"])
+        self.assertNotIn("combine", empty["props"], "The empty Backlog is a container, so its Add button stays its own element.")
+        self.assertEqual(empty["props"]["label"], "No tasks yet, Create a task to get started")
+        self.assertEqual([child["type"] for child in empty["children"]], ["Stack", "Button"], "The message, then the Add button.")
+        message, add = empty["children"]
+        self.assertEqual([self.plugin_text(child) for child in message["children"] if child["type"] == "Text"], ["No tasks yet", "Create a task to get started"])
+        self.assertEqual(add["props"]["testID"], "add-backlog-task-button")
+        self.assertEqual((add["props"]["style"], add["props"]["controlSize"], add["props"]["pulse"], add["props"]["label"], add["events"]),
+                         ("prominent", "small", True, "Add task to Backlog", ["onPress"]), "The empty Backlog's Add button pulses.")
+        self.assertEqual([(child["type"], child["props"]["text"], child["props"]["icon"]) for child in add["children"]], [("Label", "New Task", "plus")])
+        self.assertTrue(self.plugin_node(tree, "empty-state-done")["props"]["combine"], "An empty state without an action reads as one element.")
         self.assertEqual([self.plugin_text(child) for child in self.plugin_node(tree, "empty-state-done")["children"] if child["type"] == "Text"], ["No tasks yet", "Drop a task here"])
         self.assertEqual(self.plugin_node(tree, "empty-state-done")["children"][0]["props"]["name"], "checkmark.circle")
         notice = self.plugin_node(tree, "blocked-waiting-indicator")
@@ -68,6 +75,20 @@ class BridgeTestCases21:
         self.assertEqual(pressed["touchedNodes"], [last_action["children"][1]["id"]])
         self.assertEqual(backlog["updates"], 0, "No column re-rendered.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "column-backlog:onPress", expected_status=2)[0], "invalid_argument")
+
+        # A Backlog with tasks keeps its plain Add button in its header, not pulsing.
+        populated = {"kanbanColumns": [{"idPrefix": "", "key": "backlog", "title": "BACKLOG", "accent": "#8591A8", "count": "1", "addHelp": "Add task to Backlog"}]}
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--props", json.dumps(populated), "--event", "add-backlog-task-button:onPress")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        self.assertNotIn("empty-state-backlog", [node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)], "A Backlog with tasks has no empty state.")
+        header = self.plugin_node(tree, "column-backlog")["children"][0]
+        self.assertEqual([child["type"] for child in header["children"]], ["Panel", "Text", "Spacer", "Panel", "Button"], "Dot, title, spacer, count, Add.")
+        add = header["children"][4]
+        self.assertEqual((add["props"]["testID"], add["props"]["style"], add["props"]["controlSize"], add["props"]["label"], add["events"]),
+                         ("add-backlog-task-button", "bordered", "small", "Add task to Backlog", ["onPress"]))
+        self.assertNotIn("pulse", add["props"], "The header's Add button does not pulse.")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: add", "The header's Add button runs its JavaScript handler.")
     # case-contract: test_plugin_card_uses_default_content_padding | The Plugin Catalog's Card page gives a Card with no padding prop its 14-point default, while `padding: 0` removes it. `plugin render --page Card` omits the default common padding but keeps the explicit zero override on the second Card, and in the UI two otherwise identical cards have the same width while the default-padded card is 28 points taller; each card keeps its own content inside the surface.
     def test_plugin_card_uses_default_content_padding(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])

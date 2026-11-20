@@ -426,6 +426,7 @@ extension TaskConversationView {
                     resetRepositoryEdits(to: repository)
                     editingRepositoryField = nil
                     newWorktreeBranch = ""
+                    resolveRepositoryDefaults(repository)
                 },
                 remove: { key in
                     guard let repository = task.repositoryWorktrees.record(chipKey: key) else { return }
