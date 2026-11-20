@@ -1,4 +1,5 @@
-// Button: its children are the label; onPress runs in JavaScript.
+// Button: its children are the label; onPress runs in JavaScript. A shortcut
+// presses it from the keyboard, and its hover hint ends by naming the keys.
 function Demo() {
   var count = React.useState(0);
   var press = function () { count[1](count[0] + 1); };
@@ -17,7 +18,8 @@ function Demo() {
       h(Button, { style: "bordered", controlSize: "small", testID: "button-bordered-small", onPress: press }, h(Text, null, "Small")),
       h(Button, { style: "prominent", shortcut: "default", help: "Return presses it", testID: "button-prominent", onPress: press }, h(Text, null, "Prominent")),
       h(Button, { style: "automatic", testID: "button-automatic", onPress: press }, h(Text, null, "Automatic")),
-      h(Button, { style: "link", testID: "button-link", onPress: press }, h(Text, null, "Link style"))),
+      h(Button, { style: "link", testID: "button-link", onPress: press }, h(Text, null, "Link style")),
+      h(Button, { style: "bordered", shortcut: "cmd+shift+b", help: "Shift-Command-B presses it", testID: "button-shortcut", onPress: press }, h(Text, null, "Shortcut"))),
     h(Button, { controlSize: "large", style: "automatic", testID: "button-large", onPress: press }, h(Label, { text: "Large", icon: "plus" })),
     h(Text, { size: 11, color: "secondary", testID: "button-press-count" }, "Pressed ", String(count[0]), " times"));
 }

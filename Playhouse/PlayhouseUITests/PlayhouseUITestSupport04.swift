@@ -241,13 +241,25 @@ extension PlayhouseUITests {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+    /// Attaches the region around `elements` at native pixel density, for changed UI
+    /// that is small within its window.
+    func attachScreenshot(named name: String, around elements: [XCUIElement]) {
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = regionImage(of: screenshot, frames: elements.map(\.frame)).map { XCTAttachment(image: $0) }
+            ?? XCTAttachment(screenshot: screenshot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
     /// `screenshot` cropped to the union of the app's windows and popovers (such as the side chat
     /// bubble, which can reach past its window), with a small margin, or nil when it can't tell.
     func appWindowsImage(of screenshot: XCUIScreenshot) -> NSImage? {
+        regionImage(of: screenshot, frames: (app.windows.allElementsBoundByIndex + app.popovers.allElementsBoundByIndex).map(\.frame))
+    }
+    func regionImage(of screenshot: XCUIScreenshot, frames: [CGRect]) -> NSImage? {
         guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let screen = NSScreen.main?.frame, screen.width > 0 else { return nil }
-        let frames = (app.windows.allElementsBoundByIndex + app.popovers.allElementsBoundByIndex)
-            .map(\.frame).filter { !$0.isEmpty && $0.width > 1 && $0.height > 1 }
+        let frames = frames.filter { !$0.isEmpty && $0.width > 1 && $0.height > 1 }
         guard let first = frames.first else { return nil }
         let region = frames.dropFirst().reduce(first) { $0.union($1) }
             .insetBy(dx: -16, dy: -16)

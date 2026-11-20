@@ -191,23 +191,19 @@ struct SideChatBubble: View {
             .accessibilityLabel(message.text)
             .accessibilityIdentifier("side-chat-user-message-\(index)")
         } else {
+            // Contains its blocks, so a formatted answer's headings and list items stay reachable.
             assistantText(message.text)
-                .accessibilityElement(children: .ignore)
+                .accessibilityElement(children: .contain)
                 .accessibilityLabel(message.text)
                 .accessibilityIdentifier("side-chat-assistant-message-\(index)")
         }
     }
 
     private func assistantText(_ text: String) -> some View {
-        let markdown = (try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text)
-        return Text(markdown)
-            .font(.system(size: Self.bodyFontSize))
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        AtomMarkdown(
+            props: MarkdownProps(text: text, size: Double(Self.bodyFontSize), selectable: true),
+            common: AtomCommon(fillWidth: true)
+        )
     }
 
     private var composer: some View {

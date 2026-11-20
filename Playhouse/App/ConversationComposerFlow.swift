@@ -639,6 +639,7 @@ extension TaskConversationView {
             isResponding = true
             errorMessage = nil
             Task { @MainActor in
+                await providerSwitch?.value
                 let started = await mutateGoal("set", objective: text, observeRuntime: true)
                 isPreparingSubmittedMessage = false
                 await conversationRuntime.refresh()
@@ -723,6 +724,8 @@ extension TaskConversationView {
                     refreshChatPageStatus()
                 }
             }
+            // A switch the window already shows runs this turn once it is saved.
+            await providerSwitch?.value
             let saved = await saveDraftAndGenerateTitle(
                 status: .inProgress,
                 prompt: text,

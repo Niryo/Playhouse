@@ -311,6 +311,9 @@ def side_chat_respond(user_text, instructions, turn, prior_turns):
     else:
         earlier = sum(1 for prior in prior_turns if prior.get("sessionID") == session)
         reply = f"Side chat follow-up {earlier + 1} on {session}: {question}"
+        if "markdown list" in question.lower():
+            # A block-Markdown answer, which the side chat renders formatted.
+            reply += "\n\n## Points\n\n- First point\n- Second point"
     turn["sideChatReply"] = reply
     text("msg_side_chat", reply)
     return []
@@ -781,8 +784,11 @@ def main():
                 # One line per Claude Code session started, including metadata-only ones.
                 with open(str(sys.argv[0]) + ".sessions", "a", encoding="utf-8") as sessions:
                     sessions.write("initialize\n")
-                # A slow session start: the turn is still launching. Metadata-only sessions
-                # carry no session ID and are never held.
+                # A slow metadata read: Playhouse reads the model list and capabilities from
+                # sessions it doesn't keep, and those are still loading.
+                if "--no-session-persistence" in sys.argv:
+                    wait_for_release("metadata", "Claude Code is reading its models and capabilities.")
+                # A slow session start: the turn is still launching.
                 if "--session-id" in sys.argv or "--resume" in sys.argv:
                     wait_for_release("launch", "Claude Code is starting the session.")
                 missing_resume = Path(str(sys.argv[0]) + ".missing-resume")

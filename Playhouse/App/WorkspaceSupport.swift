@@ -121,6 +121,44 @@ extension View {
         // Hidden from accessibility so the extra view cannot become, or resize, the control's element.
         help(text).background(NativeToolTip(text: text).accessibilityHidden(true))
     }
+
+    /// A native button's keyboard shortcut (an `AtomShortcut` spec, usually an
+    /// `AppShortcut`), named at the end of its `nativeHelp` hover hint.
+    func shortcutHelp(_ text: String, shortcut spec: String) -> some View {
+        let shortcut = AtomShortcut(spec)
+        return keyboardShortcut(shortcut?.keyboardShortcut)
+            .nativeHelp(shortcut?.help(text) ?? text)
+    }
+}
+
+extension AtomShortcut {
+    /// The SwiftUI shortcut: Return and Escape as the window's default and
+    /// cancel actions, or the key with its modifiers.
+    var keyboardShortcut: KeyboardShortcut {
+        switch role {
+        case .default: return .defaultAction
+        case .cancel: return .cancelAction
+        case nil: break
+        }
+        let key: KeyEquivalent = switch key {
+        case .character(let character): KeyEquivalent(character)
+        case .named(.return): .return
+        case .named(.escape): .escape
+        case .named(.tab): .tab
+        case .named(.space): .space
+        case .named(.delete): .delete
+        }
+        var flags: EventModifiers = []
+        for modifier in modifiers {
+            switch modifier {
+            case .ctrl: flags.insert(.control)
+            case .option: flags.insert(.option)
+            case .shift: flags.insert(.shift)
+            case .cmd: flags.insert(.command)
+            }
+        }
+        return KeyboardShortcut(key, modifiers: flags)
+    }
 }
 
 extension View {

@@ -168,9 +168,14 @@ It uses these globals:
   circle: true, placeholder: "person.crop.circle", label: name })`. The app
   loads and caches it, and shows the `placeholder` symbol while it loads or
   when it fails. Give it a `label` unless it is decorative.
+- To show formatted text (notes, a summary an agent wrote, a README), use the
+  `Markdown` atom rather than splitting it into `Text`s: `h(Markdown, { text:
+  "# Title\n**bold** and `code`" })`. It renders headings, lists, quotes, code
+  blocks, tables, rules and inline bold, italic, code and links; add
+  `frontmatter: "table"` or `"hide"` for a file with a leading `---` block.
 - `setTimeout`, `setInterval`, `console`.
 
-Compose only atoms. Raw strings go only inside a `Text`. The atoms, their props
+Compose only atoms. Raw strings go only inside a `Text` or a `Markdown`. The atoms, their props
 and their events are listed in the README inside the Playhouse source,
 `Playhouse/App/Plugins/README.md` ("Atoms"). When the source isn't available,
 run `plugin render` on a small script to learn what an atom accepts. An unknown

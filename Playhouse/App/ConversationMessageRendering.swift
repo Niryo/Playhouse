@@ -415,66 +415,6 @@ extension TaskConversationView {
         }
     }
 
-    static func markdownAttributedText(_ markdown: String) -> AttributedString {
-        (try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full)))
-            ?? AttributedString(markdown)
-    }
-
-    /// Every transcript body re-evaluation re-renders each assistant block, so parsed Markdown is
-    /// memoized by its exact inputs instead of being re-parsed for an unchanged block.
-    /// Bounded because a streaming block adds a key for every partial text it passes through.
-    static let markdownPlainTextCache: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 500
-        return cache
-    }()
-    static let markdownNSAttributedStringCache: NSCache<NSString, NSAttributedString> = {
-        let cache = NSCache<NSString, NSAttributedString>()
-        cache.countLimit = 500
-        return cache
-    }()
-
-    static func markdownPlainText(_ markdown: String) -> String {
-        if let cached = markdownPlainTextCache.object(forKey: markdown as NSString) {
-            return cached as String
-        }
-        let text = String(Self.markdownAttributedText(markdown).characters)
-        markdownPlainTextCache.setObject(text as NSString, forKey: markdown as NSString)
-        return text
-    }
-
-    /// Bridges Markdown-parsed text to `NSAttributedString`, resizing inline code/bold/italic
-    /// runs to `baseFont`'s point size (preserving their monospace/bold/italic traits) instead of
-    /// the parser's own default-size font, so inline formatting matches the surrounding body text.
-    static func markdownNSAttributedString(_ markdown: String, baseFont: NSFont) -> NSAttributedString {
-        let cacheKey = "\(baseFont.fontName)|\(baseFont.pointSize)|\(markdown)" as NSString
-        if let cached = markdownNSAttributedStringCache.object(forKey: cacheKey) {
-            return cached
-        }
-        let attributed = Self.markdownAttributedText(markdown)
-        // Fonts are applied on the NSAttributedString because NSFont is not Sendable,
-        // which AttributedString's AppKit font attribute requires.
-        let result = NSMutableAttributedString(attributed)
-        for run in attributed.runs {
-            guard let intent = run.inlinePresentationIntent else { continue }
-            let font: NSFont
-            if intent.contains(.code) {
-                // Slightly smaller than the prose, which a monospaced face reads larger than.
-                font = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize - 1, weight: .regular)
-                InlineCodeStyle.apply(to: result, range: NSRange(run.range, in: attributed))
-            } else {
-                var traits: NSFontTraitMask = []
-                if intent.contains(.stronglyEmphasized) { traits.insert(.boldFontMask) }
-                if intent.contains(.emphasized) { traits.insert(.italicFontMask) }
-                guard !traits.isEmpty else { continue }
-                font = NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
-            }
-            result.addAttribute(.font, value: font, range: NSRange(run.range, in: attributed))
-        }
-        markdownNSAttributedStringCache.setObject(result, forKey: cacheKey)
-        return result
-    }
-
     static func displayableAssistantText(_ text: String) -> String {
         // Runs for every assistant row on every transcript pass: most replies have no
         // plan tags and no surrounding whitespace, so skip building copies for them.
@@ -654,8 +594,8 @@ extension TaskConversationView {
     ) -> some View {
         // Progress text without a message ID is short-lived, so only replies are kept.
         let blocks = messageID.map { messageID in
-            Self.markdownBlocksCache.value(slot: messageID, key: markdown) { Self.markdownBlocks(markdown) }
-        } ?? Self.markdownBlocks(markdown)
+            Self.markdownBlocksCache.value(slot: messageID, key: markdown) { MarkdownDocument.blocks(markdown) }
+        } ?? MarkdownDocument.blocks(markdown)
         return VStack(alignment: .leading, spacing: 7) {
             if let messageID {
                 ForEach(AssistantMarkdownSegment.segments(of: blocks)) { segment in
@@ -681,7 +621,7 @@ extension TaskConversationView {
                             markdownBlockText(block)
                         }
                         .accessibilityElement(children: .combine)
-                        .accessibilityLabel(Self.markdownPlainText(block.text))
+                        .accessibilityLabel(MarkdownInlineText.plainText(block.text))
                         .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
                     case .orderedListItem(let number):
                         HStack(alignment: .top, spacing: 7) {
@@ -689,9 +629,13 @@ extension TaskConversationView {
                             markdownBlockText(block)
                         }
                         .accessibilityElement(children: .combine)
-                        .accessibilityLabel("\(number). " + Self.markdownPlainText(block.text))
+                        .accessibilityLabel("\(number). " + MarkdownInlineText.plainText(block.text))
                         .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
-                    case .codeBlock, .table:
+                    case .quote:
+                        markdownBlockText(block)
+                            .markdownQuote()
+                            .accessibilityIdentifier("assistant-markdown-quote-\(block.id)")
+                    case .codeBlock, .table, .rule:
                         markdownCard(block)
                     case .paragraph:
                         markdownBlockText(block)
@@ -704,14 +648,17 @@ extension TaskConversationView {
     }
 
     @ViewBuilder
-    func markdownCard(_ block: AssistantMarkdownBlock) -> some View {
+    func markdownCard(_ block: MarkdownBlock) -> some View {
         switch block.kind {
         case .codeBlock(let language):
             CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
                 .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
         case .table(let headers, let alignments, let rows):
             TableBlockView(blockID: block.id, headers: headers, alignments: alignments, rows: rows, font: block.font)
-        case .heading, .listItem, .orderedListItem, .paragraph:
+        case .rule:
+            MarkdownRule()
+                .accessibilityIdentifier("assistant-markdown-rule-\(block.id)")
+        case .heading, .listItem, .orderedListItem, .quote, .paragraph:
             EmptyView()
         }
     }
@@ -719,7 +666,7 @@ extension TaskConversationView {
     /// One reply's consecutive prose blocks in a single text view, so a selection, and the
     /// comment made on it, can run across headings, paragraphs, and list items.
     func assistantProseText(
-        _ blocks: [AssistantMarkdownBlock],
+        _ blocks: [MarkdownBlock],
         messageID: String,
         responseAnnotations: [ResponseAnnotationReference],
         wholeMessageText: String
@@ -757,15 +704,10 @@ extension TaskConversationView {
             .padding(.bottom, layout.endsWithParagraph ? 5 : 0)
     }
 
-    func markdownBlockText(_ block: AssistantMarkdownBlock) -> some View {
-        let formatted = NSMutableAttributedString(attributedString: Self.markdownNSAttributedString(block.text, baseFont: block.font))
-        // SwiftUI text has no pill drawing of its own; the inline code tint is drawn as a plain background.
-        formatted.enumerateAttribute(InlineCodeStyle.attribute, in: NSRange(location: 0, length: formatted.length)) { value, range, _ in
-            if let color = value as? NSColor { formatted.addAttribute(.backgroundColor, value: color, range: range) }
-        }
+    func markdownBlockText(_ block: MarkdownBlock) -> some View {
         // A row is placed at the height it measured, and a stack around this text, like the question form's,
         // may hand that height out unevenly; keeping the text's natural height stops it truncating to one line.
-        return Text((try? AttributedString(formatted, including: \.appKit)) ?? Self.markdownAttributedText(block.text))
+        MarkdownInlineText.text(block.text, baseFont: block.font)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -904,177 +846,8 @@ extension TaskConversationView {
         }
     }
 
-    /// Splits a Markdown table row on `|`, dropping an optional leading/trailing pipe the way
-    /// GFM tables are usually written (`| a | b |` as well as the bare `a | b`).
-    static func markdownTableCells(_ line: String) -> [String] {
-        var trimmed = line.trimmingCharacters(in: .whitespaces)
-        if trimmed.hasPrefix("|") { trimmed.removeFirst() }
-        if trimmed.hasSuffix("|") { trimmed.removeLast() }
-        return trimmed.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-    }
+    static let markdownBlocksCache = ReplyRenderCache<[MarkdownBlock]>(countLimit: 2000)
 
-    /// Returns the per-column alignment if `line` is a valid GFM table separator row (each cell is
-    /// dashes with optional leading/trailing colon, e.g. `---`, `:---`, `:---:`, `---:`), or `nil`
-    /// if it isn't a separator row at all.
-    static func markdownTableSeparatorAlignments(_ line: String) -> [MarkdownTableColumnAlignment]? {
-        let cells = markdownTableCells(line)
-        guard !cells.isEmpty else { return nil }
-        var alignments: [MarkdownTableColumnAlignment] = []
-        for cell in cells {
-            var body = cell
-            let leadingColon = body.hasPrefix(":")
-            if leadingColon { body.removeFirst() }
-            let trailingColon = body.hasSuffix(":")
-            if trailingColon { body.removeLast() }
-            guard !body.isEmpty, body.allSatisfy({ $0 == "-" }) else { return nil }
-            switch (leadingColon, trailingColon) {
-            case (true, true): alignments.append(.center)
-            case (false, true): alignments.append(.trailing)
-            default: alignments.append(.leading)
-            }
-        }
-        return alignments
-    }
-
-    static func orderedListPrefix(_ line: Substring) -> (number: Int, rest: Substring)? {
-        let digits = line.prefix(while: { $0.isNumber })
-        guard !digits.isEmpty, let number = Int(digits) else { return nil }
-        let afterDigits = line.dropFirst(digits.count)
-        guard afterDigits.first == ".", afterDigits.dropFirst().first == " " else { return nil }
-        return (number, afterDigits.dropFirst(2))
-    }
-
-    static let markdownBlocksCache = ReplyRenderCache<[AssistantMarkdownBlock]>(countLimit: 2000)
-
-    static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
-        var blocks: [AssistantMarkdownBlock] = []
-        var paragraphLines: [String] = []
-        var paragraphStart: Int?
-        // Treat digit-dot-space prefixes as an ordered list when they start a block (any number,
-        // as in CommonMark) or start at 1 while a paragraph is open, then increment by one;
-        // otherwise a wrapped sentence like "3. 5 billion parameters…" would be mis-parsed.
-        var lastOrderedNumber: Int?
-
-        func flushParagraph() {
-            guard let start = paragraphStart, !paragraphLines.isEmpty else { return }
-            blocks.append(AssistantMarkdownBlock(
-                id: start,
-                kind: .paragraph,
-                text: paragraphLines.joined(separator: " ")
-            ))
-            paragraphLines.removeAll()
-            paragraphStart = nil
-        }
-
-        let rawLines = markdown.components(separatedBy: .newlines)
-        var index = 0
-        while index < rawLines.count {
-            let rawLine = rawLines[index]
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else {
-                // A blank line alone does not end an ordered list: Markdown allows a "loose"
-                // list with blank lines between items, so `lastOrderedNumber` carries across
-                // this gap and only resets once a non-list block actually interrupts it.
-                flushParagraph()
-                index += 1
-                continue
-            }
-            if line.hasPrefix("```") {
-                flushParagraph()
-                lastOrderedNumber = nil
-                let fenceStart = index
-                let language = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
-                var codeLines: [String] = []
-                index += 1
-                // Only a line consisting solely of backticks closes the fence, matching
-                // CommonMark; a mere `hasPrefix("```")` would also match content lines inside the
-                // code block itself (e.g. a code sample that demonstrates Markdown fences).
-                while index < rawLines.count {
-                    let candidate = rawLines[index].trimmingCharacters(in: .whitespaces)
-                    if candidate.count >= 3, candidate.allSatisfy({ $0 == "`" }) { break }
-                    codeLines.append(rawLines[index])
-                    index += 1
-                }
-                if index < rawLines.count { index += 1 } // consume closing fence
-                blocks.append(AssistantMarkdownBlock(
-                    id: fenceStart,
-                    kind: .codeBlock(language: language.isEmpty ? nil : language),
-                    text: codeLines.joined(separator: "\n")
-                ))
-                continue
-            }
-            if line.contains("|"), index + 1 < rawLines.count,
-               let alignments = Self.markdownTableSeparatorAlignments(rawLines[index + 1].trimmingCharacters(in: .whitespaces)) {
-                let headers = Self.markdownTableCells(line)
-                // A separator row with a different cell count than the header isn't a valid GFM
-                // table (e.g. a stray "---" thematic break after a line that merely contains "|");
-                // fall through to the normal paragraph/heading/list handling below instead.
-                if headers.count == alignments.count {
-                    flushParagraph()
-                    lastOrderedNumber = nil
-                    let tableStart = index
-                    index += 2 // consume the header row and the separator row
-                    var rows: [[String]] = []
-                    while index < rawLines.count {
-                        let rowLine = rawLines[index].trimmingCharacters(in: .whitespaces)
-                        guard !rowLine.isEmpty, rowLine.contains("|") else { break }
-                        // GFM pads short rows and drops extra cells, so every row renders with the
-                        // header's column count; without this a ragged row would shift the Grid's
-                        // remaining columns out of alignment with their headers.
-                        var cells = Self.markdownTableCells(rowLine)
-                        if cells.count > headers.count { cells.removeSubrange(headers.count...) }
-                        cells.append(contentsOf: Array(repeating: "", count: max(0, headers.count - cells.count)))
-                        rows.append(cells)
-                        index += 1
-                    }
-                    blocks.append(AssistantMarkdownBlock(
-                        id: tableStart,
-                        kind: .table(headers: headers, alignments: alignments, rows: rows),
-                        text: ""
-                    ))
-                    continue
-                }
-            }
-            if line.range(of: #":(?:playhouse-annotation|codex-annotation)\{index=\"\d+\"\}"#, options: .regularExpression) != nil {
-                flushParagraph()
-                lastOrderedNumber = nil
-                blocks.append(AssistantMarkdownBlock(id: index, kind: .paragraph, text: line))
-                index += 1
-                continue
-            }
-            let headingPrefix = line.prefix(while: { $0 == "#" })
-            if !headingPrefix.isEmpty, headingPrefix.count <= 6,
-               line.dropFirst(headingPrefix.count).first == " " {
-                flushParagraph()
-                lastOrderedNumber = nil
-                blocks.append(AssistantMarkdownBlock(
-                    id: index,
-                    kind: .heading(headingPrefix.count),
-                    text: String(line.dropFirst(headingPrefix.count + 1))
-                ))
-            } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-                flushParagraph()
-                lastOrderedNumber = nil
-                blocks.append(AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2))))
-            } else if let ordered = orderedListPrefix(line[...]),
-                      // As in CommonMark, only a list starting at 1 may interrupt a paragraph,
-                      // so a wrapped line that happens to begin "3. " stays part of its paragraph.
-                      // With no paragraph open, a new list may start at any number.
-                      paragraphLines.isEmpty || ordered.number == 1,
-                      ordered.number == (lastOrderedNumber.map { $0 + 1 } ?? (paragraphLines.isEmpty ? ordered.number : 1)) {
-                flushParagraph()
-                lastOrderedNumber = ordered.number
-                blocks.append(AssistantMarkdownBlock(id: index, kind: .orderedListItem(number: ordered.number), text: String(ordered.rest)))
-            } else {
-                lastOrderedNumber = nil
-                paragraphStart = paragraphStart ?? index
-                paragraphLines.append(line)
-            }
-            index += 1
-        }
-        flushParagraph()
-        return blocks
-    }
 }
 
 /// An automatic message's text (a Playhouse nudge, a provider's own notice), which can carry

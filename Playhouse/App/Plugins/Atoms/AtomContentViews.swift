@@ -242,13 +242,24 @@ struct AtomButton<Content: View>: View {
         styled
             .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
             .modifier(Applied(when: props.controlSize == "large") { $0.controlSize(.large) })
-            .modifier(Applied(when: props.shortcut == "default") { $0.keyboardShortcut(.defaultAction) })
-            .modifier(Applied(when: props.shortcut == "cancel") { $0.keyboardShortcut(.cancelAction) })
+            .keyboardShortcut(shortcut?.keyboardShortcut)
             .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
             .padding(.vertical, overhangs ? -CGFloat(props.emphasis ?? 0) : 0)
             .disabled(props.disabled == true)
             .modifier(Applied(when: props.selected == true) { $0.accessibilityAddTraits(.isSelected) })
-            .atomCommon(common, atom: .button, frame: false)
+            .atomCommon(helpNamingShortcut, atom: .button, frame: false)
+            // Outside the button's accessibility element, so the swelling ring
+            // never changes the frame the button reports.
+            .modifier(Applied(when: props.pulse == true && props.disabled != true) { $0.modifier(AtomPulse()) })
+    }
+
+    private var shortcut: AtomShortcut? { props.shortcut.flatMap(AtomShortcut.init) }
+
+    /// The hover hint ends by naming the shortcut.
+    private var helpNamingShortcut: AtomCommon {
+        var common = common
+        common.help = AtomShortcut.help(common.help, shortcut: props.shortcut)
+        return common
     }
 
     private var isFixedSize: Bool { common.width != nil || common.height != nil }
@@ -299,6 +310,28 @@ struct AtomButton<Content: View>: View {
             Button(role: role, action: action) { label }
                 .buttonStyle(.plain)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        }
+    }
+}
+
+/// A Button's `pulse`: an accent ring that swells out from the button's edge
+/// and fades, over and over, without changing its layout or click target.
+private struct AtomPulse: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var expanded = false
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .padding(reduceMotion ? -3 : expanded ? -9 : -1)
+                .opacity(reduceMotion ? 0.55 : expanded ? 0 : 0.8)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { expanded = true }
         }
     }
 }

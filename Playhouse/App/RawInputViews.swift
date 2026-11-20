@@ -184,9 +184,8 @@ struct RawInputSheet: View {
                 Spacer()
                 Button("Done") { dismiss() }
                     .buttonHoverPointer()
-                    .nativeHelp("Done")
+                    .shortcutHelp("Done", shortcut: "default")
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("close-raw-input-button")
             }
         }

@@ -29,7 +29,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(path, fixture.primary.path)
         let taskPrompt = "Please update the README and add concise setup steps for first time contributors tomorrow."
         let generatedBranch = "generated-fixture-title"
-        XCTAssertEqual(record["mergeTarget"] as? String, "main")
+        XCTAssertNil(record["mergeTarget"], "A pending repository's merge target is undecided until its settings open or the task starts.")
         let composer = element("message-composer")
         let composerIsAvailable = waitUntil({ composer.exists && composer.isHittable }, timeout: 15)
         if !composerIsAvailable {

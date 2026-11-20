@@ -14,7 +14,7 @@ extension TaskConversationView {
             }
             .buttonHoverPointer()
             .buttonStyle(.plain)
-            .nativeHelp("Show sidebar")
+            .shortcutHelp("Show sidebar", shortcut: AppShortcut.sidebar)
             .accessibilityLabel("Show sidebar")
             .accessibilityIdentifier("show-task-sidebar-button")
 
@@ -45,7 +45,7 @@ extension TaskConversationView {
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.plain)
-                .nativeHelp("Hide sidebar")
+                .shortcutHelp("Hide sidebar", shortcut: AppShortcut.sidebar)
                 .accessibilityLabel("Hide sidebar")
                 .accessibilityIdentifier("hide-task-sidebar-button")
                 Spacer(minLength: 0)
@@ -92,7 +92,7 @@ extension TaskConversationView {
                         }
                         .buttonStyle(.plain)
                         .buttonHoverPointer()
-                        .nativeHelp("Back to Kanban")
+                        .shortcutHelp("Back to Kanban", shortcut: AppShortcut.back)
                         .accessibilityLabel("Back to Kanban board")
                         .accessibilityIdentifier("back-to-board-button")
                         Text("Plugin editor")
@@ -353,7 +353,7 @@ extension TaskConversationView {
             }
             .buttonHoverPointer()
             .buttonStyle(.plain)
-            .nativeHelp("Back to Kanban")
+            .shortcutHelp("Back to Kanban", shortcut: AppShortcut.back)
             .accessibilityLabel("Back to Kanban board")
             .accessibilityIdentifier("back-to-board-button")
 
@@ -426,6 +426,7 @@ extension TaskConversationView {
                     resetRepositoryEdits(to: repository)
                     editingRepositoryField = nil
                     newWorktreeBranch = ""
+                    resolveRepositoryDefaults(repository)
                 },
                 remove: { key in
                     guard let repository = task.repositoryWorktrees.record(chipKey: key) else { return }
@@ -440,6 +441,7 @@ extension TaskConversationView {
                 get: { repositoryBeingEdited == nil ? nil : repositoryBeingEditedKey },
                 set: { if $0 == nil { repositoryBeingEditedKey = nil } }
             ),
+            addShortcut: AppShortcut.repositoryPicker,
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
             picker: { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) },
             settings: { chip in

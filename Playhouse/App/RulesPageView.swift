@@ -540,17 +540,15 @@ private struct RuleEditorPanel: View {
                 }
                 Spacer()
                 Button(rule.editable ? "Cancel" : "Close", action: onClose)
-                    .keyboardShortcut(.cancelAction)
                     .buttonHoverPointer()
-                    .nativeHelp(rule.editable ? "Discard changes" : "Close the rule")
+                    .shortcutHelp(rule.editable ? "Discard changes" : "Close the rule", shortcut: "cancel")
                     .accessibilityIdentifier("rule-editor-cancel")
                 if rule.editable {
                     Button("Save") { save() }
-                        .keyboardShortcut("s", modifiers: .command)
                         .buttonStyle(.borderedProminent)
                         .disabled(isSaving)
                         .buttonHoverPointer()
-                        .nativeHelp("Save the rule (⌘S)")
+                        .shortcutHelp("Save the rule", shortcut: AppShortcut.save)
                         .accessibilityIdentifier("rule-editor-save")
                 }
             }
@@ -653,16 +651,14 @@ private struct NewRulePanel: View {
                 }
                 Spacer()
                 Button("Cancel", action: onClose)
-                    .keyboardShortcut(.cancelAction)
                     .buttonHoverPointer()
-                    .nativeHelp("Close without creating a rule")
+                    .shortcutHelp("Close without creating a rule", shortcut: "cancel")
                     .accessibilityIdentifier("new-rule-cancel")
                 Button("Create") { create() }
-                    .keyboardShortcut("s", modifiers: .command)
                     .buttonStyle(.borderedProminent)
                     .disabled(isSaving)
                     .buttonHoverPointer()
-                    .nativeHelp("Create the rule (⌘S)")
+                    .shortcutHelp("Create the rule", shortcut: AppShortcut.save)
                     .accessibilityIdentifier("new-rule-create")
             }
         }

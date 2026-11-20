@@ -516,3 +516,50 @@ class BridgeTestCases28:
         self.kill_daemon(private)
         self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id, extra_environment=private)[0])["mode"], "optimized",
                          "Optimized context survives a daemon restart.")
+
+    # case-contract: test_conversation_open_reads_reconciled_history_and_shows_loading | Opening a task reads its newest history page and the task as that read reconciled it in one request: conversation history --include-task returns the task record beside the messages, which a plain read leaves out, so a submitted prompt whose turn never started comes back from that read as Waiting Response with the prompt in its saved draft, while a task that doesn't exist fails as not found with no record. While the opening read hasn't answered (held by PLAYHOUSE_E2E_HISTORY_READ_DELAY_SECONDS), the transcript shows Loading conversation… and never the empty conversation prompt; once it answers the stored messages replace the loading state, and a task with no messages shows its empty conversation prompt only then. A brand-new task shows its empty state at once, never the loading state, and the standalone chat opens through the same read: its opening read returns the chat beside its messages, and the chat shows the loading state until they arrive. Opening is shared presentation over one daemon read, so one representative provider (Codex) covers it.
+    def test_conversation_open_reads_reconciled_history_and_shows_loading(self):
+        env = self.install_codex_fixture("codex-fixture-open-history-success")
+        task_id = self.create_task(title="Opened history", roots=[self.primary])["id"]
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Say hello.", extra_environment=env)[0])
+        plain = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertNotIn("task", plain, "A plain read returns only the conversation.")
+        self.assertIn("assistant", [message["role"] for message in plain["messages"]])
+        # The read a window makes when it opens the task, held as long as the test asks.
+        held = {**env, "PLAYHOUSE_E2E_HISTORY_READ_DELAY_SECONDS": "1"}
+        started = time.monotonic()
+        opened = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--defer-images", "--include-task", extra_environment=held
+        )[0])
+        self.assertGreaterEqual(time.monotonic() - started, 1, "The test delay holds the opening read.")
+        self.assertEqual([message["text"] for message in opened["messages"]], [message["text"] for message in plain["messages"]])
+        stored = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual((opened["task"]["id"], opened["task"]["status"]), (task_id, stored["status"]), "The read returns the task beside its messages.")
+        # The standalone chat opens through the same read.
+        chat_id = self.assert_success(self.call_cli("chat", "open")[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", chat_id, "--message", "Say hello in the chat.", extra_environment=env)[0])
+        chat = self.assert_success(self.call_cli("conversation", "history", chat_id, "--include-task", extra_environment=held)[0])
+        self.assertIn("Say hello in the chat.", [message["text"] for message in chat["messages"]])
+        self.assertIn("assistant", [message["role"] for message in chat["messages"]])
+        self.assertEqual(chat["task"]["id"], chat_id, "A chat's opening read returns the chat beside its messages.")
+
+        # A submitted prompt whose turn never started is reconciled by the same read.
+        never_started = self.create_task(title="Opened never-started prompt")["id"]
+        submitted = "Submitted before Playhouse restarted."
+        self.assert_success(self.call_cli("task", "draft", never_started, "--text", "")[0])
+        self.assert_success(self.call_cli(
+            "task", "prompt", never_started, "--text", submitted, "--status", "In Progress", "--submitted", "true"
+        )[0])
+        reopened = self.assert_success(self.call_cli("conversation", "history", never_started, "--include-task")[0])
+        self.assertEqual(reopened["messages"], [], "A task with no messages has an empty conversation.")
+        recovered = reopened["task"]
+        self.assertEqual(recovered["status"], "Waiting Response")
+        self.assertIsNone(recovered.get("pendingSubmittedPrompt"))
+        self.assertEqual(recovered["savedPrompt"], submitted)
+        self.assertTrue(recovered["hasUnsentDraft"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", never_started)[0])["status"], "Waiting Response",
+                         "The read saved the status it reconciled.")
+        # Opening a task that doesn't exist fails without a task record.
+        missing, _ = self.call_cli("conversation", "history", "A8AC713C-BDD7-4B54-9B4A-6D6CCD7F957C", "--include-task", expected_status=3)
+        self.assert_failure(missing, "not_found")
+        self.assertNotIn("result", missing, "A failed opening read returns no task.")
