@@ -36,9 +36,14 @@ struct RemoteConversationManager {
     // MARK: - Store-only operations
 
     func modelID(taskID: UUID) throws -> String? { try store.modelID(taskID: taskID) }
+    func modelID(taskID: UUID, provider: ConversationProvider) throws -> String? {
+        try store.modelID(taskID: taskID, provider: provider)
+    }
     func effort(taskID: UUID) throws -> ConversationEffort { try store.effort(taskID: taskID) }
     func contextMode(taskID: UUID) throws -> ConversationContextMode { try store.contextMode(taskID: taskID) }
-    func setModelID(taskID: UUID, modelID: String) async throws { try await store.setModelID(taskID: taskID, modelID: modelID) }
+    func setModelID(taskID: UUID, modelID: String, provider: ConversationProvider? = nil) async throws {
+        try await store.setModelID(taskID: taskID, modelID: modelID, provider: provider)
+    }
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] { try store.cachedModels(taskID: taskID) }
     func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
         try store.cachedModels(taskID: taskID, provider: provider)
@@ -275,9 +280,13 @@ struct RemoteConversationManager {
             .decoded(BoardTaskRecord.self)
     }
 
-    func setProvider(taskID: UUID, provider: ConversationProvider) async throws -> BoardTaskRecord {
-        try await daemon.call("conversation.provider.set", ["taskID": id(taskID), "provider": .string(provider.rawValue)])
-            .decoded(BoardTaskRecord.self)
+    /// The saved task and the provider dividers the switch recorded.
+    func setProvider(
+        taskID: UUID, provider: ConversationProvider
+    ) async throws -> (record: BoardTaskRecord, providerBoundaries: [ConversationProviderBoundary]) {
+        let result = try await daemon.call("conversation.provider.set", ["taskID": id(taskID), "provider": .string(provider.rawValue)])
+        let boundaries = try result.object?["providerBoundaries"].map { try $0.decoded([ConversationProviderBoundary].self) } ?? []
+        return (try result.decoded(BoardTaskRecord.self), boundaries)
     }
 
     // MARK: - Skills, read and managed by the daemon like the CLI's `skills` commands

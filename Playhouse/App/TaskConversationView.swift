@@ -181,7 +181,13 @@ struct TaskConversationView: View {
     @State var isSavingSchedule = false
     @FocusState var isScheduleTitleFocused: Bool
     @State var providerBoundaries: [ConversationProviderBoundary] = []
+    /// True while a switch this window showed is being saved.
     @State var isSwitchingProvider = false
+    /// The provider a switch shows before the task model has it: from the click
+    /// until the daemon's write reaches this window's task.
+    @State var switchedProvider: ConversationProvider?
+    /// The save of that switch, which a send waits for so it runs with the new provider.
+    @State var providerSwitch: Task<Void, Never>?
     @State var providerNotice: String?
     @State var messages: [ConversationMessage] = []
     // Oldest message currently rendered in the transcript. The transcript keeps a
@@ -405,7 +411,7 @@ struct TaskConversationView: View {
         return runtimeModel
     }
 
-    var provider: ConversationProvider { task.conversationProvider }
+    var provider: ConversationProvider { switchedProvider ?? task.conversationProvider }
 
     /// Observed so the view refreshes when this task's turn starts or ends.
     /// Claude runs conversations in parallel, so a client-wide flag would miss
@@ -819,6 +825,10 @@ struct TaskConversationView: View {
                 draft = skillFixPrompt
                 sendMessage()
             }
+        }
+        .onChange(of: task.conversationProvider) { _, saved in
+            // The saved switch reached this window's task, or another client switched it since.
+            if !isSwitchingProvider || saved == switchedProvider { switchedProvider = nil }
         }
         .onChange(of: providerPendingUserInputRequest) { previous, request in
             // Once the snapshot drops it, a later question may reuse an answered request's ID.
