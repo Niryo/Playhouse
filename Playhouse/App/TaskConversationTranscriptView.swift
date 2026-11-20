@@ -64,7 +64,11 @@ extension TaskConversationView {
                             }
                         }
                     } else {
-                        if activeGoal?.status != "complete" && !isLoadingHistory {
+                        // Until the first history read lands the conversation is not known to be
+                        // empty, so it shows that it is loading rather than the empty prompt.
+                        if !hasLoadedConversation {
+                            ConversationHistoryLoadingIndicator()
+                        } else if activeGoal?.status != "complete" && !isLoadingHistory {
                             emptyConversationPlaceholder
                         }
                         if shouldShowActivityDisclosure {
@@ -732,6 +736,35 @@ private struct EmptyConversationAddRepositoryPrompt: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .accessibilityIdentifier("empty-conversation-add-repository-caption")
+        }
+    }
+}
+
+/// Stands in for the transcript while a conversation's first history read is under way. It shows
+/// only once the read has taken a moment, so a conversation that opens quickly doesn't flash it.
+private struct ConversationHistoryLoadingIndicator: View {
+    static let delay: Duration = .milliseconds(300)
+    @State private var isShown = false
+
+    var body: some View {
+        ZStack {
+            if isShown {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading conversation…")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Loading conversation…")
+                .accessibilityIdentifier("conversation-history-loading")
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 280)
+        .task {
+            try? await Task.sleep(for: Self.delay)
+            isShown = true
         }
     }
 }
