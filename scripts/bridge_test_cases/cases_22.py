@@ -427,6 +427,36 @@ class BridgeTestCases22:
         self.assertEqual(sessions(), [], "Deleting the plugin removes its editor conversation.")
         self.assertFalse((self.plugins_folder() / "busy-editor").exists())
 
+    # case-contract: test_plugin_editor_opens_long_conversation_with_loader | A plugin editor whose conversation is long opens at once and shows that it is loading until its history arrives: the editor's sixty settled turns, held in Playhouse's own store, are read as the newest page of 80 messages with the 40 before them counted, ending on the newest question and answer, and `plugin edit --id` returns the same editor. While the editor's operation lock is held, as a Save, Discard or starting turn holds it, that history read waits and returns the same page once the lock is released. In the window, the plugin submenu's Edit… opens the editor with its preview while that read waits, and its transcript shows Loading conversation… in place of the empty plugin prompt; once the lock is released the loader goes away and the newest question and answer show. Opening an editor and its loader are Playhouse-owned and provider neutral, so Claude represents both providers.
+    def test_plugin_editor_opens_long_conversation_with_loader(self):
+        environment = self.install_claude_fixture("claude-fixture-plugin-long-editor")
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.write_installed_plugin("long-editor", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
+        editor = self.assert_success(self.call_cli("plugin", "edit", "--id", "long-editor")[0])["task"]
+        self.assert_success(self.call_cli("conversation", "send", editor["id"], "--message", "Start the long plugin.",
+                                          extra_environment=environment)[0])
+        # Earlier sessions' turns are already in Playhouse's own store; the provider holds none of them.
+        self.seed_long_history(editor["id"])
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", "long-editor")[0])["task"]["id"], editor["id"],
+                         "Edit reopens the same editor conversation.")
+        def assert_newest_page(page):
+            texts = [message["text"] for message in page["messages"]]
+            self.assertEqual((len(texts), page.get("earlierMessageCount")), (80, 40), "The editor reads only its newest page.")
+            self.assertEqual(texts[-2:], ["Long history user 60.", "Long history assistant 60."])
+        assert_newest_page(self.assert_success(self.call_cli("conversation", "history", editor["id"], "--limit", "80",
+                                                             extra_environment=environment)[0]))
+        # Opening the editor reads that page behind its operation lock, which a Save, Discard or
+        # starting turn holds; the read waits for it rather than failing.
+        barrier = TaskOperationLockBarrier(self.data_directory, editor["id"])
+        try:
+            read = self.start_cli("conversation", "history", editor["id"], "--limit", "80", extra_environment=environment)
+            time.sleep(1.5)
+            self.assertIsNone(read.poll(), "The history read waits while the editor's operation lock is held.")
+        finally:
+            barrier.release()
+        waited, _ = self.finish_cli(read, "conversation history", timeout=30)
+        assert_newest_page(self.assert_success(waited))
+
     # case-contract: test_plugin_enable_disable_and_builtins | `plugin list` reports the built-in Changes plugin first (builtIn, valid and enabled, at the conversation sidebar with the inline presentation), then the task card's built-in Pull request mode and Pull requests plugins (inline at the taskItem placement), the board sidebar's built-in Agents info (a section at the mainSidebarBottom placement) and its built-in Scheduled Tasks (a popover at the mainSidebar placement), and the composer's built-in Built-in Commands (headless at the composerActions placement, with its / commands), before the installed plugins. A built-in can't be deleted, edited or rendered headlessly (invalid_argument), and an installed folder with a built-in's id is invalid. An inline plugin is valid only at the conversation sidebar or on the task card. `plugin disable --id` and `plugin enable --id` work on built-in and installed plugins, bump the plugins revision and persist across fresh CLI reads. A `plugin refresh` with nothing changed still bumps the revision and lists identical plugins, and in the window it leaves an open plugin submenu open. A disabled plugin is listed with enabled false, is not run when plugins are refreshed, and `plugin render` refuses it as unavailable until it is enabled again. An unknown id is not_found, a malformed or missing one invalid_argument, and a deleted plugin installed again starts enabled with no saved state. An inline conversation sidebar plugin receives `workspace` (its revision and the open diff) and `sidebar` (whether it is on the rail) props, and its Playhouse.ui.refreshWorkspace and openDiff calls are recorded headlessly, while the board's sidebar refuses them as unavailable. In the window, the Plugins menu has a Built-in Plugins section whose Changes submenu offers Disable but no Edit or Delete, and which labels Built-in Commands Headless (slash commands only), its submenu also offering Disable but no Edit or Delete. Disabling Changes removes the task sidebar's Changes section and labels it Disabled, and enabling it brings the section back. An installed plugin's submenu offers Disable beside Edit and Delete, and disabling it removes its button until it is enabled again. An installed inline plugin renders in place in the task sidebar with no entry button: its refreshWorkspace raises the workspace revision, its openDiff opens the window's diff view for a real change and the open diff reaches its props, and on the hidden sidebar's rail it reads that it is on the rail. Each plugin keeps its own saved values: `plugin state --id` reads them and `plugin state --id --key --value <json>` stores one (null removes it) and bumps the plugins revision; `plugin list` reports each plugin's `state`, which an installed plugin gets as `props.state` and stores with Playhouse.setState (recorded headlessly), and the built-in Changes keeps its state the same way. An unknown id is not_found, and an empty key, a missing value or a value that is not JSON is invalid_argument without bumping the revision. A fresh daemon reads the disabled ids and saved states back from settings, and authoring an inline plugin outside the conversation sidebar or the task card is invalid_argument. In the window, the inline plugin's Playhouse.setState comes back as its props.state, and collapsing the Changes section saves its collapsed state as its plugin state. After a relaunch a disabled Changes stays hidden and labeled Disabled while the plugin keeps its saved state, and enabled again, Changes comes back collapsed. An open page plugin receives its newly saved state, and disabling a plugin closes its open surface.
     def test_plugin_enable_disable_and_builtins(self):
         def listed():
