@@ -65,10 +65,11 @@ extension TaskConversationView {
                         }
                     } else {
                         // Until the first history read lands the conversation is not known to be
-                        // empty, so it shows that it is loading rather than the empty prompt.
-                        if !hasLoadedConversation {
+                        // empty, so it shows that it is loading rather than the empty prompt. A new
+                        // task has nothing to read: it shows its empty state at once.
+                        if !hasLoadedConversation && !isNewTask {
                             ConversationHistoryLoadingIndicator()
-                        } else if activeGoal?.status != "complete" && !isLoadingHistory {
+                        } else if activeGoal?.status != "complete" && (isNewTask || !isLoadingHistory) {
                             emptyConversationPlaceholder
                         }
                         if shouldShowActivityDisclosure {

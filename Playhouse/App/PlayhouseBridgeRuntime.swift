@@ -493,12 +493,16 @@ final class PlayhouseBridgeRuntime {
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
-                _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
+                // Tests slow the read down to see what a window shows until it answers.
+                if let delay = PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_HISTORY_READ_DELAY_SECONDS"].flatMap(TimeInterval.init), delay > 0 {
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+                let reconciled = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
                 let conversations = ConversationManager(
                     tasks: taskManager, clients: clients, settingsManager: settings, defersHistoryImages: request.defersHistoryImages
                 )
                 let messageLimit = try request.optionalHistoryLimit("limit")
-                result = try Self.value(await conversations.history(
+                let history = try Self.value(await conversations.history(
                     taskID: taskID,
                     onActionRequest: {
                         eventHandler(BridgeEvent(requestID: request.id, type: "action_request", payload: .object([:])))
@@ -509,6 +513,14 @@ final class PlayhouseBridgeRuntime {
                     chatPageID: request.arguments["page"]?.string,
                     includesImageData: true
                 ))
+                // A window opening the task reads the record this read reconciled, rather than
+                // reconciling it again in a request of its own.
+                if request.arguments["includeTask"]?.bool == true, case .object(var object) = history {
+                    object["task"] = try Self.value(reconciled)
+                    result = .object(object)
+                } else {
+                    result = history
+                }
             case "conversation.images":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = try Self.value(await conversations.messageImages(

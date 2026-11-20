@@ -3,8 +3,7 @@ import SwiftData
 import SwiftUI
 
 extension TaskConversationView {
-    /// The newest page of history, as `loadConversation` reads it. Opening a task
-    /// starts this read before reconciling the task's status, which it doesn't depend on.
+    /// The newest page of history, as `loadConversation` reads it.
     func readLatestHistoryPage() async throws -> ConversationHistory {
         try await conversationManager.history(
             taskID: task.id,
@@ -13,12 +12,21 @@ extension TaskConversationView {
         )
     }
 
+    /// Opening a task: the newest page of history and the task as the daemon reconciled
+    /// its status for the read, in one request.
+    func readHistoryOnOpen() async throws -> (history: ConversationHistory, reconciled: BoardTaskRecord?) {
+        try await conversationManager.historyOnOpen(
+            taskID: task.id,
+            messageLimit: Self.historyPageSize,
+            onActionRequest: { actionNotice = approvalNotice }
+        )
+    }
+
     /// Applies the newest page of history, read here or by a `pendingRead` already in flight.
-    /// A `reconciled` record, just returned by the daemon, decides the draft and pending
-    /// prompt in place of the task model, which picks up that write asynchronously.
+    /// The record a `pendingRead` returns, just reconciled by the daemon, decides the draft
+    /// and pending prompt in place of the task model, which picks up that write asynchronously.
     func loadConversation(
-        pendingRead: Task<ConversationHistory, Error>? = nil,
-        reconciled: BoardTaskRecord? = nil
+        pendingRead: Task<(history: ConversationHistory, reconciled: BoardTaskRecord?), Error>? = nil
     ) async {
         isLoadingHistory = true
         oldestRenderedMessageID = nil
@@ -43,10 +51,10 @@ extension TaskConversationView {
             // Standalone chat rotates one session per page, so the transcript asks for the
             // earlier pages to be restored from the local archive alongside the live session.
             // Only the newest page is read; older pages load as the reader scrolls up.
-            let history = if let pendingRead {
+            let (history, reconciled) = if let pendingRead {
                 try await pendingRead.value
             } else {
-                try await readLatestHistoryPage()
+                (try await readLatestHistoryPage(), BoardTaskRecord?.none)
             }
             // From here until the window is resolved nothing awaits, so no frame renders the
             // messages before the rows the transcript shows of them are settled.

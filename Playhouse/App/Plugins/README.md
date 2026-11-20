@@ -544,7 +544,12 @@ result) are each delivered, since a throttle keeps only the latest call and
 would drop the others. A service never hears its own state writes (its
 handlers' bridge requests carry the internal `__pluginService` argument), so a
 handler that saves state can't wake itself in a loop; a write made elsewhere,
-by its popover or the CLI, does reach it. Script handlers are background work
+by its popover or the CLI, does reach it. Services that wake each other (one
+writes another plugin's state, which writes back) can't loop either: every
+request a service makes carries the depth of the event it heard
+(`__pluginEventDepth`), and an event raised past
+`PluginServiceHost.maximumEventDepth` (8) is dropped and recorded as
+`plugin.event.dropped` with reason `event-chain-too-deep`. Script handlers are background work
 only: a move that waits for its services' reactions (`PluginServiceHost.settle`,
 such as the pull request mode opening a pull request) never waits for them.
 A plugin can't call `plugin.service` or `plugin.services` itself

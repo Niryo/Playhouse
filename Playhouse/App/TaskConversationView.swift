@@ -782,27 +782,25 @@ struct TaskConversationView: View {
             // fresh model list are still round-tripping through the bridge.
             if !isReadOnly { primeModelOptionsFromCache() }
             if !isReadOnly { refreshQueuedMessages() }
-            // The transcript read is the slow part of opening a long conversation and
-            // doesn't depend on reconciling the task's status, so it runs meanwhile.
-            // Applying it waits for the reconciled task, whose draft and pending
-            // prompt it restores from the daemon's returned record. The request leaves now rather than once the main actor
-            // is free: building a conversation's first frame keeps it busy, longest
-            // on the first open of a session, and the daemon reads meanwhile.
+            // One request reconciles the task's status and reads the transcript; its draft and
+            // pending prompt are restored from the record the daemon returns with it. The
+            // request leaves now rather than once the main actor is free: building a
+            // conversation's first frame keeps it busy, longest on the first open of a
+            // session, and the daemon reads meanwhile.
             let historyRead = if #available(macOS 26.0, *) {
-                Task.immediate { try await readLatestHistoryPage() }
+                Task.immediate { try await readHistoryOnOpen() }
             } else {
-                Task { try await readLatestHistoryPage() }
+                Task { try await readHistoryOnOpen() }
             }
             // The chat's pages are a quick local read, so the labels and the transcript's page
             // separators are ready for its first frame rather than waiting on the provider's
             // model list below, which can take seconds on a cold start.
             if task.isStandaloneChat { refreshChatPageStatus() }
             await withTaskCancellationHandler {
-                let reconciled = isReadOnly ? nil : try? await conversationManager.reconcileLifecycleStatusOnOpen(taskID: task.id)
                 if !isReadOnly, let request = providerPendingUserInputRequest, request.threadID == task.activeConversationID {
                     userInputRequest = request
                 }
-                await loadConversation(pendingRead: historyRead, reconciled: reconciled)
+                await loadConversation(pendingRead: historyRead)
             } onCancel: {
                 historyRead.cancel()
             }

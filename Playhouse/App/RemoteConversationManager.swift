@@ -78,11 +78,28 @@ struct RemoteConversationManager {
         if let beforeMessageID { arguments["before"] = .string(beforeMessageID) }
         if let afterMessageID { arguments["after"] = .string(afterMessageID) }
         if let chatPageID { arguments["page"] = .string(chatPageID) }
+        // A read changes no running turn, so it doesn't re-read the runtime state either: the
+        // subscription keeps that current, and a fresh copy re-rendered every view watching it.
         let result = try await daemon.call("conversation.history", arguments) { event in
             if event.type == "action_request" { onActionRequest() }
         }
-        await runtime.refresh()
         return try result.decoded(ConversationHistory.self)
+    }
+
+    /// The newest `messageLimit` messages and the task as the daemon reconciled it for the read,
+    /// so opening a task takes one request rather than a reconcile and then a read.
+    func historyOnOpen(
+        taskID: UUID,
+        messageLimit: Int,
+        onActionRequest: @escaping () -> Void = {}
+    ) async throws -> (history: ConversationHistory, reconciled: BoardTaskRecord?) {
+        let result = try await daemon.call("conversation.history", [
+            "taskID": id(taskID), "deferImages": .boolean(true), "includeTask": .boolean(true),
+            "limit": .string(String(messageLimit)),
+        ]) { event in
+            if event.type == "action_request" { onActionRequest() }
+        }
+        return (try result.decoded(ConversationHistory.self), try? result.object?["task"]?.decoded(BoardTaskRecord.self))
     }
 
     /// The images of messages a history read marked `imagesDeferred`.

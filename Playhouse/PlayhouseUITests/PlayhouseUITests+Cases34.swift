@@ -587,3 +587,97 @@ extension PlayhouseUITests {
         }, timeout: 45), "The turn for \(message) should finish.", file: file, line: line)
     }
 }
+
+extension PlayhouseUITests {
+    // case-contract: test_conversation_open_reads_reconciled_history_and_shows_loading | Opening a task reads its newest history page and the task as that read reconciled it in one request: conversation history --include-task returns the task record beside the messages, which a plain read leaves out, so a submitted prompt whose turn never started comes back from that read as Waiting Response with the prompt in its saved draft, while a task that doesn't exist fails as not found with no record. While the opening read hasn't answered (held by PLAYHOUSE_E2E_HISTORY_READ_DELAY_SECONDS), the transcript shows Loading conversation… and never the empty conversation prompt; once it answers the stored messages replace the loading state, and a task with no messages shows its empty conversation prompt only then. A brand-new task shows its empty state at once, never the loading state, and the standalone chat opens through the same read: its opening read returns the chat beside its messages, and the chat shows the loading state until they arrive. Opening is shared presentation over one daemon read, so one representative provider (Codex) covers it.
+    func test_conversation_open_reads_reconciled_history_and_shows_loading() throws {
+        // The success fixture answers a turn without asking questions, so a CLI send returns.
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
+        // Every history read the window makes is held, so what it shows until one answers stays in view.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ["PLAYHOUSE_E2E_HISTORY_READ_DELAY_SECONDS": "8"])
+        let loading = element("conversation-history-loading")
+        let empty = element("empty-conversation")
+        // A brand-new task has nothing to load: it shows its empty state at once.
+        element("new-task-button").click()
+        XCTAssertTrue(empty.waitToExist(timeout: 4), "A new task shows its empty state without waiting for the held read.")
+        XCTAssertFalse(loading.exists, "A new task never shows the loading state.")
+        attachScreenshot(named: "A new task shows its empty state at once, never the loading state")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
+
+        let title = "Opened history"
+        try createTaskFixture(title: title, roots: [fixture.primary.path])
+        let taskID = try self.taskID(named: title)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Say hello."])
+        let plain = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertNil(plain["task"], "A plain read returns only the conversation.")
+        let reply = try XCTUnwrap((plain["messages"] as? [[String: Any]])?.last { $0["role"] as? String == "assistant" }?["text"] as? String)
+        let opened = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "80", "--defer-images", "--include-task"])["result"] as? [String: Any])
+        XCTAssertEqual((opened["task"] as? [String: Any])?["id"] as? String, taskID, "The read returns the task beside its messages.")
+        XCTAssertEqual((opened["task"] as? [String: Any])?["status"] as? String, try taskRecord(id: taskID)?["status"] as? String)
+
+        func open(_ title: String) {
+            let card = app.buttons.matching(NSPredicate(format: "label == %@", title)).firstMatch
+            XCTAssertTrue(card.waitToExist(timeout: 10), "Task card is missing: \(title)")
+            clickTaskCardTitle(card)
+            XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Clicking the task card title should open the task.")
+        }
+        func showsLoading(_ context: String) {
+            XCTAssertTrue(loading.waitToExist(timeout: 4), "\(context): the transcript shows that it is loading until the history read answers.")
+            XCTAssertFalse(empty.exists, "\(context): a conversation that is still loading never claims to be empty.")
+            attachScreenshot(named: "\(context): a held history read shows Loading conversation, not the empty state")
+            attachElementScreenshot(loading, named: "\(context): the loading state")
+            XCTAssertTrue(loading.exists, "\(context): the screenshots were taken while the read was still held.")
+        }
+        open(title)
+        showsLoading("Task")
+        XCTAssertEqual(element("conversation-scroll-view").value as? String, "Loading conversation history")
+        let replyRow = transcriptMessage(reply)
+        XCTAssertTrue(replyRow.waitToExist(timeout: 20), "The stored messages replace the loading state.")
+        XCTAssertFalse(loading.exists, "The loading state is gone once the messages are in.")
+        XCTAssertFalse(empty.exists)
+        attachScreenshot(named: "The stored messages replace the loading state")
+
+        // A task with no messages loads too, and shows its empty state only once it has.
+        let neverStarted = "Opened never-started prompt"
+        try createTaskFixture(title: neverStarted, roots: [fixture.primary.path])
+        let neverStartedID = try self.taskID(named: neverStarted)
+        let submitted = "Submitted before Playhouse restarted."
+        _ = try runCLI(["task", "draft", neverStartedID, "--text", ""])
+        _ = try runCLI(["task", "prompt", neverStartedID, "--text", submitted, "--status", "In Progress", "--submitted", "true"])
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
+        open(neverStarted)
+        showsLoading("Empty task")
+        XCTAssertTrue(empty.waitToExist(timeout: 20), "Once the read answers with no messages, the empty state shows.")
+        XCTAssertFalse(loading.exists)
+        // The record that read reconciled restores the never-started prompt to the composer.
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == submitted }, timeout: 10), "The reconciled record returns the never-started prompt to the composer.")
+        XCTAssertEqual(try taskRecord(id: neverStartedID)?["status"] as? String, "Waiting Response")
+        let reopened = try XCTUnwrap(try runCLI(["conversation", "history", neverStartedID, "--include-task"])["result"] as? [String: Any])
+        XCTAssertEqual((reopened["messages"] as? [Any])?.count, 0)
+        XCTAssertEqual((reopened["task"] as? [String: Any])?["status"] as? String, "Waiting Response")
+        XCTAssertEqual((reopened["task"] as? [String: Any])?["savedPrompt"] as? String, submitted)
+        // Opening a task that doesn't exist fails without a task record.
+        let missing = try runCLI(["conversation", "history", "A8AC713C-BDD7-4B54-9B4A-6D6CCD7F957C", "--include-task"], expectedStatus: 3)
+        XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
+        XCTAssertNil(missing["result"], "A failed opening read returns no task.")
+        attachScreenshot(named: "An empty conversation shows its empty state once loaded")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
+
+        // The standalone chat opens through the same read.
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", chatID, "--message", "Say hello in the chat."])
+        let chat = try XCTUnwrap(try runCLI(["conversation", "history", chatID, "--include-task"])["result"] as? [String: Any])
+        XCTAssertEqual((chat["task"] as? [String: Any])?["id"] as? String, chatID, "A chat's opening read returns the chat beside its messages.")
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        showsLoading("Standalone chat")
+        XCTAssertTrue(transcriptMessage("Say hello in the chat.").waitToExist(timeout: 20), "The chat's stored messages replace the loading state.")
+        XCTAssertFalse(loading.exists)
+        XCTAssertFalse(empty.exists, "A chat with messages never shows its empty state.")
+        attachScreenshot(named: "The standalone chat's messages replace the loading state")
+    }
+}
