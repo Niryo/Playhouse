@@ -741,3 +741,31 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(logged_in["tree"], "js-last-action")), "Last: login claude", "Log in ran its JavaScript handler.")
         self.plugin_node(logged_in["tree"], "agents-info-claude-window-five_hour")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "AgentsInfo", "--event", "agents-info:onPress", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_keyboard_shortcuts_press_buttons_and_name_them_in_hover_hints | Important buttons have keyboard shortcuts that press them, and every button with a shortcut names it at the end of its hover hint, which reads exactly that text, keys and modifiers included. On the board, Command-N opens a new task, which the CLI lists as Untitled task, Shift-Command-C opens and closes the standalone chat and Shift-Command-D opens and closes the Done archive, and their hover hints read Create a new task (⌘N), Open the standalone chat (⇧⌘C) and Browse completed tasks (⇧⌘D). In the new task, Shift-Command-P turns Plan mode on and off (hint Plan before making changes (⇧⌘P)), Shift-Command-R opens the Add repository picker (hint Add a repository (⇧⌘R)), the schedule hint's Done button names Return, its default-action key (Use this schedule; Send then schedules the task (Return)), Control-Command-S hides and shows the task sidebar (hint Hide sidebar (⌃⌘S)), Shift-Command-K opens the Skills page (hint Skills, Rules & MCP (⇧⌘K)), whose close button, a Button atom with the cancel shortcut, reads Close (Esc) and, opened from a focused composer, closes it on Escape, after which typing still goes to the composer, and Command-[ returns to the board (hint Back to Kanban (⌘[)). In a Codex task with a repository worktree, Control-` opens the terminal (hint Open a terminal in this task's worktree (⌃`)) and hides it again while the shell has focus, and Command-. stops a running turn (hint Pause Codex response (⌘.)), which then offers Continue and leaves the task Waiting Response. A Button atom's shortcut prop takes default, cancel, or cmd, ctrl or option with any other modifiers and a key, joined by +: the Plugin Catalog's Button page has a Shortcut button that Shift-Command-B presses (Pressed 1 times) and whose hover hint reads Shift-Command-B presses it (⇧⌘B); `plugin render` reports that button's shortcut prop and runs its onPress, renders default, cancel and key combinations (cmd+shift+b, ctrl+option+t, option+`, cmd+], cmd+;, ctrl+return, cmd++) without errors, and reports in errors with exit 1, naming the shortcut, an invalid shortcut (empty, a modifier with no key, an unknown or repeated modifier, a key that is neither one character nor a key name, or a key with no cmd, ctrl or option, such as n, shift+n or return, which would take it from typing) and one Playhouse uses itself, whatever the order of its modifiers (cmd+n, shift+cmd+d, ctrl+`, or the menu bar's cmd+q).
+    def test_keyboard_shortcuts_press_buttons_and_name_them_in_hover_hints(self):
+        pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "Button", "--event", "button-shortcut:onPress")[0])
+        self.assertEqual(pressed["errors"], [])
+        shortcut_button = self.plugin_node(pressed["tree"], "button-shortcut")
+        self.assertEqual((shortcut_button["type"], shortcut_button["props"]["shortcut"], shortcut_button["props"]["help"], shortcut_button["events"]),
+                         ("Button", "cmd+shift+b", "Shift-Command-B presses it", ["onPress"]),
+                         "The hover hint names the keys natively; the prop keeps the plugin's own text.")
+        self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "button-press-count")), "Pressed 1 times", "The Shortcut button runs its onPress.")
+        self.assertEqual(self.plugin_node(pressed["tree"], "button-prominent")["props"]["shortcut"], "default")
+
+        def button(shortcut):
+            return 'Playhouse.render(h(Button, { shortcut: %s, testID: "keyed", onPress: function () {} }, h(Text, null, "Keyed")));' % json.dumps(shortcut)
+
+        for shortcut in ["default", "cancel", "cmd+shift+b", "ctrl+option+t", "option+`", "cmd+]", "cmd+;", "ctrl+return", "cmd++"]:
+            rendered = self.assert_success(self.render_plugin(button(shortcut)))
+            self.assertEqual(rendered["errors"], [], f"{shortcut} is a valid shortcut.")
+            self.assertEqual(self.plugin_node(rendered["tree"], "keyed")["props"]["shortcut"], shortcut)
+        for shortcut in ["", "cmd+", "hyper+n", "cmd+cmd+n", "cmd+enter", "nn", "n", "shift+n", "return"]:
+            failed = self.render_plugin(button(shortcut), expected_status=1)
+            self.assertTrue(failed["ok"], "A plugin that fails still reports its render.")
+            message = f'<Button> has an invalid shortcut "{shortcut}"'
+            self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{shortcut!r} reports {message}: {failed['result']['errors']}")
+        for shortcut, display in [("cmd+n", "⌘N"), ("shift+cmd+d", "⇧⌘D"), ("ctrl+`", "⌃`"), ("cmd+q", "⌘Q")]:
+            failed = self.render_plugin(button(shortcut), expected_status=1)
+            message = f'<Button> can\'t take the shortcut "{shortcut}" ({display}): Playhouse uses it.'
+            self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{shortcut} is the app's own: {failed['result']['errors']}")

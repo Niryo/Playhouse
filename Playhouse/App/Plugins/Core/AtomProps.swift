@@ -147,7 +147,15 @@ enum AtomType: String, CaseIterable, Sendable {
             case .icon: _ = try IconProps.decode(props)
             case .image: _ = try ImageProps.decode(props).validateURL()
             case .label: _ = try LabelProps.decode(props)
-            case .button: _ = try ButtonProps.decode(props)
+            case .button:
+                if let shortcut = try ButtonProps.decode(props).shortcut {
+                    guard let parsed = AtomShortcut(shortcut) else {
+                        throw PluginTreeError(message: "<Button> has an invalid shortcut \"\(shortcut)\": use default, cancel, or cmd, ctrl or option with any other modifiers and a key, such as cmd+shift+n.")
+                    }
+                    if AppShortcut.reserved.contains(parsed) {
+                        throw PluginTreeError(message: "<Button> can't take the shortcut \"\(shortcut)\" (\(parsed.display)): Playhouse uses it.")
+                    }
+                }
             case .link: _ = try LinkProps.decode(props)
             case .spinner: _ = try SpinnerProps.decode(props)
             case .spacer: _ = try SpacerProps.decode(props)
@@ -386,9 +394,12 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 /// push button), link (accent text like a hyperlink) or automatic (the platform's default for where it sits); `emphasis` is the padding of the hover capsule, if any, and
 /// `overhang` lets that capsule spill past the button's layout size.
 /// `controlSize` "small" or "large" makes it a small or large control (it inherits the size
-/// otherwise); `shortcut` "default" makes Return press it and "cancel"
-/// makes Escape press it, window-wide, so only a window's primary or
-/// dismissing action should set one. `destructive` gives it the destructive
+/// otherwise); `shortcut` "default" makes Return press it, "cancel" makes
+/// Escape press it, and modifiers with a key ("cmd+shift+n", see
+/// `AtomShortcut`) make those keys press it, window-wide, so only a window's
+/// primary or dismissing action, or one it is worth a key, should set one (a
+/// plugin can't take `AppShortcut.reserved`, the app's own keys); the
+/// hover hint (`help`) then ends by naming the shortcut, as in "Save (⌘S)". `destructive` gives it the destructive
 /// role (a push button draws its title red). `selected` marks it selected to
 /// accessibility, the current choice of a row of buttons (a ChoiceBar's).
 struct ButtonProps: AtomPropsDecodable, Equatable {

@@ -155,8 +155,10 @@ def main() -> int:
             # tooltip for most controls in the main window. Menu items (menu-bar commands and
             # `Menu`/`.contextMenu` content) are native menu items and keep `.help`.
             in_menu = name in MENU_BAR_FILES or any(a < start < b for a, b in menus)
+            # `.shortcutHelp(text, shortcut:)` is `.nativeHelp` naming the control's keyboard shortcut.
             help_modifier = r"\.help" if in_menu else r"\.nativeHelp"
-            help_match = re.search(help_modifier + r"\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
+            help_match = (re.search(help_modifier + r"\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
+                          or (None if in_menu else re.search(r"\.shortcutHelp\(\s*(\"(?:\\.|[^\"\\])*\"|[^\n]+?)\s*,\s*shortcut:", chain)))
             if not help_match and re.search(r"//\s*no-tooltip:\s*\S", chain):
                 # Deliberate opt-out for controls whose tooltip would only restate the obvious.
                 pass

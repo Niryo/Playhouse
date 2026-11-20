@@ -946,8 +946,9 @@ extension PlayhouseUITests {
     }
     /// Hovers the control until its native tooltip becomes visible outside it. Retries with
     /// several XCUI hover moves inside it, because AppKit starts the tooltip delay from a move
-    /// inside the control.
-    func assertNativeHelpText(for element: XCUIElement, equals expected: String) {
+    /// inside the control. `until` replaces the default visibility check, for a tooltip whose
+    /// text the on-screen check can't read in full.
+    func assertNativeHelpText(for element: XCUIElement, equals expected: String, until isVisible: (() -> Bool)? = nil) {
         for attempt in 0..<3 {
             // Tooltips only show for the active app's key window.
             app.activate()
@@ -960,7 +961,7 @@ extension PlayhouseUITests {
                 Thread.sleep(forTimeInterval: 0.15)
                 element.coordinate(withNormalizedOffset: CGVector(dx: dx, dy: 0.5 + CGFloat(attempt) * 0.05)).hover()
             }
-            if waitUntil({ self.nativeHelpTextIsVisible(expected) }, timeout: 6) { return }
+            if waitUntil({ isVisible?() ?? self.nativeHelpTextIsVisible(expected) }, timeout: 6) { return }
         }
         XCTFail("Hovering should present the native help text ‘\(expected)’ outside the PR control.")
     }

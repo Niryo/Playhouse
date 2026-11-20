@@ -383,10 +383,11 @@ struct SkillsPageActions {
 /// composer, and in the catalog's demo. A task opens it from its sidebar.
 struct SkillsButton: View {
     let testID: String
+    var shortcut: String? = nil
     let action: () -> Void
 
     var body: some View {
-        AtomButton(common: AtomCommon(testID: testID, label: "Skills", help: "Skills"), action: action) {
+        AtomButton(props: ButtonProps(shortcut: shortcut), common: AtomCommon(testID: testID, label: "Skills", help: "Skills"), action: action) {
             AtomIcon(props: IconProps(name: "sparkles"))
         }
     }
@@ -418,7 +419,7 @@ struct SkillsPageHeader: View {
             AtomSpacer()
             AtomButton(
                 props: ButtonProps(shortcut: model.panelOpen || model.selection != nil ? nil : "cancel"),
-                common: AtomCommon(testID: "\(prefix)skills-back-button", label: "Close", help: "Close (Esc)"),
+                common: AtomCommon(testID: "\(prefix)skills-back-button", label: "Close", help: "Close"),
                 action: actions.back
             ) {
                 AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07, capsule: true), common: AtomCommon(width: 22, height: 22)) {

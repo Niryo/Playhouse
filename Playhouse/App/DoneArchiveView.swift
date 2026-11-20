@@ -247,11 +247,13 @@ struct DoneArchivePanel: View {
 /// The board header's Done archive button, the same Button atom the catalog's copy uses.
 struct DoneArchiveButton: View {
     var testID = "done-archive-button"
+    /// The board's; the catalog's copy takes none.
+    var shortcut: String? = nil
     let action: () -> Void
 
     var body: some View {
         AtomButton(
-            props: ButtonProps(style: "bordered"),
+            props: ButtonProps(style: "bordered", shortcut: shortcut),
             common: AtomCommon(testID: testID, label: "Done tasks", help: "Browse completed tasks"),
             action: action
         ) {

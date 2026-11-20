@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Vision
 import XCTest
 
 extension PlayhouseUITests {
@@ -494,5 +495,284 @@ extension PlayhouseUITests {
                 && (try? self.taskRecord(id: taskID)?["status"] as? String).map { $0 != "In Progress" } == true
                 && !self.element("pause-response-button").exists
         }, timeout: 45), "The turn for \(message) should finish.", file: file, line: line)
+    }
+
+    // case-contract: test_keyboard_shortcuts_press_buttons_and_name_them_in_hover_hints | Important buttons have keyboard shortcuts that press them, and every button with a shortcut names it at the end of its hover hint, which reads exactly that text, keys and modifiers included. On the board, Command-N opens a new task, which the CLI lists as Untitled task, Shift-Command-C opens and closes the standalone chat and Shift-Command-D opens and closes the Done archive, and their hover hints read Create a new task (⌘N), Open the standalone chat (⇧⌘C) and Browse completed tasks (⇧⌘D). In the new task, Shift-Command-P turns Plan mode on and off (hint Plan before making changes (⇧⌘P)), Shift-Command-R opens the Add repository picker (hint Add a repository (⇧⌘R)), the schedule hint's Done button names Return, its default-action key (Use this schedule; Send then schedules the task (Return)), Control-Command-S hides and shows the task sidebar (hint Hide sidebar (⌃⌘S)), Shift-Command-K opens the Skills page (hint Skills, Rules & MCP (⇧⌘K)), whose close button, a Button atom with the cancel shortcut, reads Close (Esc) and, opened from a focused composer, closes it on Escape, after which typing still goes to the composer, and Command-[ returns to the board (hint Back to Kanban (⌘[)). In a Codex task with a repository worktree, Control-` opens the terminal (hint Open a terminal in this task's worktree (⌃`)) and hides it again while the shell has focus, and Command-. stops a running turn (hint Pause Codex response (⌘.)), which then offers Continue and leaves the task Waiting Response. A Button atom's shortcut prop takes default, cancel, or cmd, ctrl or option with any other modifiers and a key, joined by +: the Plugin Catalog's Button page has a Shortcut button that Shift-Command-B presses (Pressed 1 times) and whose hover hint reads Shift-Command-B presses it (⇧⌘B); `plugin render` reports that button's shortcut prop and runs its onPress, renders default, cancel and key combinations (cmd+shift+b, ctrl+option+t, option+`, cmd+], cmd+;, ctrl+return, cmd++) without errors, and reports in errors with exit 1, naming the shortcut, an invalid shortcut (empty, a modifier with no key, an unknown or repeated modifier, a key that is neither one character nor a key name, or a key with no cmd, ctrl or option, such as n, shift+n or return, which would take it from typing) and one Playhouse uses itself, whatever the order of its modifiers (cmd+n, shift+cmd+d, ctrl+`, or the menu bar's cmd+q).
+    func test_keyboard_shortcuts_press_buttons_and_name_them_in_hover_hints() throws {
+        executionTimeAllowance = 300 // It hovers a dozen buttons long enough for their tooltips.
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
+        codexFixtureExecutable = executable
+        let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
+        let received = URL(fileURLWithPath: executable + ".interrupt-received")
+        let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+        // A titled task with a repository gets its worktree at once, so its terminal can open.
+        let workTaskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Shortcut work", "--prompt", "Fixture task description.", "--provider", "codex",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["task", "repository", "add", workTaskID, "--repo", fixture.primary.path])
+
+        launchApp(defaultParent: fixture.parent.path)
+        let newTask = element("new-task-button")
+        XCTAssertTrue(newTask.waitToExist(timeout: 15), "The board shows its New Task button.")
+        assertShortcutHelpText(for: newTask, equals: "Create a new task (⌘N)")
+        assertShortcutHelpText(for: element("chat-sidebar-button"), equals: "Open the standalone chat (⇧⌘C)")
+        assertShortcutHelpText(for: element("done-archive-button"), equals: "Browse completed tasks (⇧⌘D)")
+
+        app.typeKey("d", modifierFlags: [.command, .shift])
+        XCTAssertTrue(element("done-archive-title").waitToExist(timeout: 5), "Shift-Command-D opens the Done archive.")
+        attachScreenshot(named: "Shift-Command-D opened the Done archive")
+        app.typeKey("d", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ !self.element("done-archive-title").exists }, timeout: 5), "Shift-Command-D closes it again.")
+
+        app.typeKey("n", modifierFlags: .command)
+        let back = element("back-to-board-button")
+        XCTAssertTrue(back.waitToExist(timeout: 15), "Command-N opens a new task.")
+        XCTAssertTrue(waitUntil({
+            let tasks = ((try? self.runCLI(["task", "list"]))?["result"] as? [String: Any])?["tasks"] as? [[String: Any]] ?? []
+            return Set(tasks.compactMap { $0["title"] as? String }) == ["Shortcut work", "Untitled task"]
+        }, timeout: 10), "The new task is saved, and the CLI lists it beside the fixture task.")
+
+        let plan = element("conversation-plan-button")
+        XCTAssertTrue(plan.waitToExist(timeout: 10), "The new task's composer shows the Plan mode button.")
+        XCTAssertEqual(plan.value as? String, "Off")
+        assertShortcutHelpText(for: plan, equals: "Plan before making changes (⇧⌘P)")
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ plan.value as? String == "On" }, timeout: 5), "Shift-Command-P turns Plan mode on.")
+        attachScreenshot(named: "Shift-Command-P turned Plan mode on")
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ plan.value as? String == "Off" }, timeout: 5), "Shift-Command-P turns it off again.")
+
+        let addRepository = element("add-conversation-repository-button")
+        XCTAssertTrue(addRepository.waitToExist(timeout: 5))
+        assertShortcutHelpText(for: addRepository, equals: "Add a repository (⇧⌘R)")
+        app.typeKey("r", modifierFlags: [.command, .shift])
+        let repositorySearch = element("conversation-repository-search")
+        XCTAssertTrue(repositorySearch.waitToExist(timeout: 5), "Shift-Command-R opens the Add repository picker.")
+        attachScreenshot(named: "Shift-Command-R opened the repository picker")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !repositorySearch.exists }, timeout: 5), "Escape closes the picker.")
+
+        // A native button whose shortcut is the window's default action names Return.
+        _ = openScheduleHint()
+        assertShortcutHelpText(for: element("schedule-done-button"), equals: "Use this schedule; Send then schedules the task (Return)")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(element("schedule-hint")), "Escape closes the schedule hint.")
+
+        let hideSidebar = element("hide-task-sidebar-button")
+        XCTAssertTrue(hideSidebar.waitToExist(timeout: 5), "The task opens with its sidebar shown.")
+        assertShortcutHelpText(for: hideSidebar, equals: "Hide sidebar (⌃⌘S)")
+        app.typeKey("s", modifierFlags: [.control, .command])
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5), "Control-Command-S hides the sidebar to its rail.")
+        attachScreenshot(named: "Control-Command-S hid the task sidebar")
+        app.typeKey("s", modifierFlags: [.control, .command])
+        XCTAssertTrue(element("task-sidebar").waitToExist(timeout: 5), "Control-Command-S shows it again.")
+
+        let skills = element("open-skills-button")
+        assertShortcutHelpText(for: skills, equals: "Skills, Rules & MCP (⇧⌘K)")
+        // From a focused composer, whose editor would otherwise keep Escape from the page.
+        let composer = element("message-composer")
+        composer.click()
+        app.typeKey("k", modifierFlags: [.command, .shift])
+        let skillsClose = element("skills-back-button")
+        XCTAssertTrue(skillsClose.waitToExist(timeout: 10), "Shift-Command-K opens the Skills page.")
+        // The Button atom names its cancel shortcut, Escape, after the hint's own text.
+        assertShortcutHelpText(for: skillsClose, equals: "Close (Esc)")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(skillsClose), "Escape closes the Skills page.")
+        app.typeText("q")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "q" }, timeout: 5), "After the Skills page closes, typing still goes to the composer.")
+        app.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5))
+
+        assertShortcutHelpText(for: back, equals: "Back to Kanban (⌘[)")
+        app.typeKey("[", modifierFlags: .command)
+        XCTAssertTrue(newTask.waitToExist(timeout: 10), "Command-[ returns to the board.")
+        XCTAssertFalse(back.exists)
+
+        openTask(named: "Shortcut work")
+        let terminalToggle = element("toggle-terminal-button")
+        XCTAssertTrue(waitUntil({ terminalToggle.exists && terminalToggle.isEnabled }, timeout: 15), "The task's worktree lets its terminal open.")
+        assertShortcutHelpText(for: terminalToggle, equals: "Open a terminal in this task's worktree (⌃`)")
+        app.typeKey("`", modifierFlags: .control)
+        let terminal = element("task-terminal-view")
+        XCTAssertTrue(terminal.waitToExist(timeout: 10), "Control-` opens the terminal.")
+        attachScreenshot(named: "Control-backtick opened the terminal")
+        // From inside the shell too: the terminal doesn't keep the key for itself.
+        terminal.click()
+        app.typeKey("`", modifierFlags: .control)
+        XCTAssertTrue(waitForDisappearance(element("task-terminal-panel")), "Control-` hides the terminal while it has focus.")
+
+        sendFromComposer("Hold until stopped by a shortcut.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The turn is running.")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.exists && stop.isEnabled }, timeout: 20), "The composer offers Stop while the turn runs.")
+        assertShortcutHelpText(for: stop, equals: "Pause Codex response (⌘.)")
+        app.typeKey(".", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "Command-. stops the turn.")
+        try Data("acknowledge interrupt\n".utf8).write(to: release)
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15), "The stopped turn offers Continue.")
+        XCTAssertTrue(waitForStatus(workTaskID, "Waiting Response"))
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+
+        clickPluginsMenuItem("Plugin Catalog")
+        catalogSidebarRow("plugin-catalog-atom-Button").click()
+        let pressCount = element("button-press-count")
+        XCTAssertTrue(pressCount.waitToExist(timeout: 10), "The catalog shows the Button page.")
+        XCTAssertEqual(pluginText(pressCount), "Pressed 0 times")
+        let shortcutButton = element("button-shortcut")
+        XCTAssertTrue(shortcutButton.exists, "The Button page shows its Shortcut button.")
+        assertShortcutHelpText(for: shortcutButton, equals: "Shift-Command-B presses it (⇧⌘B)")
+        app.typeKey("b", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ self.pluginText(pressCount) == "Pressed 1 times" }, timeout: 5), "Shift-Command-B presses the Shortcut button, which runs its onPress.")
+
+        // Last, back on the board: the open chat widens the window past the VM's screen, and it
+        // stays that wide once the chat closes, which would push later controls off screen.
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(waitForDisappearance(pressCount), "Command-W closes the Plugin Catalog.")
+        app.typeKey("[", modifierFlags: .command)
+        XCTAssertTrue(newTask.waitToExist(timeout: 10), "Command-[ returns the main window to the board.")
+        app.typeKey("c", modifierFlags: [.command, .shift])
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 15), "Shift-Command-C opens the standalone chat.")
+        attachScreenshot(named: "Shift-Command-C opened the standalone chat")
+        app.typeKey("c", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ !self.element("chat-sidebar").exists }, timeout: 5), "Shift-Command-C closes it again.")
+    }
+
+    /// Hovers `element` until its tooltip shows the hint's words, requires the tooltip to draw the
+    /// exact hint, keys and modifiers included, keeps a close-up of the button with its tooltip,
+    /// then moves away so the tooltip closes. The tooltip's help tag carries no text in the VM,
+    /// OCR misreads ⌘ ⇧ ⌃ (as "96", "H", "8" or nothing), and the runner may not use the
+    /// Accessibility API, so the exact text is checked by drawing it in the tooltip font and
+    /// comparing its ink with the tooltip's: a missing, extra or different key changes the shape.
+    private func assertShortcutHelpText(for element: XCUIElement, equals help: String, file: StaticString = #filePath, line: UInt = #line) {
+        let label = help.range(of: " (", options: .backwards).map { String(help[..<$0.lowerBound]) } ?? help
+        let tooltip = app.descendants(matching: .helpTag).firstMatch
+        assertNativeHelpText(for: element, equals: help, until: { self.helpTag(tooltip, shows: label) })
+        if let match = tooltipInk(tooltip, against: help) {
+            let (drawn, expected, overlap, covered) = match
+            XCTAssertTrue(abs(drawn.width - expected.width) <= 1 && abs(drawn.height - expected.height) <= 1 && overlap >= 0.85 && covered >= 0.998,
+                          "The tooltip should read exactly ‘\(help)’, shortcut included: its text is \(drawn.width)×\(drawn.height) px against \(expected.width)×\(expected.height), overlapping \(overlap), within a pixel \(covered).",
+                          file: file, line: line)
+        } else {
+            XCTFail("The tooltip ‘\(help)’ should be on screen to compare.", file: file, line: line)
+        }
+        attachRegionScreenshot(tooltip.exists ? [element, tooltip] : [element], named: "Hover hint: \(help)", padding: 16)
+        movePointerToHelpRunway(below: element)
+        if !waitUntil({ !tooltip.exists }, timeout: 4) {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.85)).hover()
+        }
+        XCTAssertTrue(waitUntil({ !tooltip.exists }, timeout: 8), "Moving away should close the tooltip ‘\(help)’.", file: file, line: line)
+    }
+
+    /// Whether the help tag is on screen and its own frame reads `label`.
+    private func helpTag(_ tooltip: XCUIElement, shows label: String) -> Bool {
+        guard let image = tooltipImage(tooltip, inset: -4)?.0 else { return false }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        let words = Self.words((request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " "))
+        return words.hasPrefix(Self.words(label))
+    }
+
+    /// The on-screen help tag, grown by `inset` points (negative grows it), at native pixels,
+    /// with the screen's pixels per point.
+    private func tooltipImage(_ tooltip: XCUIElement, inset: CGFloat) -> (CGImage, CGFloat)? {
+        guard tooltip.exists else { return nil }
+        let region = tooltip.frame.insetBy(dx: inset, dy: inset)
+        guard let image = XCUIScreen.main.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let screen = NSScreen.main?.frame, screen.width > 0, !region.isEmpty else { return nil }
+        let scale = CGFloat(image.width) / screen.width
+        let pixels = CGRect(x: region.minX * scale, y: region.minY * scale, width: region.width * scale, height: region.height * scale).integral
+        return image.cropping(to: pixels).map { ($0, scale) }
+    }
+
+    /// The tooltip's text ink and `text`'s, drawn in the system tooltip font at the screen's
+    /// density, compared at the best of a few one- or two-pixel shifts. `overlap` is shared ink
+    /// over all ink; `covered` is the smaller share of either's ink that has the other's within a
+    /// pixel. The reference is drawn in the tooltip's own polarity, since light-on-dark and
+    /// dark-on-light text antialias to different stroke weights. Measured in the VM, the right
+    /// hint scores covered 1.0 (overlap 0.90 to 0.98, lower in a light window), while one wrong
+    /// key or modifier stays at or below covered 0.992, and mostly changes the width too. Nil when the tooltip is not on screen. Inside its border
+    /// only, so the frame does not count as text.
+    private func tooltipInk(_ tooltip: XCUIElement, against text: String) -> (drawn: TextInk, expected: TextInk, overlap: Double, covered: Double)? {
+        guard let captured = tooltipImage(tooltip, inset: 1), let drawn = TextInk(captured.0) else { return nil }
+        let scale = captured.1
+        let string = NSAttributedString(string: text, attributes: [
+            .font: NSFont.toolTipsFont(ofSize: 0), .foregroundColor: drawn.isLightText ? NSColor.white : NSColor.black,
+        ])
+        let size = string.size()
+        let width = Int((size.width + 16) * scale), height = Int((size.height + 8) * scale)
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(gray: drawn.isLightText ? 0.12 : 0.95, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: scale, y: scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        string.draw(at: NSPoint(x: 8, y: 4))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let reference = context.makeImage(), let expected = TextInk(reference) else { return nil }
+        // The tooltip's text can sit a pixel off the reference's, which antialiasing turns into a
+        // different ink edge, so take the best of the small shifts.
+        var bestOverlap = 0.0, bestCovered = 0.0
+        for dy in -1...1 {
+            for dx in -2...2 {
+                var shared = 0, either = 0, drawnNear = 0, drawnInk = 0, expectedNear = 0, expectedInk = 0
+                for y in -1...max(drawn.height, expected.height) {
+                    for x in -2...max(drawn.width, expected.width) + 2 {
+                        let a = drawn.isInk(x, y), b = expected.isInk(x + dx, y + dy)
+                        if a && b { shared += 1 }
+                        if a || b { either += 1 }
+                        if a { drawnInk += 1; if expected.hasInk(near: x + dx, y + dy) { drawnNear += 1 } }
+                        if b { expectedInk += 1; if drawn.hasInk(near: x, y) { expectedNear += 1 } }
+                    }
+                }
+                bestOverlap = max(bestOverlap, Double(shared) / Double(max(either, 1)))
+                bestCovered = max(bestCovered, min(Double(drawnNear) / Double(max(drawnInk, 1)), Double(expectedNear) / Double(max(expectedInk, 1))))
+            }
+        }
+        return (drawn, expected, bestOverlap, bestCovered)
+    }
+}
+
+/// The text pixels of an image of text on a plain background, cropped to their bounds. Text is
+/// whichever side of mid-grey the background (the median pixel) is not, so light and dark
+/// tooltips both work.
+private struct TextInk {
+    let width: Int
+    let height: Int
+    /// Whether the text is lighter than its background.
+    let isLightText: Bool
+    private let ink: [Bool]
+
+    init?(_ image: CGImage) {
+        let fullWidth = image.width, fullHeight = image.height
+        var pixels = [UInt8](repeating: 0, count: fullWidth * fullHeight)
+        guard let context = CGContext(data: &pixels, width: fullWidth, height: fullHeight, bitsPerComponent: 8, bytesPerRow: fullWidth,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: fullWidth, height: fullHeight))
+        let lightText = pixels.sorted()[pixels.count / 2] < 128
+        isLightText = lightText
+        let isInk = pixels.map { lightText ? $0 > 128 : $0 < 128 }
+        var minX = fullWidth, maxX = -1, minY = fullHeight, maxY = -1
+        for y in 0..<fullHeight {
+            for x in 0..<fullWidth where isInk[y * fullWidth + x] {
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        width = maxX - minX + 1
+        height = maxY - minY + 1
+        ink = (minY...maxY).flatMap { y in (minX...maxX).map { x in isInk[y * fullWidth + x] } }
+    }
+
+    func isInk(_ x: Int, _ y: Int) -> Bool {
+        x >= 0 && y >= 0 && x < width && y < height && ink[y * width + x]
+    }
+
+    func hasInk(near x: Int, _ y: Int) -> Bool {
+        (-1...1).contains { dy in (-1...1).contains { dx in isInk(x + dx, y + dy) } }
     }
 }

@@ -487,17 +487,15 @@ private struct SkillEditorPanel: View {
                 }
                 Spacer()
                 Button(readOnly ? "Close" : "Cancel", action: onClose)
-                    .keyboardShortcut(.cancelAction)
                     .buttonHoverPointer()
-                    .nativeHelp(readOnly ? "Close the skill" : "Discard changes")
+                    .shortcutHelp(readOnly ? "Close the skill" : "Discard changes", shortcut: "cancel")
                     .accessibilityIdentifier("skill-editor-cancel")
                 if !readOnly {
                     Button("Save") { save() }
-                        .keyboardShortcut("s", modifiers: .command)
                         .buttonStyle(.borderedProminent)
                         .disabled(isSaving)
                         .buttonHoverPointer()
-                        .nativeHelp("Save SKILL.md (⌘S)")
+                        .shortcutHelp("Save SKILL.md", shortcut: AppShortcut.save)
                         .accessibilityIdentifier("skill-editor-save")
                 }
             }
@@ -588,16 +586,14 @@ private struct NewSkillPanel: View {
                 }
                 Spacer()
                 Button("Cancel", action: onClose)
-                    .keyboardShortcut(.cancelAction)
                     .buttonHoverPointer()
-                    .nativeHelp("Close without creating a skill")
+                    .shortcutHelp("Close without creating a skill", shortcut: "cancel")
                     .accessibilityIdentifier("new-skill-cancel")
                 Button("Create") { create() }
-                    .keyboardShortcut("s", modifiers: .command)
                     .buttonStyle(.borderedProminent)
                     .disabled(isSaving)
                     .buttonHoverPointer()
-                    .nativeHelp("Create the skill (⌘S)")
+                    .shortcutHelp("Create the skill", shortcut: AppShortcut.save)
                     .accessibilityIdentifier("new-skill-create")
             }
         }
