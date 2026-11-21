@@ -29,6 +29,13 @@ def held_release(runtime, _session_state, message):
 
 
 def held_interrupt(runtime, _session_state, message):
+    from codex_fixture_turn_scenarios import background_state, _start_background_command, save_background_state
+
+    hold_background = _session_state.turn_message == "Hold until stopped with a Codex background command."
+    if hold_background:
+        background = background_state(runtime)
+        _start_background_command(runtime, background)
+        save_background_state(runtime, background)
     # Emit the same user item identity that thread/items/list returns for this
     # turn; the history file can already hold turns from an earlier session.
     _session_state.index = max(len(_session_state.serial_history().get("turns", [])), 1)
@@ -69,6 +76,10 @@ def held_interrupt(runtime, _session_state, message):
         _session_state.saved_history["interruptReceived"] = True
         _session_state.history_path.write_text(runtime.json.dumps(_session_state.saved_history), encoding="utf-8")
         runtime.Path(str(runtime.sys.argv[0]) + ".interrupt-received").write_text("turn/interrupt\n", encoding="utf-8")
+        if hold_background:
+            # The shared server keeps answering other requests, but this interrupt
+            # gets no acknowledgment or terminal event.
+            break
         if _session_state.mode.endswith("-hold-reject-interrupt"):
             _session_state.reject = runtime.Path(str(runtime.sys.argv[0]) + ".interrupt-reject")
             _session_state.reject_deadline = runtime.time.monotonic() + 15
@@ -101,6 +112,8 @@ def held_interrupt(runtime, _session_state, message):
             runtime.time.sleep(0.02)
         _session_state.interrupt_release.unlink(missing_ok=True)
         runtime.write({"jsonrpc": "2.0", "id": _session_state.interrupt_message["id"], "result": {}})
+        if runtime.Path(str(runtime.sys.argv[0]) + ".stop-ack-only").is_file():
+            break
         runtime.write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
             "threadId": runtime.THREAD_ID,
             "turn": {"id": runtime.TURN_ID, "status": "interrupted", "error": {"message": "Codex interrupted this turn."}},

@@ -19,13 +19,16 @@ extension PlayhouseUITests {
         let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
         let received = URL(fileURLWithPath: executable + ".interrupt-received")
         let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        let ackOnly = URL(fileURLWithPath: executable + ".stop-ack-only")
+        try Data().write(to: ackOnly)
+        defer { try? FileManager.default.removeItem(at: ackOnly) }
         try? FileManager.default.removeItem(at: ready)
         try? FileManager.default.removeItem(at: received)
         try? FileManager.default.removeItem(at: release)
         // Earlier cases share this fixture; its saved turns would renumber this turn's items.
         if provider == "codex" { try? FileManager.default.removeItem(atPath: executable + ".history") }
-        if provider == "codex" { codexFixtureExecutable = executable }
-        else { claudeFixtureExecutable = executable }
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
+        claudeFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui").path
 
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)
@@ -55,16 +58,20 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Stop shows at once before \(provider) acknowledges")
         attachElementScreenshot(element("continue-response-button"), named: "The Continue button before \(provider) acknowledges")
         XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 5), "The task should move to Waiting Response immediately after Stop.")
-        element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
-        let waitingColumn = element("column-waiting-response")
-        let waitingCard = waitingColumn.buttons["task-card-\(taskID.uppercased())"]
-        XCTAssertTrue(waitingCard.waitToExist(timeout: 5), "The visible board should place the stopped task in Waiting Response before interrupt acknowledgment.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "\(provider) should receive its native interrupt.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The task should move before the provider acknowledges the interrupt.")
-        try Data("acknowledge interrupt\n".utf8).write(to: release)
-        clickTaskCardTitle(waitingCard)
-        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
+        let nextProvider = provider == "codex" ? "claude" : "codex"
+        try switchProviderAfterStop(taskID: taskID, provider: nextProvider) {
+            XCTAssertTrue(waitUntil({
+                (try? diagnosticEvents())?.contains {
+                    $0["event"] as? String == "bridge.request.started" && $0["command"] as? String == "conversation.provider.set"
+                } == true
+            }, timeout: 4), "The switch request should reach the daemon before interrupt acknowledgment.")
+            try Data("acknowledge interrupt\n".utf8).write(to: release)
+        }
+        element("back-to-board-button").click()
+        assertTaskVisible(title, inColumn: "Waiting Response")
+        openTask(named: title)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
         // A user-initiated Stop settles with no final answer and no Blocked reason,
@@ -90,6 +97,21 @@ extension PlayhouseUITests {
             attachScreenshot(named: "Interrupted Codex message timestamp")
             attachElementScreenshot(app.staticTexts["message-time-\(promptID)"], named: "Interrupted Codex timestamp detail")
         }
+    }
+
+    func switchProviderAfterStop(taskID: String, provider: String, afterSelection: () throws -> Void = {}) throws {
+        let menu = element("conversation-provider-menu")
+        XCTAssertTrue(waitUntil({ menu.isEnabled }, timeout: 5))
+        menu.click()
+        let choice = app.menuItems["conversation-provider-\(provider)"]
+        XCTAssertTrue(choice.waitToExist(timeout: 5))
+        choice.click()
+        try afterSelection()
+        XCTAssertTrue(waitUntil({
+            (try? taskRecord(id: taskID)?["conversationProvider"] as? String) == provider
+        }, timeout: 15), "Selecting a different provider should save after Stop even without a terminal event.")
+        attachAppWindowScreenshot(named: "Switched to \(provider) after Stop")
+        attachElementScreenshot(menu, named: "Provider after Stop")
     }
     func exerciseRejectedStop(provider: String, title: String) throws {
         let task = try XCTUnwrap(try runCLI([

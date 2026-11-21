@@ -866,7 +866,7 @@ extension PlayhouseUITests {
             )
         }
     }
-    // case-contract: test_codex_background_command_holds_task_in_progress_until_its_result | A Codex turn that ends without a stopping outcome while a required command it started is still running keeps the task In Progress, with no private prompt, for as long as the command runs, across many more reconciliations of the provider's background terminals than the old five-continuation allowance. When the command ends, Playhouse delivers its real exit status and output to Codex in exactly one private results turn, and the outcome Codex reports there settles the task: Review after a passing command; after a failing command either In Progress again while the agent's rerun is running and Review once the rerun passes, or Blocked with the agent's reason. A command that disappears without a result is reported to the agent as unknown, never as successful. A command still running when Playhouse's wait ceiling passes is reported as still running in the one results turn, is neither terminated nor waited for again, and a turn that ends unsettled after it leaves the task Blocked with the missing-outcome reason. Stopping the task while it waits terminates the command, leaves the task in Waiting Response with no failure reason, and starts no further turn. A turn that reports completed while leaving a command running, as with a dev server, settles in Review at once with no wait, no termination, and no results turn.
+    // case-contract: test_codex_background_command_holds_task_in_progress_until_its_result | A Codex turn that ends without a stopping outcome while a required command it started is still running keeps the task In Progress, with no private prompt, for as long as the command runs, across many more reconciliations of the provider's background terminals than the old five-continuation allowance. When the command ends, Playhouse delivers its real exit status and output to Codex in exactly one private results turn, and the outcome Codex reports there settles the task: Review after a passing command; after a failing command either In Progress again while the agent's rerun is running and Review once the rerun passes, or Blocked with the agent's reason. A command that disappears without a result is reported to the agent as unknown, never as successful. A command still running when Playhouse's wait ceiling passes is reported as still running in the one results turn, is neither terminated nor waited for again, and a turn that ends unsettled after it leaves the task Blocked with the missing-outcome reason. The runtime reports the background wait active and interruptible, so the conversation exposes Stop and asks for confirmation. Declining leaves the command running. Confirming terminates the command, leaves the task in Waiting Response with no failure reason, and starts no further turn. A turn that reports completed while leaving a command running, as with a dev server, settles in Review at once with no wait, no termination, and no results turn.
     func test_codex_background_command_holds_task_in_progress_until_its_result() throws {
         let resultsMarker = "background work results"
         func fixtureExecutable(_ name: String) -> URL {
@@ -1031,7 +1031,22 @@ extension PlayhouseUITests {
         }
         XCTAssertTrue(waitUntil({ running(backgroundState(stoppedExecutable)) == 1 && count(backgroundState(stoppedExecutable), "listCalls") >= 2 }, timeout: 30),
                       "The run should be waited for before the Stop.")
-        _ = try runCLI(["conversation", "stop", stoppedID])
+        openTask(named: "Stopped while waiting")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(stop.waitToExist(timeout: 10), "The conversation should expose Stop during its background wait.")
+        XCTAssertTrue(stop.isEnabled)
+        stop.click()
+        let confirmation = app.sheets.containing(.staticText, identifier: "Stop background work?").firstMatch
+        XCTAssertTrue(confirmation.waitToExist(timeout: 5))
+        attachAppWindowScreenshot(named: "Codex background work confirmation")
+        attachScreenshot(named: "Codex confirmation in context")
+        attachElementScreenshot(confirmation, named: "Codex confirmation choices")
+        confirmation.buttons["Keep Running"].click()
+        XCTAssertEqual(try status(stoppedID), "In Progress")
+        XCTAssertEqual(running(backgroundState(stoppedExecutable)), 1)
+        stop.click()
+        XCTAssertTrue(confirmation.waitToExist(timeout: 5))
+        confirmation.buttons["Stop All"].click()
         _ = try finishCLIProcess(stopped, expectedStatus: nil)
         XCTAssertEqual(try status(stoppedID), "Waiting Response", "A Stop during the wait keeps the user's paused state.")
         XCTAssertNil(try taskRecord(id: stoppedID)?["statusMessage"] as? String, "A user-requested Stop must not be reported as a failure.")
@@ -1040,6 +1055,7 @@ extension PlayhouseUITests {
         Thread.sleep(forTimeInterval: 1.5)
         XCTAssertEqual(try fixtureTurns(stoppedExecutable).count, 1, "Nothing restarts the work after a Stop.")
         XCTAssertEqual(try status(stoppedID), "Waiting Response")
+        element("back-to-board-button").click()
         assertTaskVisible("Stopped while waiting", inColumn: "Waiting Response")
 
         try createTaskFixture(title: "Leaves a dev server running", roots: [fixture.primary.path])

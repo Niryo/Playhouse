@@ -1164,7 +1164,17 @@ extension PlayhouseCLI {
                     ])
                 }
                 throw CLIError.usage("Use: playhouse conversation model <task-id> [set <model-id>]")
-            case "stop": return BridgeRequest(command: "conversation.stop", arguments: ["taskID": .string(id)])
+            case "stop":
+                let options = Array(tail.dropFirst())
+                var arguments: [String: BridgeValue] = ["taskID": .string(id)]
+                switch options {
+                case []: break
+                case let values where values.count == 2 && values[0] == "--confirm-background-work":
+                    arguments["confirmationID"] = .string(values[1])
+                default:
+                    throw CLIError.usage("Use: playhouse conversation stop <task-id> [--confirm-background-work <confirmation-id>]")
+                }
+                return BridgeRequest(command: "conversation.stop", arguments: arguments)
             case "provider":
                 switch Array(tail.dropFirst()) {
                 case []: return BridgeRequest(command: "conversation.provider.get", arguments: ["taskID": .string(id)])

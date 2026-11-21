@@ -600,7 +600,14 @@ final class PlayhouseBridgeRuntime {
                 result = .object(["models": .array(try conversations.cachedModels(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
             case "conversation.stop":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
-                result = .object(["interrupted": .boolean(try await conversations.interrupt(taskID: request.requiredUUID("taskID")))])
+                do {
+                    let interrupted = try await conversations.interrupt(
+                        taskID: request.requiredUUID("taskID"), confirmationID: request.arguments["confirmationID"]?.string
+                    )
+                    result = .object(["interrupted": .boolean(interrupted)])
+                } catch let confirmation as ConversationStopConfirmation {
+                    result = .object(["interrupted": .boolean(false), "confirmationID": .string(confirmation.id)])
+                }
             case "conversation.provider.get":
                 let task = try taskManager.conversationSubject(request.requiredUUID("taskID"))
                 result = .object([

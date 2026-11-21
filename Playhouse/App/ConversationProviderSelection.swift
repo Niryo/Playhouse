@@ -248,6 +248,7 @@ extension ConversationManager {
     /// `remembersDefault` is false when Playhouse picks the provider itself (an unstarted
     /// conversation moving to the provider that is installed), which isn't the user's choice.
     func setProvider(taskID: UUID, provider: ConversationProvider, remembersDefault: Bool = true) async throws -> BoardTaskRecord {
+        _ = await ConversationTurnLaunch.providerStopOutcome(taskID)
         var task = try tasks.conversationSubject(taskID)
         PlayhouseDiagnostics.record("conversation.provider.switch.started", fields: [
             "taskID": taskID.uuidString, "from": task.conversationProvider.rawValue, "to": provider.rawValue

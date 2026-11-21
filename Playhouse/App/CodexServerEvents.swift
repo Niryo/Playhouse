@@ -14,6 +14,9 @@ extension CodexAppServerClient {
         }
         // The warm thread of direct MCP calls runs no turns; its notifications are no conversation's.
         if let threadID = params["threadId"] as? String, threadID == mcpCallThread?.id { return }
+        if let threadID = params["threadId"] as? String,
+           let turnID = (params["turnId"] as? String) ?? (params["turn"] as? [String: Any])?["id"] as? String,
+           rejectedTurnKeys.contains(Self.turnKey(threadID: threadID, turnID: turnID)) { return }
         let context = (params["threadId"] as? String).flatMap { turnContexts[$0] }
         if method == "turn/started" || method == "turn/completed", let threadID = params["threadId"] as? String,
            threadParents[threadID] == nil {
@@ -253,7 +256,6 @@ extension CodexAppServerClient {
             }
 
             let key = Self.turnKey(threadID: threadID, turnID: turnID)
-            if rejectedTurnKeys.remove(key) != nil { return }
             let result: Result<Void, Error>
             if turn["status"] as? String == "completed" {
                 result = .success(())

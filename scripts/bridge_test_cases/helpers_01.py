@@ -181,6 +181,7 @@ class BridgeTestHelpers01:
         )
         (self.data_directory / marker_name).write_text(marker_value, encoding="utf-8")
         environment = {environment_name: str(executable)}
+        Path(str(executable) + ".stop-ack-only").touch()
         ready = Path(str(executable) + ".interrupt-ready")
         received = Path(str(executable) + ".interrupt-received")
         release = Path(str(executable) + ".interrupt-release")
@@ -228,12 +229,22 @@ class BridgeTestHelpers01:
         self.assertTrue(received.is_file(), f"{provider} should receive its native interrupt before acknowledging it.")
         stopping = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(stopping["status"], "Waiting Response", "The task should leave In Progress before the provider acknowledges Stop.")
+        other_provider = "claude" if provider == "codex" else "codex"
+        switch = self.start_cli(
+            "conversation", "provider", task["id"], "set", other_provider, extra_environment=environment,
+        )
+        self.wait_for(lambda: any(
+            event.get("event") == "bridge.request.started" and event.get("command") == "conversation.provider.set"
+            for event in self.diagnostic_events()
+        ), "Provider switch should reach the daemon while acknowledgment is held.")
         release.write_text("acknowledge interrupt\n", encoding="utf-8")
         stopper.join(timeout=20)
         self.assertFalse(stopper.is_alive(), f"The {provider} interrupt acknowledgment should settle.")
         self.assertEqual(stop_failures, [])
         stopped = self.assert_success(stop_results["response"])
         self.assertTrue(stopped["interrupted"], f"{provider} should acknowledge its native turn interrupt.")
+        switched = self.assert_success(self.finish_cli(switch, "switch provider during Stop")[0])
+        self.assertEqual(switched["conversationProvider"], other_provider)
         sender.join(timeout=20)
         self.assertFalse(sender.is_alive(), f"The {provider} send should finish after its active turn is interrupted.")
         self.assertEqual(send_failures, [])

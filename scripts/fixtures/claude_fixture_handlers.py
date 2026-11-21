@@ -367,6 +367,9 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         # and the fold it performs on settle is distinguishable from the section
         # simply never having rendered.
         runtime.assistant("msg_stop_command", [{"type": "tool_use", "id": "toolu_stop_command", "name": "Bash", "input": {"command": "git status --short"}}])
+        if user_text.strip() == "Hold until stopped with a background process.":
+            child = runtime.subprocess.Popen(["/bin/sleep", "90"], start_new_session=True)
+            runtime.Path(str(runtime.sys.argv[0]) + ".stop-child").write_text(str(child.pid), encoding="utf-8")
         ready = runtime.Path(str(runtime.sys.argv[0]) + ".interrupt-ready")
         ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
         deadline = runtime.time.monotonic() + 30
@@ -405,6 +408,8 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
             runtime.write({"type": "control_response", "response": {
                 "subtype": "success", "request_id": control.get("request_id"), "response": {},
             }})
+            if runtime.Path(str(runtime.sys.argv[0]) + ".stop-ack-only").is_file():
+                continue
             runtime.write({"type": "result", "subtype": "error_during_execution", "is_error": True,
                    "result": "Claude interrupted this turn."})
             break

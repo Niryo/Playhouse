@@ -643,14 +643,33 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return interrupted
     }
 
-    /// Stops the session's Claude Code process (SIGTERM to its process group, then SIGKILL), which
-    /// also ends the background shells and subagents it started. The turn waiting on it, even one
-    /// held open by a question, fails at once.
-    func forceStopActiveTurn(threadID: String) async -> Bool {
+    func hasBackgroundWorkToStop(threadID: String) async -> Bool {
+        guard let runner = runners[threadID] ?? Self.activeRunnersBySessionID[threadID] else { return false }
+        if !runner.outstandingBackgroundTaskIDs.isEmpty { return true }
+        let root = runner.processIdentifier
+        return root > 0 && !childProcessIDs(of: root).isEmpty
+    }
+
+    func forceStopActiveTurn(threadID: String, interruptProvider _: Bool) async -> Bool {
         guard let runner = runners[threadID] ?? Self.activeRunnersBySessionID[threadID] else { return false }
         let stopped = runner.isTurnActive || runner.activeTurnID != nil || runner.pendingQuestion != nil
         runner.wasInterrupted = true
         interruptedThreadIDs.insert(threadID)
+        let identity = runner.agentRun?.identity
+            ?? AgentProcessIdentity.current(pid: runner.processIdentifier)
+        if let identity, identity.isAlive {
+            let descendants = descendantProcessIDs(of: identity.pid).compactMap { AgentProcessIdentity.current(pid: $0) }
+            AgentRunHost.killProcessTree(identity, descendants: descendants)
+        }
+        for activity in runner.toolActivities.values where activity.isActive {
+            let interrupted = ConversationActivity(
+                id: activity.id, title: activity.title, detail: activity.detail, status: "interrupted",
+                childThreadID: activity.childThreadID, agentPath: activity.agentPath, model: activity.model,
+                toolKind: activity.toolKind, server: activity.server, tool: activity.tool, turnID: activity.turnID,
+                backgroundTaskID: activity.backgroundTaskID
+            ).preservingTimelineFields(of: activity)
+            runner.activityHandler?(interrupted)
+        }
         runner.shutdown()
         return stopped
     }
