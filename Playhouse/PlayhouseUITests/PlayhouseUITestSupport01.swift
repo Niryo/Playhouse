@@ -19,13 +19,16 @@ extension PlayhouseUITests {
         let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
         let received = URL(fileURLWithPath: executable + ".interrupt-received")
         let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        let ackOnly = URL(fileURLWithPath: executable + ".stop-ack-only")
+        try Data().write(to: ackOnly)
+        defer { try? FileManager.default.removeItem(at: ackOnly) }
         try? FileManager.default.removeItem(at: ready)
         try? FileManager.default.removeItem(at: received)
         try? FileManager.default.removeItem(at: release)
         // Earlier cases share this fixture; its saved turns would renumber this turn's items.
         if provider == "codex" { try? FileManager.default.removeItem(atPath: executable + ".history") }
-        if provider == "codex" { codexFixtureExecutable = executable }
-        else { claudeFixtureExecutable = executable }
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
+        claudeFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui").path
 
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)
@@ -55,16 +58,20 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Stop shows at once before \(provider) acknowledges")
         attachElementScreenshot(element("continue-response-button"), named: "The Continue button before \(provider) acknowledges")
         XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 5), "The task should move to Waiting Response immediately after Stop.")
-        element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
-        let waitingColumn = element("column-waiting-response")
-        let waitingCard = waitingColumn.buttons["task-card-\(taskID.uppercased())"]
-        XCTAssertTrue(waitingCard.waitToExist(timeout: 5), "The visible board should place the stopped task in Waiting Response before interrupt acknowledgment.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "\(provider) should receive its native interrupt.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The task should move before the provider acknowledges the interrupt.")
-        try Data("acknowledge interrupt\n".utf8).write(to: release)
-        clickTaskCardTitle(waitingCard)
-        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
+        let nextProvider = provider == "codex" ? "claude" : "codex"
+        try switchProviderAfterStop(taskID: taskID, provider: nextProvider) {
+            XCTAssertTrue(waitUntil({
+                (try? diagnosticEvents())?.contains {
+                    $0["event"] as? String == "bridge.request.started" && $0["command"] as? String == "conversation.provider.set"
+                } == true
+            }, timeout: 4), "The switch request should reach the daemon before interrupt acknowledgment.")
+            try Data("acknowledge interrupt\n".utf8).write(to: release)
+        }
+        element("back-to-board-button").click()
+        assertTaskVisible(title, inColumn: "Waiting Response")
+        openTask(named: title)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
         // A user-initiated Stop settles with no final answer and no Blocked reason,
@@ -90,6 +97,21 @@ extension PlayhouseUITests {
             attachScreenshot(named: "Interrupted Codex message timestamp")
             attachElementScreenshot(app.staticTexts["message-time-\(promptID)"], named: "Interrupted Codex timestamp detail")
         }
+    }
+
+    func switchProviderAfterStop(taskID: String, provider: String, afterSelection: () throws -> Void = {}) throws {
+        let menu = element("conversation-provider-menu")
+        XCTAssertTrue(waitUntil({ menu.isEnabled }, timeout: 5))
+        menu.click()
+        let choice = app.menuItems["conversation-provider-\(provider)"]
+        XCTAssertTrue(choice.waitToExist(timeout: 5))
+        choice.click()
+        try afterSelection()
+        XCTAssertTrue(waitUntil({
+            (try? taskRecord(id: taskID)?["conversationProvider"] as? String) == provider
+        }, timeout: 15), "Selecting a different provider should save after Stop even without a terminal event.")
+        attachAppWindowScreenshot(named: "Switched to \(provider) after Stop")
+        attachElementScreenshot(menu, named: "Provider after Stop")
     }
     func exerciseRejectedStop(provider: String, title: String) throws {
         let task = try XCTUnwrap(try runCLI([
@@ -407,7 +429,7 @@ extension PlayhouseUITests {
         }
     }
     /// Runs a tool-call turn and a later turn from the composer, then checks that the earlier
-    /// turn shows each call inline, after the message written before it, with IN and OUT blocks.
+    /// turn shows each call inline, after the message written before it, each shell call on one line that expands to its IN and OUT blocks.
     func assertEarlierTurnToolCallsRenderInline(provider: String, executableName: String, callIDs: [String], summaries: [String]) throws {
         let display = provider == "claude" ? "Claude" : "Codex"
         let source = WorkspaceFixture.root.appendingPathComponent(provider == "claude" ? "claude-fixture-ui" : "codex-fixture-ui")
@@ -481,13 +503,16 @@ extension PlayhouseUITests {
 
         XCTAssertTrue(rows[0].label.contains("Bash") && rows[0].label.contains("Completed"), rows[0].label)
         XCTAssertTrue(text(of: element("conversation-tool-call-name-\(callIDs[0])")).contains("Bash"))
-        XCTAssertTrue(text(of: element("conversation-tool-call-summary-\(callIDs[0])")).contains(summaries[0]))
-        XCTAssertTrue(text(of: element("conversation-tool-call-input-\(callIDs[0])")).contains("git status --short && echo fixture-status-done"),
-                      "The IN block should show the exact command.")
-        XCTAssertTrue(text(of: element("conversation-tool-call-output-\(callIDs[0])")).contains("fixture-status-done"),
-                      "The OUT block should show what the command returned.")
+        // A shell call collapses to one line: its name and the start of its command, nothing else.
+        let statusCommand = element("conversation-tool-call-command-\(callIDs[0])")
+        XCTAssertTrue(text(of: statusCommand).contains("git status --short && echo fixture-status-done"),
+                      "The collapsed row should show the start of the command.")
+        XCTAssertLessThan(rows[0].frame.height, 40, "A collapsed shell call should take a single line.")
+        for hidden in ["summary", "input", "output"] {
+            XCTAssertFalse(element("conversation-tool-call-\(hidden)-\(callIDs[0])").exists, "A collapsed shell call hides its \(hidden).")
+        }
         XCTAssertTrue(rows[2].label.contains("Failed"), "A failing command should render as failed: \(rows[2].label)")
-        XCTAssertTrue(text(of: element("conversation-tool-call-input-\(callIDs[2])")).contains("exit 3"))
+        XCTAssertTrue(text(of: element("conversation-tool-call-command-\(callIDs[2])")).contains("exit 3"))
         XCTAssertFalse(element("conversation-tool-call-input-\(callIDs[3])").exists, "An MCP call's arguments must stay private.")
         XCTAssertFalse(element("conversation-tool-call-output-\(callIDs[3])").exists, "An MCP call's raw result must stay private.")
         for privateText in ["timeline-private-argument", "timeline-private-result"] {
@@ -498,17 +523,45 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "\(display) earlier turn tool calls inline")
 
+        // Expanding a shell call shows its purpose and full IN and OUT blocks, even a short one.
+        XCTAssertTrue(scrollFullyIntoView(rows[0], in: scrollView))
+        element("conversation-tool-call-toggle-\(callIDs[0])").click()
+        let statusInput = element("conversation-tool-call-input-\(callIDs[0])")
+        XCTAssertTrue(statusInput.waitToExist(timeout: 5), "Expanding a shell call should show its IN block.")
+        XCTAssertFalse(statusCommand.exists, "The expanded row replaces the one-line preview with the full blocks.")
+        XCTAssertTrue(text(of: element("conversation-tool-call-summary-\(callIDs[0])")).contains(summaries[0]))
+        XCTAssertTrue(text(of: statusInput).contains("git status --short && echo fixture-status-done"),
+                      "The IN block should show the exact command.")
+        XCTAssertTrue(text(of: element("conversation-tool-call-output-\(callIDs[0])")).contains("fixture-status-done"),
+                      "The OUT block should show what the command returned.")
+
+        // A command longer than the row and spanning two lines still collapses to one line: only
+        // its first line, cut at the row's edge, with an ellipsis marking the line that follows.
         let listingOutput = element("conversation-tool-call-output-\(callIDs[1])")
+        let listingCommand = element("conversation-tool-call-command-\(callIDs[1])")
         XCTAssertTrue(scrollFullyIntoView(rows[1], in: scrollView))
-        let collapsedHeight = listingOutput.frame.height
-        XCTAssertFalse(element("conversation-tool-call-toggle-\(callIDs[0])").exists, "A short call has nothing more to show.")
+        let collapsedHeight = rows[1].frame.height
+        XCTAssertLessThan(collapsedHeight, 40, "A long multi-line command should still collapse to a single line.")
+        XCTAssertLessThanOrEqual(listingCommand.frame.maxX, rows[1].frame.maxX + 1, "The preview is cut at the row's edge instead of overflowing it.")
+        let listingPreview = text(of: listingCommand).trimmingCharacters(in: .whitespaces)
+        XCTAssertTrue(listingPreview.hasPrefix("ls -1 -- . # lists every fixture file") && listingPreview.hasSuffix("…"),
+                      "The preview should start with the command's first line and end with an ellipsis: \(listingPreview)")
+        XCTAssertFalse(listingPreview.contains("fixture-listing-done"), "The preview should not include the command's second line.")
+        XCTAssertFalse(listingOutput.exists, "A collapsed shell call hides its output.")
+        attachScreenshot(named: "\(display) shell calls collapsed to one line", around: [rows[1], rows[2]])
         let toggle = element("conversation-tool-call-toggle-\(callIDs[1])")
-        XCTAssertTrue(toggle.waitToExist(timeout: 5), "A call whose output runs past the clipped lines can expand.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 5), "A shell call can expand.")
         toggle.click()
-        XCTAssertTrue(waitUntil({ listingOutput.frame.height > collapsedHeight + 10 }, timeout: 5),
-                      "Expanding should show every output line, not just the clipped ones.")
-        XCTAssertTrue(text(of: listingOutput).contains("fixture-four.txt"))
+        XCTAssertTrue(waitUntil({ listingOutput.exists && rows[1].frame.height > collapsedHeight + 10 }, timeout: 5),
+                      "Expanding should show the full output.")
+        XCTAssertTrue(text(of: element("conversation-tool-call-input-\(callIDs[1])")).contains("fixture-listing-done"),
+                      "The expanded IN block shows every line of the command.")
+        XCTAssertTrue(text(of: listingOutput).contains("fixture-four.txt"), "The expanded output is not clipped.")
+        XCTAssertTrue(scrollFullyIntoView(rows[1], in: scrollView))
         attachScreenshot(named: "\(display) tool call output expanded")
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !listingOutput.exists && self.element("conversation-tool-call-command-\(callIDs[1])").exists }, timeout: 5),
+                      "Collapsing returns the shell call to its one-line preview.")
 
         let firstStep = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "git status --short was clean."
@@ -532,7 +585,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load the earlier turn as the reader scrolls up.")
         XCTAssertTrue(scrollTranscriptUntilExists(element("conversation-tool-call-\(callIDs[0])")),
                       "The earlier turn's calls should still render inline after reopening the task.")
-        XCTAssertTrue(text(of: element("conversation-tool-call-input-\(callIDs[0])")).contains("git status --short"))
+        XCTAssertTrue(text(of: element("conversation-tool-call-command-\(callIDs[0])")).contains("git status --short"))
     }
     /// Expands the latest turn's Worked for summary when it is collapsed.
     func expandLatestWorkedFor() -> Bool {
@@ -563,7 +616,7 @@ extension PlayhouseUITests {
                 && self.noTurnIsRunning()
         }, timeout: 60), "The later ordinary turn should finish with an answer.")
         XCTAssertTrue(revealWholeTranscript(), "The earlier nudged turn should load as the reader scrolls up.")
-        let input = element("conversation-tool-call-input-\(callID)")
+        let input = element("conversation-tool-call-command-\(callID)")
         XCTAssertTrue(scrollTranscriptUntilExists(input), "After a later turn, the nudged turn's call should render inline.")
         XCTAssertTrue([input.label, input.value as? String ?? ""].joined(separator: " ").contains("echo NUDGED CHECK PASSED"),
                       "The inline call should show the nudged turn's exact command.")

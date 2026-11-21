@@ -4,11 +4,25 @@ import SwiftData
 import Darwin
 import SQLite3
 
+struct ConversationStopConfirmation: Error {
+    let id: String
+}
+
 extension ConversationManager {
     // MARK: - Turn control
 
-    func interrupt(taskID: UUID) async throws -> Bool {
+    func interrupt(taskID: UUID, confirmationID: String? = nil) async throws -> Bool {
         PlayhouseDiagnostics.record("conversation.interrupt.started", fields: ["taskID": taskID.uuidString])
+        // A second Stop can also stop a send that arrived while the first Stop was
+        // waiting on the provider.
+        guard ConversationTurnLaunch.beginProviderStop(taskID) else {
+            if ConversationTurnLaunch.requestStopOfWaitingSends(taskID) { return true }
+            return await ConversationTurnLaunch.providerStopOutcome(taskID)
+        }
+        var interrupted = false
+        defer { ConversationTurnLaunch.endProviderStop(taskID, interrupted: interrupted) }
+        let isDeleting = TaskDeletion.isDeleting(taskID)
+        if !isDeleting { try await requireBackgroundStopConfirmation(taskID, confirmationID: confirmationID) }
         // A send this daemon accepted that doesn't own the turn yet (it is on its way to the
         // turn reservation, or waiting behind the turn being stopped) is stopped with it: it
         // gives up at its first launch checkpoint instead of starting a turn after the stop.
@@ -27,6 +41,7 @@ extension ConversationManager {
             if ConversationTurnLaunch.isLaunching(taskID), !canInterruptProviderTurn(taskID) {
                 ConversationTurnLaunch.requestStop(taskID)
                 guard await ConversationTurnLaunch.settled(taskID) == .turnStarted else {
+                    interrupted = true
                     PlayhouseDiagnostics.record("conversation.interrupt.finished", fields: [
                         "taskID": taskID.uuidString,
                         "interrupted": "true",
@@ -42,7 +57,8 @@ extension ConversationManager {
                 "taskID": taskID.uuidString,
                 "reason": "no_thread"
             ])
-            return stoppedWaitingSend
+            interrupted = stoppedWaitingSend
+            return interrupted
         }
         let providerClient = client(for: task)
         guard providerClient.isTurnActive(threadID: threadID)
@@ -51,33 +67,68 @@ extension ConversationManager {
                 "taskID": taskID.uuidString,
                 "reason": "no_active_turn"
             ])
-            return stoppedWaitingSend
+            interrupted = stoppedWaitingSend
+            return interrupted
         }
         // A user-requested stop is a resumable pause. Persist that intent before
         // asking the provider so the task leaves In Progress as soon as Stop is
         // clicked, even when the provider is still thinking or the interrupt
         // acknowledgment takes time.
+        let turnID = providerClient.activeTurnIdentity(threadID: threadID)
         let pauseRevision = try await tasks.transitionLifecycleStatus(
             taskID,
             from: .inProgress,
             to: .waitingResponse
         ) ?? launchPauseRevision
-        // A stop already on its way to the provider covers this turn; asking again would
-        // only reach the provider after the turn is gone. This stop shares that one's outcome,
-        // unless it already stopped a message of its own that was waiting.
-        guard ConversationTurnLaunch.beginProviderStop(taskID) else {
-            let joined = stoppedWaitingSend ? true : await ConversationTurnLaunch.providerStopOutcome(taskID)
-            PlayhouseDiagnostics.record("conversation.interrupt.finished", fields: [
-                "taskID": taskID.uuidString,
-                "interrupted": String(joined),
-                "joinedStopInFlight": "true"
-            ])
-            return joined
-        }
-        var interrupted = false
-        defer { ConversationTurnLaunch.endProviderStop(taskID, interrupted: interrupted) }
         do {
-            interrupted = try await providerClient.interruptActiveTurn(threadID: threadID)
+            let currentTurnID = providerClient.activeTurnIdentity(threadID: threadID)
+            if let confirmationID, backgroundStopScope(threadID: threadID, turnID: currentTurnID) != confirmationID {
+                throw BridgeCommandError(code: "invalid_transition", message: "The conversation changed. Click Stop again to review its background work.")
+            }
+            let accepted: Bool
+            if confirmationID != nil, task.conversationProvider == .claude {
+                accepted = await providerClient.forceStopActiveTurn(threadID: threadID, interruptProvider: false)
+            } else if isDeleting {
+                accepted = try await providerClient.interruptActiveTurn(threadID: threadID)
+            } else if confirmationID != nil, try await providerClient.stopBackgroundWork(threadID: threadID) {
+                accepted = true
+            } else {
+                let reply = await BoundedWait.result(within: .seconds(8)) {
+                    guard providerClient.activeTurnIdentity(threadID: threadID) == turnID else {
+                        return Result<Bool, Error>.success(false)
+                    }
+                    do { return Result<Bool, Error>.success(try await providerClient.interruptActiveTurn(threadID: threadID)) }
+                    catch { return .failure(error) }
+                }
+                if let reply {
+                    accepted = try reply.get()
+                } else if let turnID, providerClient.activeTurnIdentity(threadID: threadID) == turnID {
+                    try await requireBackgroundStopConfirmation(taskID, confirmationID: confirmationID)
+                    if providerClient.activeTurnIdentity(threadID: threadID) == turnID {
+                        accepted = await providerClient.forceStopActiveTurn(threadID: threadID, interruptProvider: true)
+                    } else {
+                        accepted = true
+                    }
+                } else {
+                    accepted = !providerClient.isTurnActive(threadID: threadID)
+                }
+            }
+            if accepted, !isDeleting {
+                let currentTurn: () -> String? = { providerClient.activeTurnIdentity(threadID: threadID) }
+                // Give the provider's terminal event a chance to finish the send. Some
+                // providers acknowledge the interrupt and then leave the turn open.
+                if !(await waitForTurnToEnd(taskID, timeout: .milliseconds(200), turnID: turnID, currentTurn: currentTurn)),
+                   let turnID, currentTurn() == turnID {
+                    if confirmationID == nil { try await requireBackgroundStopConfirmation(taskID, confirmationID: nil) }
+                    if currentTurn() == turnID {
+                        _ = await providerClient.forceStopActiveTurn(threadID: threadID, interruptProvider: false)
+                    }
+                }
+                guard await waitForTurnToEnd(taskID, timeout: Self.deleteForceStopTimeout, turnID: turnID, currentTurn: currentTurn) else {
+                    throw BridgeCommandError(code: "operation_failed", message: "Couldn't finish stopping this turn. Try Stop again.")
+                }
+            }
+            interrupted = accepted
         } catch {
             if let pauseRevision,
                (providerClient.isTurnActive(threadID: threadID)
@@ -96,6 +147,25 @@ extension ConversationManager {
             "interrupted": String(interrupted)
         ])
         return interrupted || stoppedWaitingSend
+    }
+
+    private func requireBackgroundStopConfirmation(_ taskID: UUID, confirmationID: String?) async throws {
+        let task = try tasks.conversationSubject(taskID)
+        guard let threadID = task.activeConversationID else { return }
+        let client = client(for: task)
+        let turnID = client.activeTurnIdentity(threadID: threadID)
+        let scope = backgroundStopScope(threadID: threadID, turnID: turnID)
+        if let confirmationID {
+            guard scope == confirmationID else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The conversation changed. Click Stop again to review its background work.")
+            }
+        } else if let scope, await client.hasBackgroundWorkToStop(threadID: threadID) {
+            throw ConversationStopConfirmation(id: scope)
+        }
+    }
+
+    private func backgroundStopScope(threadID: String, turnID: String?) -> String? {
+        turnID.map { "\(threadID):\($0)" }
     }
 
     // MARK: - Task deletion
@@ -124,7 +194,7 @@ extension ConversationManager {
             // delete is done, so its reply doesn't wait for this.
             if let threadID = TaskDeletion.threadID(taskID) {
                 let client = self.clients.client(for: TaskDeletion.provider(taskID) ?? .claude)
-                Task { @MainActor in _ = await client.forceStopActiveTurn(threadID: threadID) }
+                Task { @MainActor in _ = await client.forceStopActiveTurn(threadID: threadID, interruptProvider: true) }
             }
         }
         TaskDeletion.begin(taskID, deletion)
@@ -174,7 +244,7 @@ extension ConversationManager {
             TaskDeletion.remember(taskID, threadID: threadID, provider: task.conversationProvider)
             let providerClient = client(for: task)
             let forced = await BoundedWait.result(within: Self.deleteForceStopTimeout) {
-                await providerClient.forceStopActiveTurn(threadID: threadID)
+                await providerClient.forceStopActiveTurn(threadID: threadID, interruptProvider: true)
             }
             fields["forceStopped"] = forced.map(String.init) ?? "timed_out"
         }
@@ -193,11 +263,18 @@ extension ConversationManager {
     }
 
     /// Whether the task's turn, its launch and every send waiting for it ended within `timeout`.
-    private func waitForTurnToEnd(_ taskID: UUID, timeout: Duration) async -> Bool {
+    private func waitForTurnToEnd(
+        _ taskID: UUID,
+        timeout: Duration,
+        turnID: String? = nil,
+        currentTurn: () -> String? = { nil }
+    ) async -> Bool {
         let deadline = ContinuousClock.now + timeout
         while true {
             let reserved = (try? tasks.hasConversationTurnReservation(taskID)) ?? true
-            if !reserved, !ConversationTurnLaunch.isLaunching(taskID), !ConversationTurnLaunch.hasWaitingSend(taskID) { return true }
+            let active = currentTurn()
+            if let active, let turnID, active != turnID { return true }
+            if active == nil, !reserved, !ConversationTurnLaunch.isLaunching(taskID), !ConversationTurnLaunch.hasWaitingSend(taskID) { return true }
             guard ContinuousClock.now < deadline else { return false }
             try? await Task.sleep(for: .milliseconds(50))
         }

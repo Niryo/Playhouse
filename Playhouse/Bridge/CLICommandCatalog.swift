@@ -204,7 +204,7 @@ enum CLICommandCatalog {
         command("conversation queue-list", "<task-id>", "List a task's queued messages.", chat),
         command("conversation queue-retry|queue-remove|queue-steer", "<task-id> <message-id>", "Retry, remove, or steer with a queued message.", internalUse),
         command("conversation steer", "<task-id> --message <text> [--image <path>]...", "Add a message to the task's running turn.", chat),
-        command("conversation stop", "<task-id>", "Stop the task's running turn.", chat),
+        command("conversation stop", "<task-id> [--confirm-background-work <confirmation-id>]", "Stop the turn, returning a confirmation ID when background work is running.", chat),
         command("conversation models", "<task-id> [--cached]", "List the models the task's provider offers; --cached reads the last saved list.", chat),
         command("conversation model", "<task-id> [set <model-id>]", "Show or set the task's model.", chat),
         command("conversation effort", "<task-id> [set <low|medium|high|xhigh>]", "Show or set the task's reasoning effort.", chat),

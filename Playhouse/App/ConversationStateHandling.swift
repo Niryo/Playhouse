@@ -1083,7 +1083,7 @@ extension TaskConversationView {
 
     /// Stops the response. The window shows the stop immediately; the daemon and the provider
     /// catch up in the background, however long the turn takes to wind down.
-    func pauseResponse() {
+    func pauseResponse(confirmationID: String? = nil) {
         guard !isPausingResponse else { return }
         // Text that streamed before the click is part of what was stopped.
         flushStreamedTextDeltas()
@@ -1094,14 +1094,18 @@ extension TaskConversationView {
         let generation = sendGeneration
         Task { @MainActor in
             do {
-                var interrupted = try await conversationManager.interrupt(taskID: task.id)
+                var interrupted = try await conversationManager.interrupt(
+                    taskID: task.id, confirmationID: confirmationID
+                )
                 // This window's send may not have reached the daemon when the stop did.
                 var remainingAttempts = 50
                 while !interrupted, remainingAttempts > 0, isPausingResponse,
                       sendGeneration == generation, sendsInFlight > 0 {
                     try? await Task.sleep(for: .milliseconds(100))
                     remainingAttempts -= 1
-                    interrupted = try await conversationManager.interrupt(taskID: task.id)
+                    interrupted = try await conversationManager.interrupt(
+                        taskID: task.id, confirmationID: confirmationID
+                    )
                 }
                 interruptsInFlight -= 1
                 guard sendGeneration == generation, isPausingResponse else { return }
@@ -1129,7 +1133,12 @@ extension TaskConversationView {
                 isPausingResponse = false
                 hasPausedResponse = false
                 isResponding = sendsInFlight > 0 || providerTurnIsActive
-                errorMessage = error.localizedDescription
+                if let confirmation = error as? ConversationStopConfirmation {
+                    backgroundStopConfirmationID = confirmation.id
+                    confirmsStoppingBackgroundWork = true
+                } else {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
     }

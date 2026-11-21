@@ -700,7 +700,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Codex chat page keeps every turn after a relaunch")
     }
 
-    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, well apart, at most 10 in view at a time with no scroll bar, reading only the 10 newest labels at first and older ones, 10 at a time, only as the column is scrolled up, and shown as soon as the chat opens without waiting for the provider's model list, with the store's pages indexed by chat and age so reading the newest few never sorts the whole chat; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right without narrowing them, widening the chat sidebar by the labels' room, which pushes the board's columns right, instead of reflowing the messages' text, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, well apart, at most 10 in view at a time with no scroll bar, reading only the 10 newest labels at first and older ones, 10 at a time, only as the column is scrolled up, and shown as soon as the chat opens without waiting for the provider's model list, with the store's pages indexed by chat and age so reading the newest few never sorts the whole chat; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right without narrowing them, widening the chat sidebar by the labels' room, which pushes the board's columns right, instead of reflowing the messages' text, the handle's target reaches the chat's leading edge, so with the chat against the window's edge, a pointer pushed against that edge, where the window's resize edge is, beside the handle slides them out too, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_anchors_jump_and_recall() throws {
         executionTimeAllowance = 360 // It walks 45 pages: jumps, Latest, Jump to bottom, recall, a turn and a relaunch.
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-anchors")
@@ -749,6 +749,14 @@ extension PlayhouseUITests {
             let current = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value == %@", "chat-page-anchor-", "current"))
             return current.count == 1 ? current.firstMatch.label : nil
         }
+        /// Scrolls the labels with the pointer resting at their middle. A scroll alone can post its
+        /// wheel event before the pointer reaches the column, beside it over the transcript, which
+        /// then scrolls instead of the labels.
+        func scrollLabels(by deltaY: CGFloat) {
+            let middle = anchors.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            middle.hover()
+            middle.scroll(byDeltaX: 0, deltaY: deltaY)
+        }
         func separatorTop(_ title: String) -> CGFloat? {
             chatPageSeparators(title).first.map { $0.minY - scrollView.frame.minY }
         }
@@ -759,7 +767,7 @@ extension PlayhouseUITests {
             for delta: CGFloat in [150, -150] {
                 for _ in 0..<40 {
                     guard !ready() else { break }
-                    anchors.scroll(byDeltaX: 0, deltaY: delta)
+                    scrollLabels(by: delta)
                     _ = waitUntil(ready, timeout: 0.3)
                 }
             }
@@ -874,6 +882,24 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ abs(chatSidebar.frame.width - foldedSidebarWidth) < 1 && abs(backlogColumn.frame.minX - foldedColumnLeft) < 2 }, timeout: 3),
                       "Folded labels return the chat sidebar to its width and the board's columns to their place; sidebar \(chatSidebar.frame.width), column left \(backlogColumn.frame.minX).")
 
+        // With the chat against the window's leading edge, the handle's target reaches that edge, so
+        // a pointer pushed against it, where the window's own resize edge is, still slides the labels out.
+        XCTAssertEqual(chatSidebar.frame.minX, windowFrame.minX, accuracy: 0.5, "The chat sits against the window's leading edge.")
+        XCTAssertEqual(handle.frame.minX, scrollView.frame.minX, accuracy: 0.5, "The handle's target reaches the transcript's leading edge.")
+        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: 0, dy: handle.frame.midY - windowFrame.minY))
+            .hover()
+        // Waits for the slide to end, with the labels fully out beside the handle, before the screenshot.
+        XCTAssertTrue(waitUntil({
+            anchors.exists && handle.value as? String == "open"
+                && chatSidebar.frame.width > foldedSidebarWidth + 100 && anchors.frame.minX >= handle.frame.maxX - 1
+        }, timeout: 5),
+                      "A pointer at the window's leading edge beside the handle slides the labels out; handle \(handle.frame), labels \(anchors.frame), window \(windowFrame).")
+        attachScreenshot(named: "chat-page-anchors-revealed-from-window-edge")
+        moveOffLabels()
+        XCTAssertTrue(waitUntil({ !anchors.exists && handle.value as? String == "folded" }, timeout: 5),
+                      "Labels revealed from the window's edge fold back when the pointer leaves.")
+
         // Clicking the handle locks the labels open after the pointer leaves, and closes the lock above it.
         handle.hover()
         XCTAssertTrue(waitUntil({ anchors.exists && handle.value as? String == "open" }, timeout: 5))
@@ -898,10 +924,22 @@ extension PlayhouseUITests {
         XCTAssertEqual(label(longTitle).label, longTitle)
         XCTAssertLessThanOrEqual(anchors.frame.width, 130, "The labels stay compact.")
         XCTAssertGreaterThanOrEqual(anchors.frame.width, 100, "The labels have room for a short title.")
+        // A window tall enough that the 10 labels, not the transcript's height, bound the column.
+        let window = app.windows.firstMatch
+        // Pressed near its left end: a window reaching the Dock has the Dock over the middle of its
+        // bottom edge, which would take the press instead.
+        let bottomEdge = window.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 1)).withOffset(CGVector(dx: 16, dy: -2))
+        bottomEdge.press(forDuration: 0.2, thenDragTo: bottomEdge.withOffset(CGVector(dx: 0, dy: 400)))
+        // Room for 11 labels (14 pt each, 20 pt apart, 6 pt padding above and below) plus the
+        // 26 pt above and below them for the search and the arrow: 366 + 52.
+        XCTAssertTrue(waitUntil({ scrollView.frame.height >= 418 }, timeout: 5),
+                      "The window should grow until the transcript has room for more than 10 labels; transcript height \(scrollView.frame.height).")
         XCTAssertEqual(anchors.frame.midY, scrollView.frame.midY, accuracy: 4, "The labels sit halfway down the transcript.")
-        let labelsInView = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-"))
-            .allElementsBoundByIndex.filter { anchors.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }.count
-        XCTAssertEqual(labelsInView, 10, "Exactly the 10 newest labels are in view.")
+        func labelsInView() -> Int {
+            anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-"))
+                .allElementsBoundByIndex.filter { anchors.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }.count
+        }
+        XCTAssertEqual(labelsInView(), 10, "Exactly the 10 newest labels are in view.")
         XCTAssertEqual(anchors.frame.height, 332, accuracy: 3, "The column is as tall as 10 labels.")
         XCTAssertLessThan(anchors.frame.height, scrollView.frame.height - 52 - 8, "The column stops at 10 labels with transcript height to spare.")
         XCTAssertEqual(anchors.scrollBars.count, 0, "The labels scroll without a scroll bar.")
@@ -911,15 +949,18 @@ extension PlayhouseUITests {
         XCTAssertFalse(label("Topic 03").exists, "An older page has no label until the labels are scrolled up to it.")
         XCTAssertTrue(waitUntil({ currentLabelTitle() == "Harbor" }, timeout: 10), "The label of the page in view is marked; current=\(String(describing: currentLabelTitle())).")
         XCTAssertFalse(element("chat-jump-to-latest").exists)
-        XCTAssertEqual(anchors.value as? String, "10 pages, older pages above", "Showing all ten labels reads no more pages.")
+        XCTAssertEqual(anchors.value as? String, "10 pages, older pages above", "Growing the window reads no more labels.")
         attachScreenshot(named: "chat-page-anchors-newest-ten")
         attachElementScreenshot(anchors, named: "chat-page-anchors-newest-ten-closeup")
         // Scrolling up past the oldest label read so far reads the next 10, and no more.
-        anchors.scroll(byDeltaX: 0, deltaY: 60)
+        scrollLabels(by: 60)
         XCTAssertTrue(waitUntil({ anchors.value as? String == "20 pages, older pages above" }, timeout: 5),
                       "Scrolling the labels up reads 10 older ones; labels \(String(describing: anchors.value)).")
         XCTAssertFalse(waitUntil({ anchors.value as? String != "20 pages, older pages above" }, timeout: 1),
                       "One scroll reads one batch; labels \(String(describing: anchors.value)).")
+        // With 20 read, and the transcript room for 11, the column still holds at most 10.
+        XCTAssertEqual(anchors.frame.height, 332, accuracy: 3, "With more labels read, the column stays as tall as 10 labels.")
+        XCTAssertLessThanOrEqual(labelsInView(), 10, "At most 10 labels are in view with more read.")
 
         // Agent replies end where the user's messages end, which is the room the labels use.
         let question = scrollView.descendants(matching: .any)
