@@ -902,12 +902,7 @@ extension PlayhouseUITests {
         // left there by chance (say, after a panel closed over the row) closes as soon
         // as the list shifts under it.
         for _ in 0..<3 {
-            // Another row's hint, opened where the pointer last rested, can cover this row;
-            // leaving the list closes it.
-            if !row.isHittable {
-                element("skills-title").hover()
-                _ = waitUntil({ row.isHittable }, timeout: 3)
-            }
+            _ = waitUntilUncovered(row, timeout: 3)
             row.hover()
             if hint.waitToExist(timeout: 3) { return hint }
             // Leave the row and come back, so its tracking area sees a fresh entry.
@@ -915,6 +910,21 @@ extension PlayhouseUITests {
         }
         XCTFail("Resting on \(rowIdentifier) should show its hint.", file: file, line: line)
         return hint
+    }
+    /// Waits until `target` exists, can be clicked and `ready` holds. Another row's hint, opened
+    /// where the pointer last rested (say, after an error banner pushed the rows down under it),
+    /// can cover the target; whenever the target exists but is covered, the pointer leaves the
+    /// list, which closes that hint. Checking on every poll also catches a target that becomes
+    /// covered only once a closing panel is gone.
+    func waitUntilUncovered(_ target: XCUIElement, timeout: TimeInterval, and ready: () -> Bool = { true }) -> Bool {
+        waitUntil({
+            guard target.exists else { return false }
+            guard target.isHittable else {
+                element("skills-title").hover()
+                return false
+            }
+            return ready()
+        }, timeout: timeout)
     }
     /// Moves the pointer off the list and waits for any hint it opened to close, so a
     /// screenshot shows the rows rather than a hint left over them.
@@ -1074,10 +1084,7 @@ extension PlayhouseUITests {
     func openRuleActions(_ key: String, file: StaticString = #filePath, line: UInt = #line) {
         app.activate()
         let actions = element("rule-actions-\(key)")
-        // Another row's hint, opened where the pointer last rested (say, after an error banner
-        // pushed the rows down under it), can cover this row's menu; leaving the list closes it.
-        if actions.exists, !actions.isHittable { element("skills-title").hover() }
-        XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("rule-editor-panel").exists && !self.element("new-rule-panel").exists }, timeout: 10),
+        XCTAssertTrue(waitUntilUncovered(actions, timeout: 10, and: { !self.element("rule-editor-panel").exists && !self.element("new-rule-panel").exists }),
                       "\(key) should have an actions menu.", file: file, line: line)
         actions.click()
         if !app.menuItems["Reveal in Finder"].waitToExist(timeout: 3) { actions.click() }
@@ -1125,10 +1132,7 @@ extension PlayhouseUITests {
     /// `identifier` item, or the item titled `title` when no item carries that identifier.
     func clickMcpMenuItem(server key: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         let actions = element("mcp-actions-\(key)")
-        // Another row's hint, opened where the pointer last rested, can cover this row's
-        // menu in the narrow card; leaving the list closes it.
-        if actions.exists, !actions.isHittable { element("skills-title").hover() }
-        XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("mcp-editor-panel").exists }, timeout: 10),
+        XCTAssertTrue(waitUntilUncovered(actions, timeout: 10, and: { !self.element("mcp-editor-panel").exists }),
                       "\(key) should have an actions menu.", file: file, line: line)
         actions.click()
         let byIdentifier = app.menuItems.matching(identifier: identifier).firstMatch

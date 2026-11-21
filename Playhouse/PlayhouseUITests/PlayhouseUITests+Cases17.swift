@@ -536,7 +536,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation, whose turns Playhouse holds in its own store, immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window: when its sent turn streams sixty replies, each stored as its own message in order, it keeps the newest 40 of those 61 messages rendered as they arrive. Reopened once that turn settles, its sixty replies, all the turn's own with none of them progress that collapses, make a newest turn far longer than what a conversation renders when it opens: it opens at its end on the newest reply, renders only the messages above it that fill the viewport (more than the six it opens with, fewer than 40) and not the turn's question, and scrolling up reveals the earlier replies and reaches that question. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation, whose turns Playhouse holds in its own store, immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward reveals earlier messages automatically, a few at a time, starting from a reader already at the top of the rendered messages; they are revealed while the reader is near the oldest rendered message and stop once the reader rests away from it, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window: when its sent turn streams sixty replies, each stored as its own message in order, it keeps the newest 40 of those 61 messages rendered as they arrive. Reopened once that turn settles, its sixty replies, all the turn's own with none of them progress that collapses, make a newest turn far longer than what a conversation renders when it opens: it opens at its end on the newest reply, renders only the messages above it that fill the viewport (more than the six it opens with, fewer than 40) and not the turn's question, and scrolling up reveals the earlier replies and reaches that question. An in-place provider switch keeps the revealed history and the reader on the newest message, with the switch's divider below it; reopening the conversation after it opens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every message, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -718,24 +718,46 @@ extension PlayhouseUITests {
         scrollTranscript(by: -1500, until: { isVisible(latest) }, limit: 40)
         XCTAssertTrue(waitUntil({ isVisible(latest) }, timeout: 5), "Loading earlier messages should preserve and return to the newest content.")
 
-        // An in-place reload must reopen on the latest turn and keep upward
-        // paging working; a provider switch reloads history without leaving the
-        // conversation.
+        // A provider switch only decides who runs the next turn, so the transcript stays as the
+        // reader left it: every revealed message, with the reader still at the newest one. The
+        // switch's divider goes below it, and the view stays at the end to show the divider.
         let providerMenu = element("conversation-provider-menu")
         XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu should be available once the long history settles.")
         providerMenu.click()
         let claudeChoice = app.menuItems["conversation-provider-claude"]
         XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
         claudeChoice.click()
+        XCTAssertTrue(waitUntil({ providerMenu.value as? String == "claude" }, timeout: 10), "The conversation switches to Claude in place.")
+        XCTAssertFalse(waitUntil({ scrollView.value as? String != "Showing latest 120 of 120 messages" }, timeout: 3),
+                       "Switching providers keeps the revealed history; value=\(scrollView.value as? String ?? "nil").")
+        let divider = element("provider-boundary-claude")
+        XCTAssertTrue(waitUntil({ isVisible(divider) }, timeout: 5), "The switch's divider shows at the end of the transcript.")
+        XCTAssertTrue(isVisible(latest), "Switching providers keeps the reader on the newest message.")
+        XCTAssertGreaterThan(divider.frame.minY, latest.frame.maxY - 1, "The divider sits below the newest message.")
+        XCTAssertLessThanOrEqual(divider.frame.maxY, scrollView.frame.maxY + 1, "The view stays at the end, with the divider fully in view; divider=\(divider.frame), viewport=\(scrollView.frame).")
+        // The menu shows a switch before it is saved and returns to Codex if saving fails, so
+        // the switch counts only once the task records it and the menu still reads Claude.
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longTaskID))?["conversationProvider"] as? String == "claude" }, timeout: 10),
+                      "The task records the switch to Claude.")
+        XCTAssertEqual(providerMenu.value as? String, "claude", "The switch holds once saved.")
+        XCTAssertFalse(element("codex-chat-error").exists, "The switch saves without an error.")
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages", "Saving the switch keeps the revealed history too.")
+        attachScreenshot(named: "A provider switch keeps the revealed history")
+
+        // Reopened, the conversation opens on the latest turn again and upward paging works
+        // from that fresh window.
+        element("back-to-board-button").click()
+        openTask(named: "Long conversation history")
         XCTAssertTrue(waitUntil({
             scrollView.value as? String == "Showing latest 2 of 120 messages"
-        }, timeout: 20), "Reloading history in place should reopen on the latest turn instead of keeping the revealed history.")
-        XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "The latest question should be visible again after an in-place reload.")
-        assertPinnedToLatestQuestion("Reloading in place")
-        attachScreenshot(named: "In-place reload reopens on the latest question")
-        XCTAssertFalse(oldest.exists, "An in-place reload should not keep older messages rendered.")
+        }, timeout: 20), "Reopening after the switch should open on the latest turn instead of keeping the revealed history.")
+        XCTAssertEqual(element("conversation-provider-menu").value as? String, "claude", "The reopened conversation keeps the saved switch.")
+        XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "The latest question should be visible again after reopening.")
+        assertPinnedToLatestQuestion("Reopening after the switch")
+        attachScreenshot(named: "Reopening after the switch opens on the latest question")
+        XCTAssertFalse(oldest.exists, "Reopening should not keep older messages rendered.")
         scrollView.scroll(byDeltaX: 0, deltaY: 200)
-        XCTAssertTrue(waitUntil({ renderedCount() > 2 }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
+        XCTAssertTrue(waitUntil({ renderedCount() > 2 }, timeout: 10), "Upward scrolling must still reveal earlier messages after reopening.")
         // Long upward scrolls, as dragging the scroller's knob to the top does, each land on the
         // oldest rendered message and reveal the messages above it, including the page still in
         // the store, until the first messages are reached.

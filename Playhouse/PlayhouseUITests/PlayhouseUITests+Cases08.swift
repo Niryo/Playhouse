@@ -201,7 +201,9 @@ extension PlayhouseUITests {
         // The remembered selection loads after the empty conversation first renders.
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: restoredTitle) == "secondary" }, timeout: 5),
                       "A new task should restore the remaining remembered repository, not \(accessibleLabelOrValue(of: restoredTitle)).")
-        XCTAssertTrue(element("conversation-repository-badge-secondary").exists)
+        // The title names the saved repositories while they are still being attached, so the
+        // header's chip, which shows once one is attached, can follow it a moment later.
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 5), "The new task attaches the remaining remembered repository.")
         XCTAssertFalse(element("conversation-repository-badge-primary").exists)
         attachScreenshot(named: "New task restores only the repository that remains selected")
 

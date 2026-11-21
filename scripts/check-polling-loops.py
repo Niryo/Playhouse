@@ -21,11 +21,13 @@ POLLING_LOOP = re.compile(r"\bfor\s+_\s+in\s+[^{]*?\bwhere\b")
 def main() -> int:
     violations = []
     for path in FILES:
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if line.lstrip().startswith("//"):
-                continue
-            if POLLING_LOOP.search(line):
-                violations.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        # Blank comment lines but keep their places, so a match spanning lines (a `where` on the
+        # line after `for _ in …`) is still found and reported at the line of its `for`.
+        text = "\n".join("" if line.lstrip().startswith("//") else line for line in lines)
+        for match in POLLING_LOOP.finditer(text):
+            number = text.count("\n", 0, match.start()) + 1
+            violations.append(f"{path.relative_to(ROOT)}:{number}: {lines[number - 1].strip()}")
     if violations:
         print("`for _ in … where COND` keeps evaluating COND after it fails; use `guard COND else { break }`:", file=sys.stderr)
         print("\n".join(violations), file=sys.stderr)
