@@ -128,7 +128,9 @@ enum ChatPageAnchorsLayout {
     /// The search above the labels, and its gap from the first label.
     static let searchHeight: CGFloat = 18
     static let searchSpacing: CGFloat = 4
-    /// Where the labels' handle sits from the transcript column's edge.
+    /// Where the labels' line sits from the transcript column's edge. The handle's target spans
+    /// this inset too, so with the chat at the window's edge, a pointer pushed against that edge,
+    /// where the window's own resize edge is, still reaches the handle.
     static let handleInset: CGFloat = 2
     /// The handle's target, which the open labels start just beyond.
     static let handleWidth: CGFloat = 12
@@ -216,10 +218,8 @@ struct ChatPageAnchorsColumnInset: ViewModifier, Animatable {
     }
 
     func body(content: Content) -> some View {
-        content.padding(
-            .leading,
-            ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth, push: push) + ChatPageAnchorsLayout.handleInset
-        )
+        // The handle's own target spans `handleInset`, reaching the column's edge.
+        content.padding(.leading, ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth, push: push))
     }
 }
 
@@ -482,8 +482,11 @@ struct ChatPageAnchorsHandle: View {
             Capsule()
                 .fill(fill)
                 .frame(width: isOpen || isLocked ? 5 : 3, height: 64)
-                // A wider, taller target than the line itself, so it is easy to find.
+                // A wider, taller target than the line itself, so it is easy to find, reaching
+                // left to the transcript column's edge, which is the window's edge when the chat
+                // is against it.
                 .frame(width: ChatPageAnchorsLayout.handleWidth, height: 108)
+                .padding(.leading, ChatPageAnchorsLayout.handleInset)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -499,7 +502,7 @@ struct ChatPageAnchorsHandle: View {
         .accessibilityIdentifier("chat-page-anchors-handle")
         // Above the line, inside the handle's target, so hovering or clicking it is the handle's.
         // Laid over the button after its accessibility modifiers, so it is its own element.
-        .overlay(alignment: .top) {
+        .overlay(alignment: .topTrailing) {
             if isOpen || isLocked {
                 Image(systemName: isLocked ? "lock.fill" : "lock.open")
                     .font(.system(size: 9, weight: .semibold))
