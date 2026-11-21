@@ -300,6 +300,29 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path) }, timeout: 10))
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path) }, timeout: 10), "Both Review task probes should overlap on focus.")
         XCTAssertFalse(resolveButton.exists, "A mergeable PR should not show the conflict action.")
+        let ghCallsURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CALL_LOG"]))
+        func ghCallCount() -> Int {
+            ((try? String(contentsOf: ghCallsURL, encoding: .utf8))?.split(whereSeparator: \.isNewline).count) ?? 0
+        }
+        // The cooldown is timed from a probe the app starts once it is idle. The launch's probes
+        // start while the app is still starting up, so their markers can trail the throttle's
+        // own start by more than a later probe's does, which made the cooldown look short.
+        var settledCalls = ghCallCount()
+        var callsSettled = false
+        for _ in 0..<8 {
+            Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
+            let calls = ghCallCount()
+            callsSettled = calls == settledCalls
+            guard !callsSettled else { break }
+            settledCalls = calls
+        }
+        XCTAssertTrue(callsSettled, "The launch's GitHub probes should stop within the cooldown before it is timed; calls=\(settledCalls).")
+        for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
+        activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({
+            [123, 456].allSatisfy { FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("\($0)").path) }
+                && ghCallCount() == settledCalls + 2
+        }, timeout: 10), "Returning to the app after the cooldown probes both PRs at once.")
         let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
         try "123=conflicting\n".write(to: stateURL, atomically: true, encoding: .utf8)
         // The fixture touches started/<number> as each probe starts, so the marker's date is
@@ -308,8 +331,7 @@ extension PlayhouseUITests {
         let probeMarkerURL = startedDirectory.appendingPathComponent("123")
         let lastProbeStart = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: probeMarkerURL.path)[.modificationDate] as? Date)
         for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
-        let ghCallsURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CALL_LOG"]))
-        let callsBeforeCooldownFocus = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
+        let callsBeforeCooldownFocus = ghCallCount()
         for _ in 0..<4 {
             activateOtherAppThenReturn()
         }

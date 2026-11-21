@@ -698,12 +698,21 @@ extension PlayhouseUITests {
     func revealOptimizedTranscriptMessage(_ text: String) -> Bool {
         let scrollView = element("conversation-scroll-view")
         let target = transcriptMessage(text)
+        // The first loaded row; its frame moves with every scroll that moves the transcript,
+        // including one that loads an earlier page.
+        let firstRow = scrollView.children(matching: .any).element(boundBy: 0)
         for direction in [CGFloat(600), CGFloat(-600)] {
+            // The search starts wherever the last one left the transcript, often already at the
+            // top; two scrolls in a row that move nothing mean this direction has no more rows.
+            var stillScrolls = 0
             for _ in 0..<20 {
                 if target.exists { return revealInConversation(target) }
                 guard scrollView.exists else { return false }
+                let before = firstRow.exists ? firstRow.frame : .null
                 scrollView.scroll(byDeltaX: 0, deltaY: direction)
-                _ = target.waitToExist(timeout: 0.5)
+                if target.waitToExist(timeout: 0.5) { continue }
+                stillScrolls = firstRow.exists && firstRow.frame == before ? stillScrolls + 1 : 0
+                guard stillScrolls < 2 else { break }
             }
         }
         return target.exists && revealInConversation(target)
