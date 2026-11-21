@@ -30,12 +30,17 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 curl -fsSL "${manifest_url}" -o "${work}/manifest.json"
-read -r asset_url asset_size asset_sha version < <(python3 - "${work}/manifest.json" <<'PY'
-import base64, json, sys
-info = json.loads(base64.b64decode(json.load(open(sys.argv[1]))["payload"]))
-print(info["asset"]["url"], info["asset"]["size"], info["asset"]["sha256"], info["version"])
-PY
-)
+# Parse with plutil and base64, which every Mac has. /usr/bin/python3 is only a
+# stub that offers the Command Line Tools on a Mac without them.
+manifest_field() {
+  plutil -extract "$1" raw -o - "$2" 2>/dev/null \
+    || { printf 'install-release: the release manifest has no %s.\n' "$1" >&2; exit 1; }
+}
+manifest_field payload "${work}/manifest.json" | base64 -D > "${work}/release-info.json"
+asset_url="$(manifest_field asset.url "${work}/release-info.json")"
+asset_size="$(manifest_field asset.size "${work}/release-info.json")"
+asset_sha="$(manifest_field asset.sha256 "${work}/release-info.json")"
+version="$(manifest_field version "${work}/release-info.json")"
 printf 'Downloading Playhouse %s...\n' "${version}"
 curl -fL --progress-bar "${asset_url}" -o "${work}/Playhouse.zip"
 [[ "$(stat -f %z "${work}/Playhouse.zip")" == "${asset_size}" ]] || { printf 'install-release: the download has the wrong size.\n' >&2; exit 1; }
