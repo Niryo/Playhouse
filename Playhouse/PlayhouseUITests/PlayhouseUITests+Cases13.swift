@@ -749,6 +749,14 @@ extension PlayhouseUITests {
             let current = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value == %@", "chat-page-anchor-", "current"))
             return current.count == 1 ? current.firstMatch.label : nil
         }
+        /// Scrolls the labels with the pointer resting at their middle. A scroll alone can post its
+        /// wheel event before the pointer reaches the column, beside it over the transcript, which
+        /// then scrolls instead of the labels.
+        func scrollLabels(by deltaY: CGFloat) {
+            let middle = anchors.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            middle.hover()
+            middle.scroll(byDeltaX: 0, deltaY: deltaY)
+        }
         func separatorTop(_ title: String) -> CGFloat? {
             chatPageSeparators(title).first.map { $0.minY - scrollView.frame.minY }
         }
@@ -759,7 +767,7 @@ extension PlayhouseUITests {
             for delta: CGFloat in [150, -150] {
                 for _ in 0..<40 {
                     guard !ready() else { break }
-                    anchors.scroll(byDeltaX: 0, deltaY: delta)
+                    scrollLabels(by: delta)
                     _ = waitUntil(ready, timeout: 0.3)
                 }
             }
@@ -922,14 +930,16 @@ extension PlayhouseUITests {
         // bottom edge, which would take the press instead.
         let bottomEdge = window.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 1)).withOffset(CGVector(dx: 16, dy: -2))
         bottomEdge.press(forDuration: 0.2, thenDragTo: bottomEdge.withOffset(CGVector(dx: 0, dy: 400)))
-        // Room for 11 labels (11 × 14 + 10 × 20 + 2 × 6) and the search and arrow around them (2 × 26).
-        // A window already against the Dock grows no further, and this much fits there.
+        // Room for 11 labels (14 pt each, 20 pt apart, 6 pt padding above and below) plus the
+        // 26 pt above and below them for the search and the arrow: 366 + 52.
         XCTAssertTrue(waitUntil({ scrollView.frame.height >= 418 }, timeout: 5),
                       "The window should grow until the transcript has room for more than 10 labels; transcript height \(scrollView.frame.height).")
         XCTAssertEqual(anchors.frame.midY, scrollView.frame.midY, accuracy: 4, "The labels sit halfway down the transcript.")
-        let labelsInView = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-"))
-            .allElementsBoundByIndex.filter { anchors.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }.count
-        XCTAssertEqual(labelsInView, 10, "Exactly the 10 newest labels are in view.")
+        func labelsInView() -> Int {
+            anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-"))
+                .allElementsBoundByIndex.filter { anchors.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }.count
+        }
+        XCTAssertEqual(labelsInView(), 10, "Exactly the 10 newest labels are in view.")
         XCTAssertEqual(anchors.frame.height, 332, accuracy: 3, "The column is as tall as 10 labels.")
         XCTAssertLessThan(anchors.frame.height, scrollView.frame.height - 52 - 8, "The column stops at 10 labels with transcript height to spare.")
         XCTAssertEqual(anchors.scrollBars.count, 0, "The labels scroll without a scroll bar.")
@@ -943,11 +953,14 @@ extension PlayhouseUITests {
         attachScreenshot(named: "chat-page-anchors-newest-ten")
         attachElementScreenshot(anchors, named: "chat-page-anchors-newest-ten-closeup")
         // Scrolling up past the oldest label read so far reads the next 10, and no more.
-        anchors.scroll(byDeltaX: 0, deltaY: 60)
+        scrollLabels(by: 60)
         XCTAssertTrue(waitUntil({ anchors.value as? String == "20 pages, older pages above" }, timeout: 5),
                       "Scrolling the labels up reads 10 older ones; labels \(String(describing: anchors.value)).")
         XCTAssertFalse(waitUntil({ anchors.value as? String != "20 pages, older pages above" }, timeout: 1),
                       "One scroll reads one batch; labels \(String(describing: anchors.value)).")
+        // With 20 read, and the transcript room for 11, the column still holds at most 10.
+        XCTAssertEqual(anchors.frame.height, 332, accuracy: 3, "With more labels read, the column stays as tall as 10 labels.")
+        XCTAssertLessThanOrEqual(labelsInView(), 10, "At most 10 labels are in view with more read.")
 
         // Agent replies end where the user's messages end, which is the room the labels use.
         let question = scrollView.descendants(matching: .any)
