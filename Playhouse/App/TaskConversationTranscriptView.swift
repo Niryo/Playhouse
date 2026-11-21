@@ -603,6 +603,7 @@ extension TaskConversationView {
             if !waitingFollowUps.isEmpty {
                 queuedFollowUpList
             }
+            newChatPageControl
 
             ComposerView(model: composerModel, actions: composerActions, header: {
         recalledChatPageChips
@@ -647,7 +648,7 @@ extension TaskConversationView {
             ), mentions: ChatEditorMentions(
                 handles: mentionHandles, edit: mentionEdit, onKey: handleComposerKey,
                 onEditingChange: { isComposerEditing = $0 }
-            ))
+            ), keyboardShortcuts: true)
                 // A zero-height strip along the composer's top edge, so the menu grows upward over the
                 // transcript rather than covering the text being typed.
                 .overlay(alignment: .top) {

@@ -42,7 +42,7 @@ function Header(props) {
     h(Spacer),
     h(Button, {
       shortcut: model.panelOpen || selecting ? undefined : "cancel", testID: prefix + "skills-back-button",
-      label: "Close", help: "Close (Esc)", onPress: on.back
+      label: "Close", help: "Close", onPress: on.back
     }, h(Stack, { fill: "primary", fillOpacity: 0.07, capsule: true, width: 22, height: 22 },
       h(Icon, { name: "xmark", size: 9, weight: "bold", color: "secondary" })))
   ];

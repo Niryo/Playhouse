@@ -194,7 +194,7 @@ enum CLICommandCatalog {
                 "Map a task's conversation by position: each turn's user message, its agent messages and tool calls, and its final answer.", readBoard),
         command("conversation read", "<task-id> [--at <position>[,<position>...]] [--from <position>] [--to <position>] [--kinds <user,steer,agent,final,plan,subagent,playhouse,tool>] [--include-tools]",
                 "Read entries of a task's conversation by position: whole numbers are messages, decimals (12.3) are the tool calls after message 12.", readBoard),
-        command("conversation send", "<task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]... [--defer-images]",
+        command("conversation send", "<task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]... [--new-page] [--defer-images]",
                 "Send a message to a task's agent, starting a turn; prints JSON event lines and then a final response.", chat),
         command("conversation queue", "<task-id> --message <text> [--image <path>]...", "Queue a message to send when the task's current turn ends.", chat),
         command("conversation queue-list", "<task-id>", "List a task's queued messages.", chat),

@@ -634,6 +634,8 @@ extension TaskConversationView {
         let contextPageIDs = annotationPageIDs + recalledPages.map(\.id).filter {
             !annotationPageIDs.contains($0) && $0 != activeChatPageID
         }
+        // A page the user started from the composer goes with the message they typed for it.
+        let startsNewPage = usesComposerDraft && task.isStandaloneChat && startsNewChatPage
         let resolutionAttempt = conflictResolutionAttempt
         if usesComposerDraft && isEnteringGoal && pendingAnnotations.isEmpty {
             isPreparingSubmittedMessage = true
@@ -688,6 +690,10 @@ extension TaskConversationView {
             draft = ""
             recalledChatPages = []
         }
+        if startsNewPage {
+            startsNewChatPage = false
+            sendsNewChatPage = true
+        }
         let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
         if usesComposerDraft { pendingImages = [] }
         // Question IDs can repeat across turns.
@@ -715,6 +721,14 @@ extension TaskConversationView {
                 sendsInFlight -= 1
                 settleLocalStopIfDone()
             }
+            // However the send ends, a turn it filed sits on its page, whose separator now
+            // shows the page's own title.
+            defer {
+                if startsNewPage {
+                    sendsNewChatPage = false
+                    refreshChatPageStatus()
+                }
+            }
             // A switch the window already shows runs this turn once it is saved.
             await providerSwitch?.value
             let saved = await saveDraftAndGenerateTitle(
@@ -734,6 +748,7 @@ extension TaskConversationView {
                 if usesComposerDraft {
                     draft = freeformText
                     recalledChatPages = recalledPages
+                    if startsNewPage { startsNewChatPage = true }
                     pendingImages = imageDataURLs.compactMap { dataURL in
                         guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                         return PendingImage(dataURL: dataURL, image: image)
@@ -763,7 +778,7 @@ extension TaskConversationView {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
                 awaitsDispatch = false
                 sendsAwaitingDispatch -= 1
-                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: contextPageIDs, onTurnStarting: {
+                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: contextPageIDs, startsNewChatPage: startsNewPage, onTurnStarting: {
                     // A turn the user already stopped, or one a newer send replaced, starts
                     // only to be stopped.
                     if sendGeneration == generation, !isPausingResponse { isResponding = true }
@@ -839,6 +854,8 @@ extension TaskConversationView {
                     for index in annotations.indices where deliveredIDs.contains(annotations[index].id) {
                         annotations[index].pending = false
                     }
+                    // Its turn was never filed on the new page, so the next message still starts it.
+                    if startsNewPage { startsNewChatPage = true }
                     errorMessage = error.localizedDescription
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
@@ -848,6 +865,8 @@ extension TaskConversationView {
                         for page in recalledPages where !recalledChatPages.contains(where: { $0.id == page.id }) {
                             recalledChatPages.append(page)
                         }
+                        // The message goes back to the composer, so does its new page.
+                        if startsNewPage { startsNewChatPage = true }
                         pendingImages = imageDataURLs.compactMap { dataURL in
                             guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                             return PendingImage(dataURL: dataURL, image: image)

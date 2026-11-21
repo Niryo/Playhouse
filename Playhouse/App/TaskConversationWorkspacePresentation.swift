@@ -88,7 +88,7 @@ extension TaskConversationView {
             .buttonStyle(.plain)
             .buttonHoverPointer()
             .disabled(terminalUnavailableReason != nil && !isTerminalPresented)
-            .nativeHelp(terminalUnavailableReason ?? (isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's worktree"))
+            .shortcutHelp(terminalUnavailableReason ?? (isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's worktree"), shortcut: AppShortcut.terminal)
             .accessibilityLabel(isTerminalPresented ? "Hide terminal" : "Open terminal")
             .accessibilityValue(isTerminalPresented ? "Shown" : "Hidden")
             .accessibilityIdentifier("toggle-terminal-button")
@@ -114,7 +114,7 @@ extension TaskConversationView {
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
-        .nativeHelp("Skills, Rules & MCP")
+        .shortcutHelp("Skills, Rules & MCP", shortcut: AppShortcut.skills)
         .accessibilityLabel("Skills")
         .accessibilityIdentifier("open-skills-button")
     }

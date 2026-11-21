@@ -231,6 +231,12 @@ struct TaskConversationView: View {
     @State var hoveredChatPageAnchorsParts: Set<ChatPageAnchorsHoverPart> = []
     /// Earlier chat pages the next message recalls into the agent's context.
     @State var recalledChatPages: [StandaloneChatPage] = []
+    /// The user started a new page from the composer: the next message runs without the last
+    /// page's context. Until then the transcript ends on that page's separator.
+    @State var startsNewChatPage = false
+    /// A send that started a new page is running; its separator stays above the turn until the
+    /// turn is filed on that page.
+    @State var sendsNewChatPage = false
     /// The newest question the transcript has presented, which tells one just sent from it.
     @State var lastScrolledUserMessageID: String?
     @State var annotations: [ConversationAnnotation] = []
@@ -762,10 +768,9 @@ struct TaskConversationView: View {
             if let selectedChatImage {
                 VStack(alignment: .trailing, spacing: 8) {
                     Button("Close") { self.selectedChatImage = nil }
-                        .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("close-chat-image-viewer")
                         .buttonHoverPointer()
-                        .nativeHelp("Close the full-size image")
+                        .shortcutHelp("Close the full-size image", shortcut: "cancel")
                     Image(nsImage: selectedChatImage)
                         .resizable()
                         .scaledToFit()

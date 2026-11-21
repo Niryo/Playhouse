@@ -1,8 +1,270 @@
 import AppKit
 import Foundation
+import Vision
 import XCTest
 
 extension PlayhouseUITests {
+    // case-contract: test_standalone_chat_new_page_skips_last_page_context | A standalone chat's next message can start a new page, so it runs without the last page's context. Without it, a message continues the active page and resumes that page's provider session. The CLI's conversation send --new-page, and in the chat the small New page plus button, centered on a page rule right above the composer (absent from an empty chat), open a page titled "New page" that Playhouse marks as the user's own, before the turn, whose turn starts a fresh provider session, never resuming the last page's: its prompt carries a Playhouse page header naming that "New page" as the current page, telling the agent the user started it for a new topic and to name it in close-turn, and listing the earlier page by title and ID only so it can still be read, while none of the last page's turns travel with it. While the turn runs it is already on that page, still titled "New page" with no messages, and the chat shows a "New page" separator without a remove button above the sent message and no plus button. The agent's close-turn --new-title names that page instead of opening another one, so the chat gains exactly one page, holding the turn, the earlier page keeps its own messages, and the next message without New page resumes the new page's session; a close-turn with --continues true and no title leaves the page to the fallback classifier, which names it from the message, so it never keeps its placeholder title. A New page send that fails leaves its empty page, which another New page send reuses, running there in a fresh session that opens with the New page header again and names it, and a send without New page instead removes it and continues the page before it, resuming that page's session; in the chat, a New page send that fails keeps its removable New page separator, so the next message still starts that page. In the chat, pressing the button replaces it with a "New page" separator with a remove button; removing it brings the button back and the next message continues the active page, and once a message is sent with it the turn sits under the page's separator showing its real title and the button comes back; no plus button shows while any turn runs, a plain one included. --new-page on a board task is invalid_argument. The page is opened in Playhouse's provider-neutral turn path before the provider session is chosen and the header reaches either provider as the same seeded context, so one representative provider (Claude) covers the case.
+    func test_standalone_chat_new_page_skips_last_page_context() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-ui-chat-new-page")
+        let executable = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]))
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        let firstPrompt = "Name the largest moon of Jupiter."
+        let newPagePrompt = "Suggest a quick pasta dinner."
+        let newPageAnswer = "Cacio e pepe takes fifteen minutes."
+        let headerLine = "The user started this new page for their message"
+        let composer = element("message-composer")
+        let button = element("new-chat-page-button")
+        let separator = element("new-chat-page-separator")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        XCTAssertFalse(button.exists, "An empty chat has no page to leave, so it offers no New page button.")
+
+        func fixtureTurns(endingWith prompt: String) -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter {
+                let text = ($0["userText"] as? String) ?? ""
+                return text.hasSuffix(prompt) && !text.hasPrefix("Classify the latest user message")
+            }
+        }
+        func send(_ prompt: String) {
+            let before = fixtureTurns(endingWith: prompt).count
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({
+                fixtureTurns(endingWith: prompt).count > before && self.noTurnIsRunning()
+            }, timeout: 30), "The chat turn \(prompt) should finish.")
+        }
+        func status() throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        }
+        func activePage() throws -> [String: Any] {
+            try XCTUnwrap(try status()["activePage"] as? [String: Any])
+        }
+        func page(_ id: String) throws -> [String: Any] {
+            try XCTUnwrap((try runCLI(["chat", "page", "read", id])["result"] as? [String: Any])?["page"] as? [String: Any])
+        }
+        func pageTexts(_ id: String) throws -> [String] {
+            try XCTUnwrap((try runCLI(["chat", "page", "read", id])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+                .compactMap { $0["text"] as? String }
+        }
+        func pageIDs() throws -> [String] {
+            try XCTUnwrap((try runCLI(["chat", "page", "list"])["result"] as? [String: Any])?["pages"] as? [[String: Any]])
+                .compactMap { $0["id"] as? String }
+        }
+
+        send(firstPrompt)
+        let firstPage = try activePage()
+        let firstSession = try XCTUnwrap(fixtureTurns(endingWith: firstPrompt).last?["sessionID"] as? String)
+        XCTAssertTrue(button.waitToExist(timeout: 10), "The New page button shows right above the composer.")
+        XCTAssertLessThan(button.frame.maxY, composer.frame.minY, "The button sits above the composer.")
+        let buttonRule = element("new-chat-page-rule")
+        XCTAssertTrue(buttonRule.exists, "The button sits on a page rule.")
+        XCTAssertGreaterThan(buttonRule.frame.width, button.frame.width * 4, "The rule runs across the chat on both sides of the button.")
+        XCTAssertLessThan(abs(buttonRule.frame.midX - button.frame.midX), 2, "The button sits centered on its rule.")
+        XCTAssertLessThan(abs(buttonRule.frame.midY - button.frame.midY), 2, "The rule passes through the button's middle.")
+        // The rule's hairlines are drawn: halfway between each end of the rule and the button, the
+        // pixel column holds one line that stands out from the background, level with the button's middle.
+        let ruleFrame = buttonRule.frame
+        let ruleBitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(buttonRule.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+        let ruleScale = CGFloat(ruleBitmap.pixelsWide) / ruleFrame.width
+        func ruleLuminance(_ x: Int, _ y: Int) -> CGFloat {
+            guard let color = ruleBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return 0 }
+            return 0.299 * color.redComponent + 0.587 * color.greenComponent + 0.114 * color.blueComponent
+        }
+        for (side, pointX) in [("left", (ruleFrame.minX + button.frame.minX) / 2), ("right", (button.frame.maxX + ruleFrame.maxX) / 2)] {
+            let x = Int((pointX - ruleFrame.minX) * ruleScale)
+            let background = ruleLuminance(x, 0)
+            let column = (0..<ruleBitmap.pixelsHigh).map { abs(ruleLuminance(x, $0) - background) }
+            let lineRow = try XCTUnwrap(column.indices.max { column[$0] < column[$1] })
+            XCTAssertGreaterThan(column[lineRow], 0.03, "The \(side) hairline of the page rule is drawn.")
+            let lineY = ruleFrame.minY + CGFloat(lineRow) / ruleScale
+            XCTAssertLessThan(abs(lineY - button.frame.midY), 1.5, "The \(side) hairline passes through the button's middle.")
+            XCTAssertLessThanOrEqual(column.filter { $0 > 0.03 }.count, Int(ceil(2 * ruleScale)), "The \(side) side shows one thin line, not a filled band.")
+        }
+        attachScreenshot(named: "standalone-chat-new-page-button")
+        attachElementScreenshot(buttonRule, named: "standalone-chat-new-page-button-close-up")
+
+        // Pressing it adds the New page separator in its place; removing it brings the button back.
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5), "Pressing New page adds a page separator.")
+        XCTAssertEqual(element("new-chat-page-title").value as? String ?? element("new-chat-page-title").label, "New page")
+        XCTAssertTrue(element("new-chat-page-remove").exists, "The new page can be removed.")
+        XCTAssertFalse(button.exists, "The button gives way to the new page's separator.")
+        XCTAssertLessThan(separator.frame.maxY, composer.frame.minY, "The separator sits above the composer.")
+        attachScreenshot(named: "standalone-chat-new-page-separator")
+        attachRegionScreenshot([separator, composer], named: "standalone-chat-new-page-separator-close-up")
+        element("new-chat-page-remove").click()
+        XCTAssertTrue(button.waitToExist(timeout: 5), "Removing the new page brings the button back.")
+        XCTAssertFalse(separator.exists)
+
+        // With the page removed, the message continues the active page in its session.
+        send(newPagePrompt)
+        let continued = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(continued["resumed"] as? Bool, true, "A message without New page resumes the active page's session.")
+        XCTAssertEqual(continued["sessionID"] as? String, firstSession)
+        XCTAssertFalse((continued["userText"] as? String ?? "").contains(headerLine))
+        XCTAssertEqual(try activePage()["id"] as? String, firstPage["id"] as? String)
+
+        // New page, then a message: a fresh session without the last page's turns. While the
+        // turn runs, its page's separator stays above it, without a remove button or the plus.
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5))
+        let hold = URL(fileURLWithPath: executable.path + ".hold-new-page")
+        let active = URL(fileURLWithPath: executable.path + ".new-page-active")
+        let release = URL(fileURLWithPath: executable.path + ".new-page-release")
+        try Data("Hold the New page turn.\n".utf8).write(to: hold)
+        let before = fixtureTurns(endingWith: newPagePrompt).count
+        composer.click()
+        composer.typeText(newPagePrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 30), "The New page turn is held.")
+        let sentMessages = app.groups.matching(NSPredicate(format: "label CONTAINS %@", newPagePrompt))
+        func newestSentMessage() throws -> XCUIElement {
+            try XCTUnwrap(sentMessages.allElementsBoundByIndex.max { $0.frame.minY < $1.frame.minY })
+        }
+        XCTAssertTrue(separator.waitToExist(timeout: 10), "The running turn shows the new page's separator.")
+        XCTAssertFalse(element("new-chat-page-remove").exists, "A sent message's page can no longer be removed.")
+        XCTAssertFalse(button.exists, "No New page button while the turn runs.")
+        XCTAssertLessThan(separator.frame.maxY, try newestSentMessage().frame.minY,
+                          "The separator sits above the sent message.")
+        let running = try activePage()
+        XCTAssertEqual(running["title"] as? String, "New page", "The running turn is on the user's page.")
+        XCTAssertEqual(running["messageCount"] as? Int, 0)
+        attachScreenshot(named: "standalone-chat-new-page-turn-running")
+        attachRegionScreenshot([separator, try newestSentMessage()], named: "standalone-chat-new-page-turn-running-close-up")
+        try Data("Release the New page turn.\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({
+            fixtureTurns(endingWith: newPagePrompt).count > before && self.noTurnIsRunning()
+        }, timeout: 30), "The New page turn should finish.")
+        let fresh = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        let freshText = fresh["userText"] as? String ?? ""
+        XCTAssertEqual(fresh["resumed"] as? Bool, false, "A New page message never resumes the last page's session.")
+        XCTAssertNotEqual(fresh["sessionID"] as? String, firstSession)
+        XCTAssertTrue(freshText.contains("Current page: \"New page\" (id: "), "The header names the user's new page.")
+        XCTAssertTrue(freshText.contains(headerLine), "The header tells the agent the user started a new topic.")
+        XCTAssertTrue(freshText.contains("- \"\(firstPage["title"] as? String ?? "")\" (id: \(firstPage["id"] as? String ?? ""), "),
+                      "The earlier page stays listed by title and ID.")
+        for earlier in ["Ganymede", newPageAnswer, firstPrompt] {
+            XCTAssertFalse(freshText.contains(earlier), "None of the last page's turns travel with a New page message.")
+        }
+        XCTAssertEqual(try status()["missedPreviousPageSignal"] as? Bool, false)
+        let newPage = try activePage()
+        XCTAssertEqual(newPage["id"] as? String, running["id"] as? String, "The turn is filed on the page it ran on.")
+        XCTAssertEqual(newPage["title"] as? String, "Pasta dinner", "close-turn names the user's page.")
+        XCTAssertEqual(try pageIDs(), [newPage["id"] as? String, firstPage["id"] as? String].compactMap { $0 },
+                       "close-turn names the user's page rather than opening another one.")
+        XCTAssertEqual(try pageTexts(newPage["id"] as? String ?? ""), [newPagePrompt, newPageAnswer], "The New page turn is filed on the new page.")
+        XCTAssertEqual(try pageTexts(firstPage["id"] as? String ?? "").count, 4, "The earlier page keeps its own messages.")
+        XCTAssertNotNil(try page(firstPage["id"] as? String ?? "")["closedAt"] as? String, "The earlier page is closed.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Pasta dinner") }, timeout: 10),
+                      "The sent turn sits under its page's separator, showing the page's real title.")
+        XCTAssertTrue(chatTranscriptShows(newPageAnswer, belowPage: "Pasta dinner"))
+        XCTAssertFalse(separator.exists, "Sending the message uses up the new page.")
+        XCTAssertTrue(button.waitToExist(timeout: 10), "The button comes back once the message is sent.")
+        attachScreenshot(named: "standalone-chat-new-page-titled-after-send")
+        let titledSeparator = element("chat-sidebar").descendants(matching: .staticText)
+            .matching(NSPredicate(format: "identifier == %@ AND (label == %@ OR value == %@)", "chat-page-separator", "Pasta dinner", "Pasta dinner"))
+            .firstMatch
+        attachRegionScreenshot([titledSeparator, try newestSentMessage(), button], named: "standalone-chat-new-page-titled-close-up")
+
+        // The next message without New page continues the new page's session. No plus button
+        // shows while any turn runs, a plain one included.
+        try Data("Hold the plain turn.\n".utf8).write(to: hold)
+        let beforeFollowUp = fixtureTurns(endingWith: newPagePrompt).count
+        composer.click()
+        composer.typeText(newPagePrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 30), "The plain turn is held.")
+        XCTAssertFalse(button.exists, "No New page button while a plain turn runs.")
+        XCTAssertFalse(separator.exists, "A plain turn starts no new page.")
+        try Data("Release the plain turn.\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({
+            fixtureTurns(endingWith: newPagePrompt).count > beforeFollowUp && self.noTurnIsRunning()
+        }, timeout: 30), "The plain turn should finish.")
+        let followUp = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(followUp["resumed"] as? Bool, true)
+        XCTAssertEqual(followUp["sessionID"] as? String, fresh["sessionID"] as? String)
+        XCTAssertEqual(try activePage()["id"] as? String, newPage["id"] as? String)
+
+        // A New page send that fails leaves its empty page; trying New page again reuses it.
+        func failedNewPageSend() throws -> [String: Any] {
+            try Data("Fail the New page turn.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".fail-new-page"))
+            _ = try runCLI(["conversation", "send", chatID, "--message", newPagePrompt, "--new-page"], expectedStatus: 1)
+            return try activePage()
+        }
+        let failed = try failedNewPageSend()
+        XCTAssertEqual(failed["title"] as? String, "New page")
+        XCTAssertEqual(failed["messageCount"] as? Int, 0)
+        XCTAssertEqual(try failedNewPageSend()["id"] as? String, failed["id"] as? String, "Retrying New page reuses its unfilled page.")
+        XCTAssertEqual(try pageIDs().count, 3)
+        // Sending from the chat without New page then undoes that page and continues the page before it.
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        XCTAssertFalse(separator.exists)
+        send(newPagePrompt)
+        let undone = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(undone["resumed"] as? Bool, true, "Without New page the message continues the earlier page's session.")
+        XCTAssertEqual(undone["sessionID"] as? String, fresh["sessionID"] as? String)
+        XCTAssertFalse((undone["userText"] as? String ?? "").contains(headerLine))
+        XCTAssertEqual(try activePage()["id"] as? String, newPage["id"] as? String)
+        XCTAssertEqual(try pageIDs(), [newPage["id"] as? String, firstPage["id"] as? String].compactMap { $0 },
+                       "The unfilled New page is gone.")
+
+        // A New page send from the chat that fails keeps its New page, so the next message
+        // still starts it, on the same page, in a fresh session.
+        try Data("Fail the New page turn.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".fail-new-page"))
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5))
+        send(newPagePrompt)
+        XCTAssertTrue(separator.waitToExist(timeout: 10), "The failed send keeps its New page separator.")
+        XCTAssertTrue(element("new-chat-page-remove").exists, "The kept New page can still be removed.")
+        XCTAssertFalse(button.exists)
+        let failedInChat = try activePage()
+        XCTAssertEqual(failedInChat["title"] as? String, "New page")
+        XCTAssertEqual(failedInChat["messageCount"] as? Int, 0)
+        attachScreenshot(named: "standalone-chat-new-page-kept-after-failed-send")
+        send(newPagePrompt)
+        let retried = try XCTUnwrap(fixtureTurns(endingWith: newPagePrompt).last)
+        XCTAssertEqual(retried["resumed"] as? Bool, false, "The retried New page message starts a fresh session.")
+        XCTAssertNotEqual(retried["sessionID"] as? String, fresh["sessionID"] as? String)
+        XCTAssertTrue((retried["userText"] as? String ?? "").contains(headerLine), "The retry opens with the New page header again.")
+        XCTAssertFalse((retried["userText"] as? String ?? "").contains(newPageAnswer))
+        let retriedPage = try activePage()
+        XCTAssertEqual(retriedPage["id"] as? String, failedInChat["id"] as? String, "The retry lands on the kept page.")
+        XCTAssertEqual(retriedPage["title"] as? String, "Pasta dinner")
+        XCTAssertEqual(try pageIDs().count, 3)
+
+        // An agent that closes a New page turn with --continues true and no title leaves the
+        // page to the fallback classifier, which names it from the message.
+        try Data("Continue the New page turn.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".continue-new-page"))
+        XCTAssertTrue(button.waitToExist(timeout: 10))
+        button.click()
+        XCTAssertTrue(separator.waitToExist(timeout: 5))
+        send(newPagePrompt)
+        XCTAssertTrue(waitUntil({
+            ((try? status())?["missedPreviousPageSignal"] as? Bool) == false
+                && ((try? activePage())?["title"] as? String) == "Classified pasta"
+        }, timeout: 30), "The user's page never keeps its placeholder title.")
+        let named = try activePage()
+        XCTAssertNotEqual(named["id"] as? String, retriedPage["id"] as? String)
+        XCTAssertEqual(try pageTexts(named["id"] as? String ?? ""), [newPagePrompt, newPageAnswer])
+        XCTAssertEqual(try pageIDs().count, 4)
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Classified pasta") }, timeout: 10),
+                      "The classifier's title replaces New page in the transcript.")
+
+        // Chat pages belong to the standalone chat only.
+        let boardTask = try XCTUnwrap((try runCLI(["task", "create", "--title", "New page rejection", "--prompt", "Fixture task description."])["result"] as? [String: Any])?["id"] as? String)
+        assertCLIError(try runCLI(["conversation", "send", boardTask, "--message", "Hello", "--new-page"], expectedStatus: 2), code: "invalid_argument")
+    }
+
     // case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, carries the latest plan in full, states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
     func test_claude_optimized_follow_up_starts_fresh_seeded_session() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-optimized-follow-up")
@@ -585,6 +847,285 @@ extension PlayhouseUITests {
                 && (try? self.taskRecord(id: taskID)?["status"] as? String).map { $0 != "In Progress" } == true
                 && !self.element("pause-response-button").exists
         }, timeout: 45), "The turn for \(message) should finish.", file: file, line: line)
+    }
+
+    // case-contract: test_keyboard_shortcuts_press_buttons_and_name_them_in_hover_hints | Important buttons have keyboard shortcuts that press them, and every button with a shortcut names it at the end of its hover hint, which reads exactly that text, keys and modifiers included. On the board, Command-N opens a new task, which the CLI lists as Untitled task, Shift-Command-C opens and closes the standalone chat and Shift-Command-D opens and closes the Done archive, and their hover hints read Create a new task (⌘N), Open the standalone chat (⇧⌘C) and Browse completed tasks (⇧⌘D). In the new task, Shift-Command-P turns Plan mode on and off (hint Plan before making changes (⇧⌘P)), Shift-Command-R opens the Add repository picker (hint Add a repository (⇧⌘R)), the schedule hint's Done button names Return, its default-action key (Use this schedule; Send then schedules the task (Return)), Control-Command-S hides and shows the task sidebar (hint Hide sidebar (⌃⌘S)), Shift-Command-K opens the Skills page (hint Skills, Rules & MCP (⇧⌘K)), whose close button, a Button atom with the cancel shortcut, reads Close (Esc) and, opened from a focused composer, closes it on Escape, after which typing still goes to the composer, and Command-[ returns to the board (hint Back to Kanban (⌘[)). In a Codex task with a repository worktree, Control-` opens the terminal (hint Open a terminal in this task's worktree (⌃`)) and hides it again while the shell has focus, and Command-. stops a running turn (hint Pause Codex response (⌘.)), which then offers Continue and leaves the task Waiting Response. A Button atom's shortcut prop takes default, cancel, or cmd, ctrl or option with any other modifiers and a key, joined by +: the Plugin Catalog's Button page has a Shortcut button that Shift-Command-B presses (Pressed 1 times) and whose hover hint reads Shift-Command-B presses it (⇧⌘B); `plugin render` reports that button's shortcut prop and runs its onPress, renders default, cancel and key combinations (cmd+shift+b, ctrl+option+t, option+`, cmd+], cmd+;, ctrl+return, cmd++) without errors, and reports in errors with exit 1, naming the shortcut, an invalid shortcut (empty, a modifier with no key, an unknown or repeated modifier, a key that is neither one character nor a key name, or a key with no cmd, ctrl or option, such as n, shift+n or return, which would take it from typing) and one Playhouse uses itself, whatever the order of its modifiers (cmd+n, shift+cmd+d, ctrl+`, or the menu bar's cmd+q).
+    func test_keyboard_shortcuts_press_buttons_and_name_them_in_hover_hints() throws {
+        executionTimeAllowance = 300 // It hovers a dozen buttons long enough for their tooltips.
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
+        codexFixtureExecutable = executable
+        let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
+        let received = URL(fileURLWithPath: executable + ".interrupt-received")
+        let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+        // A titled task with a repository gets its worktree at once, so its terminal can open.
+        let workTaskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Shortcut work", "--prompt", "Fixture task description.", "--provider", "codex",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["task", "repository", "add", workTaskID, "--repo", fixture.primary.path])
+
+        launchApp(defaultParent: fixture.parent.path)
+        let newTask = element("new-task-button")
+        XCTAssertTrue(newTask.waitToExist(timeout: 15), "The board shows its New Task button.")
+        assertShortcutHelpText(for: newTask, equals: "Create a new task (⌘N)")
+        assertShortcutHelpText(for: element("chat-sidebar-button"), equals: "Open the standalone chat (⇧⌘C)")
+        assertShortcutHelpText(for: element("done-archive-button"), equals: "Browse completed tasks (⇧⌘D)")
+
+        app.typeKey("d", modifierFlags: [.command, .shift])
+        XCTAssertTrue(element("done-archive-title").waitToExist(timeout: 5), "Shift-Command-D opens the Done archive.")
+        attachScreenshot(named: "Shift-Command-D opened the Done archive")
+        app.typeKey("d", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ !self.element("done-archive-title").exists }, timeout: 5), "Shift-Command-D closes it again.")
+
+        app.typeKey("n", modifierFlags: .command)
+        let back = element("back-to-board-button")
+        XCTAssertTrue(back.waitToExist(timeout: 15), "Command-N opens a new task.")
+        XCTAssertTrue(waitUntil({
+            let tasks = ((try? self.runCLI(["task", "list"]))?["result"] as? [String: Any])?["tasks"] as? [[String: Any]] ?? []
+            return Set(tasks.compactMap { $0["title"] as? String }) == ["Shortcut work", "Untitled task"]
+        }, timeout: 10), "The new task is saved, and the CLI lists it beside the fixture task.")
+
+        let plan = element("conversation-plan-button")
+        XCTAssertTrue(plan.waitToExist(timeout: 10), "The new task's composer shows the Plan mode button.")
+        XCTAssertEqual(plan.value as? String, "Off")
+        assertShortcutHelpText(for: plan, equals: "Plan before making changes (⇧⌘P)")
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ plan.value as? String == "On" }, timeout: 5), "Shift-Command-P turns Plan mode on.")
+        attachScreenshot(named: "Shift-Command-P turned Plan mode on")
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ plan.value as? String == "Off" }, timeout: 5), "Shift-Command-P turns it off again.")
+
+        let addRepository = element("add-conversation-repository-button")
+        XCTAssertTrue(addRepository.waitToExist(timeout: 5))
+        assertShortcutHelpText(for: addRepository, equals: "Add a repository (⇧⌘R)")
+        app.typeKey("r", modifierFlags: [.command, .shift])
+        let repositorySearch = element("conversation-repository-search")
+        XCTAssertTrue(repositorySearch.waitToExist(timeout: 5), "Shift-Command-R opens the Add repository picker.")
+        attachScreenshot(named: "Shift-Command-R opened the repository picker")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !repositorySearch.exists }, timeout: 5), "Escape closes the picker.")
+
+        // A native button whose shortcut is the window's default action names Return.
+        _ = openScheduleHint()
+        assertShortcutHelpText(for: element("schedule-done-button"), equals: "Use this schedule; Send then schedules the task (Return)")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(element("schedule-hint")), "Escape closes the schedule hint.")
+
+        let hideSidebar = element("hide-task-sidebar-button")
+        XCTAssertTrue(hideSidebar.waitToExist(timeout: 5), "The task opens with its sidebar shown.")
+        assertShortcutHelpText(for: hideSidebar, equals: "Hide sidebar (⌃⌘S)")
+        app.typeKey("s", modifierFlags: [.control, .command])
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5), "Control-Command-S hides the sidebar to its rail.")
+        attachScreenshot(named: "Control-Command-S hid the task sidebar")
+        app.typeKey("s", modifierFlags: [.control, .command])
+        XCTAssertTrue(element("task-sidebar").waitToExist(timeout: 5), "Control-Command-S shows it again.")
+
+        let skills = element("open-skills-button")
+        assertShortcutHelpText(for: skills, equals: "Skills, Rules & MCP (⇧⌘K)")
+        // From a focused composer, whose editor would otherwise keep Escape from the page.
+        let composer = element("message-composer")
+        composer.click()
+        app.typeKey("k", modifierFlags: [.command, .shift])
+        let skillsClose = element("skills-back-button")
+        XCTAssertTrue(skillsClose.waitToExist(timeout: 10), "Shift-Command-K opens the Skills page.")
+        // The Button atom names its cancel shortcut, Escape, after the hint's own text.
+        assertShortcutHelpText(for: skillsClose, equals: "Close (Esc)")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(skillsClose), "Escape closes the Skills page.")
+        app.typeText("q")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "q" }, timeout: 5), "After the Skills page closes, typing still goes to the composer.")
+        app.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5))
+
+        assertShortcutHelpText(for: back, equals: "Back to Kanban (⌘[)")
+        app.typeKey("[", modifierFlags: .command)
+        XCTAssertTrue(newTask.waitToExist(timeout: 10), "Command-[ returns to the board.")
+        XCTAssertFalse(back.exists)
+
+        openTask(named: "Shortcut work")
+        let terminalToggle = element("toggle-terminal-button")
+        XCTAssertTrue(waitUntil({ terminalToggle.exists && terminalToggle.isEnabled }, timeout: 15), "The task's worktree lets its terminal open.")
+        assertShortcutHelpText(for: terminalToggle, equals: "Open a terminal in this task's worktree (⌃`)")
+        app.typeKey("`", modifierFlags: .control)
+        let terminal = element("task-terminal-view")
+        XCTAssertTrue(terminal.waitToExist(timeout: 10), "Control-` opens the terminal.")
+        attachScreenshot(named: "Control-backtick opened the terminal")
+        // From inside the shell too: the terminal doesn't keep the key for itself.
+        terminal.click()
+        app.typeKey("`", modifierFlags: .control)
+        XCTAssertTrue(waitForDisappearance(element("task-terminal-panel")), "Control-` hides the terminal while it has focus.")
+
+        sendFromComposer("Hold until stopped by a shortcut.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The turn is running.")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.exists && stop.isEnabled }, timeout: 20), "The composer offers Stop while the turn runs.")
+        assertShortcutHelpText(for: stop, equals: "Pause Codex response (⌘.)")
+        app.typeKey(".", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "Command-. stops the turn.")
+        try Data("acknowledge interrupt\n".utf8).write(to: release)
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15), "The stopped turn offers Continue.")
+        XCTAssertTrue(waitForStatus(workTaskID, "Waiting Response"))
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+
+        clickPluginsMenuItem("Plugin Catalog")
+        catalogSidebarRow("plugin-catalog-atom-Button").click()
+        let pressCount = element("button-press-count")
+        XCTAssertTrue(pressCount.waitToExist(timeout: 10), "The catalog shows the Button page.")
+        XCTAssertEqual(pluginText(pressCount), "Pressed 0 times")
+        let shortcutButton = element("button-shortcut")
+        XCTAssertTrue(shortcutButton.exists, "The Button page shows its Shortcut button.")
+        assertShortcutHelpText(for: shortcutButton, equals: "Shift-Command-B presses it (⇧⌘B)")
+        app.typeKey("b", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ self.pluginText(pressCount) == "Pressed 1 times" }, timeout: 5), "Shift-Command-B presses the Shortcut button, which runs its onPress.")
+
+        // Last, back on the board: the open chat widens the window past the VM's screen, and it
+        // stays that wide once the chat closes, which would push later controls off screen.
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(waitForDisappearance(pressCount), "Command-W closes the Plugin Catalog.")
+        app.typeKey("[", modifierFlags: .command)
+        XCTAssertTrue(newTask.waitToExist(timeout: 10), "Command-[ returns the main window to the board.")
+        app.typeKey("c", modifierFlags: [.command, .shift])
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 15), "Shift-Command-C opens the standalone chat.")
+        attachScreenshot(named: "Shift-Command-C opened the standalone chat")
+        app.typeKey("c", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil({ !self.element("chat-sidebar").exists }, timeout: 5), "Shift-Command-C closes it again.")
+    }
+
+    /// Hovers `element` until its tooltip shows the hint's words, requires the tooltip to draw the
+    /// exact hint, keys and modifiers included, keeps a close-up of the button with its tooltip,
+    /// then moves away so the tooltip closes. The tooltip's help tag carries no text in the VM,
+    /// OCR misreads ⌘ ⇧ ⌃ (as "96", "H", "8" or nothing), and the runner may not use the
+    /// Accessibility API, so the exact text is checked by drawing it in the tooltip font and
+    /// comparing its ink with the tooltip's: a missing, extra or different key changes the shape.
+    private func assertShortcutHelpText(for element: XCUIElement, equals help: String, file: StaticString = #filePath, line: UInt = #line) {
+        let label = help.range(of: " (", options: .backwards).map { String(help[..<$0.lowerBound]) } ?? help
+        let tooltip = app.descendants(matching: .helpTag).firstMatch
+        assertNativeHelpText(for: element, equals: help, until: { self.helpTag(tooltip, shows: label) })
+        if let match = tooltipInk(tooltip, against: help) {
+            let (drawn, expected, overlap, covered) = match
+            XCTAssertTrue(abs(drawn.width - expected.width) <= 1 && abs(drawn.height - expected.height) <= 1 && overlap >= 0.85 && covered >= 0.998,
+                          "The tooltip should read exactly ‘\(help)’, shortcut included: its text is \(drawn.width)×\(drawn.height) px against \(expected.width)×\(expected.height), overlapping \(overlap), within a pixel \(covered).",
+                          file: file, line: line)
+        } else {
+            XCTFail("The tooltip ‘\(help)’ should be on screen to compare.", file: file, line: line)
+        }
+        attachRegionScreenshot(tooltip.exists ? [element, tooltip] : [element], named: "Hover hint: \(help)", padding: 16)
+        movePointerToHelpRunway(below: element)
+        if !waitUntil({ !tooltip.exists }, timeout: 4) {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.85)).hover()
+        }
+        XCTAssertTrue(waitUntil({ !tooltip.exists }, timeout: 8), "Moving away should close the tooltip ‘\(help)’.", file: file, line: line)
+    }
+
+    /// Whether the help tag is on screen and its own frame reads `label`.
+    private func helpTag(_ tooltip: XCUIElement, shows label: String) -> Bool {
+        guard let image = tooltipImage(tooltip, inset: -4)?.0 else { return false }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        let words = Self.words((request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " "))
+        return words.hasPrefix(Self.words(label))
+    }
+
+    /// The on-screen help tag, grown by `inset` points (negative grows it), at native pixels,
+    /// with the screen's pixels per point.
+    private func tooltipImage(_ tooltip: XCUIElement, inset: CGFloat) -> (CGImage, CGFloat)? {
+        guard tooltip.exists else { return nil }
+        let region = tooltip.frame.insetBy(dx: inset, dy: inset)
+        guard let image = XCUIScreen.main.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let screen = NSScreen.main?.frame, screen.width > 0, !region.isEmpty else { return nil }
+        let scale = CGFloat(image.width) / screen.width
+        let pixels = CGRect(x: region.minX * scale, y: region.minY * scale, width: region.width * scale, height: region.height * scale).integral
+        return image.cropping(to: pixels).map { ($0, scale) }
+    }
+
+    /// The tooltip's text ink and `text`'s, drawn in the system tooltip font at the screen's
+    /// density, compared at the best of a few one- or two-pixel shifts. `overlap` is shared ink
+    /// over all ink; `covered` is the smaller share of either's ink that has the other's within a
+    /// pixel. The reference is drawn in the tooltip's own polarity, since light-on-dark and
+    /// dark-on-light text antialias to different stroke weights. Measured in the VM, the right
+    /// hint scores covered 1.0 (overlap 0.90 to 0.98, lower in a light window), while one wrong
+    /// key or modifier stays at or below covered 0.992, and mostly changes the width too. Nil when the tooltip is not on screen. Inside its border
+    /// only, so the frame does not count as text.
+    private func tooltipInk(_ tooltip: XCUIElement, against text: String) -> (drawn: TextInk, expected: TextInk, overlap: Double, covered: Double)? {
+        guard let captured = tooltipImage(tooltip, inset: 1), let drawn = TextInk(captured.0) else { return nil }
+        let scale = captured.1
+        let string = NSAttributedString(string: text, attributes: [
+            .font: NSFont.toolTipsFont(ofSize: 0), .foregroundColor: drawn.isLightText ? NSColor.white : NSColor.black,
+        ])
+        let size = string.size()
+        let width = Int((size.width + 16) * scale), height = Int((size.height + 8) * scale)
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(gray: drawn.isLightText ? 0.12 : 0.95, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: scale, y: scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        string.draw(at: NSPoint(x: 8, y: 4))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let reference = context.makeImage(), let expected = TextInk(reference) else { return nil }
+        // The tooltip's text can sit a pixel off the reference's, which antialiasing turns into a
+        // different ink edge, so take the best of the small shifts.
+        var bestOverlap = 0.0, bestCovered = 0.0
+        for dy in -1...1 {
+            for dx in -2...2 {
+                var shared = 0, either = 0, drawnNear = 0, drawnInk = 0, expectedNear = 0, expectedInk = 0
+                for y in -1...max(drawn.height, expected.height) {
+                    for x in -2...max(drawn.width, expected.width) + 2 {
+                        let a = drawn.isInk(x, y), b = expected.isInk(x + dx, y + dy)
+                        if a && b { shared += 1 }
+                        if a || b { either += 1 }
+                        if a { drawnInk += 1; if expected.hasInk(near: x + dx, y + dy) { drawnNear += 1 } }
+                        if b { expectedInk += 1; if drawn.hasInk(near: x, y) { expectedNear += 1 } }
+                    }
+                }
+                bestOverlap = max(bestOverlap, Double(shared) / Double(max(either, 1)))
+                bestCovered = max(bestCovered, min(Double(drawnNear) / Double(max(drawnInk, 1)), Double(expectedNear) / Double(max(expectedInk, 1))))
+            }
+        }
+        return (drawn, expected, bestOverlap, bestCovered)
+    }
+}
+
+/// The text pixels of an image of text on a plain background, cropped to their bounds. Text is
+/// whichever side of mid-grey the background (the median pixel) is not, so light and dark
+/// tooltips both work.
+private struct TextInk {
+    let width: Int
+    let height: Int
+    /// Whether the text is lighter than its background.
+    let isLightText: Bool
+    private let ink: [Bool]
+
+    init?(_ image: CGImage) {
+        let fullWidth = image.width, fullHeight = image.height
+        var pixels = [UInt8](repeating: 0, count: fullWidth * fullHeight)
+        guard let context = CGContext(data: &pixels, width: fullWidth, height: fullHeight, bitsPerComponent: 8, bytesPerRow: fullWidth,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: fullWidth, height: fullHeight))
+        let lightText = pixels.sorted()[pixels.count / 2] < 128
+        isLightText = lightText
+        let isInk = pixels.map { lightText ? $0 > 128 : $0 < 128 }
+        var minX = fullWidth, maxX = -1, minY = fullHeight, maxY = -1
+        for y in 0..<fullHeight {
+            for x in 0..<fullWidth where isInk[y * fullWidth + x] {
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        width = maxX - minX + 1
+        height = maxY - minY + 1
+        ink = (minY...maxY).flatMap { y in (minX...maxX).map { x in isInk[y * fullWidth + x] } }
+    }
+
+    func isInk(_ x: Int, _ y: Int) -> Bool {
+        x >= 0 && y >= 0 && x < width && y < height && ink[y * width + x]
+    }
+
+    func hasInk(near x: Int, _ y: Int) -> Bool {
+        (-1...1).contains { dy in (-1...1).contains { dx in isInk(x + dx, y + dy) } }
     }
 }
 

@@ -38,8 +38,7 @@ struct WorkspaceRootsEditor: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .buttonHoverPointer()
-                    .nativeHelp("Cancel folder changes")
-                    .keyboardShortcut(.cancelAction)
+                    .shortcutHelp("Cancel folder changes", shortcut: "cancel")
                 Button("Save folders") {
                     onSave(roots)
                     dismiss()

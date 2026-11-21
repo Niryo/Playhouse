@@ -336,10 +336,9 @@ extension TaskConversationView {
                 Spacer()
                 Button("Done", action: confirmScheduleHint)
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
                     .disabled(validation != nil)
                     .buttonHoverPointer()
-                    .nativeHelp(savedSchedule != nil ? "Save this schedule" : "Use this schedule; Send then schedules the task")
+                    .shortcutHelp(savedSchedule != nil ? "Save this schedule" : "Use this schedule; Send then schedules the task", shortcut: "default")
                     .accessibilityIdentifier("schedule-done-button")
             }
         }

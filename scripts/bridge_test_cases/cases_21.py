@@ -440,7 +440,7 @@ class BridgeTestCases21:
         self.assertEqual((opener["children"][0]["type"], opener["children"][0]["props"]["name"]), ("Icon", "sparkles"))
 
         back = self.plugin_node(tree, "skills-back-button")
-        self.assertEqual((back["props"]["shortcut"], back["props"]["label"], back["props"]["help"]), ("cancel", "Close", "Close (Esc)"), "Escape closes the modal while nothing is open.")
+        self.assertEqual((back["props"]["shortcut"], back["props"]["label"], back["props"]["help"]), ("cancel", "Close", "Close"), "Escape closes the modal while nothing is open; the Button names it in the hover hint, Close (Esc).")
         circle = back["children"][0]
         self.assertEqual((circle["type"], circle["props"]["width"], circle["props"]["height"], circle["props"]["capsule"]), ("Stack", 22, 22, True))
         self.assertEqual(circle["children"][0]["props"]["name"], "xmark")

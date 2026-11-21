@@ -161,6 +161,8 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     var pluginActions: AnyView? = nil
     /// The editor's `@` mentions; native, and absent from the catalog's copy.
     var mentions = ChatEditorMentions()
+    /// The Skills, Plan mode and stop buttons' keyboard shortcuts; the catalog's copy takes none.
+    var keyboardShortcuts = false
 
     var body: some View {
         AtomPanel(
@@ -191,12 +193,12 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
             AtomStack(props: StackProps(axis: "h", spacing: 12)) {
                 attachButton
                 if model.skills {
-                    SkillsButton(testID: prefix + "open-skills-button", action: actions.openSkills)
+                    SkillsButton(testID: prefix + "open-skills-button", shortcut: shortcut(AppShortcut.skills), action: actions.openSkills)
                 }
                 if let pluginActions {
                     pluginActions
                 }
-                modeToggle(model.plan, testID: "conversation-plan-button", label: "Plan mode", action: actions.togglePlan) { on in
+                modeToggle(model.plan, testID: "conversation-plan-button", label: "Plan mode", shortcut: shortcut(AppShortcut.planMode), action: actions.togglePlan) { on in
                     AtomIcon(props: IconProps(name: "lightbulb.max", size: 13, weight: "medium", color: Self.modeColor(on)))
                 }
                 if let optimized = model.optimizedContext {
@@ -238,10 +240,11 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
 
     /// A Plan or Goal button: its icon, on an orange highlight while the mode is on.
     private func modeToggle<Icon: View>(
-        _ toggle: ComposerModel.ModeToggle, testID: String, label: String, action: @escaping () -> Void, @ViewBuilder icon: (Bool) -> Icon
+        _ toggle: ComposerModel.ModeToggle, testID: String, label: String, shortcut: String? = nil, action: @escaping () -> Void, @ViewBuilder icon: (Bool) -> Icon
     ) -> some View {
         let icon = icon(toggle.on)
         return AtomButton(
+            props: ButtonProps(shortcut: shortcut),
             common: AtomCommon(testID: prefix + testID, label: label, value: toggle.on ? "On" : "Off", help: toggle.help),
             action: action
         ) {
@@ -257,6 +260,8 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     private static func modeColor(_ on: Bool) -> String { on ? "orange" : "secondary" }
 
     private var prefix: String { model.prefix }
+
+    private func shortcut(_ spec: String) -> String? { keyboardShortcuts ? spec : nil }
 
     private func menuItem(_ item: ComposerModel.Item) -> MenuProps.Item {
         MenuProps.Item(id: item.id, title: item.title, help: item.help, testID: prefix + item.testID, checked: item.checked, icon: item.checked ? nil : item.icon)
@@ -334,7 +339,7 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     private var primary: some View {
         let primary = model.primary
         AtomButton(
-            props: ButtonProps(disabled: primary.disabled),
+            props: ButtonProps(disabled: primary.disabled, shortcut: primary.kind == "stop" ? shortcut(AppShortcut.stopResponse) : nil),
             common: AtomCommon(testID: prefix + primary.testID, label: primary.label, value: primary.value.isEmpty ? nil : primary.value, help: primary.help),
             action: actions.primary
         ) {

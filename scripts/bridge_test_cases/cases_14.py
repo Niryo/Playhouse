@@ -171,11 +171,13 @@ class BridgeTestCases14:
                 os.kill(recovery_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            exit_deadline = time.monotonic() + 5
+            # A killed process stays in the table as a zombie until its parent reaps it, which a
+            # loaded machine can delay; a zombie has exited, so only a live process counts.
+            exit_deadline = time.monotonic() + 15
             while time.monotonic() < exit_deadline:
-                try:
-                    os.kill(recovery_pid, 0)
-                except ProcessLookupError:
+                status = subprocess.run(["ps", "-o", "stat=", "-p", str(recovery_pid)],
+                                        capture_output=True, text=True, check=False).stdout.strip()
+                if not status or status.startswith("Z"):
                     break
                 time.sleep(0.02)
             else:
