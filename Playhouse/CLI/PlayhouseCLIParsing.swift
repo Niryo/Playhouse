@@ -995,7 +995,7 @@ extension PlayhouseCLI {
                 throw CLIError.unknownCommand(args)
             }
         case "update":
-            let usage = "Use: playhouse update status|check [--automatic true]|download|cancel|install [--when-idle true]|set-auto-check <on|off>|launched|dismiss-notice"
+            let usage = "Use: playhouse update status|check [--automatic true|--at-launch true]|download|cancel|install [--when-idle true]|launched|dismiss-notice"
             guard let operation = rest.first else { throw CLIError.usage(usage) }
             let tail = Array(rest.dropFirst())
             switch operation {
@@ -1003,14 +1003,15 @@ extension PlayhouseCLI {
                 guard tail.isEmpty else { throw CLIError.usage(usage) }
                 return BridgeRequest(command: "update.\(operation)")
             case "check":
-                let flags = try parseFlags(tail, valueFlags: ["--automatic"])
-                return BridgeRequest(command: "update.check", arguments: ["automatic": .boolean(flags["--automatic"]?.first == "true")])
+                let flags = try parseFlags(tail, valueFlags: ["--automatic", "--at-launch"])
+                let automatic = flags["--automatic"]?.first == "true"
+                let atLaunch = flags["--at-launch"]?.first == "true"
+                guard !(automatic && atLaunch) else { throw CLIError.usage(usage) }
+                let kind = atLaunch ? "launch" : automatic ? "automatic" : "manual"
+                return BridgeRequest(command: "update.check", arguments: ["kind": .string(kind)])
             case "install":
                 let flags = try parseFlags(tail, valueFlags: ["--when-idle"])
                 return BridgeRequest(command: "update.install", arguments: ["whenIdle": .boolean(flags["--when-idle"]?.first == "true")])
-            case "set-auto-check":
-                guard tail.count == 1, tail[0] == "on" || tail[0] == "off" else { throw CLIError.usage(usage) }
-                return BridgeRequest(command: "update.set-auto-check", arguments: ["enabled": .boolean(tail[0] == "on")])
             default:
                 throw CLIError.unknownCommand(args)
             }

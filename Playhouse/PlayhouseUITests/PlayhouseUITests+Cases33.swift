@@ -158,7 +158,7 @@ extension PlayhouseUITests {
         return pluginText(element)
     }
 
-    // case-contract: test_update_check_offers_signed_release_on_release_builds | A development build reports the development phase and refuses to check, download or install, and its Check for Updates menu item is disabled, so it never updates itself. A stable build checks the signed release feed: before a check it is up to date with no offer; a check offers the newer release with its version, release date and notes, shown as a compact Update button at the trailing end of the window's title bar whose tooltip names them, which a fresh read still reports, and finds it through the release's asset list (GitHub's latest-release API) when the feed link fails; the daily automatic check does not reach the feed again within a day, even when the feed is gone, while a manual check from the app menu then reports the failure; and turning daily checks off is saved and makes an automatic check a no-op. A newer release built for another architecture or needing a newer macOS is not offered. An app in a folder it can't write to says to move Playhouse to Applications, refuses to check, and doesn't offer even a release it already found, so no update button shows.
+    // case-contract: test_update_check_offers_signed_release_on_release_builds | A development build reports the development phase and refuses to check, download or install, and its Check for Updates menu item is disabled, so it never updates itself. A stable build checks the signed release feed: before a check it is up to date with no offer; a check offers the newer release with its version, release date and notes, shown as a compact Update button at the trailing end of the window's title bar whose tooltip names them, which a fresh read still reports, and finds it through the release's asset list (GitHub's latest-release API) when the feed link fails; the window's check at every launch reaches the feed even within a day, and with the feed gone fails quietly, keeping the offer and the Update button with no error, while the hourly automatic check does not reach the feed again within a day, and a manual check from the app menu then reports the failure; a newer release published within the day is missed by the hourly check but offered at the next launch, where the Update button names it. Update checks can't be turned off: Settings has no daily-check toggle. A newer release built for another architecture or needing a newer macOS is not offered. An app in a folder it can't write to says to move Playhouse to Applications, refuses to check, and doesn't offer even a release it already found, so no update button shows.
     func test_update_check_offers_signed_release_on_release_builds() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertFalse(element("update-pill").waitToExist(timeout: 3), "A development build never offers an update.")
@@ -214,16 +214,28 @@ extension PlayhouseUITests {
         XCTAssertEqual((checked["available"] as? [String: Any])?["notes"] as? String, "Faster boards and a new update button.")
         let lastChecked = try XCTUnwrap(checked["lastCheckedAt"] as? String)
 
-        // Relaunched within the day with the feed gone, the window keeps the offer without asking again.
+        // Relaunched within the day with the feed gone, the window's check at launch still asks the
+        // feed; it fails quietly, so the offer and its button stay and no error is shown.
         XCTAssertTrue(terminateAppAndWait(app))
         let manifest = update.feed.appendingPathComponent("playhouse-release.json")
         let signedManifest = try Data(contentsOf: manifest)
         try FileManager.default.removeItem(at: manifest)
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: update.environment)
         XCTAssertTrue(element("update-pill").waitToExist(timeout: 20), "The stored offer should still show.")
-        // The stored offer shows before the window's automatic check runs; give it time to (wrongly) run.
-        XCTAssertFalse(waitUntil({ (try? self.updateStatus(update.environment))?["lastCheckedAt"] as? String != lastChecked }, timeout: 5),
-                       "The automatic check must not run again within a day.")
+        var relaunched: [String: Any] = [:]
+        XCTAssertTrue(waitUntil({
+            relaunched = (try? self.updateStatus(update.environment)) ?? [:]
+            return relaunched["lastCheckedAt"] as? String != lastChecked
+        }, timeout: 15), "The check at launch should reach the feed even within a day.")
+        XCTAssertEqual(relaunched["phase"] as? String, "available")
+        XCTAssertNil(relaunched["error"], "A failed check at launch must stay quiet.")
+        XCTAssertEqual(element("update-pill").label, "Update to 0.2.0", "The offer keeps its button after a quiet failed check.")
+        attachScreenshot(named: "Relaunch within a day with the feed gone: the Update button stays")
+        attachElementScreenshot(element("update-pill"), named: "Update to 0.2.0 button kept after a quiet failed launch check")
+        // The hourly automatic check after it doesn't reach the feed again within the day.
+        let launchChecked = try XCTUnwrap(relaunched["lastCheckedAt"] as? String)
+        let hourly = try XCTUnwrap(try runCLI(["update", "check", "--automatic", "true"], extraEnvironment: update.environment)["result"] as? [String: Any])
+        XCTAssertEqual(hourly["lastCheckedAt"] as? String, launchChecked, "The hourly check must not run again within a day.")
         settings = openUpdateSettings()
         XCTAssertEqual(settingsText(settings, "update-current-version"), "Playhouse 0.1.0")
         XCTAssertEqual(settingsText(settings, "update-settings-summary"), "Playhouse 0.2.0 is available.")
@@ -238,17 +250,39 @@ extension PlayhouseUITests {
                       "Settings should show why the check failed: \(checkError)")
         attachScreenshot(named: "Settings after a manual check failed")
 
-        let toggle = settings.descendants(matching: .any).matching(identifier: "update-auto-check-toggle").firstMatch
-        XCTAssertEqual(toggle.value as? Int, 1)
-        toggle.click()
-        XCTAssertTrue(waitUntil({ (try? self.updateStatus(update.environment))?["autoCheck"] as? Bool == false }, timeout: 10),
-                      "Turning daily checks off should be saved.")
-        XCTAssertTrue(waitUntil({ toggle.value as? Int == 0 }, timeout: 5))
-        attachScreenshot(named: "Settings with daily update checks turned off")
-        try Data("{}".utf8).write(to: dataDirectory.appendingPathComponent("Updates/state.json"))
-        let skipped = try XCTUnwrap(try runCLI(["update", "check", "--automatic", "true"], extraEnvironment: update.environment)["result"] as? [String: Any])
-        XCTAssertNil(skipped["lastCheckedAt"], "An automatic check must not run while daily checks are off.")
-        XCTAssertEqual(skipped["phase"] as? String, "upToDate")
+        // Update checks can't be turned off.
+        XCTAssertFalse(settings.descendants(matching: .any).matching(identifier: "update-auto-check-toggle").firstMatch.exists,
+                       "Settings has no daily-check toggle.")
+        XCTAssertNil((try updateStatus(update.environment))["autoCheck"])
+        // Scroll the Updates section into view for its screenshot: Check Now, then the summary, no toggle.
+        let updatesSummary = settings.descendants(matching: .any).matching(identifier: "update-settings-summary").firstMatch
+        let settingsScroll = settings.scrollViews.firstMatch
+        for _ in 0..<8 {
+            guard updatesSummary.frame.maxY > settings.frame.maxY - 8 else { break }
+            settingsScroll.scroll(byDeltaX: 0, deltaY: -300)
+            _ = waitForStableFrame(updatesSummary, timeout: 2)
+        }
+        XCTAssertLessThanOrEqual(updatesSummary.frame.maxY, settings.frame.maxY, "The Updates section should be in view.")
+        attachScreenshot(named: "Settings Updates section: Check Now and no daily-check toggle")
+        XCTAssertTrue(terminateAppAndWait(app))
+
+        // A newer release published within the day: the hourly check misses it, and the next
+        // launch offers it on the Update button.
+        let newer = try makeUpdateFixture(root: "update-fixture-newer", release: ["release": "0.3.0"])
+        let missed = try XCTUnwrap(try runCLI(["update", "check", "--automatic", "true"], extraEnvironment: newer.environment)["result"] as? [String: Any])
+        XCTAssertEqual((missed["available"] as? [String: Any])?["version"] as? String, "0.2.0",
+                       "The hourly check must not reach the feed within the day.")
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: newer.environment)
+        let newerPill = element("update-pill")
+        XCTAssertTrue(waitUntil({ newerPill.exists && newerPill.label == "Update to 0.3.0" }, timeout: 30),
+                      "The launch check should offer the release published within the day.")
+        let offered = try updateStatus(newer.environment)
+        XCTAssertEqual(offered["phase"] as? String, "available")
+        XCTAssertEqual((offered["available"] as? [String: Any])?["version"] as? String, "0.3.0")
+        XCTAssertNil(offered["error"])
+        assertNativeHelpText(for: newerPill, equals: "Playhouse 0.3.0, released November 18, 2026")
+        attachScreenshot(named: "Relaunch within a day: the Update button offers the newer 0.3.0")
+        attachElementScreenshot(newerPill, named: "Update to 0.3.0 button close-up")
         XCTAssertTrue(terminateAppAndWait(app))
 
         // A newer release this Mac can't run is not offered.

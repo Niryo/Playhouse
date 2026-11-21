@@ -45,9 +45,15 @@ final class UpdateController: ObservableObject {
         }
         loop = Task { [weak self] in
             await self?.reportLaunched()
+            // The first check after launch always asks the feed; the hourly ones after it
+            // reach the network at most once a day.
+            var atLaunch = true
             while !Task.isCancelled {
                 guard let self else { return }
-                if self.isRelease { await self.run("update.check", ["automatic": .boolean(true)], quietly: true) }
+                if self.isRelease {
+                    await self.run("update.check", ["kind": .string(atLaunch ? "launch" : "automatic")], quietly: true)
+                    atLaunch = false
+                }
                 // An install the previous version started finishes after this
                 // launch, so its result arrives a little later.
                 if self.isFollowing {
@@ -68,11 +74,7 @@ final class UpdateController: ObservableObject {
     }
 
     func checkNow() async {
-        await run("update.check", [:])
-    }
-
-    func setAutoCheck(_ enabled: Bool) async {
-        await run("update.set-auto-check", ["enabled": .boolean(enabled)])
+        await run("update.check", ["kind": .string("manual")])
     }
 
     /// The notice was opened or dismissed; the daemon stops offering it.
@@ -423,11 +425,6 @@ struct UpdateSettingsSection: View {
                         .disabled(updates.isWorking)
                         .accessibilityIdentifier("update-check-now-button")
                 }
-                Toggle("Check for updates every day", isOn: Binding(
-                    get: { status.autoCheck },
-                    set: { value in Task { await updates.setAutoCheck(value) } }
-                ))
-                .accessibilityIdentifier("update-auto-check-toggle")
                 Text(summary(status))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)

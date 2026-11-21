@@ -9,7 +9,6 @@ struct UpdateStatus: Codable, Equatable {
     var channel: String
     var currentVersion: String
     var currentBuild: String
-    var autoCheck: Bool
     var phase: String
     var lastCheckedAt: Date?
     var available: ReleaseInfo?
@@ -21,6 +20,17 @@ struct UpdateStatus: Codable, Equatable {
     var unsentDrafts: Int?
     var error: String?
     var lastInstall: UpdateInstallRecord?
+}
+
+/// Who asked for an update check, which decides how it behaves.
+enum UpdateCheckKind: String {
+    /// Check Now, Check for Updates… or a plain `update check`: always reaches the
+    /// feed and shows a failure.
+    case manual
+    /// The window's hourly check: reaches the feed at most once a day and fails quietly.
+    case automatic
+    /// The window's check when it opens: always reaches the feed and fails quietly.
+    case launch
 }
 
 /// Checks for, downloads and installs Playhouse releases. Lives in the daemon,
@@ -41,7 +51,6 @@ final class UpdateManager {
         var waitingRelaunchEnvironment: [String: String]?
     }
 
-    static let autoCheckKey = "updateAutoCheck"
     /// A scheduled check reaches the network at most this often.
     static let automaticCheckInterval: TimeInterval = 24 * 60 * 60
     /// How often a waiting install looks for running agents.
@@ -62,7 +71,6 @@ final class UpdateManager {
     private let target: URL
     private let targetIsThisApp: Bool
     private let stateDirectory: URL
-    private let preferences: UserDefaults
     private let runtimeScope: String?
     /// What the new version is opened with, so it runs like the app that asked.
     private let relaunchEnvironment: [String: String]
@@ -70,7 +78,7 @@ final class UpdateManager {
     /// would interrupt someone writing it, so an automatic install waits for them.
     private let unsentDrafts: @MainActor () -> Int
 
-    init(request: BridgeRequest, storeDirectory: String?, runtimeScope: String?, preferences: UserDefaults, unsentDrafts: @escaping @MainActor () -> Int) {
+    init(request: BridgeRequest, storeDirectory: String?, runtimeScope: String?, unsentDrafts: @escaping @MainActor () -> Int) {
         // Tests point a test build at a local feed, key and install location.
         let overrides = BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier)
             ? request.arguments.compactMapValues(\.string)
@@ -88,7 +96,6 @@ final class UpdateManager {
         let root = storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         stateDirectory = root.appendingPathComponent("Updates", isDirectory: true)
-        self.preferences = preferences
         self.runtimeScope = runtimeScope
         self.unsentDrafts = unsentDrafts
     }
@@ -109,22 +116,12 @@ final class UpdateManager {
         ConversationRuntimeSnapshot.current(dataDirectory: runtimeScope).activeThreadIDs.count
     }
 
-    var autoCheck: Bool {
-        preferences.object(forKey: Self.autoCheckKey) as? Bool ?? true
-    }
-
-    func setAutoCheck(_ enabled: Bool) -> UpdateStatus {
-        preferences.set(enabled, forKey: Self.autoCheckKey)
-        return status()
-    }
-
     func status() -> UpdateStatus {
         let state = loadState()
         var status = UpdateStatus(
             channel: channel,
             currentVersion: currentVersion,
             currentBuild: targetInfo["CFBundleVersion"] as? String ?? "",
-            autoCheck: autoCheck,
             phase: "upToDate",
             lastCheckedAt: state.lastCheckedAt,
             available: state.available,
@@ -159,14 +156,13 @@ final class UpdateManager {
     }
 
     /// Asks the release feed for the latest release and remembers it if it is
-    /// newer than the installed version and runs on this Mac. An automatic check skips the network
-    /// when automatic checks are off or the last check was under a day ago.
-    func check(automatic: Bool) async throws -> UpdateStatus {
+    /// newer than the installed version and runs on this Mac. See `UpdateCheckKind` for when
+    /// each kind reaches the network and whether it records a failure.
+    func check(_ kind: UpdateCheckKind) async throws -> UpdateStatus {
         try requireReleaseBuild()
         var state = loadState()
-        if automatic {
-            guard autoCheck else { return status() }
-            if let last = state.lastCheckedAt, Date().timeIntervalSince(last) < Self.automaticCheckInterval { return status() }
+        if kind == .automatic, let last = state.lastCheckedAt, Date().timeIntervalSince(last) < Self.automaticCheckInterval {
+            return status()
         }
         do {
             let release = try ReleaseManifestVerifier.verify(try await fetchManifest(), publicKey: publicKey)
@@ -191,7 +187,7 @@ final class UpdateManager {
         } catch {
             state.lastCheckedAt = Date()
             // A scheduled check fails quietly; the next one tries again.
-            if !automatic { state.error = error.localizedDescription }
+            if kind == .manual { state.error = error.localizedDescription }
             try? saveState(state)
             throw error
         }

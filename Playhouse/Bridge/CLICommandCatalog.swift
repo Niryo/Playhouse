@@ -278,10 +278,9 @@ enum CLICommandCatalog {
         command("archive search", "<query>", "Search archived Codex conversations.", internalUse),
 
         command("update status", "", "Show the app update's state.", chat),
-        command("update check", "[--automatic true]", "Check for an app update.", chat),
+        command("update check", "[--automatic true|--at-launch true]", "Check for an app update.", chat),
         command("update download|cancel|launched|dismiss-notice", "", "Download an update, cancel it, or record a launch or dismissed notice.", internalUse),
         command("update install", "[--when-idle true]", "Install a downloaded update and relaunch.", internalUse),
-        command("update set-auto-check", "<on|off>", "Turn automatic update checks on or off.", internalUse),
         command("update verify-bundle", "--bundle <app> [--replacing <installed app>] [--version <x.y.z>]", "Verify a downloaded app bundle's signature and version.", internalUse),
         command("update apply", "--staged <app> --target <app> --state-dir <path> [--service-name <name>] [--socket-path <path>] [--relaunch-env <NAME=value>...]",
                 "Install a staged update; the daemon runs this.", internalUse),

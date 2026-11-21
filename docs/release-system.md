@@ -103,11 +103,10 @@ CLI commands (all print the update status unless noted):
 | Command | Purpose |
 | --- | --- |
 | `update status` | Channel, current version and build, phase, last check, offered release, progress, error, last install |
-| `update check [--automatic true]` | Check the feed. `--automatic` is the daily check: it does nothing when daily checks are off or the last check was under a day ago |
+| `update check [--automatic true\|--at-launch true]` | Check the feed. `--automatic` is the hourly check: it does nothing when the last check was under a day ago. `--at-launch` is the window's check at launch: it always checks. Both fail quietly, without recording an error. The two can't be combined |
 | `update download` | Download and verify the offered release and stage it. Streams `update_progress` events. A second download while one runs is refused with `update_busy` |
 | `update cancel` | Stop the running download; the release stays offered with no error, and the download command fails with `update_cancelled`. With nothing downloading it fails with `no_download` |
 | `update install [--when-idle true]` | Start the installer. With `--when-idle` while agents are running turns or a message is being written, it returns `started: false` with `activeTurns` and `unsentDrafts`, and the daemon installs by itself once neither holds it. While an installer is running, another install is refused with `update_busy` |
-| `update set-auto-check on\|off` | Turn the daily check on or off |
 | `update launched` | Called by the window at launch: confirms a new version started, and returns the last install with its release notes until it is dismissed or, for an install, a day has passed |
 | `update dismiss-notice` | Mark the last install's notice as seen |
 | `update verify-bundle --bundle <app> [--version x.y.z]` | Run the bundle checks; used by `release.sh` |
@@ -122,10 +121,10 @@ Error codes: `development_build`, `update_location`, `update_unreachable`, `upda
 - **Feed.** `https://github.com/Niryo/Playhouse/releases/latest/download/playhouse-release.json`. GitHub serves it from its download path, not the rate-limited REST API, so many users behind one address (an office NAT) aren't throttled. If that link fails, the app reads the manifest's URL from the REST `releases/latest` listing.
 - **Verification.** The manifest's Ed25519 signature must verify against `ReleaseSigningKey.publicKey` whichever path delivered it. Only a version newer than the installed one, built for `arm64` and needing at most the running macOS version, is offered.
 - **When.**
-  - The window asks for an automatic check at launch and then every hour. The daemon reaches the network at most once a day.
+  - The window checks the feed at every launch, then asks for an automatic check every hour, which reaches the network at most once a day. So an update shows on the next launch, or within a day for an app left open.
   - Playhouse → Check for Updates…, Settings → Updates → Check Now, and `update check` check immediately.
 - **Errors.** A failed automatic check is silent and is retried the next day. A failed manual check shows its error in Settings and in the pill.
-- **Setting.** "Check for updates every day", in Settings → Updates, is on by default.
+- **No setting.** Update checks can't be turned off; Settings → Updates has only Check Now.
 
 ### Downloading and verifying
 
@@ -212,7 +211,7 @@ Paired cases (CLI suite and Tart UI suite, in `BridgeTestContracts.json`):
 
 | Case | Covers |
 | --- | --- |
-| `test_update_check_offers_signed_release_on_release_builds` | Dev builds refuse; offer, date and notes; the release listing when the feed link fails; daily check skipped within a day; manual check failure from the app menu; auto-check setting; Intel-only and future-macOS releases not offered; misplaced app offers nothing and shows no pill |
+| `test_update_check_offers_signed_release_on_release_builds` | Dev builds refuse; offer, date and notes; the release listing when the feed link fails; launch check reaches the feed within a day and fails quietly; hourly check skipped within a day; manual check failure from the app menu; a newer release offered at the next launch; no daily-check toggle; Intel-only and future-macOS releases not offered; misplaced app offers nothing and shows no pill |
 | `test_update_download_reports_progress_and_cancels` | HTTP download progress; busy refusal; cancel keeps the offer and stages nothing; unreachable feed shown as "Update failed"; clicking it retries the download, which then waits for a half-written message |
 | `test_update_rejects_tampered_release` | Foreign manifest signature refused at check; archive refused at download for its size and for its checksum; nothing staged |
 | `test_update_install_replaces_app_cli_and_daemon` | Progress, staging, bundle swap, new CLI version, daemon restart, cleanup, install notice with What's new until opened or a day old |

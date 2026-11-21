@@ -59,7 +59,7 @@ class BridgeTestCases27:
         self.wait_for(finished, "The installer did not record a result.", timeout=timeout)
         return record
 
-    # case-contract: test_update_check_offers_signed_release_on_release_builds | A development build reports the development phase and refuses to check, download or install, and its Check for Updates menu item is disabled, so it never updates itself. A stable build checks the signed release feed: before a check it is up to date with no offer; a check offers the newer release with its version, release date and notes, shown as a compact Update button at the trailing end of the window's title bar whose tooltip names them, which a fresh read still reports, and finds it through the release's asset list (GitHub's latest-release API) when the feed link fails; the daily automatic check does not reach the feed again within a day, even when the feed is gone, while a manual check from the app menu then reports the failure; and turning daily checks off is saved and makes an automatic check a no-op. A newer release built for another architecture or needing a newer macOS is not offered. An app in a folder it can't write to says to move Playhouse to Applications, refuses to check, and doesn't offer even a release it already found, so no update button shows.
+    # case-contract: test_update_check_offers_signed_release_on_release_builds | A development build reports the development phase and refuses to check, download or install, and its Check for Updates menu item is disabled, so it never updates itself. A stable build checks the signed release feed: before a check it is up to date with no offer; a check offers the newer release with its version, release date and notes, shown as a compact Update button at the trailing end of the window's title bar whose tooltip names them, which a fresh read still reports, and finds it through the release's asset list (GitHub's latest-release API) when the feed link fails; the window's check at every launch reaches the feed even within a day, and with the feed gone fails quietly, keeping the offer and the Update button with no error, while the hourly automatic check does not reach the feed again within a day, and a manual check from the app menu then reports the failure; a newer release published within the day is missed by the hourly check but offered at the next launch, where the Update button names it. Update checks can't be turned off: Settings has no daily-check toggle. A newer release built for another architecture or needing a newer macOS is not offered. An app in a folder it can't write to says to move Playhouse to Applications, refuses to check, and doesn't offer even a release it already found, so no update button shows.
     def test_update_check_offers_signed_release_on_release_builds(self):
         development = self.assert_success(self.call_cli("update", "status")[0])
         self.assertEqual(development["phase"], "development")
@@ -72,7 +72,12 @@ class BridgeTestCases27:
         before = self.assert_success(self.call_cli("update", "status", extra_environment=environment)[0])
         self.assertEqual((before["channel"], before["currentVersion"], before["phase"]), ("stable", "0.1.0", "upToDate"))
         self.assertIsNone(before.get("lastCheckedAt"))
-        self.assertTrue(before["autoCheck"])
+        self.assertNotIn("autoCheck", before, "Update checks can't be turned off.")
+        self.assert_failure(self.call_cli("update", "set-auto-check", "off", expected_status=2, extra_environment=environment)[0], "invalid_argument")
+        self.assert_failure(
+            self.call_cli("update", "check", "--automatic", "true", "--at-launch", "true", expected_status=2, extra_environment=environment)[0],
+            "invalid_argument",
+        )
 
         checked = self.assert_success(self.call_cli("update", "check", extra_environment=environment)[0])
         self.assertEqual(checked["phase"], "available")
@@ -92,21 +97,37 @@ class BridgeTestCases27:
         manifest = Path(fixture["feed"]) / "playhouse-release.json"
         signed_manifest = manifest.read_bytes()
         manifest.unlink()
+        # Move the last check an hour back, still within the day, so a check that reaches the
+        # feed visibly records a newer time (times are stored to the second).
+        state = self.data_directory / "Updates" / "state.json"
+        stored = json.loads(state.read_text(encoding="utf-8"))
+        an_hour_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+        stored["lastCheckedAt"] = an_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+        state.write_text(json.dumps(stored), encoding="utf-8")
         automatic = self.assert_success(self.call_cli("update", "check", "--automatic", "true", extra_environment=environment)[0])
-        self.assertEqual((automatic["phase"], automatic["lastCheckedAt"]), ("available", checked["lastCheckedAt"]))
+        self.assertEqual((automatic["phase"], automatic["lastCheckedAt"]), ("available", stored["lastCheckedAt"]))
+        # The window's check at launch reaches the feed even within the day, so with the feed
+        # gone it fails, but quietly: the offer stays and no error is recorded.
+        self.assert_failure(
+            self.call_cli("update", "check", "--at-launch", "true", expected_status=1, extra_environment=environment)[0],
+            "update_unreachable",
+        )
+        launched = self.assert_success(self.call_cli("update", "status", extra_environment=environment)[0])
+        self.assertNotEqual(launched["lastCheckedAt"], stored["lastCheckedAt"], "The check at launch should reach the feed within the day.")
+        self.assertEqual((launched["phase"], launched["available"]["version"]), ("available", "0.2.0"))
+        self.assertIsNone(launched.get("error"), "A failed check at launch must stay quiet.")
         self.call_cli("update", "check", expected_status=1, extra_environment=environment)
         failed = self.assert_success(self.call_cli("update", "status", extra_environment=environment)[0])
         self.assertEqual(failed["phase"], "failed")
         self.assertTrue(failed["error"])
 
-        off = self.assert_success(self.call_cli("update", "set-auto-check", "off", extra_environment=environment)[0])
-        self.assertFalse(off["autoCheck"])
-        self.assertFalse(self.assert_success(self.call_cli("update", "status", extra_environment=environment)[0])["autoCheck"])
-        state = self.data_directory / "Updates" / "state.json"
-        state.write_text(json.dumps({}), encoding="utf-8")
-        skipped = self.assert_success(self.call_cli("update", "check", "--automatic", "true", extra_environment=environment)[0])
-        self.assertIsNone(skipped.get("lastCheckedAt"), "An automatic check must not run while daily checks are off.")
-        self.assertEqual(skipped["phase"], "upToDate")
+        # A newer release published within the day: the hourly check misses it, the next launch offers it.
+        _, newer = self.make_update_fixture(root="update-fixture-newer", release="0.3.0")
+        hourly = self.assert_success(self.call_cli("update", "check", "--automatic", "true", extra_environment=newer)[0])
+        self.assertEqual(hourly["available"]["version"], "0.2.0", "The hourly check must not reach the feed within the day.")
+        relaunched = self.assert_success(self.call_cli("update", "check", "--at-launch", "true", extra_environment=newer)[0])
+        self.assertEqual((relaunched["phase"], relaunched["available"]["version"]), ("available", "0.3.0"))
+        self.assertIsNone(relaunched.get("error"))
 
         # A newer release this Mac can't run is not offered.
         for name, release in (("intel", {"architecture": "x86_64"}), ("future-macos", {"minimum_system": "99.0"})):
