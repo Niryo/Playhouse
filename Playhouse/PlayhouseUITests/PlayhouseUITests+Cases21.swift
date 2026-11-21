@@ -217,13 +217,18 @@ extension PlayhouseUITests {
         XCTAssertFalse(transcriptContains("Fixture reminder"), "Claude Code's own reminders are not part of the agent's work.")
         let agentToolCall = element("conversation-tool-call-toolu_bg_sub_read")
         XCTAssertTrue(agentToolCall.waitToExist(timeout: 5), "The running agent's window should show its tool calls.")
-        let agentToolSummary = element("conversation-tool-call-summary-toolu_bg_sub_read")
-        XCTAssertTrue((agentToolSummary.value as? String ?? agentToolSummary.label).hasPrefix("Read the fixture"), String(describing: agentToolSummary.value))
         XCTAssertFalse(transcriptContains("Background check finished."), "The report is not shown before the agent finishes.")
         let agentText = element("assistant-message-msg_bg_sub_1-0")
         XCTAssertTrue(agentText.exists, "The agent's text renders as its own message.")
         XCTAssertGreaterThanOrEqual(agentToolCall.frame.minY, agentText.frame.maxY - 1, "The agent's tool call sits after the text it followed.")
-        // A call this short shows its whole input and output without a toggle.
+        // The agent's shell call collapses to its command; expanding shows its purpose, input and output.
+        let agentToolCommand = element("conversation-tool-call-command-toolu_bg_sub_read")
+        XCTAssertTrue([agentToolCommand.label, agentToolCommand.value as? String ?? ""].joined(separator: " ").contains("cat README.md"),
+                      "The collapsed agent tool call shows the start of its command.")
+        element("conversation-tool-call-toggle-toolu_bg_sub_read").click()
+        let agentToolSummary = element("conversation-tool-call-summary-toolu_bg_sub_read")
+        XCTAssertTrue(agentToolSummary.waitToExist(timeout: 5), "Expanding the agent's tool call shows its purpose.")
+        XCTAssertTrue((agentToolSummary.value as? String ?? agentToolSummary.label).hasPrefix("Read the fixture"), String(describing: agentToolSummary.value))
         XCTAssertTrue(element("conversation-tool-call-input-toolu_bg_sub_read").exists)
         XCTAssertTrue(transcriptContains("cat README.md"), "The agent's tool call shows its input.")
         XCTAssertTrue(transcriptContains("Fixture README"), "The agent's tool call shows its output.")

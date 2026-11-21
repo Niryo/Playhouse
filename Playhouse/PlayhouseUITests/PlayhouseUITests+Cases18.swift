@@ -97,11 +97,11 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ isVisible(callRow) }, timeout: 5), "The earlier turn's command should render inline after its question.")
         XCTAssertLessThan(intermediate.frame.minY, callRow.frame.minY, "The command should follow the message it came after.")
         XCTAssertTrue(scrollFullyIntoView(callRow, in: scrollView))
-        let collapsedOutputHeight = callOutput.frame.height
+        XCTAssertFalse(callOutput.exists, "A collapsed shell call shows only its one-line command preview.")
         let toggle = element("conversation-tool-call-toggle-item_long_history_command_21")
-        XCTAssertTrue(toggle.waitToExist(timeout: 5), "Output past the clipped lines can expand.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 5), "A shell call can expand.")
         toggle.click()
-        XCTAssertTrue(waitUntil({ callOutput.frame.height > collapsedOutputHeight + 10 }, timeout: 5), "Expanding should show every output line.")
+        XCTAssertTrue(waitUntil({ callOutput.exists && callOutput.frame.height > 60 }, timeout: 5), "Expanding should show every output line.")
         let expandedOutputHeight = callOutput.frame.height
         bringNearTop(intermediate, coarse: 300)
 

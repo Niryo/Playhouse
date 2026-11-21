@@ -456,7 +456,7 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
             "command": "git status --short && echo fixture-status-done", "description": "Check repository status",
         }, "fixture-status-done")
         runtime.text("msg_timeline_middle", "The status is clean. Next I'll list the files and run the check.")
-        tool_call("toolu_timeline_list", "Bash", {"command": "ls -1", "description": "List fixture files"},
+        tool_call("toolu_timeline_list", "Bash", {"command": "ls -1 -- . # lists every fixture file so the collapsed row can show how a long command is cut to a single line with an ellipsis instead of wrapping across the transcript\necho fixture-listing-done", "description": "List fixture files"},
                   "README.md\nfixture-one.txt\nfixture-two.txt\nfixture-three.txt\nfixture-four.txt")
         tool_call("toolu_timeline_fail", "Bash", {"command": "exit 3", "description": "Run the failing check"},
                   "Exit code 3", is_error=True)
