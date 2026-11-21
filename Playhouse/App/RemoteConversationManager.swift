@@ -581,6 +581,21 @@ struct RemoteConversationManager {
         }.decoded(SideChatReply.self)
     }
 
+    /// Asks on a new page that runs alongside the standalone chat, in a parallel bubble.
+    func sendInParallel(text: String, imageDataURLs: [String] = [], onBubbleCreated: @escaping () -> Void = {}) async throws {
+        _ = try await daemon.call("chat.bubble.send", [
+            "message": .string(text),
+            "images": .array(imageDataURLs.map(BridgeValue.string)),
+            "deferImages": .boolean(true),
+        ]) { event in
+            if event.type == "bubble_created" { onBubbleCreated() }
+        }
+    }
+
+    func closeParallelChatBubble(id bubbleID: UUID) async throws {
+        _ = try await daemon.call("chat.bubble.close", ["bubbleID": id(bubbleID)])
+    }
+
     func savedSideChats(taskID: UUID) async throws -> [SavedSideChat] {
         try await daemon.call("conversation.side_chats.list", ["taskID": id(taskID)]).decoded([SavedSideChat].self)
     }

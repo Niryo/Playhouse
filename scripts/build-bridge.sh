@@ -162,6 +162,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/CodexTurnSending.swift"
   "${repository_root}/Playhouse/App/ConversationCompaction.swift"
   "${repository_root}/Playhouse/App/ConversationHistory.swift"
+  "${repository_root}/Playhouse/App/ParallelChatBubbles.swift"
   "${repository_root}/Playhouse/App/ConversationManager.swift"
   "${repository_root}/Playhouse/App/ConversationMessages.swift"
   "${repository_root}/Playhouse/App/ConversationProviderSelection.swift"

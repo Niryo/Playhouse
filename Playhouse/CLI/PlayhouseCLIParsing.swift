@@ -488,6 +488,24 @@ extension PlayhouseCLI {
             if rest == ["status"] {
                 return BridgeRequest(command: "chat.status")
             }
+            if rest.first == "bubble", rest.count >= 2 {
+                let tail = Array(rest.dropFirst(2))
+                switch rest[1] {
+                case "send":
+                    let flags = try parseFlags(tail, valueFlags: ["--message", "--image"])
+                    return BridgeRequest(command: "chat.bubble.send", arguments: [
+                        "message": .string(flags["--message"]?.first ?? ""),
+                        "images": .array(try imageDataURLs(flags["--image"] ?? [])),
+                    ])
+                case "list" where tail.isEmpty:
+                    return BridgeRequest(command: "chat.bubble.list")
+                case "close":
+                    let id = try firstPositional(tail)
+                    return BridgeRequest(command: "chat.bubble.close", arguments: ["bubbleID": .string(id)])
+                default:
+                    throw CLIError.unknownCommand(args)
+                }
+            }
             guard rest.first == "page", rest.count >= 2 else { throw CLIError.unknownCommand(args) }
             let tail = Array(rest.dropFirst(2))
             switch rest[1] {

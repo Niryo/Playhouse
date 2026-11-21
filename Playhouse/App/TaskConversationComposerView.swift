@@ -76,6 +76,11 @@ extension TaskConversationView {
                 help: composerSchedule != nil || savedSchedule != nil ? "Change the schedule" : "Schedule this task",
                 open: isSchedulePopoverPresented
             ) : nil,
+            // The standalone chat asks on a side page while it keeps its own turn going.
+            parallelSend: task.isStandaloneChat && !task.isParallelChatBubble && !isReadOnly ? .init(
+                disabled: !hasSubmittableDraft || isPreparingSubmittedMessage || isEnteringGoal,
+                help: "Send in parallel: ask on a new page in a bubble beside the chat, while you keep chatting here"
+            ) : nil,
             primary: primary
         )
     }
@@ -212,6 +217,7 @@ extension TaskConversationView {
                 }
             },
             dismissSchedule: { isSchedulePopoverPresented = false },
+            sendInParallel: sendDraftInParallel,
             primary: {
                 switch composerModel.primary.kind {
                 case "stop": pauseResponse()
@@ -226,6 +232,24 @@ extension TaskConversationView {
     /// Whether the draft has something Return or Send would hand off.
     var hasSubmittableDraft: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingImages.isEmpty
+    }
+
+    /// The Send in parallel button: the draft leaves the composer for a parallel bubble, whose
+    /// turn the app's bubble store follows, so it keeps running if this chat closes.
+    func sendDraftInParallel() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let imageDataURLs = pendingImages.map(\.dataURL)
+        guard !text.isEmpty || !imageDataURLs.isEmpty, !isPreparingSubmittedMessage else { return }
+        draftAutosaveTask?.cancel()
+        draftAutosaveTask = nil
+        composerDraft.settledText = ""
+        draft = ""
+        pendingImages = []
+        isComposerFocused = true
+        ParallelChatBubbleStore.shared.send(text: text, imageDataURLs: imageDataURLs, using: conversationManager) {
+            // A send no bubble took leaves its question to send again, unless a new one was typed.
+            if draft.isEmpty, pendingImages.isEmpty { draft = text }
+        }
     }
 
     /// Return and the Send button: a running turn queues the draft as a follow-up.

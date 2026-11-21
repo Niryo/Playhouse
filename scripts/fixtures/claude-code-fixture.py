@@ -103,6 +103,15 @@ CHAT_NEW_PAGE_PROMPT = "Suggest a quick pasta dinner."
 CHAT_NEW_PAGE_ANSWER = "Cacio e pepe takes fifteen minutes."
 CHAT_NEW_PAGE_TITLE = "Pasta dinner"
 CHAT_NEW_PAGE_HEADER = "The user started this new page for their message"
+# Questions the user sends in parallel bubbles, each on a page of its own: (marker slug, answer,
+# the title its close-turn names the page with), and the follow-up a bubble continues its page with.
+CHAT_PARALLEL_PROMPTS = {
+    "Suggest a quick salad lunch.": ("salad-lunch", "A Greek salad takes ten minutes.", "Salad lunch"),
+    "Suggest a quick soup supper.": ("soup-supper", "Tomato soup takes twenty minutes.", "Soup supper"),
+    "Suggest a quick taco breakfast.": ("taco-breakfast", "Egg tacos take five minutes.", "Taco breakfast"),
+}
+CHAT_PARALLEL_FOLLOW_UP_PROMPT = "Add a dressing."
+CHAT_PARALLEL_FOLLOW_UP_ANSWER = "Lemon and olive oil."
 # A chat turn that answers, runs close-turn last, and then gets Claude Code's own notice.
 CHAT_NOTICE_PROMPT = "Name the largest moon of Saturn."
 CHAT_NOTICE_ANSWER = "Titan is the largest moon of Saturn."

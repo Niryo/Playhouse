@@ -143,7 +143,7 @@ extension BoardTaskManager {
             FetchDescriptor<BoardTask>(predicate: #Predicate { $0.legacyStandaloneChatMarker })
         )
         guard !legacy.isEmpty else { return }
-        var alreadyMigrated = try modelContext.fetch(FetchDescriptor<StandaloneChat>()).contains { $0.authoredPluginID == nil }
+        var alreadyMigrated = try modelContext.fetch(FetchDescriptor<StandaloneChat>()).contains { $0.authoredPluginID == nil && $0.parallelOfChatID == nil }
         for task in legacy {
             if !alreadyMigrated {
                 let chat = StandaloneChat(provider: task.conversationProvider)
@@ -190,7 +190,7 @@ extension BoardTaskManager {
     func getOrCreateStandaloneChat(provider: ConversationProvider) async throws -> BoardTaskRecord {
         try migrateLegacyStandaloneChatTasks()
         let descriptor = FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)])
-        if let existing = try modelContext.fetch(descriptor).first(where: { $0.authoredPluginID == nil }) {
+        if let existing = try modelContext.fetch(descriptor).first(where: { $0.authoredPluginID == nil && $0.parallelOfChatID == nil }) {
             return BoardTaskRecord(task: existing)
         }
         let chat = StandaloneChat(provider: provider)

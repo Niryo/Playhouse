@@ -501,6 +501,9 @@ extension TaskConversationView {
     }
 
     func refreshChatPageStatus() {
+        refreshParallelChatPlaceholders()
+        // A parallel bubble is a single page of its own: it has no labels or separators to show.
+        guard !task.isParallelChatBubble else { return }
         // The labels' own store, which stays open: this runs at every turn's end.
         guard let chatManager = chatPageAnchors.chatManager() else {
             chatPagesByTurnID = [:]
@@ -511,6 +514,18 @@ extension TaskConversationView {
         chatPageAnchors.reload(from: chatManager)
         markCurrentChatPage()
     }
+    func refreshParallelChatPlaceholders() {
+        guard task.isStandaloneChat, !task.isParallelChatBubble,
+              let bubbles = try? BoardTaskManager(modelContext: modelContext).parallelChatBubbles(of: task.id) else {
+            if !parallelChatPlaceholders.isEmpty { parallelChatPlaceholders = [] }
+            return
+        }
+        let placeholders = bubbles.map {
+            ParallelChatPlaceholder(id: $0.id, prompt: $0.parallelPrompt ?? $0.title, anchorTurnID: $0.parallelAnchorTurnID)
+        }
+        if placeholders != parallelChatPlaceholders { parallelChatPlaceholders = placeholders }
+    }
+
     func persistPendingAnnotations() {
         let data = PersistedAnnotations.encode(annotations.filter { !inFlightAnnotationIDs.contains($0.id) })
         let taskID = task.id

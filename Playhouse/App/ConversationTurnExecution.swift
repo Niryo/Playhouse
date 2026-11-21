@@ -325,13 +325,13 @@ extension ConversationManager {
             if task.isStandaloneChat, startsNewChatPage {
                 // The user's New page: this turn runs on a page of its own, in a fresh session
                 // that never receives the last page's turns.
-                let page = try tasks.standaloneChatManager().startUserNewPage(provider: provider.rawValue)
+                let page = try tasks.standaloneChatManager(for: taskID).startUserNewPage(provider: provider.rawValue)
                 PlayhouseDiagnostics.record("chat.page.user_new_page", fields: [
                     "taskID": taskID.uuidString, "pageID": page.id, "provider": provider.rawValue
                 ])
                 onUpdate(ConversationUpdate(type: "chat_page_updated"))
             } else if task.isStandaloneChat, !isPlayhouseNudge, userInputAnswers.isEmpty, !hideSensitiveRecoveryPrompt,
-                      try tasks.standaloneChatManager().discardUnstartedUserNewPage() {
+                      try tasks.standaloneChatManager(for: taskID).discardUnstartedUserNewPage() {
                 // A message the user sent without New page continues the page before an empty New
                 // page an earlier failed send left; Playhouse's own nudges and answers to the agent's
                 // questions belong to the turn they follow and leave it alone.
@@ -343,7 +343,7 @@ extension ConversationManager {
             let standaloneChatPage = task.isStandaloneChat ? standaloneChatActivePage(taskID: taskID) : nil
             let sessionRecoveryContext: String?
             if let standaloneChatPage {
-                sessionRecoveryContext = standaloneChatPageContext(headerPageID: nil, fullPageIDs: [standaloneChatPage.id])
+                sessionRecoveryContext = standaloneChatPageContext(taskID: taskID, headerPageID: nil, fullPageIDs: [standaloneChatPage.id])
             } else if provider == .claude {
                 sessionRecoveryContext = ConversationHandoff.context(for: .claude, messages: Self.withoutNudgeTurns(try await history(taskID: taskID).messages))
             } else {
@@ -391,7 +391,7 @@ extension ConversationManager {
             let standaloneChatFullPageIDs = contextPageIDs.filter { $0 != standaloneChatPage?.id }
             let standaloneChatSeedContext = standaloneChatPage == nil && contextPageIDs.isEmpty
                 ? nil
-                : standaloneChatPageContext(headerPageID: standaloneChatHeaderPageID, fullPageIDs: standaloneChatFullPageIDs)
+                : standaloneChatPageContext(taskID: taskID, headerPageID: standaloneChatHeaderPageID, fullPageIDs: standaloneChatFullPageIDs)
             if let standaloneChatPage, pageSessionID == nil {
                 threadID = try await client.startThread(
                     workspace: workspace,
@@ -399,7 +399,7 @@ extension ConversationManager {
                     developerInstructions: standaloneChatInstructions()
                 )
                 phase = "thread-persistence"
-                try? tasks.standaloneChatManager().setProviderSession(
+                try? tasks.standaloneChatManager(for: taskID).setProviderSession(
                     pageID: standaloneChatPage.id, provider: provider.rawValue, sessionID: threadID
                 )
                 _ = try await tasks.persistConversationID(taskID, provider: provider, id: threadID)
@@ -486,7 +486,7 @@ extension ConversationManager {
                 )
                 phase = "thread-persistence"
                 if let standaloneChatPage {
-                    try? tasks.standaloneChatManager().setProviderSession(
+                    try? tasks.standaloneChatManager(for: taskID).setProviderSession(
                         pageID: standaloneChatPage.id, provider: provider.rawValue, sessionID: threadID
                     )
                 }

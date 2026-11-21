@@ -153,6 +153,9 @@ struct TaskConversationView: View {
     @State var selectedChatImage: NSImage?
     @State var isGeneratingTitle = false
     @State var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
+    /// The standalone chat's open parallel bubbles, whose placeholders the transcript shows
+    /// after the turn each one returns after.
+    @State var parallelChatPlaceholders: [ParallelChatPlaceholder] = []
     /// The message at the top of the transcript's viewport, as last reported.
     @State var topTranscriptRowID: String?
     @State var conversationMode: ConversationMode = .code
@@ -932,6 +935,8 @@ struct TaskConversationView: View {
             // Mid-turn revisions are progress, and turn end refreshes pages anyway, so the
             // store is only reread while no turn runs.
             if task.isStandaloneChat, !providerTurnIsActive { refreshChatPageStatus() }
+            // A bubble sent or closed while the chat answers moves its placeholder at once.
+            if task.isStandaloneChat { refreshParallelChatPlaceholders() }
             // History lags what this window's own stream has already shown.
             guard followedTurnStreams == 0 else { return }
             followHistory()

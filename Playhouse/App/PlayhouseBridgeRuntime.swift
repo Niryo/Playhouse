@@ -425,11 +425,12 @@ final class PlayhouseBridgeRuntime {
                 let page = try chatManager.createExplicitPage(title: request.requiredString("title"), provider: settings.defaultConversationProvider.rawValue)
                 result = try Self.value(["page": page])
             case "chat.page.close-turn":
-                let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
-                // The chat-id argument identifies which hidden task's turn this is (for logs/future
-                // multi-chat support); v1 has a single page store, so pages are always scoped to
-                // StandaloneChatManager.defaultChatID regardless of which task passed this signal.
                 let chatID = try request.requiredString("chatID")
+                // The chat-id argument names whose turn this is: the standalone chat files its pages
+                // under its own scope, and a parallel bubble under its own until it closes.
+                let scope = try UUID(uuidString: chatID).flatMap { try taskManager.standaloneChatModel($0) }?.standaloneChatPageScope
+                    ?? StandaloneChatManager.defaultChatID
+                let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory, chatID: scope)
                 let continues = request.arguments["continues"]?.bool ?? true
                 if !continues, (request.arguments["newTitle"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw BridgeCommandError(code: "invalid_argument", message: "A new page requires --new-title when --continues is false.")
@@ -1229,7 +1230,8 @@ final class PlayhouseBridgeRuntime {
                     .generateTitle(from: prompt, workspace: workspace, taskID: taskID)
                 result = generated.map { .object(["title": .string($0.title), "provider": .string($0.provider.rawValue)]) } ?? .null
             case "conversation.send", "conversation.side_chat", "conversation.side_chats.list",
-                 "conversation.side_chat.close", "conversation.events.subscribe":
+                 "conversation.side_chat.close", "conversation.events.subscribe",
+                 "chat.bubble.send", "chat.bubble.list", "chat.bubble.close":
                 result = try await conversationOperation(
                     request, taskManager: taskManager, settings: settings,
                     conversationClients: conversationClients, eventHandler: eventHandler

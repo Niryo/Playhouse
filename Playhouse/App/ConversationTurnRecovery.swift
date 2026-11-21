@@ -485,7 +485,7 @@ extension ConversationManager {
     /// opening turn already runs inside its own page session.
     func standaloneChatActivePage(taskID: UUID) -> StandaloneChatPage? {
         guard let task = try? tasks.conversationSubject(taskID),
-              let chatManager = try? tasks.standaloneChatManager() else { return nil }
+              let chatManager = try? tasks.standaloneChatManager(for: taskID) else { return nil }
         if let existing = (try? chatManager.activePage()) ?? nil { return existing }
         return try? chatManager.createPage(
             title: "New conversation",
@@ -500,9 +500,9 @@ extension ConversationManager {
     /// with `chat page read` when the user's message continues it. Only pages the user
     /// explicitly attached (`fullPageIDs`, from an annotation or a recalled page title) and a
     /// page whose lost session is being rebuilt travel whole; the whole chat never does.
-    func standaloneChatPageContext(headerPageID: String?, fullPageIDs: [String]) -> String? {
+    func standaloneChatPageContext(taskID: UUID, headerPageID: String?, fullPageIDs: [String]) -> String? {
         guard headerPageID != nil || !fullPageIDs.isEmpty,
-              let chatManager = try? tasks.standaloneChatManager() else { return nil }
+              let chatManager = try? tasks.standaloneChatManager(for: taskID) else { return nil }
         func chatPage(_ pageID: String) -> ConversationHandoff.ChatPage? {
             guard let page = try? chatManager.page(id: pageID),
                   let archived = try? chatManager.messages(pageID: pageID) else { return nil }
@@ -520,7 +520,11 @@ extension ConversationManager {
         }
         let current = headerPageID.flatMap(chatPage)
         let attached = fullPageIDs.compactMap(chatPage).filter { !$0.messages.isEmpty }
-        let recentPages = current == nil ? [] : ((try? chatManager.listPages(limit: ConversationHandoff.recentChatPageLimit + 1)) ?? [])
+        // A parallel bubble's agent sees the standalone chat's pages, as its own page joins them.
+        let recentPagesManager = (try? tasks.conversationSubject(taskID))?.isParallelChatBubble == true
+            ? (try? tasks.standaloneChatManager(scope: StandaloneChatManager.defaultChatID)) ?? chatManager
+            : chatManager
+        let recentPages = current == nil ? [] : ((try? recentPagesManager.listPages(limit: ConversationHandoff.recentChatPageLimit + 1)) ?? [])
             .filter { $0.id != headerPageID && $0.messageCount > 0 }
             .prefix(ConversationHandoff.recentChatPageLimit)
         // A brand-new chat has nothing to point at yet.
@@ -655,7 +659,7 @@ extension ConversationManager {
         turnID: String,
         onUpdate: @escaping (ConversationUpdate) -> Void
     ) {
-        guard let chatManager = try? tasks.standaloneChatManager() else { return }
+        guard let chatManager = try? tasks.standaloneChatManager(for: chat.id) else { return }
         let startedAt = ((try? chatManager.inflightTurnStartedAt()) ?? nil)
             ?? history.messages.filter { $0.turnID == turnID }.compactMap(\.createdAt).min()
         let signal = startedAt.flatMap { (try? chatManager.turnSignals(from: $0))?.last }
@@ -799,7 +803,7 @@ extension ConversationManager {
         reason: String
     ) async -> Int {
         guard (try? tasks.conversationSubject(taskID))?.isStandaloneChat == true,
-              let chatManager = try? tasks.standaloneChatManager(),
+              let chatManager = try? tasks.standaloneChatManager(for: taskID),
               let filed = try? chatManager.filedTurnIDs() else { return 0 }
         let messages = standaloneChatTranscriptMessages(taskID: taskID)
         let inFlightSince = (try? chatManager.inflightTurnStartedAt()) ?? nil
@@ -869,7 +873,7 @@ extension ConversationManager {
             return
         }
         guard let task = try? tasks.conversationSubject(taskID), task.isStandaloneChat,
-              let chatManager = try? tasks.standaloneChatManager(),
+              let chatManager = try? tasks.standaloneChatManager(for: taskID),
               let missedSignal = try? chatManager.lastTurnMissedSignal() else { return }
         let pending: StandaloneChatPendingFallback? = (try? chatManager.pendingFallback()) ?? nil
         guard missedSignal || pending != nil else { return }

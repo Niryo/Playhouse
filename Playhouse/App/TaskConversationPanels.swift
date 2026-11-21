@@ -344,7 +344,8 @@ extension TaskConversationView {
 
 
     var conversationHeader: some View {
-        HStack(spacing: 12) {
+        let backLabel = task.isParallelChatBubble ? "Back to the bubble" : "Back to Kanban board"
+        return HStack(spacing: 12) {
             Button(action: saveAndBack) {
                 Image(systemName: "chevron.backward")
                     .font(.system(size: 13, weight: .semibold))
@@ -353,8 +354,8 @@ extension TaskConversationView {
             }
             .buttonHoverPointer()
             .buttonStyle(.plain)
-            .shortcutHelp("Back to Kanban", shortcut: AppShortcut.back)
-            .accessibilityLabel("Back to Kanban board")
+            .shortcutHelp(task.isParallelChatBubble ? backLabel : "Back to Kanban", shortcut: AppShortcut.back)
+            .accessibilityLabel(backLabel)
             .accessibilityIdentifier("back-to-board-button")
 
             VStack(alignment: .leading, spacing: 4) {

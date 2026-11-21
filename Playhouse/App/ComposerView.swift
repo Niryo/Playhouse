@@ -87,6 +87,13 @@ struct ComposerModel: Codable, Equatable {
         var testID: String
     }
 
+    /// The standalone chat's Send in parallel button beside Send: the draft goes to a new page
+    /// that runs alongside the chat. Nil everywhere else.
+    struct ParallelSend: Codable, Equatable {
+        var disabled: Bool
+        var help: String
+    }
+
     /// Starts every accessibility identifier ("" in the conversation, "native-"
     /// on the catalog's native side, so the two never share one).
     var prefix: String
@@ -112,6 +119,7 @@ struct ComposerModel: Codable, Equatable {
     var model: ModelPicker
     /// Nil where the conversation can't be scheduled.
     var schedule: Schedule?
+    var parallelSend: ParallelSend? = nil
     var primary: Primary
 }
 
@@ -143,6 +151,7 @@ struct ComposerActions {
     var selectEffort: (String) -> Void = { _ in }
     var toggleSchedule: () -> Void = {}
     var dismissSchedule: () -> Void = {}
+    var sendInParallel: () -> Void = {}
     var primary: () -> Void = {}
 }
 
@@ -221,7 +230,12 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
                 if let schedule = model.schedule {
                     scheduleButton(schedule)
                 }
-                primary
+                AtomStack(props: StackProps(axis: "h", spacing: 5)) {
+                    primary
+                    if let parallelSend = model.parallelSend {
+                        parallelSendButton(parallelSend)
+                    }
+                }
             }
         }
     }
@@ -357,6 +371,21 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
                 }
             default:
                 primaryIcon("arrow.up", fill: "accent", opacity: 1, size: 13, radius: 15.5, dimmed: primary.disabled)
+            }
+        }
+    }
+
+    private func parallelSendButton(_ parallelSend: ComposerModel.ParallelSend) -> some View {
+        AtomButton(
+            props: ButtonProps(disabled: parallelSend.disabled),
+            common: AtomCommon(testID: prefix + "composer-send-in-parallel-button", label: "Send in parallel", help: parallelSend.help),
+            action: actions.sendInParallel
+        ) {
+            AtomPanel(
+                props: PanelProps(fill: "accent", fillOpacity: 0.14, cornerRadius: 13),
+                common: AtomCommon(width: 26, height: 26, padding: 0, opacity: parallelSend.disabled ? 0.45 : 1)
+            ) {
+                AtomIcon(props: IconProps(asset: "ParallelSendIcon", color: "accent"), common: AtomCommon(width: 15, height: 15))
             }
         }
     }

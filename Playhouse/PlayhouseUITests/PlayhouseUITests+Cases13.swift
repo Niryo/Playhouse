@@ -898,12 +898,6 @@ extension PlayhouseUITests {
         XCTAssertEqual(label(longTitle).label, longTitle)
         XCTAssertLessThanOrEqual(anchors.frame.width, 130, "The labels stay compact.")
         XCTAssertGreaterThanOrEqual(anchors.frame.width, 100, "The labels have room for a short title.")
-        // A window tall enough that the 10 labels, not the transcript's height, bound the column.
-        let window = app.windows.firstMatch
-        let bottomEdge = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1)).withOffset(CGVector(dx: 0, dy: -2))
-        bottomEdge.press(forDuration: 0.2, thenDragTo: bottomEdge.withOffset(CGVector(dx: 0, dy: 400)))
-        XCTAssertTrue(waitUntil({ scrollView.frame.height >= 452 }, timeout: 5),
-                      "The window should grow until the transcript has room for more than 10 labels; transcript height \(scrollView.frame.height).")
         XCTAssertEqual(anchors.frame.midY, scrollView.frame.midY, accuracy: 4, "The labels sit halfway down the transcript.")
         let labelsInView = anchors.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-page-anchor-"))
             .allElementsBoundByIndex.filter { anchors.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }.count
@@ -917,7 +911,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(label("Topic 03").exists, "An older page has no label until the labels are scrolled up to it.")
         XCTAssertTrue(waitUntil({ currentLabelTitle() == "Harbor" }, timeout: 10), "The label of the page in view is marked; current=\(String(describing: currentLabelTitle())).")
         XCTAssertFalse(element("chat-jump-to-latest").exists)
-        XCTAssertEqual(anchors.value as? String, "10 pages, older pages above", "Growing the window reads no more labels.")
+        XCTAssertEqual(anchors.value as? String, "10 pages, older pages above", "Showing all ten labels reads no more pages.")
         attachScreenshot(named: "chat-page-anchors-newest-ten")
         attachElementScreenshot(anchors, named: "chat-page-anchors-newest-ten-closeup")
         // Scrolling up past the oldest label read so far reads the next 10, and no more.

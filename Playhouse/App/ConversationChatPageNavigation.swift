@@ -320,7 +320,7 @@ extension TaskConversationView {
     /// then runs without the last page's context; sending or removing the page brings the button back.
     @ViewBuilder
     var newChatPageControl: some View {
-        if task.isStandaloneChat, !isReadOnly {
+        if task.isStandaloneChat, !task.isParallelChatBubble, !isReadOnly {
             if startsNewChatPage {
                 newChatPageSeparator(removable: true)
             } else if !messages.isEmpty, !sendsNewChatPage, !isResponding {
@@ -367,7 +367,7 @@ extension TaskConversationView {
     /// Whether the chat has page labels to offer: only the standalone chat has pages, and a
     /// narrow chat keeps its width for messages.
     func offersChatPageAnchors(transcriptWidth: CGFloat) -> Bool {
-        task.isStandaloneChat && !chatPageAnchors.pages.isEmpty
+        task.isStandaloneChat && !task.isParallelChatBubble && !chatPageAnchors.pages.isEmpty
             && transcriptWidth >= ChatPageAnchorsLayout.minimumTranscriptWidth
     }
 

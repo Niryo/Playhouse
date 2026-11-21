@@ -70,6 +70,10 @@ extension TaskConversationView {
                         if !hasLoadedConversation && !isNewTask {
                             ConversationHistoryLoadingIndicator()
                         } else if activeGoal?.status != "complete" && (isNewTask || !isLoadingHistory) {
+                            ForEach(parallelChatPlaceholders.filter { $0.anchorTurnID == nil }) { placeholder in
+                                ParallelChatPlaceholderRow(bubbleID: placeholder.id, prompt: placeholder.prompt)
+                                    .id("parallel-chat-placeholder-\(placeholder.id.uuidString)")
+                            }
                             emptyConversationPlaceholder
                         }
                         if shouldShowActivityDisclosure {

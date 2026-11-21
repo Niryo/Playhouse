@@ -721,7 +721,7 @@ class BridgeTestCases13:
             'ClaudeSessionSupport', 'ClaudeTurnControl', 'ClaudeTurnReporting', 'CodexAccountUsage',
             'CodexMessageConversion', 'CodexServerEvents', 'CodexServerTransport', 'CodexSharedServer',
             'CodexTaskInstructions', 'CodexThreadLifecycle', 'CodexTurnRecovery', 'CodexTurnSending',
-            'ConversationCompaction', 'ConversationHistory', 'ConversationManager', 'ConversationMessages',
+            'ConversationCompaction', 'ConversationHistory', 'ConversationManager', 'ConversationMessages', 'ParallelChatBubbles',
             'ConversationProviderSelection', 'ConversationStandaloneAutomation', 'ConversationTranscriptRecording', 'ConversationTurnControl',
             'ConversationTurnExecution', 'ConversationTurnRecovery', 'McpCatalogModels', 'PlayhouseBridgeConversationFlow',
             'PlayhouseBridgeConversationOperations', 'PlayhouseBridgeOverview', 'PlayhouseBridgePullRequests', 'PlayhouseBridgeRequestDiagnostics',
