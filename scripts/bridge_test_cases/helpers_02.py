@@ -145,7 +145,7 @@ class BridgeTestHelpers02:
         self.assertEqual(status["output"].strip(), "fixture-status-done")
         self.assertEqual(status["summary"], summaries[0])
         self.assertEqual(status["status"], "completed")
-        self.assertEqual(listing["input"], "ls -1")
+        self.assertEqual(listing["input"], "ls -1 -- . # lists every fixture file so the collapsed row can show how a long command is cut to a single line with an ellipsis instead of wrapping across the transcript\necho fixture-listing-done")
         self.assertEqual(listing["output"].strip().splitlines()[-1], "fixture-four.txt")
         self.assertEqual(listing["summary"], summaries[1])
         self.assertEqual(failing["input"], "exit 3")

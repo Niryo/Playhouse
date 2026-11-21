@@ -245,7 +245,7 @@ def list_items(runtime, _session_state, message):
                      "status": "completed", "exitCode": 0, "durationMs": 12, "aggregatedOutput": "fixture-status-done\n"},
                     {"id": f"item_timeline_middle_{suffix}", "type": "agentMessage", "phase": "commentary",
                      "text": "The status is clean. Next I'll list the files and run the check."},
-                    {"id": "item_timeline_list", "type": "commandExecution", "command": "ls -1",
+                    {"id": "item_timeline_list", "type": "commandExecution", "command": "ls -1 -- . # lists every fixture file so the collapsed row can show how a long command is cut to a single line with an ellipsis instead of wrapping across the transcript\necho fixture-listing-done",
                      "cwd": "/tmp/playhouse-fixture", "status": "completed", "exitCode": 0, "durationMs": 9,
                      "aggregatedOutput": "README.md\nfixture-one.txt\nfixture-two.txt\nfixture-three.txt\nfixture-four.txt\n"},
                     {"id": "item_timeline_fail", "type": "commandExecution", "command": "exit 3",

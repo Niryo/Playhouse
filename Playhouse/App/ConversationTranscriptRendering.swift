@@ -14,6 +14,8 @@ final class ToolCallExpansionState {
 
 /// One tool call in the conversation timeline: the tool's name and what the call was for, then
 /// what it was given (IN) and what it returned (OUT), clipped to a few lines until expanded.
+/// A shell call collapses further, to one line with the start of its command, and shows what it
+/// was for and its IN and OUT blocks only once expanded.
 struct ToolCallTimelineRow: View {
     let activity: ConversationActivity
     let expansion: ToolCallExpansionState
@@ -52,9 +54,25 @@ struct ToolCallTimelineRow: View {
         }
     }
 
+    /// Both providers name their shell tool `Bash`, so Claude and Codex commands collapse alike.
+    private var isShellCommand: Bool {
+        activity.toolKind != "mcp" && activity.tool == "Bash" && (activity.input != nil || output != nil)
+    }
+
+    /// The collapsed shell row's preview: the command's first non-empty line, ending in an
+    /// ellipsis when more lines follow. A first line too long for the row is cut by truncation.
+    private var commandPreview: String? {
+        let lines = (activity.input ?? "").split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard let first = lines.first else { return nil }
+        return lines.count > 1 ? "\(first) …" : first
+    }
+
+    private var showsDetails: Bool { !isShellCommand || isExpanded }
+
     /// Whether either block holds more than its collapsed lines show.
     private var canExpand: Bool {
-        [activity.input, output].compactMap { $0 }.contains { text in
+        if isShellCommand { return true }
+        return [activity.input, output].compactMap { $0 }.contains { text in
             text.count > 240 || text.split(separator: "\n", omittingEmptySubsequences: false).count > Self.collapsedLineLimit
         }
     }
@@ -72,7 +90,15 @@ struct ToolCallTimelineRow: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(WorkspaceTheme.conversationText)
                         .accessibilityIdentifier("conversation-tool-call-name-\(activity.id)")
-                    if let summary {
+                    if !showsDetails, let commandPreview {
+                        Text(commandPreview)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .accessibilityLabel(commandPreview)
+                            .accessibilityIdentifier("conversation-tool-call-command-\(activity.id)")
+                    } else if let summary {
                         Text(summary)
                             .font(.system(size: 14))
                             .foregroundStyle(.secondary)
@@ -98,7 +124,7 @@ struct ToolCallTimelineRow: View {
                         .accessibilityIdentifier("conversation-tool-call-toggle-\(activity.id)")
                     }
                 }
-                if activity.input != nil || output != nil {
+                if showsDetails, activity.input != nil || output != nil {
                     VStack(alignment: .leading, spacing: 0) {
                         if let input = activity.input {
                             ioRow(label: "IN", text: input, identifier: "conversation-tool-call-input-\(activity.id)")
