@@ -41,6 +41,37 @@ extension PlayhouseBridgeRuntime {
                 historyMessageLimit: try request.optionalHistoryLimit()
             )
             return try Self.value(history)
+        case "chat.bubble.send":
+            let conversations = ConversationManager(
+                tasks: taskManager, clients: conversationClients(), settingsManager: settings, defersHistoryImages: request.defersHistoryImages
+            )
+            var created: ParallelChatBubbleRecord?
+            let history = try await conversations.sendInParallel(
+                text: request.arguments["message"]?.string ?? "",
+                imageDataURLs: request.arguments["images"]?.strings ?? [],
+                onBubbleCreated: { bubble in
+                    created = bubble
+                    if let payload = try? Self.value(bubble) {
+                        eventHandler(BridgeEvent(requestID: request.id, type: "bubble_created", payload: payload))
+                    }
+                },
+                onUpdate: { update in
+                    if let payload = try? Self.value(update) {
+                        eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
+                    }
+                }
+            )
+            return .object([
+                "bubble": try created.map { try Self.value($0) } ?? .null,
+                "history": try Self.value(history),
+            ])
+        case "chat.bubble.list":
+            let chat = try await taskManager.getOrCreateStandaloneChat(provider: settings.defaultConversationProvider)
+            let bubbles = try taskManager.parallelChatBubbles(of: chat.id).map(taskManager.parallelChatBubbleRecord)
+            return try Self.value(["bubbles": bubbles])
+        case "chat.bubble.close":
+            let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+            return try Self.value(await conversations.closeParallelChatBubble(id: request.requiredUUID("bubbleID")))
         case "conversation.side_chat":
             let taskID = try request.requiredUUID("taskID")
             let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)

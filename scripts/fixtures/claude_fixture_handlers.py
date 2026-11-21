@@ -94,6 +94,36 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
             commands.append({"command": close_turn,
                              "output": runtime.run_tool("toolu_close_first", "Bash", {"command": close_turn}, close_turn)})
         runtime.text("msg_chat_close_first_answer", runtime.CHAT_CLOSE_FIRST_ANSWER)
+    elif any(user_text.rstrip().endswith(prompt) for prompt in runtime.CHAT_PARALLEL_PROMPTS):
+        # A parallel bubble's question. `.hold-parallel-<slug>` keeps its turn running, with
+        # `.parallel-<slug>-active` present, until `.parallel-<slug>-release` appears, so a test can
+        # use the chat while the bubble answers; its close-turn names the bubble's new page.
+        prompt = next(prompt for prompt in runtime.CHAT_PARALLEL_PROMPTS if user_text.rstrip().endswith(prompt))
+        slug, answer, title = runtime.CHAT_PARALLEL_PROMPTS[prompt]
+        hold = runtime.Path(str(runtime.sys.argv[0]) + f".hold-parallel-{slug}")
+        if hold.exists():
+            hold.unlink(missing_ok=True)
+            active = runtime.Path(str(runtime.sys.argv[0]) + f".parallel-{slug}-active")
+            release = runtime.Path(str(runtime.sys.argv[0]) + f".parallel-{slug}-release")
+            active.write_text("The parallel turn is held.\n", encoding="utf-8")
+            deadline = runtime.time.monotonic() + 60
+            while not release.exists() and runtime.time.monotonic() < deadline:
+                runtime.time.sleep(0.02)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+        close_turn = runtime.report_command(instructions, " chat page close-turn ")
+        if close_turn and runtime.CHAT_NEW_PAGE_HEADER in user_text:
+            close_turn = close_turn.replace("--continues true", f"--continues false --new-title {runtime.shlex.quote(title)}")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": runtime.run_tool(f"toolu_parallel_{slug.replace('-', '_')}_close_turn", "Bash", {"command": close_turn}, close_turn)})
+        runtime.text(f"msg_chat_parallel_{slug.replace('-', '_')}_answer", answer)
+    elif user_text.rstrip().endswith(runtime.CHAT_PARALLEL_FOLLOW_UP_PROMPT):
+        close_turn = runtime.report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": runtime.run_tool("toolu_parallel_follow_up_close_turn", "Bash", {"command": close_turn}, close_turn)})
+        runtime.text("msg_chat_parallel_follow_up_answer", runtime.CHAT_PARALLEL_FOLLOW_UP_ANSWER)
     elif user_text.rstrip().endswith(runtime.CHAT_NEW_PAGE_PROMPT):
         # `.hold-new-page` keeps the turn running, with `.new-page-active` present, until
         # `.new-page-release` appears, so a test can look at the chat while the turn runs.

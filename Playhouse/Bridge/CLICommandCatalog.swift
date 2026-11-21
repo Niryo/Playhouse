@@ -162,6 +162,10 @@ enum CLICommandCatalog {
         command("chat page new", "--title <title>", "Start a new page; close-turn starts one itself when the topic changes.", internalUse),
         command("chat page close-turn", "<chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]",
                 "File this turn under the current page, or under a new titled page.", chat),
+        command("chat bubble send", "--message <text> [--image <path>]...",
+                "Ask on a new page that runs alongside the chat, in a bubble the chat takes back when it closes.", internalUse),
+        command("chat bubble list", "", "List the chat's open parallel pages.", internalUse),
+        command("chat bubble close", "<bubble-id>", "Close a finished parallel page, inserting it into the chat at its placeholder.", internalUse),
 
         command("workspace repos list", "", "List the repositories under the repository suggestions folder.", readBoard),
         command("workspace suggest", "--parent <path>", "Suggest repository folders under a parent folder.", internalUse),

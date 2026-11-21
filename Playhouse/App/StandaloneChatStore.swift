@@ -92,6 +92,9 @@ final class StandaloneChatManager {
     private static let pageFileProcessLock = NSLock()
     private static let pageFileBackfillLock = NSLock()
 
+    /// The chat whose pages and turn bookkeeping this manager reads and writes: the
+    /// standalone chat itself, or one of its parallel bubbles while that bubble runs.
+    let chatID: String
     private var database: OpaquePointer?
     private let pageFilesDirectory: URL
     private let isoFormatter: ISO8601DateFormatter = {
@@ -109,7 +112,8 @@ final class StandaloneChatManager {
         return supportDirectory.appendingPathComponent("StandaloneChat-v1.sqlite")
     }
 
-    init(dataDirectory: String? = nil) throws {
+    init(dataDirectory: String? = nil, chatID: String = StandaloneChatManager.defaultChatID) throws {
+        self.chatID = chatID
         let url = try Self.storeURL(dataDirectory: dataDirectory)
         pageFilesDirectory = url.deletingLastPathComponent().appendingPathComponent("StandaloneChat-Pages", isDirectory: true)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -235,9 +239,9 @@ final class StandaloneChatManager {
     // MARK: - Pages
 
     @discardableResult
-    func createPage(chatID: String = defaultChatID, title: String, provider: String, closingCurrentActivePage: Bool = true) throws -> StandaloneChatPage {
+    func createPage(title: String, provider: String, closingCurrentActivePage: Bool = true) throws -> StandaloneChatPage {
         let now = Date()
-        let previous = closingCurrentActivePage ? try activePage(chatID: chatID) : nil
+        let previous = closingCurrentActivePage ? try activePage() : nil
         if let active = previous {
             try closePage(id: active.id)
         }
@@ -256,7 +260,7 @@ final class StandaloneChatManager {
         return page
     }
 
-    func activePage(chatID: String = defaultChatID) throws -> StandaloneChatPage? {
+    func activePage() throws -> StandaloneChatPage? {
         try queryPages(
             "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? AND closed_at IS NULL ORDER BY created_at DESC LIMIT 1;",
             bindings: [.text(chatID)]
@@ -341,7 +345,7 @@ final class StandaloneChatManager {
 
     /// The newest pages, or with `titleContaining` only those whose title contains that text,
     /// ignoring case, as the search above the chat's page labels finds them.
-    func listPages(chatID: String = defaultChatID, limit: Int = 50, titleContaining: String? = nil) throws -> [StandaloneChatPage] {
+    func listPages(limit: Int = 50, titleContaining: String? = nil) throws -> [StandaloneChatPage] {
         let titleText = titleContaining?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !titleText.isEmpty else {
             return try queryPages(
@@ -366,10 +370,10 @@ final class StandaloneChatManager {
     /// `newTitle`; `continues == true` (or an inferred default when no signal arrived)
     /// appends to the current active page, creating one if this is the very first turn.
     @discardableResult
-    func resolveTurnPage(chatID: String = defaultChatID, provider: String, continues: Bool, newTitle: String?) throws -> StandaloneChatPage {
+    func resolveTurnPage(provider: String, continues: Bool, newTitle: String?) throws -> StandaloneChatPage {
         let title = newTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         // The page the user started for this turn is already the turn's own page: a title names it.
-        if let userPage = try unstartedUserNewPage(chatID: chatID) {
+        if let userPage = try unstartedUserNewPage() {
             if !title.isEmpty { try setPageTitle(pageID: userPage.id, title: title) }
             return try page(id: userPage.id)
         }
@@ -377,10 +381,10 @@ final class StandaloneChatManager {
             guard !title.isEmpty else {
                 throw StandaloneChatStoreError.queryFailed("A new page requires --new-title when --continues is false.")
             }
-            return try createPage(chatID: chatID, title: title, provider: provider)
+            return try createPage(title: title, provider: provider)
         }
-        if let active = try activePage(chatID: chatID) { return active }
-        return try createPage(chatID: chatID, title: "New conversation", provider: provider, closingCurrentActivePage: false)
+        if let active = try activePage() { return active }
+        return try createPage(title: "New conversation", provider: provider, closingCurrentActivePage: false)
     }
 
     // MARK: - Compliance tracking
@@ -388,7 +392,7 @@ final class StandaloneChatManager {
     /// Call once per real `chat page new`/`close-turn` CLI invocation (not the auto-fallback
     /// page creation), so a turn's compliance can be checked by comparing the sequence before
     /// and after the turn ran.
-    func recordSignal(chatID: String = defaultChatID) throws {
+    func recordSignal() throws {
         try exec(
             """
             INSERT INTO chat_meta (chat_id, signal_sequence, last_turn_missed_signal) VALUES (?, 1, 0)
@@ -404,14 +408,14 @@ final class StandaloneChatManager {
     /// its send fails while its daemon is alive), so a daemon that took the turn over after a
     /// restart knows when it began even when its provider's messages carry no time (Codex), and
     /// recovery knows the newest turn really ran.
-    func beginTurn(chatID: String = defaultChatID) throws {
+    func beginTurn() throws {
         try exec(
             "INSERT INTO chat_inflight_turn (chat_id, started_at) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET started_at = excluded.started_at;",
             bindings: [.text(chatID), .text(iso(Date()))]
         )
     }
 
-    func inflightTurnStartedAt(chatID: String = defaultChatID) throws -> Date? {
+    func inflightTurnStartedAt() throws -> Date? {
         var startedAt: Date?
         try withStatement("SELECT started_at FROM chat_inflight_turn WHERE chat_id = ?;", bindings: [.text(chatID)]) { statement in
             if sqlite3_step(statement) == SQLITE_ROW { startedAt = date(columnText(statement, 0)) }
@@ -419,16 +423,16 @@ final class StandaloneChatManager {
         return startedAt
     }
 
-    func endTurn(chatID: String = defaultChatID) throws {
+    func endTurn() throws {
         try exec("DELETE FROM chat_inflight_turn WHERE chat_id = ?;", bindings: [.text(chatID)])
     }
 
     /// Records a `chat page close-turn` signal: it counts toward the turn's compliance check
     /// and keeps the page it resolved to with its time, in one transaction.
-    func recordTurnSignal(pageID: String, chatID: String = defaultChatID) throws {
+    func recordTurnSignal(pageID: String) throws {
         try exec("BEGIN IMMEDIATE;")
         do {
-            try recordSignal(chatID: chatID)
+            try recordSignal()
             try exec(
                 "INSERT INTO chat_turn_signals (chat_id, page_id, recorded_at) VALUES (?, ?, ?);",
                 bindings: [.text(chatID), .text(pageID), .text(iso(Date()))]
@@ -441,7 +445,7 @@ final class StandaloneChatManager {
     }
 
     /// The close-turn signals recorded from `start` up to (not including) `end`, oldest first.
-    func turnSignals(chatID: String = defaultChatID, from start: Date, to end: Date? = nil) throws -> [StandaloneChatTurnSignal] {
+    func turnSignals(from start: Date, to end: Date? = nil) throws -> [StandaloneChatTurnSignal] {
         var signals: [StandaloneChatTurnSignal] = []
         try withStatement(
             "SELECT page_id, recorded_at FROM chat_turn_signals WHERE chat_id = ? AND recorded_at >= ? AND recorded_at < ? ORDER BY seq ASC;",
@@ -455,14 +459,38 @@ final class StandaloneChatManager {
     }
 
     /// Pages created from `start` up to (not including) `end`, oldest first.
-    func pagesCreated(chatID: String = defaultChatID, from start: Date, to end: Date) throws -> [StandaloneChatPage] {
+    func pagesCreated(from start: Date, to end: Date) throws -> [StandaloneChatPage] {
         try queryPages(
             "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at ASC;",
             bindings: [.text(chatID), .text(iso(start)), .text(iso(end))]
         )
     }
 
-    func signalSequence(chatID: String = defaultChatID) throws -> Int {
+    /// Moves a closing parallel bubble's pages into this chat as closed pages dated to their
+    /// place in this chat's history, and drops the bubble's own turn bookkeeping. Running it
+    /// again after an interrupted close finds nothing left to move.
+    func adoptPages(fromChatID bubbleChatID: String, createdAt dates: [String: Date]) throws {
+        let now = iso(Date())
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            for (pageID, createdAt) in dates {
+                try exec(
+                    "UPDATE chat_pages SET chat_id = ?, created_at = ?, closed_at = COALESCE(closed_at, ?) WHERE id = ? AND chat_id = ?;",
+                    bindings: [.text(chatID), .text(iso(createdAt)), .text(now), .text(pageID), .text(bubbleChatID)]
+                )
+            }
+            for table in ["chat_meta", "chat_pending_fallback", "chat_turn_signals", "chat_inflight_turn", "chat_user_new_page"] {
+                try exec("DELETE FROM \(table) WHERE chat_id = ?;", bindings: [.text(bubbleChatID)])
+            }
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+        for pageID in dates.keys { try syncPageFile(pageID: pageID) }
+    }
+
+    func signalSequence() throws -> Int {
         var value = 0
         try withStatement("SELECT signal_sequence FROM chat_meta WHERE chat_id = ?;", bindings: [.text(chatID)]) { statement in
             if sqlite3_step(statement) == SQLITE_ROW { value = Int(sqlite3_column_int64(statement, 0)) }
@@ -470,7 +498,7 @@ final class StandaloneChatManager {
         return value
     }
 
-    func setLastTurnMissedSignal(_ missed: Bool, chatID: String = defaultChatID) throws {
+    func setLastTurnMissedSignal(_ missed: Bool) throws {
         try exec(
             """
             INSERT INTO chat_meta (chat_id, signal_sequence, last_turn_missed_signal) VALUES (?, 0, ?)
@@ -480,7 +508,7 @@ final class StandaloneChatManager {
         )
     }
 
-    func lastTurnMissedSignal(chatID: String = defaultChatID) throws -> Bool {
+    func lastTurnMissedSignal() throws -> Bool {
         var value = false
         try withStatement("SELECT last_turn_missed_signal FROM chat_meta WHERE chat_id = ?;", bindings: [.text(chatID)]) { statement in
             if sqlite3_step(statement) == SQLITE_ROW { value = sqlite3_column_int64(statement, 0) != 0 }
@@ -488,18 +516,18 @@ final class StandaloneChatManager {
         return value
     }
 
-    func setPendingFallback(pageID: String, turnID: String, chatID: String = defaultChatID) throws {
+    func setPendingFallback(pageID: String, turnID: String) throws {
         try exec(
             "INSERT INTO chat_pending_fallback (chat_id, page_id, turn_id) VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET page_id = excluded.page_id, turn_id = excluded.turn_id;",
             bindings: [.text(chatID), .text(pageID), .text(turnID)]
         )
     }
 
-    func markPendingFallback(pageID: String, turnID: String, chatID: String = defaultChatID) throws {
+    func markPendingFallback(pageID: String, turnID: String) throws {
         try exec("BEGIN IMMEDIATE;")
         do {
-            try setLastTurnMissedSignal(true, chatID: chatID)
-            try setPendingFallback(pageID: pageID, turnID: turnID, chatID: chatID)
+            try setLastTurnMissedSignal(true)
+            try setPendingFallback(pageID: pageID, turnID: turnID)
             try exec("COMMIT;")
         } catch {
             try? exec("ROLLBACK;")
@@ -510,17 +538,17 @@ final class StandaloneChatManager {
     /// Reconstructs a missing pending pointer only while its missed-signal marker,
     /// active page, and latest turn still match. An explicit page start wins if it
     /// commits first because it clears the marker and changes the active page.
-    func recoverPendingFallbackIfActive(pageID: String, turnID: String, chatID: String = defaultChatID) throws -> Bool {
+    func recoverPendingFallbackIfActive(pageID: String, turnID: String) throws -> Bool {
         try exec("BEGIN IMMEDIATE;")
         do {
-            guard try pendingFallback(chatID: chatID) == nil,
-                  try lastTurnMissedSignal(chatID: chatID),
-                  try activePage(chatID: chatID)?.id == pageID,
+            guard try pendingFallback() == nil,
+                  try lastTurnMissedSignal(),
+                  try activePage()?.id == pageID,
                   try messages(pageID: pageID).last?.turnID == turnID else {
                 try exec("ROLLBACK;")
                 return false
             }
-            try setPendingFallback(pageID: pageID, turnID: turnID, chatID: chatID)
+            try setPendingFallback(pageID: pageID, turnID: turnID)
             try exec("COMMIT;")
             return true
         } catch {
@@ -529,7 +557,7 @@ final class StandaloneChatManager {
         }
     }
 
-    func pendingFallback(chatID: String = defaultChatID) throws -> StandaloneChatPendingFallback? {
+    func pendingFallback() throws -> StandaloneChatPendingFallback? {
         var pending: StandaloneChatPendingFallback?
         try withStatement(
             "SELECT page_id, turn_id FROM chat_pending_fallback WHERE chat_id = ?;",
@@ -542,11 +570,11 @@ final class StandaloneChatManager {
         return pending
     }
 
-    func hasPendingFallback(chatID: String = defaultChatID) throws -> Bool {
-        try pendingFallback(chatID: chatID) != nil
+    func hasPendingFallback() throws -> Bool {
+        try pendingFallback() != nil
     }
 
-    func clearPendingFallback(turnID: String? = nil, chatID: String = defaultChatID) throws {
+    func clearPendingFallback(turnID: String? = nil) throws {
         if let turnID {
             try exec("DELETE FROM chat_pending_fallback WHERE chat_id = ? AND turn_id = ?;", bindings: [.text(chatID), .text(turnID)])
         } else {
@@ -556,14 +584,14 @@ final class StandaloneChatManager {
 
     /// Starts an explicitly requested page and supersedes any unresolved fallback
     /// in one transaction, so a late classifier cannot race this user choice.
-    func createExplicitPage(chatID: String = defaultChatID, title: String, provider: String) throws -> StandaloneChatPage {
+    func createExplicitPage(title: String, provider: String) throws -> StandaloneChatPage {
         try exec("BEGIN IMMEDIATE;")
         do {
-            let previousPageID = try activePage(chatID: chatID)?.id
-            try clearPendingFallback(chatID: chatID)
-            try setLastTurnMissedSignal(false, chatID: chatID)
-            let page = try createPage(chatID: chatID, title: title, provider: provider)
-            try recordSignal(chatID: chatID)
+            let previousPageID = try activePage()?.id
+            try clearPendingFallback()
+            try setLastTurnMissedSignal(false)
+            let page = try createPage(title: title, provider: provider)
+            try recordSignal()
             try exec("COMMIT;")
             if let previousPageID { try syncPageFile(pageID: previousPageID) }
             try syncPageFile(pageID: page.id)
@@ -576,12 +604,12 @@ final class StandaloneChatManager {
 
     /// The page the user started with New page, while it is the active page and no turn has
     /// filled it yet.
-    func unstartedUserNewPage(chatID: String = defaultChatID) throws -> StandaloneChatPage? {
+    func unstartedUserNewPage() throws -> StandaloneChatPage? {
         var pageID: String?
         try withStatement("SELECT page_id FROM chat_user_new_page WHERE chat_id = ?;", bindings: [.text(chatID)]) { statement in
             if sqlite3_step(statement) == SQLITE_ROW { pageID = columnText(statement, 0) }
         }
-        guard let pageID, let active = try activePage(chatID: chatID), active.id == pageID, active.messageCount == 0 else { return nil }
+        guard let pageID, let active = try activePage(), active.id == pageID, active.messageCount == 0 else { return nil }
         return active
     }
 
@@ -592,8 +620,8 @@ final class StandaloneChatManager {
     /// Playhouse starts this page, not the agent, so unlike `chat page new` it records no page
     /// signal: the turn still owes its own close-turn, and the fallback classifier names the
     /// page when that never comes.
-    func startUserNewPage(chatID: String = defaultChatID, provider: String) throws -> StandaloneChatPage {
-        if let unstarted = try unstartedUserNewPage(chatID: chatID) {
+    func startUserNewPage(provider: String) throws -> StandaloneChatPage {
+        if let unstarted = try unstartedUserNewPage() {
             guard unstarted.providerSessionID != nil else { return unstarted }
             try exec("UPDATE chat_pages SET provider_session_id = NULL WHERE id = ?;", bindings: [.text(unstarted.id)])
             if isOutsideTransaction { try syncPageFile(pageID: unstarted.id) }
@@ -601,10 +629,10 @@ final class StandaloneChatManager {
         }
         try exec("BEGIN IMMEDIATE;")
         do {
-            let previousPageID = try activePage(chatID: chatID)?.id
-            try clearPendingFallback(chatID: chatID)
-            try setLastTurnMissedSignal(false, chatID: chatID)
-            let page = try createPage(chatID: chatID, title: Self.newPageTitle, provider: provider)
+            let previousPageID = try activePage()?.id
+            try clearPendingFallback()
+            try setLastTurnMissedSignal(false)
+            let page = try createPage(title: Self.newPageTitle, provider: provider)
             try exec(
                 "INSERT INTO chat_user_new_page (chat_id, page_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET page_id = excluded.page_id;",
                 bindings: [.text(chatID), .text(page.id)]
@@ -623,8 +651,8 @@ final class StandaloneChatManager {
     /// then sent without New page: the empty page goes and the page it closed is the active page
     /// again, so the message continues it. Returns whether a page was undone.
     @discardableResult
-    func discardUnstartedUserNewPage(chatID: String = defaultChatID) throws -> Bool {
-        guard let unstarted = try unstartedUserNewPage(chatID: chatID) else { return false }
+    func discardUnstartedUserNewPage() throws -> Bool {
+        guard let unstarted = try unstartedUserNewPage() else { return false }
         var reopenedPageID: String?
         try exec("BEGIN IMMEDIATE;")
         do {
@@ -652,7 +680,6 @@ final class StandaloneChatManager {
     /// share one SQLite transaction with BEGIN IMMEDIATE.
     @discardableResult
     func applyFallbackClassification(
-        chatID: String = defaultChatID,
         pageID: String,
         turnID: String,
         continues: Bool,
@@ -663,8 +690,8 @@ final class StandaloneChatManager {
         var changedPageIDs: [String] = [pageID]
         try exec("BEGIN IMMEDIATE;")
         do {
-            guard try pendingFallback(chatID: chatID) == StandaloneChatPendingFallback(pageID: pageID, turnID: turnID),
-                  try activePage(chatID: chatID)?.id == pageID,
+            guard try pendingFallback() == StandaloneChatPendingFallback(pageID: pageID, turnID: turnID),
+                  try activePage()?.id == pageID,
                   try messages(pageID: pageID).last?.turnID == turnID else {
                 try exec("ROLLBACK;")
                 return false
@@ -672,7 +699,7 @@ final class StandaloneChatManager {
 
             if hasPriorUserMessage {
                 if !continues, let title {
-                    let newPage = try createPage(chatID: chatID, title: title, provider: provider)
+                    let newPage = try createPage(title: title, provider: provider)
                     changedPageIDs.append(newPage.id)
                     try exec(
                         "UPDATE chat_messages SET page_id = ? WHERE page_id = ? AND turn_id = ?;",
@@ -686,8 +713,8 @@ final class StandaloneChatManager {
             } else if let title {
                 try setPageTitle(pageID: pageID, title: title)
             }
-            try setLastTurnMissedSignal(false, chatID: chatID)
-            try clearPendingFallback(turnID: turnID, chatID: chatID)
+            try setLastTurnMissedSignal(false)
+            try clearPendingFallback(turnID: turnID)
             try exec("COMMIT;")
             for changedPageID in changedPageIDs { try syncPageFile(pageID: changedPageID) }
             return true
@@ -742,8 +769,7 @@ final class StandaloneChatManager {
         pageID: String,
         turnID: String,
         messages turnMessages: [StandaloneChatTurnMessage],
-        laterTurnIDs: Set<String> = [],
-        chatID: String = defaultChatID
+        laterTurnIDs: Set<String> = []
     ) throws -> Bool {
         try exec("BEGIN IMMEDIATE;")
         do {
@@ -796,7 +822,7 @@ final class StandaloneChatManager {
     }
 
     /// Every turn filed on any page of this chat.
-    func filedTurnIDs(chatID: String = defaultChatID) throws -> Set<String> {
+    func filedTurnIDs() throws -> Set<String> {
         var turnIDs = Set<String>()
         try withStatement(
             "SELECT DISTINCT m.turn_id FROM chat_messages m JOIN chat_pages p ON p.id = m.page_id WHERE p.chat_id = ?;",
@@ -818,12 +844,12 @@ final class StandaloneChatManager {
         return sqlite3_get_autocommit(database) != 0
     }
 
-    private func syncAllPageFiles(chatID: String = defaultChatID) throws {
+    private func syncAllPageFiles() throws {
         try FileManager.default.createDirectory(at: pageFilesDirectory, withIntermediateDirectories: true)
         _ = Darwin.chmod(pageFilesDirectory.path, mode_t(0o700))
         let pages = try queryPages(
-            "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages WHERE chat_id = ? ORDER BY created_at ASC;",
-            bindings: [.text(chatID)]
+            "SELECT id, chat_id, title, summary, created_at, closed_at, provider, provider_session_id, message_count FROM chat_pages ORDER BY created_at ASC;",
+            bindings: []
         )
         for page in pages { try syncPageFile(pageID: page.id) }
     }
@@ -896,7 +922,7 @@ final class StandaloneChatManager {
         return results
     }
 
-    func pageAssignmentsByTurnID(chatID: String = defaultChatID) throws -> [String: StandaloneChatPage] {
+    func pageAssignmentsByTurnID() throws -> [String: StandaloneChatPage] {
         var assignments: [String: StandaloneChatPage] = [:]
         try withStatement(
             "SELECT DISTINCT m.turn_id, p.id, p.chat_id, p.title, p.summary, p.created_at, p.closed_at, p.provider, p.provider_session_id, p.message_count FROM chat_messages m JOIN chat_pages p ON p.id = m.page_id WHERE p.chat_id = ? ORDER BY p.created_at ASC;",
@@ -917,7 +943,7 @@ final class StandaloneChatManager {
 
     // MARK: - Search
 
-    func searchPages(chatID: String = defaultChatID, query: String, limit: Int = 10) throws -> [StandaloneChatPageMatch] {
+    func searchPages(query: String, limit: Int = 10) throws -> [StandaloneChatPageMatch] {
         var results: [StandaloneChatPageMatch] = []
         let sql = """
         SELECT p.id, p.chat_id, p.title, p.summary, p.created_at, p.closed_at, p.provider, p.provider_session_id, p.message_count,
@@ -1039,5 +1065,13 @@ final class StandaloneChatManager {
 
     private func lastErrorMessage() -> String {
         String(cString: sqlite3_errmsg(database))
+    }
+}
+
+extension StandaloneChat {
+    /// The page-store chat this conversation files its pages under: the standalone chat's own, or
+    /// a parallel bubble's while it runs.
+    var standaloneChatPageScope: String {
+        parallelOfChatID == nil ? StandaloneChatManager.defaultChatID : id.uuidString
     }
 }

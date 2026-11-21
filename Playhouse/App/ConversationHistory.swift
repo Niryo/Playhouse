@@ -165,7 +165,7 @@ extension ConversationManager {
         guard try tasks.conversationSubject(taskID).isStandaloneChat else {
             throw BridgeCommandError(code: "invalid_argument", message: "Only the standalone chat has pages to read history from.")
         }
-        let pageByTurnID = try tasks.standaloneChatManager().pageAssignmentsByTurnID()
+        let pageByTurnID = try tasks.standaloneChatManager(for: taskID).pageAssignmentsByTurnID()
         guard let index = messages.firstIndex(where: { $0.turnID.flatMap { pageByTurnID[$0]?.id } == chatPageID }) else {
             throw BridgeCommandError(code: "not_found", message: "That chat page has no messages in this conversation's history.")
         }

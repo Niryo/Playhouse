@@ -115,6 +115,15 @@ function primaryIcon(name, fill, opacity, size, radius, dimmed) {
     h(Icon, { name: name, size: size, weight: "bold", color: "white" }));
 }
 
+function ParallelSendButton(props) {
+  var model = props.model, parallelSend = model.parallelSend;
+  return h(Button, {
+    disabled: parallelSend.disabled, testID: model.prefix + "composer-send-in-parallel-button", label: "Send in parallel",
+    help: parallelSend.help, onPress: props.on.sendInParallel
+  }, h(Panel, { fill: "accent", fillOpacity: 0.14, cornerRadius: 13, width: 26, height: 26, padding: 0, opacity: parallelSend.disabled ? 0.45 : 1 },
+    h(Icon, { asset: "ParallelSendIcon", width: 15, height: 15, color: "accent" })));
+}
+
 function Primary(props) {
   var model = props.model, primary = model.primary;
   var label;
@@ -146,7 +155,9 @@ function Toolbar(props) {
       h(ProviderMenu, { model: model, on: on }),
       h(ModelPicker, { model: model, on: on }),
       model.schedule != null ? h(ScheduleButton, { model: model, on: on }) : null,
-      h(Primary, { model: model, on: on })));
+      h(Stack, { axis: "h", spacing: 5 },
+        h(Primary, { model: model, on: on }),
+        model.parallelSend != null ? h(ParallelSendButton, { model: model, on: on }) : null)));
 }
 
 function Composer(props) {

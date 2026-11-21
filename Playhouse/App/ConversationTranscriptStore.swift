@@ -439,6 +439,71 @@ final class ConversationTranscriptStore {
         }
     }
 
+    /// Moves every turn of `sourceID` into `targetID` right after the target's `afterTurnID`, or
+    /// before its first turn when that is nil, in one transaction, and removes what is left of
+    /// the source. Moved turns join the target's neighbouring segment: history orders messages
+    /// by segment first, so a segment of their own would show them after the target's turns.
+    /// Running it again after the move finds no turns and only removes the source.
+    func moveTurns(from sourceID: UUID, into targetID: UUID, afterTurnID: String?) throws {
+        let source = sourceID.uuidString
+        let target = targetID.uuidString
+        try pool.write { db in
+            let turnIDs = try String.fetchAll(db, sql: "SELECT id FROM conversation_turns WHERE task_id = ? ORDER BY seq", arguments: [source])
+            guard !turnIDs.isEmpty else { return }
+            let insertSeq: Int
+            if let afterTurnID {
+                guard let seq = try Int.fetchOne(db, sql: "SELECT seq FROM conversation_turns WHERE task_id = ? AND id = ?", arguments: [target, afterTurnID]) else {
+                    throw BridgeCommandError(code: "not_found", message: "The turn to insert after is not in this conversation.")
+                }
+                insertSeq = seq + 1
+            } else {
+                insertSeq = try Int.fetchOne(db, sql: "SELECT MIN(seq) FROM conversation_turns WHERE task_id = ?", arguments: [target]) ?? 1
+            }
+            let segmentID = try String.fetchOne(
+                db, sql: "SELECT segment_id FROM conversation_turns WHERE task_id = ? AND seq >= ? ORDER BY seq LIMIT 1", arguments: [target, insertSeq]
+            ) ?? String.fetchOne(
+                db, sql: "SELECT segment_id FROM conversation_turns WHERE task_id = ? AND seq < ? ORDER BY seq DESC LIMIT 1", arguments: [target, insertSeq]
+            )
+            if segmentID == nil {
+                // The target has no turns yet, so the moved turns keep their own segments.
+                var targetState = try Self.load(db, taskID: targetID, selection: .none, includeImages: false)
+                let originalTarget = targetState
+                let sourceState = try Self.load(db, taskID: sourceID, selection: .none, includeImages: false)
+                let known = Set(targetState.segments.map(\.id))
+                targetState.segments += sourceState.segments.filter { !known.contains($0.id) }
+                try Self.save(db, taskID: targetID, from: originalTarget, to: targetState)
+            }
+            // Two passes through negative values keep (task_id, seq) unique while the later turns shift.
+            try db.execute(
+                sql: "UPDATE conversation_turns SET seq = -(seq + ?) WHERE task_id = ? AND seq >= ?",
+                arguments: [turnIDs.count, target, insertSeq]
+            )
+            try db.execute(sql: "UPDATE conversation_turns SET seq = -seq WHERE task_id = ? AND seq < 0", arguments: [target])
+            for (offset, turnID) in turnIDs.enumerated() {
+                if let segmentID {
+                    try db.execute(
+                        sql: "UPDATE conversation_turns SET task_id = ?, seq = ?, segment_id = ? WHERE task_id = ? AND id = ?",
+                        arguments: [target, insertSeq + offset, segmentID, source, turnID]
+                    )
+                } else {
+                    try db.execute(
+                        sql: "UPDATE conversation_turns SET task_id = ?, seq = ? WHERE task_id = ? AND id = ?",
+                        arguments: [target, insertSeq + offset, source, turnID]
+                    )
+                }
+            }
+            for table in ["conversation_messages", "conversation_activities"] {
+                try db.execute(sql: "UPDATE \(table) SET task_id = ? WHERE task_id = ?", arguments: [target, source])
+            }
+            let usagePosition = try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(position), -1) + 1 FROM conversation_token_usage WHERE task_id = ?", arguments: [target]) ?? 0
+            try db.execute(
+                sql: "UPDATE OR IGNORE conversation_token_usage SET task_id = ?, position = position + ? WHERE task_id = ?",
+                arguments: [target, usagePosition, source]
+            )
+        }
+        try remove(sourceID)
+    }
+
     func remove(_ taskID: UUID) throws {
         _ = Self.removedTaskIDsLock.withLock { Self.removedTaskIDs.insert(taskID) }
         try pool.write { db in

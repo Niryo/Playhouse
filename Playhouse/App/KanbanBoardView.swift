@@ -231,6 +231,9 @@ struct KanbanBoardView: View {
     @FocusState var isBoardSearchFocused: Bool
     @State var isShowingChatSidebar = false
     @State var chatTask: StandaloneChat?
+    /// The chat's open parallel bubbles, oldest first, and the one opened into its larger view.
+    @State var parallelBubbles: [StandaloneChat] = []
+    @State var openParallelBubbleID: UUID?
     @State var pluginChat: StandaloneChat?
     @State var showPluginDraftNotice = false
     @State var pluginInitialDraft: String?
@@ -611,6 +614,7 @@ struct KanbanBoardView: View {
             }
 
             standaloneChatOverlay
+            parallelChatBubblesOverlay
         }
         .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

@@ -57,14 +57,21 @@ final class BoardTaskManager {
         return try ConversationTranscriptStore.open(directory: storeURL.deletingLastPathComponent())
     }
 
+    /// The page store scoped to the chat with this ID: the standalone chat's own pages, or a
+    /// parallel bubble's while it runs.
+    func standaloneChatManager(for chatID: UUID) throws -> StandaloneChatManager {
+        let scope = try standaloneChatModel(chatID)?.standaloneChatPageScope ?? StandaloneChatManager.defaultChatID
+        return try standaloneChatManager(scope: scope)
+    }
+
     /// Resolves the same isolated data directory as the task store itself (so e2e test
     /// isolation and worktree-specific app data apply here too), rather than needing a raw
     /// dataDirectory string threaded through every call site.
-    func standaloneChatManager() throws -> StandaloneChatManager {
+    func standaloneChatManager(scope: String) throws -> StandaloneChatManager {
         guard let storeURL = modelContext.container.configurations.first?.url else {
             throw BridgeCommandError(code: "operation_failed", message: "Couldn't locate the task store for standalone chat.")
         }
-        return try StandaloneChatManager(dataDirectory: storeURL.deletingLastPathComponent().path)
+        return try StandaloneChatManager(dataDirectory: storeURL.deletingLastPathComponent().path, chatID: scope)
     }
 
     func claimNextQueuedMessage(taskID: UUID, threadID: String, messageID: UUID? = nil) throws -> QueuedConversationMessage? {

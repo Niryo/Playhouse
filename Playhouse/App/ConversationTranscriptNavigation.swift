@@ -265,6 +265,10 @@ extension TaskConversationView {
         let goalEntriesByAnchorID: [String: [GoalAchievementTimelineEntry]]
         /// Context compactions with a timeline position, in activity order.
         let orderedContextCompactions: [ConversationActivity]
+        /// Parallel bubbles' placeholders keyed by the message each sits above, where its page will
+        /// return, or under the last message when it returns after everything loaded.
+        var parallelPlaceholdersByMessageID: [String: [ParallelChatPlaceholder]] = [:]
+        var parallelPlaceholdersAfterMessageID: [String: [ParallelChatPlaceholder]] = [:]
     }
 
     func makeTranscriptRowContext(rendered: [ConversationMessage]) -> TranscriptRowContext {
@@ -273,6 +277,7 @@ extension TaskConversationView {
         // Loaded and visible messages are listed once for every row rather than once per row.
         let loadedIDs = messages.map(\.id)
         let visibleIDs = Set(allMessages.map(\.id))
+        let placeholders = parallelPlaceholderRows(in: allMessages)
         func anchor(_ messageID: String?) -> String? {
             messageID.flatMap { TranscriptRowAnchors.visibleAnchor(after: $0, loadedIDs: loadedIDs, visibleIDs: visibleIDs) }
         }
@@ -289,8 +294,41 @@ extension TaskConversationView {
             conversationMessages: allMessages,
             boundariesByAnchorID: boundaries,
             goalEntriesByAnchorID: goalEntries,
-            orderedContextCompactions: activities.filter { $0.isContextCompaction && $0.timelineOrder != nil }
+            orderedContextCompactions: activities.filter { $0.isContextCompaction && $0.timelineOrder != nil },
+            parallelPlaceholdersByMessageID: placeholders.before,
+            parallelPlaceholdersAfterMessageID: placeholders.after
         )
+    }
+
+    /// Where each open bubble's page will return among the loaded turns, by the same rule its
+    /// close applies, so the placeholder shows the very spot. A placeholder whose anchor turn
+    /// isn't loaded waits until it is.
+    func parallelPlaceholderRows(in allMessages: [ConversationMessage]) -> (before: [String: [ParallelChatPlaceholder]], after: [String: [ParallelChatPlaceholder]]) {
+        guard !parallelChatPlaceholders.isEmpty else { return ([:], [:]) }
+        var turnIDs: [String] = []
+        var firstMessageIDByTurnID: [String: String] = [:]
+        for message in allMessages {
+            guard let turnID = message.turnID, firstMessageIDByTurnID[turnID] == nil else { continue }
+            firstMessageIDByTurnID[turnID] = message.id
+            turnIDs.append(turnID)
+        }
+        let pageIDByTurnID = chatPagesByTurnID.mapValues(\.id)
+        let activePageID = chatPagesByTurnID.values.first { $0.closedAt == nil }?.id
+        var before: [String: [ParallelChatPlaceholder]] = [:]
+        var after: [String: [ParallelChatPlaceholder]] = [:]
+        for placeholder in parallelChatPlaceholders {
+            if let anchor = placeholder.anchorTurnID, !turnIDs.contains(anchor) { continue }
+            let insertion = ConversationManager.parallelChatBubbleInsertion(
+                turnIDs: turnIDs, anchorTurnID: placeholder.anchorTurnID,
+                pageIDByTurnID: pageIDByTurnID, activePageID: activePageID
+            )
+            if insertion < turnIDs.count, let messageID = firstMessageIDByTurnID[turnIDs[insertion]] {
+                before[messageID, default: []].append(placeholder)
+            } else if let last = allMessages.last {
+                after[last.id, default: []].append(placeholder)
+            }
+        }
+        return (before, after)
     }
 
     /// For each rendered message, a summary of everything its rows render from besides its ID, so
@@ -308,6 +346,8 @@ extension TaskConversationView {
             hasher.combine(context.inlineTools[message.id]?.count ?? 0)
             hasher.combine(context.boundariesByAnchorID[message.id]?.count ?? 0)
             hasher.combine(context.goalEntriesByAnchorID[message.id]?.count ?? 0)
+            hasher.combine(context.parallelPlaceholdersByMessageID[message.id]?.count ?? 0)
+            hasher.combine(context.parallelPlaceholdersAfterMessageID[message.id]?.count ?? 0)
             hasher.combine(annotationCounts[message.id] ?? 0)
             hasher.combine(message.id == context.activityDisclosureAnchorID)
             hasher.combine(isResponding && message.role == .assistant && message.text.isEmpty)
@@ -320,6 +360,10 @@ extension TaskConversationView {
     /// The rows above a message: its page separator and the activity disclosure.
     @ViewBuilder
     func transcriptLeadingRows(for message: ConversationMessage, context: TranscriptRowContext) -> some View {
+        ForEach(context.parallelPlaceholdersByMessageID[message.id] ?? []) { placeholder in
+            ParallelChatPlaceholderRow(bubbleID: placeholder.id, prompt: placeholder.prompt)
+                .id("parallel-chat-placeholder-\(placeholder.id.uuidString)")
+        }
         if sendsNewChatPage, task.isStandaloneChat, message.id == context.latestTurnStartID {
             // The turn's page is filed when the turn ends; until then its separator is the new page's.
             newChatPageSeparator(removable: false)
@@ -375,6 +419,10 @@ extension TaskConversationView {
             return nextOrder.map { eventOrder < $0 } ?? true
         }) { activity in
             contextCompactionTimelineRow(activity)
+        }
+        ForEach(context.parallelPlaceholdersAfterMessageID[message.id] ?? []) { placeholder in
+            ParallelChatPlaceholderRow(bubbleID: placeholder.id, prompt: placeholder.prompt)
+                .id("parallel-chat-placeholder-\(placeholder.id.uuidString)")
         }
     }
     /// The standalone chat shows each turn's tokens under the turn's last reply, where the

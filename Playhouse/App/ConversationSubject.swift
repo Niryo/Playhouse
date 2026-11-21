@@ -232,6 +232,10 @@ extension ConversationSubject {
     var authoringPluginID: String? {
         (self as? StandaloneChat)?.authoredPluginID
     }
+    /// A side page of the standalone chat that runs alongside it until it is closed.
+    var isParallelChatBubble: Bool {
+        (self as? StandaloneChat)?.parallelOfChatID != nil
+    }
 
     var answeredAsyncQuestionIDs: [String] {
         get {
@@ -389,6 +393,15 @@ final class StandaloneChat {
     var pluginAuthoringName: String?
     var pluginAuthoringPresentation: String?
     var pluginContextFolder: String?
+    // A parallel bubble is a side page of the standalone chat with its own conversation, so it
+    // runs alongside the chat. Closing it inserts its page into the chat after the anchor turn,
+    // the chat's last turn when the bubble was sent (nil when the chat was empty).
+    var parallelOfChatID: UUID?
+    var parallelAnchorTurnID: String?
+    var parallelPrompt: String?
+    /// Set once a close starts moving the bubble into the chat, so no later turn can open a page
+    /// the close has already moved; closing it again finishes the move.
+    var parallelIsClosing: Bool = false
     var statusRawValue: String
     var lifecycleRevision: Int = 0
     var statusMessage: String?

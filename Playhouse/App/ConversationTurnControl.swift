@@ -513,6 +513,9 @@ extension ConversationManager {
                 message: "Chat pages belong to the standalone chat, so a task conversation cannot take --context-page."
             )
         }
+        guard (task as? StandaloneChat)?.parallelIsClosing != true else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This parallel page is returning to the chat; close it again to finish.")
+        }
         guard !startsNewChatPage || task.isStandaloneChat else {
             throw BridgeCommandError(
                 code: "invalid_argument",
@@ -525,7 +528,7 @@ extension ConversationManager {
         operationClient.beginConversationOperation()
         defer { operationClient.finishConversationOperation() }
         let isStandaloneChat = task.isStandaloneChat
-        let standaloneChatManager = isStandaloneChat ? try? tasks.standaloneChatManager() : nil
+        let standaloneChatManager = isStandaloneChat ? try? tasks.standaloneChatManager(for: taskID) : nil
         // Capture the signal after this send owns the turn reservation. Capturing before
         // waiting could accidentally count a previous queued turn's page signal.
         var signalBefore: Int?
