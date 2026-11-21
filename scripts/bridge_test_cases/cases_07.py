@@ -230,7 +230,7 @@ class BridgeTestCases07:
     def background_fixture_turns(self, executable):
         return json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
 
-    # case-contract: test_codex_background_command_holds_task_in_progress_until_its_result | A Codex turn that ends without a stopping outcome while a required command it started is still running keeps the task In Progress, with no private prompt, for as long as the command runs, across many more reconciliations of the provider's background terminals than the old five-continuation allowance. When the command ends, Playhouse delivers its real exit status and output to Codex in exactly one private results turn, and the outcome Codex reports there settles the task: Review after a passing command; after a failing command either In Progress again while the agent's rerun is running and Review once the rerun passes, or Blocked with the agent's reason. A command that disappears without a result is reported to the agent as unknown, never as successful. A command still running when Playhouse's wait ceiling passes is reported as still running in the one results turn, is neither terminated nor waited for again, and a turn that ends unsettled after it leaves the task Blocked with the missing-outcome reason. Stopping the task while it waits terminates the command, leaves the task in Waiting Response with no failure reason, and starts no further turn. A turn that reports completed while leaving a command running, as with a dev server, settles in Review at once with no wait, no termination, and no results turn.
+    # case-contract: test_codex_background_command_holds_task_in_progress_until_its_result | A Codex turn that ends without a stopping outcome while a required command it started is still running keeps the task In Progress, with no private prompt, for as long as the command runs, across many more reconciliations of the provider's background terminals than the old five-continuation allowance. When the command ends, Playhouse delivers its real exit status and output to Codex in exactly one private results turn, and the outcome Codex reports there settles the task: Review after a passing command; after a failing command either In Progress again while the agent's rerun is running and Review once the rerun passes, or Blocked with the agent's reason. A command that disappears without a result is reported to the agent as unknown, never as successful. A command still running when Playhouse's wait ceiling passes is reported as still running in the one results turn, is neither terminated nor waited for again, and a turn that ends unsettled after it leaves the task Blocked with the missing-outcome reason. The runtime reports the background wait active and interruptible, so the conversation exposes Stop and asks for confirmation. Declining leaves the command running. Confirming terminates the command, leaves the task in Waiting Response with no failure reason, and starts no further turn. A turn that reports completed while leaving a command running, as with a dev server, settles in Review at once with no wait, no termination, and no results turn.
     def test_codex_background_command_holds_task_in_progress_until_its_result(self):
         results_marker = "background work results"
 
@@ -327,7 +327,18 @@ class BridgeTestCases07:
         stopped, stopped_executable = self.start_background_fixture_turn(stopped_id, "codex-fixture-unique-turns-background-stop")
         try:
             self.wait_for_background_fixture(stopped_executable, lambda state: len(state["running"]) == 1 and state["listCalls"] >= 2, "The run should be waited for before the Stop.")
-            self.assert_success(self.call_cli("conversation", "stop", stopped_id, timeout=30)[0])
+            thread_id = status(stopped_id)["codexThreadID"]
+            runtime = self.assert_success(self.call_cli("conversation", "runtime")[0])
+            self.assertIn(thread_id, runtime["activeThreadIDs"])
+            self.assertIn(thread_id, runtime["interruptibleThreadIDs"])
+            unconfirmed, _ = self.call_cli("conversation", "stop", stopped_id)
+            confirmation = self.assert_success(unconfirmed)
+            self.assertFalse(confirmation["interrupted"])
+            self.assertEqual(status(stopped_id)["status"], "In Progress")
+            self.assertEqual(len(self.background_fixture_state(stopped_executable)["running"]), 1)
+            self.assert_success(self.call_cli(
+                "conversation", "stop", stopped_id, "--confirm-background-work", confirmation["confirmationID"], timeout=30,
+            )[0])
             stopped.communicate(timeout=60)
         finally:
             if stopped.poll() is None:

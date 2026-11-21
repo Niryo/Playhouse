@@ -2,16 +2,76 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases01:
-    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. The observed Codex message time survives interruption and reload. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt.
+    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. The observed Codex message time survives interruption and reload. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt. The fixture acknowledges Stop while withholding the terminal event. Playhouse settles the turn and allows a provider switch.
     def test_codex_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Codex stop while thinking", "codex", "PLAYHOUSE_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
         )
-    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt.
+    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt. The fixture acknowledges Stop while withholding the terminal event. Playhouse settles the turn and allows a provider switch.
     def test_claude_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Claude stop while thinking", "claude", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
         )
+    # case-contract: test_claude_confirms_stop_of_background_process | Stopping a Claude turn with a running background process asks for confirmation. Declining keeps the turn and its process alive. Confirming stops the turn and kills its child even when the child is in a separate process group. A provider switch can then be saved, and a fresh task read keeps the selected provider and Waiting Response status.
+    def test_claude_confirms_stop_of_background_process(self):
+        executable = self.install_provider_fixture("claude", "claude-fixture-background-stop")
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        task_id = self.create_task("Claude background stop", provider="claude")["id"]
+        ready = Path(str(executable) + ".interrupt-ready")
+        child = Path(str(executable) + ".stop-child")
+        send = self.start_background_cli(
+            "conversation", "send", task_id, "--message", "Hold until stopped with a background process.",
+            expected_status=1, environment=environment,
+        )
+        self.wait_for(ready.is_file, "The Claude turn should start a background child.")
+        child_pid = int(child.read_text())
+        unconfirmed, _ = self.call_cli("conversation", "stop", task_id, extra_environment=environment)
+        confirmation = self.assert_success(unconfirmed)
+        self.assertFalse(confirmation["interrupted"])
+        self.assertTrue(confirmation["confirmationID"])
+        self.assertEqual(self.task_for(task_id, environment)["status"], "In Progress")
+        self.assertTrue(self.process_is_running(child_pid))
+
+        confirmed, _ = self.call_cli(
+            "conversation", "stop", task_id, "--confirm-background-work", confirmation["confirmationID"],
+            extra_environment=environment,
+        )
+        self.assertTrue(self.assert_success(confirmed)["interrupted"])
+        self.finish_background_cli(send)
+        self.wait_for(lambda: not self.process_is_running(child_pid), "The detached child should exit after Stop All.")
+        self.assert_success(self.call_cli(
+            "conversation", "provider", task_id, "set", "codex", extra_environment=environment,
+        )[0])
+        persisted = self.task_for(task_id, environment)
+        self.assertEqual(persisted["conversationProvider"], "codex")
+        self.assertEqual(persisted["status"], "Waiting Response")
+    # case-contract: test_codex_confirms_stop_of_active_background_terminal | A running Codex turn with a background terminal requires confirmation before stopping. Declining keeps the terminal running. Confirming terminates that thread's terminal, settles the turn even if the interrupt is unanswered, and allows a switch to Claude while the shared Codex server stays alive.
+    def test_codex_confirms_stop_of_active_background_terminal(self):
+        executable = self.install_provider_fixture("codex", "codex-fixture-active-terminal-hold-interrupt")
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task("Codex active background stop", provider="codex")["id"]
+        send = self.start_background_cli(
+            "conversation", "send", task_id, "--message", "Hold until stopped with a Codex background command.",
+            expected_status=1, environment=environment,
+        )
+        self.wait_for(Path(str(executable) + ".interrupt-ready").is_file, "The Codex turn should start a background terminal.")
+        unconfirmed = self.assert_success(self.call_cli("conversation", "stop", task_id, extra_environment=environment)[0])
+        self.assertFalse(unconfirmed["interrupted"])
+        self.assertEqual(self.task_for(task_id, environment)["status"], "In Progress")
+        self.assertEqual(len(self.background_fixture_state(executable)["running"]), 1)
+        server_before = next(manifest["process"] for provider, _, manifest in self.agent_manifests() if provider == "codex")
+        confirmed = self.assert_success(self.call_cli(
+            "conversation", "stop", task_id, "--confirm-background-work", unconfirmed["confirmationID"],
+            extra_environment=environment,
+        )[0])
+        self.assertTrue(confirmed["interrupted"])
+        self.assertEqual(self.background_fixture_state(executable)["terminated"], ["49264"])
+        self.assertTrue(self.agent_process_alive(server_before))
+        self.finish_background_cli(send)
+        switched = self.assert_success(self.call_cli(
+            "conversation", "provider", task_id, "set", "claude", extra_environment=environment,
+        )[0])
+        self.assertEqual(switched["conversationProvider"], "claude")
     # case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, exactly once even when callers race to start it, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
     def test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle(self):
         service = f"{arguments.service_name}.lifecycle-{uuid.uuid4().hex[:8]}"

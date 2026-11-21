@@ -281,10 +281,13 @@ protocol ConversationProviderClient: AnyObject {
     /// agent's execution resumes after the report. `nil` removes it.
     func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String)
     func interruptActiveTurn(threadID: String) async throws -> Bool
+    func activeTurnIdentity(threadID: String) -> String?
+    func hasBackgroundWorkToStop(threadID: String) async -> Bool
+    func stopBackgroundWork(threadID: String) async throws -> Bool
     /// Ends the thread's turn now, without waiting for the provider to acknowledge, so the send
     /// running it gives up the task's turn reservation: what deleting a task falls back on when
     /// its turn did not stop on an interrupt. True when there was a turn or a wait to end.
-    func forceStopActiveTurn(threadID: String) async -> Bool
+    func forceStopActiveTurn(threadID: String, interruptProvider: Bool) async -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool
     func rejectUserInput(requestID: String, threadID: String, message: String)
@@ -310,6 +313,10 @@ extension ConversationProviderClient {
     func takeBackgroundWork(threadID: String, known: [ProviderBackgroundJob]) async -> ProviderBackgroundWork { ProviderBackgroundWork() }
     func waitForBackgroundJobs(threadID: String, timeout: TimeInterval, shouldStop: @escaping () -> Bool) async -> ProviderBackgroundWaitEnd { .finished }
     func forgetBackgroundJobs(threadID: String) {}
+    func activeTurnIdentity(threadID: String) -> String? {
+        ConversationSteerMailbox.activeTurnID(threadID: threadID)
+    }
+    func stopBackgroundWork(threadID: String) async throws -> Bool { false }
     func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String) {}
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {}
     func loadThreadForSend(

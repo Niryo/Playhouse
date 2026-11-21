@@ -116,7 +116,10 @@ enum AgentRunHost {
     /// SIGTERM to the agent's process group, then SIGKILL after `grace`, only while the identity
     /// still names the process that was started. Never blocks the caller's actor.
     static func terminate(_ identity: AgentProcessIdentity, grace: TimeInterval = 1) async {
-        guard identity.isAlive else { return }
+        guard identity.isAlive else {
+            if AgentProcessIdentity.current(pid: identity.pid) == identity { reapIfChild(identity.pid) }
+            return
+        }
         signal(identity, SIGTERM)
         let deadline = Date().addingTimeInterval(grace)
         while Date() < deadline {
@@ -126,6 +129,16 @@ enum AgentRunHost {
         }
         if identity.isAlive { signal(identity, SIGKILL) }
         reapIfChild(identity.pid)
+    }
+
+    /// Tool shells can create their own process groups. Signal the root group
+    /// and every separately identified descendant captured before teardown.
+    static func killProcessTree(_ identity: AgentProcessIdentity, descendants: [AgentProcessIdentity]) {
+        guard identity.isAlive else { return }
+        signal(identity, SIGKILL)
+        for process in descendants.reversed() where process.isAlive {
+            kill(process.pid, SIGKILL)
+        }
     }
 
     private static func signal(_ identity: AgentProcessIdentity, _ signal: Int32) {

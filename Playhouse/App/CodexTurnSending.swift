@@ -4,12 +4,17 @@ import SwiftData
 import Darwin
 
 extension CodexAppServerClient {
+    func activeTurnIdentity(threadID: String) -> String? {
+        (activeClient(forThread: threadID) ?? self).activeTurnID(for: threadID)
+            ?? ConversationSteerMailbox.activeTurnID(threadID: threadID)
+    }
+
     func interruptActiveTurn(threadID expectedThreadID: String) async throws -> Bool {
         if let owner = activeClient(forThread: expectedThreadID), owner !== self {
             return try await owner.interruptActiveTurn(threadID: expectedThreadID)
         }
         guard let turnID = activeTurnID(for: expectedThreadID) else {
-            if await stopBackgroundWait(threadID: expectedThreadID) { return true }
+            if try await stopBackgroundWait(threadID: expectedThreadID) { return true }
             guard activeClient(forThread: expectedThreadID) == nil else { return false }
             return try await ConversationSteerMailbox.requestInterrupt(threadID: expectedThreadID)
         }
@@ -17,11 +22,14 @@ extension CodexAppServerClient {
         wasLastTurnInterrupted = true
         interruptedThreadIDs.insert(threadID)
         do {
-            _ = try await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID])
+            _ = try await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID], timeout: .seconds(10))
             return true
         } catch {
-            wasLastTurnInterrupted = false
-            interruptedThreadIDs.remove(threadID)
+            if activeTurnID(for: threadID) == turnID,
+               !rejectedTurnKeys.contains(Self.turnKey(threadID: threadID, turnID: turnID)) {
+                wasLastTurnInterrupted = false
+                interruptedThreadIDs.remove(threadID)
+            }
             throw error
         }
     }
@@ -29,29 +37,38 @@ extension CodexAppServerClient {
     /// Fails the thread's turn and any question it is waiting on right away and asks the
     /// app-server to interrupt it without waiting for the answer. The app-server itself keeps
     /// running: it is shared by every Codex conversation in this data folder.
-    func forceStopActiveTurn(threadID: String) async -> Bool {
+    func forceStopActiveTurn(threadID: String, interruptProvider: Bool) async -> Bool {
         if let owner = activeClient(forThread: threadID), owner !== self {
-            return await owner.forceStopActiveTurn(threadID: threadID)
+            return await owner.forceStopActiveTurn(threadID: threadID, interruptProvider: interruptProvider)
         }
         var stopped = false
         if let pending = pendingUserInputs[threadID] {
             clearPendingUserInput(threadID: threadID)
-            sendServerError(requestID: pending.nativeID, code: -32000, message: "Playhouse deleted this task.")
+            sendServerError(requestID: pending.nativeID, code: -32000, message: "Playhouse stopped this turn.")
             stopped = true
         }
-        if await stopBackgroundWait(threadID: threadID) { stopped = true }
+        if (try? await stopBackgroundWait(threadID: threadID)) == true { stopped = true }
         guard let turnID = activeTurnID(for: threadID) else { return stopped }
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         rejectedTurnKeys.insert(turnKey)
+        runningTurnThreadIDs.remove(threadID)
         wasLastTurnInterrupted = true
         interruptedThreadIDs.insert(threadID)
-        let error = ClientError.turnFailed("Playhouse stopped this turn to delete its task.")
+        if contextlessTurnIDs.removeValue(forKey: threadID) != nil {
+            contextlessTurnEntries.removeValue(forKey: threadID)
+            Self.processActiveThreadIDs.remove(threadID)
+            ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
+            isTurnActive = !contextlessTurnIDs.isEmpty || turnContexts.values.contains { $0.turnID != nil }
+        }
+        let error = ClientError.turnFailed("Playhouse stopped this turn.")
         if let waiter = turnWaiters.removeValue(forKey: turnKey) {
             waiter.resume(throwing: error)
         } else {
             completedTurns[turnKey] = .failure(error)
         }
-        Task { try? await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID]) }
+        if interruptProvider {
+            Task { try? await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID]) }
+        }
         return true
     }
 

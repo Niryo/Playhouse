@@ -280,8 +280,13 @@ struct RemoteConversationManager {
         return (result.object?["text"]?.string ?? "", result.object?["queued"]?.bool ?? false, history)
     }
 
-    func interrupt(taskID: UUID) async throws -> Bool {
-        let result = try await daemon.call("conversation.stop", ["taskID": id(taskID)])
+    func interrupt(taskID: UUID, confirmationID: String? = nil) async throws -> Bool {
+        var arguments = ["taskID": id(taskID)]
+        if let confirmationID { arguments["confirmationID"] = .string(confirmationID) }
+        let result = try await daemon.call("conversation.stop", arguments)
+        if let confirmation = result.object?["confirmationID"]?.string {
+            throw ConversationStopConfirmation(id: confirmation)
+        }
         return result.object?["interrupted"]?.bool ?? false
     }
 

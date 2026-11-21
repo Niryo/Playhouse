@@ -262,6 +262,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     var runningTurnThreadIDs = Set<String>()
     var backgroundWaitThreadIDs = Set<String>()
     var backgroundWaitStopRequests = Set<String>()
+    var backgroundWaitStopsInFlight = Set<String>()
     /// The app-server's last `thread/status/changed` per thread. `idle` only says no turn
     /// is running: a thread's background terminals keep running while it is idle.
     var threadStatuses: [String: String] = [:]
@@ -428,14 +429,15 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// the resume re-sends any pending approval or question, and the turn list says whether the
     /// turn is still running or finished in the meantime.
 
-    /// Every thread with a running turn, a turn that is starting, or a question
-    /// waiting for an answer. What `isTurnActive(threadID:)` answers per thread.
+    /// Every thread with a running or starting turn, a pending question, or a
+    /// background wait. What `isTurnActive(threadID:)` answers per thread.
     var activeThreadIDsSnapshot: Set<String> {
         var ids = startingThreadIDs
         for (threadID, context) in turnContexts where context.turnID != nil { ids.insert(threadID) }
         if let activeThreadID, activeTurnID != nil { ids.insert(activeThreadID) }
         ids.formUnion(contextlessTurnIDs.keys)
         ids.formUnion(pendingUserInputs.keys)
+        ids.formUnion(backgroundWaitThreadIDs)
         return ids
     }
 

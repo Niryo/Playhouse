@@ -22,6 +22,28 @@ struct CodexCommandJob {
 }
 
 extension CodexAppServerClient {
+    func hasBackgroundWorkToStop(threadID: String) async -> Bool {
+        if let owner = activeClient(forThread: threadID), owner !== self {
+            return await owner.hasBackgroundWorkToStop(threadID: threadID)
+        }
+        if backgroundWaitThreadIDs.contains(threadID) { return true }
+        guard activeTurnIdentity(threadID: threadID) != nil else { return false }
+        if let terminals = await listBackgroundTerminals(threadID: threadID, timeout: .milliseconds(500)) {
+            return !terminals.isEmpty
+        }
+        return commandJobs[threadID]?.values.contains(where: { $0.result == nil }) == true
+    }
+
+    func stopBackgroundWork(threadID: String) async throws -> Bool {
+        if let owner = activeClient(forThread: threadID), owner !== self {
+            return try await owner.stopBackgroundWork(threadID: threadID)
+        }
+        if try await stopBackgroundWait(threadID: threadID) { return true }
+        let turnID = activeTurnIdentity(threadID: threadID)
+        try await terminateBackgroundJobs(threadID: threadID, turnID: turnID)
+        return false
+    }
+
     /// Follows `commandExecution` items by thread, independent of any turn context, so a
     /// command's end is seen after its turn's context is gone.
     func noteCommandItem(method: String, params: [String: Any]) {
@@ -64,13 +86,13 @@ extension CodexAppServerClient {
     }
 
     /// The thread's live background terminals, or nil when the app-server couldn't be asked.
-    func listBackgroundTerminals(threadID: String) async -> [[String: Any]]? {
+    func listBackgroundTerminals(threadID: String, timeout: Duration = .seconds(15)) async -> [[String: Any]]? {
         var terminals: [[String: Any]] = []
         var cursor: String?
         repeat {
             var params: [String: Any] = ["threadId": threadID, "limit": 200]
             if let cursor { params["cursor"] = cursor }
-            guard let response = try? await request(method: "thread/backgroundTerminals/list", params: params, timeout: .seconds(15)),
+            guard let response = try? await request(method: "thread/backgroundTerminals/list", params: params, timeout: timeout),
                   let page = response["data"] as? [[String: Any]] else { return nil }
             terminals += page
             cursor = response["nextCursor"] as? String
@@ -164,6 +186,10 @@ extension CodexAppServerClient {
             } interrupt: {
                 try await self.interruptActiveTurn(threadID: threadID)
             }
+            if backgroundWaitStopsInFlight.contains(threadID) {
+                try? await Task.sleep(for: .milliseconds(50))
+                continue
+            }
             if backgroundWaitStopRequests.contains(threadID) || shouldStop() { return .stopped }
             let running = (commandJobs[threadID] ?? [:]).values.filter { $0.result == nil }
             if running.isEmpty { return .finished }
@@ -177,7 +203,7 @@ extension CodexAppServerClient {
                     failedReconciliations = 0
                 } else {
                     failedReconciliations += 1
-                    if failedReconciliations >= 5 {
+                    if failedReconciliations >= 5, !backgroundWaitStopsInFlight.contains(threadID) {
                         return .providerLost("the Codex app-server stopped answering")
                     }
                 }
@@ -197,27 +223,43 @@ extension CodexAppServerClient {
 
     /// Stop during a background wait: there is no turn to interrupt, so the commands the
     /// wait is for are ended instead, and the wait with them.
-    func stopBackgroundWait(threadID: String) async -> Bool {
+    func stopBackgroundWait(threadID: String) async throws -> Bool {
         guard backgroundWaitThreadIDs.contains(threadID) else { return false }
+        guard backgroundWaitStopsInFlight.insert(threadID).inserted else { return false }
+        defer { backgroundWaitStopsInFlight.remove(threadID) }
+        let tracked = commandJobs[threadID] ?? [:]
+        let waitID = activeTurnIdentity(threadID: threadID)
+        try await terminateBackgroundJobs(threadID: threadID, turnID: waitID)
         wasLastTurnInterrupted = true
         interruptedThreadIDs.insert(threadID)
-        // Captured before the wait is released: its owner forgets the jobs as soon as it ends.
-        let tracked = commandJobs[threadID] ?? [:]
         backgroundWaitStopRequests.insert(threadID)
-        let terminals = await listBackgroundTerminals(threadID: threadID) ?? []
-        for terminal in terminals {
-            guard let itemID = terminal["itemId"] as? String, tracked[itemID] != nil,
-                  let processID = terminal["processId"] as? String else { continue }
-            _ = try? await request(
-                method: "thread/backgroundTerminals/terminate",
-                params: ["threadId": threadID, "processId": processID], timeout: .seconds(15)
-            )
-        }
         commandJobs.removeValue(forKey: threadID)
         PlayhouseDiagnostics.record("codex.background_wait.stopped", fields: diagnosticFields([
             "threadID": threadID,
             "jobCount": String(tracked.count),
         ]))
         return true
+    }
+
+    private func terminateBackgroundJobs(threadID: String, turnID: String?) async throws {
+        guard let terminals = await listBackgroundTerminals(threadID: threadID, timeout: .seconds(2)) else {
+            throw ClientError.protocolFailure("Codex didn't report which background commands are running.")
+        }
+        for terminal in terminals {
+            guard activeTurnIdentity(threadID: threadID) == turnID else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The conversation changed while stopping its background work.")
+            }
+            guard let processID = terminal["processId"] as? String else {
+                throw ClientError.protocolFailure("Codex did not identify a running background command.")
+            }
+            let result = try await request(
+                method: "thread/backgroundTerminals/terminate",
+                params: ["threadId": threadID, "processId": processID], timeout: .seconds(2)
+            )
+            if result["terminated"] as? Bool != true,
+               await listBackgroundTerminals(threadID: threadID, timeout: .seconds(2))?.contains(where: { $0["processId"] as? String == processID }) != false {
+                throw ClientError.protocolFailure("Codex did not stop a background command.")
+            }
+        }
     }
 }

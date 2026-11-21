@@ -321,6 +321,8 @@ struct TaskConversationView: View {
     /// while the provider winds the turn down (or finishes launching it, only to stop it), so
     /// until that turn is really over its activity doesn't bring the Stop button back.
     @State var isPausingResponse = false
+    @State var confirmsStoppingBackgroundWork = false
+    @State var backgroundStopConfirmationID: String?
     @State var interruptsInFlight = 0
     /// Identifies this window's newest send. An older send still unwinding after a stop leaves
     /// the composer state to the newer one.
@@ -716,6 +718,16 @@ struct TaskConversationView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
+        .alert("Stop background work?", isPresented: $confirmsStoppingBackgroundWork, presenting: backgroundStopConfirmationID) { confirmationID in
+            Button("Keep Running", role: .cancel) {}
+                .buttonHoverPointer()
+                .nativeHelp("Leave the turn and its background work running")
+            Button("Stop All", role: .destructive) { pauseResponse(confirmationID: confirmationID) }
+                .buttonHoverPointer()
+                .nativeHelp("Stop the turn and end its background work")
+        } message: { _ in
+            Text("This conversation has running background work. Stopping will end that work.")
+        }
         .pluginPresentation($openConversationPlugin, props: pluginProps, actions: pluginActions)
         .onChange(of: task.id, initial: true) {
             runtimeSlice.observe(conversationRuntime, taskID: task.id.uuidString) { [task] in

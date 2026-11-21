@@ -706,13 +706,100 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
-    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. The observed Codex message time survives interruption and reload. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt.
+    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. The observed Codex message time survives interruption and reload. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt. The fixture acknowledges Stop while withholding the terminal event. Playhouse settles the turn and allows a provider switch.
     func test_codex_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "codex", title: "Codex stop while thinking")
     }
-    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt.
+    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. In the window Continue replaces Stop at once, before the provider acknowledges the interrupt. The fixture acknowledges Stop while withholding the terminal event. Playhouse settles the turn and allows a provider switch.
     func test_claude_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
+    }
+    // case-contract: test_claude_confirms_stop_of_background_process | Stopping a Claude turn with a running background process asks for confirmation. Declining keeps the turn and its process alive. Confirming stops the turn and kills its child even when the child is in a separate process group. A provider switch can then be saved, and a fresh task read keeps the selected provider and Waiting Response status.
+    func test_claude_confirms_stop_of_background_process() throws {
+        let title = "Claude background stop"
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.",
+            "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui").path
+        let childMarker = URL(fileURLWithPath: executable + ".stop-child")
+        try? FileManager.default.removeItem(at: childMarker)
+        claudeFixtureExecutable = executable
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped with a background process.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: childMarker.path) }, timeout: 15))
+        let pid = try XCTUnwrap(Int32(String(contentsOf: childMarker, encoding: .utf8)))
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.isEnabled }, timeout: 5))
+        stop.click()
+        let confirmation = app.sheets.containing(.staticText, identifier: "Stop background work?").firstMatch
+        XCTAssertTrue(confirmation.waitToExist(timeout: 5))
+        attachAppWindowScreenshot(named: "Claude background work confirmation")
+        attachScreenshot(named: "Claude confirmation in context")
+        attachElementScreenshot(confirmation, named: "Claude confirmation choices")
+        confirmation.buttons["Keep Running"].click()
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(kill(pid, 0), 0)
+        stop.click()
+        XCTAssertTrue(confirmation.waitToExist(timeout: 5))
+        confirmation.buttons["Stop All"].click()
+        try switchProviderAfterStop(taskID: taskID, provider: "codex")
+        XCTAssertTrue(waitUntil({ kill(pid, 0) != 0 }, timeout: 5))
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+    }
+    // case-contract: test_codex_confirms_stop_of_active_background_terminal | A running Codex turn with a background terminal requires confirmation before stopping. Declining keeps the terminal running. Confirming terminates that thread's terminal, settles the turn even if the interrupt is unanswered, and allows a switch to Claude while the shared Codex server stays alive.
+    func test_codex_confirms_stop_of_active_background_terminal() throws {
+        let title = "Codex active background stop"
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.",
+            "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
+        for suffix in ["interrupt-ready", "interrupt-received", "background-state", "history"] {
+            try? FileManager.default.removeItem(atPath: "\(executable).\(suffix)")
+        }
+        let backgroundState = URL(fileURLWithPath: executable + ".background-state")
+        func terminalState() -> [String: Any] {
+            guard let data = try? Data(contentsOf: backgroundState) else { return [:] }
+            return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        }
+        codexFixtureExecutable = executable
+        claudeFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui").path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped with a Codex background command.")
+        element("send-message-button").click()
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({
+            stop.isEnabled && (terminalState()["running"] as? [String: Any])?.count == 1
+        }, timeout: 15))
+        let server = try XCTUnwrap(agentManifests().first {
+            $0.kind == "codex" && agentIsAlive($0.manifest["process"] as? [String: Any])
+        }?.manifest["process"] as? [String: Any])
+        stop.click()
+        let confirmation = app.sheets.containing(.staticText, identifier: "Stop background work?").firstMatch
+        XCTAssertTrue(confirmation.waitToExist(timeout: 5))
+        confirmation.buttons["Keep Running"].click()
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual((terminalState()["running"] as? [String: Any])?.count, 1)
+        stop.click()
+        XCTAssertTrue(confirmation.waitToExist(timeout: 5))
+        attachScreenshot(named: "Stop confirmation with a live Codex turn")
+        attachElementScreenshot(confirmation, named: "Codex active turn confirmation choices")
+        confirmation.buttons["Stop All"].click()
+        try switchProviderAfterStop(taskID: taskID, provider: "claude")
+        XCTAssertEqual(terminalState()["terminated"] as? [String], ["49264"])
+        XCTAssertTrue(agentIsAlive(server), "The same shared Codex server stays alive.")
     }
     // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, exactly once even when callers race to start it, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
     func test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle() throws {
