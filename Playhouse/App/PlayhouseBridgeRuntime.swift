@@ -494,6 +494,15 @@ final class PlayhouseBridgeRuntime {
                     ? try await AgentUsageService.login(provider, clients: clients)
                     : try await AgentUsageService.switchAccount(provider, clients: clients)
                 result = .object(["loginURL": url.map(BridgeValue.string) ?? .null])
+            case "providers.list":
+                result = try Self.value(ConversationProviderInstaller.statuses(clients: conversationClients()))
+            case "providers.install":
+                let provider = try ConversationProvider.parse(request.requiredString("provider"))
+                result = try Self.value(await ConversationProviderInstaller.install(
+                    provider, clients: conversationClients(),
+                    // A test's installer fixture stands in for the network installer only in a test bundle.
+                    fixtureInstaller: PlayhouseAppIdentity.isTestBundle ? request.arguments["__providerInstaller"]?.string : nil
+                ))
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
@@ -603,7 +612,8 @@ final class PlayhouseBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let record = try await conversations.setProvider(
                     taskID: taskID,
-                    provider: ConversationProvider.parse(request.requiredString("provider"))
+                    provider: ConversationProvider.parse(request.requiredString("provider")),
+                    remembersDefault: request.arguments["remembersDefault"]?.bool ?? true
                 )
                 guard case .object(var fields) = try Self.value(record) else { throw BridgeCommandError(code: "internal_error", message: "The task record could not be encoded.") }
                 // The dividers as recorded, which replace the ones a window drew when it showed the switch.

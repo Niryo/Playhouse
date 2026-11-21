@@ -183,6 +183,14 @@ extension PlayhouseUITests {
         let created = try runCLI(["task", "create", "--title", "Rejected provider switch", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question-queued").path
+        // Claude is installed, so the menu offers it as a provider rather than as Add Claude.
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-rejected-switch")
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Rejected provider switch")
         element("message-composer").click()

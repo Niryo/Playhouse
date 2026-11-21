@@ -922,6 +922,44 @@ extension TaskConversationView {
         await conversationManager.generateTitle(taskID: task.id, prompt: prompt)
     }
 
+    var installedProviders: [ConversationProvider] {
+        providerInstallStatuses.filter(\.isInstalled).map(\.provider)
+    }
+
+    /// The providers the menu offers to install. None until the daemon reports what's installed.
+    var missingProviders: [ConversationProvider] {
+        providerInstallStatuses.filter { !$0.isInstalled }.map(\.provider)
+    }
+
+    /// Reads which providers are installed. A conversation that hasn't started, whose provider
+    /// isn't installed, switches to one that is, so the composer shows a provider that can run.
+    func loadProviderInstallStatuses(adoptInstalledProvider: Bool = false) async {
+        guard let statuses = try? await conversationManager.providerInstallStatuses() else { return }
+        providerInstallStatuses = statuses
+        guard adoptInstalledProvider, !installedProviders.contains(provider),
+              let installed = installedProviders.first,
+              messages.isEmpty, task.pendingSubmittedPrompt == nil, canSwitchProvider else { return }
+        switchProvider(to: installed, remembersDefault: false)
+    }
+
+    /// Runs the provider's official installer through the daemon, then switches to it.
+    func installProvider(_ newProvider: ConversationProvider) {
+        guard installingProvider == nil else { return }
+        installingProvider = newProvider
+        errorMessage = nil
+        Task { @MainActor in
+            defer { installingProvider = nil }
+            do {
+                _ = try await conversationManager.installProvider(newProvider)
+                await loadProviderInstallStatuses()
+                if newProvider != provider, canSwitchProvider { switchProvider(to: newProvider) }
+            } catch {
+                await loadProviderInstallStatuses()
+                errorMessage = "Couldn't install \(ConversationProviderInstaller.productName(newProvider)): \(error.localizedDescription)"
+            }
+        }
+    }
+
     var providerMenuHelp: String {
         canSwitchProvider
             ? "Choose which assistant runs this task"
@@ -932,7 +970,7 @@ extension TaskConversationView {
     /// runs the next turn. So the window shows the switch at once, from what it already
     /// holds (the cached models, the remembered model and the divider), while the daemon
     /// saves it. The provider's live model list and its notice follow in the background.
-    func switchProvider(to newProvider: ConversationProvider) {
+    func switchProvider(to newProvider: ConversationProvider, remembersDefault: Bool = true) {
         guard newProvider != provider, canSwitchProvider else { return }
         let shownBoundaries = providerBoundaries
         let shownModels = modelOptions
@@ -952,7 +990,7 @@ extension TaskConversationView {
                 providerSwitch = nil
             }
             do {
-                providerBoundaries = try await conversationManager.setProvider(taskID: task.id, provider: newProvider).providerBoundaries
+                providerBoundaries = try await conversationManager.setProvider(taskID: task.id, provider: newProvider, remembersDefault: remembersDefault).providerBoundaries
             } catch {
                 // The switch didn't happen, so the window shows what it showed before.
                 switchedProvider = nil
@@ -1011,8 +1049,9 @@ extension TaskConversationView {
         guard let capabilities = try? await conversationManager.providerCapabilities(taskID: task.id),
               provider == noticeProvider,
               let current = capabilities.first(where: { $0.provider == provider }) else { return }
-        if let error = current.error, !current.isAvailable {
-            providerNotice = error
+        // A provider that isn't installed is offered for install in the provider menu instead.
+        guard current.isAvailable else {
+            providerNotice = nil
             return
         }
         var parts: [String] = []

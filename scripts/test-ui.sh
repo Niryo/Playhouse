@@ -94,6 +94,8 @@ done
 mkdir -p "${fixture_root}/gh-fixture"
 cp "${repository_root}/scripts/fixtures/gh-fixture.sh" "${fixture_root}/gh-fixture/gh"
 chmod 755 "${fixture_root}/gh-fixture/gh"
+cp "${repository_root}/scripts/fixtures/provider-installer-fixture.sh" "${fixture_root}/provider-installer-fixture"
+chmod 755 "${fixture_root}/provider-installer-fixture"
 mkdir -p "${fixture_root}/git-hold"
 cp "${repository_root}/scripts/fixtures/git-hold.sh" "${fixture_root}/git-hold/git"
 chmod 755 "${fixture_root}/git-hold/git"

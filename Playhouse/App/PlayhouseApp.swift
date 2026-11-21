@@ -198,6 +198,7 @@ private struct MainWindowView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .modifier(SuggestionsFolderPromptModifier(isReady: isLifecycleReady))
         .tint(WorkspaceTheme.accent)
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .background(UpdateTitlebarAccessory(updates: updateController, preferences: WorkspaceSettings.preferencesStore))

@@ -120,21 +120,21 @@ struct WorkspaceSettingsView: View {
                     get: { autoCompaction.minimumTokens }, set: { saveCompaction(minimumTokens: $0) }
                 ), suffix: "tokens", id: "auto-compaction-minimum-field")
             }
-            Section("Repository root") {
-                Text("Choose the root folder that contains your repositories. Playhouse searches below it for repository suggestions, and a valid root is required before sending a conversation.")
+            Section("Suggestions from") {
+                Text("Choose the folder that holds all of your Git repositories. Playhouse suggests repositories from it, and a task without a repository runs there.")
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
                     Image(systemName: "folder")
                         .foregroundStyle(.secondary)
-                    Text(parentFolderURL?.path ?? "No default parent folder selected")
+                    Text(parentFolderURL?.path ?? "No folder selected")
                         .lineLimit(2)
                         .textSelection(.enabled)
-                        .accessibilityLabel(parentFolderURL?.path ?? "No default parent folder selected")
+                        .accessibilityLabel(parentFolderURL?.path ?? "No folder selected")
                         .accessibilityIdentifier("default-parent-folder-path")
                     Spacer()
                     Button(parentFolderURL == nil ? "Choose…" : "Change…", action: chooseParentFolder)
                     .buttonHoverPointer()
-                        .nativeHelp("Choose repository root folder")
+                        .nativeHelp("Choose the folder Playhouse suggests repositories from")
                         .accessibilityIdentifier("choose-default-parent-folder-button")
                     if parentFolderURL != nil {
                         Button("Clear") {
@@ -146,12 +146,12 @@ struct WorkspaceSettingsView: View {
                             }
                         }
                         .buttonHoverPointer()
-                        .nativeHelp("Clear repository root folder")
+                        .nativeHelp("Clear the folder Playhouse suggests repositories from")
                         .accessibilityIdentifier("clear-default-parent-folder-button")
                     }
                 }
                 if !defaultParentFolderPath.isEmpty && parentFolderURL == nil {
-                    Label("This folder is unavailable. Choose another parent folder.", systemImage: "exclamationmark.triangle.fill")
+                    Label("This folder is unavailable. Choose another folder.", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
             }
@@ -277,14 +277,7 @@ struct WorkspaceSettingsView: View {
     }
 
     private func chooseParentFolder() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose repository root folder"
-        panel.message = "Playhouse will search below this folder for repositories. A root folder is required before sending conversations."
-        panel.prompt = "Use This Folder"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = parentFolderURL ?? FileManager.default.homeDirectoryForCurrentUser
+        let panel = SuggestionsFolderPrompt.makePanel(startingAt: parentFolderURL)
         panel.begin { response in
             guard response == .OK, let selected = panel.url else { return }
             DispatchQueue.main.async {
@@ -294,6 +287,113 @@ struct WorkspaceSettingsView: View {
                     defaultParentFolderPath = path
                 } catch {
                     pickerError = error.localizedDescription
+                }
+            }
+        }
+    }
+}
+
+/// The folder Playhouse suggests repositories from, asked for in a modal: at launch while none
+/// is set, and when a send needs one (a task with no repository runs in that folder).
+enum SuggestionsFolderPrompt {
+    static let notification = Notification.Name("playhouseShowSuggestionsFolderPrompt")
+
+    static func request() {
+        NotificationCenter.default.post(name: notification, object: nil)
+    }
+
+    /// The folder panel the prompt, Settings and the repository picker open.
+    static func makePanel(startingAt directory: URL?) -> NSOpenPanel {
+        let panel = NSOpenPanel()
+        panel.title = "Suggestions from"
+        panel.message = "Choose the folder that holds your Git repositories. Playhouse suggests repositories from it."
+        panel.prompt = "Use This Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = directory ?? FileManager.default.homeDirectoryForCurrentUser
+        return panel
+    }
+}
+
+/// Presents the Suggestions from modal over the main window. Composed of plugin atoms.
+struct SuggestionsFolderPromptModifier: ViewModifier {
+    /// Whether the window shows the board yet; the launch prompt waits for it.
+    let isReady: Bool
+    @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
+    @State private var isPresented = false
+    @State private var hasPromptedAtLaunch = false
+    @State private var error: String?
+
+    private var hasFolder: Bool { WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil }
+
+    func body(content: Content) -> some View {
+        content
+            .atomModal(
+                ModalProps(isPresented: isPresented, width: 440, title: "Where do your repositories live?", icon: "folder.badge.gearshape"),
+                common: AtomCommon(testID: "suggestions-folder-prompt"),
+                onDismiss: { isPresented = false }
+            ) {
+                AtomText(
+                    props: TextProps(text: "Choose the folder that holds all of your Git repositories, so Playhouse can suggest repositories from there. You can change it later in Settings."),
+                    common: AtomCommon(testID: "suggestions-folder-prompt-message", fillWidth: true)
+                )
+                if let error {
+                    AtomLabel(props: LabelProps(text: error, icon: "exclamationmark.triangle.fill", size: 11, weight: "medium", color: "red"))
+                }
+                AtomStack(props: StackProps(axis: "h")) {
+                    AtomSpacer()
+                    AtomButton(
+                        props: ButtonProps(style: "automatic", shortcut: "cancel"),
+                        common: AtomCommon(testID: "suggestions-folder-prompt-later-button", help: "Choose a folder later"),
+                        action: { isPresented = false }
+                    ) {
+                        AtomText(props: TextProps(text: "Not Now"))
+                    }
+                    AtomButton(
+                        props: ButtonProps(style: "prominent", shortcut: "default"),
+                        common: AtomCommon(testID: "suggestions-folder-prompt-choose-button", help: "Choose the folder that holds your repositories"),
+                        action: chooseFolder
+                    ) {
+                        AtomText(props: TextProps(text: "Choose Folder…"))
+                    }
+                }
+            }
+            .onChange(of: isReady, initial: true) { _, ready in
+                guard ready, !hasPromptedAtLaunch else { return }
+                hasPromptedAtLaunch = true
+                if !hasFolder { isPresented = true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: SuggestionsFolderPrompt.notification)) { _ in
+                if !hasFolder {
+                    error = nil
+                    isPresented = true
+                }
+            }
+    }
+
+    /// The modal is a sheet, so it closes before the folder panel opens and comes back if the
+    /// panel is cancelled.
+    private func chooseFolder() {
+        isPresented = false
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            let panel = SuggestionsFolderPrompt.makePanel(startingAt: nil)
+            panel.begin { response in
+                DispatchQueue.main.async {
+                    guard response == .OK, let selected = panel.url else {
+                        isPresented = true
+                        return
+                    }
+                    let path = selected.standardizedFileURL.path
+                    do {
+                        try WorkspaceSettingsManager().setDefaultParentFolder(path)
+                        defaultParentFolderPath = path
+                        error = nil
+                    } catch {
+                        self.error = "Couldn't use that folder: \(error.localizedDescription)"
+                        isPresented = true
+                    }
                 }
             }
         }

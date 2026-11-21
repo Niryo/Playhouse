@@ -271,7 +271,7 @@ final class WorkspaceSettingsManager {
         guard let rootFolder = defaultParentFolderURL else {
             throw BridgeCommandError(
                 code: "settings_required",
-                message: "Set the repository root folder in Settings before sending a conversation."
+                message: "Choose the folder Playhouse suggests repositories from (Settings › Suggestions from) before sending a conversation."
             )
         }
         return rootFolder

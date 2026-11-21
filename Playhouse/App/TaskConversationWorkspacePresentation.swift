@@ -469,7 +469,7 @@ extension TaskConversationView {
         }
     }
 
-    func chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: Bool = true) {
+    func chooseRepositoryParentFolder() {
         if let openPanel = repositoryParentPanel {
             // The panel doesn't block the window, so the window can come back over it (a click on
             // the window, or the picker's popover closing). Bring it back to the front; if it never
@@ -482,14 +482,7 @@ extension TaskConversationView {
         }
         let closesPicker = isShowingRepositoryPicker
         isShowingRepositoryPicker = false
-        let panel = NSOpenPanel()
-        panel.title = "Choose repository root folder"
-        panel.message = "Playhouse will search below this folder for repositories. A root folder is required before sending conversations."
-        panel.prompt = "Use This Folder"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        let panel = SuggestionsFolderPrompt.makePanel(startingAt: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath))
         repositoryParentPanel = panel
         Task { @MainActor in
             // The closing popover hands the key window back to the conversation window, which
@@ -502,7 +495,7 @@ extension TaskConversationView {
                     guard repositoryParentPanel === panel else { return }
                     repositoryParentPanel = nil
                     guard response == .OK, let selected = panel.url else {
-                        isShowingRepositoryPicker = showRepositoryPickerWhenFinished
+                        isShowingRepositoryPicker = true
                         return
                     }
                     let path = selected.standardizedFileURL.path
@@ -510,10 +503,10 @@ extension TaskConversationView {
                         try WorkspaceSettingsManager().setDefaultParentFolder(path)
                         defaultParentFolderPath = path
                         loadSuggestedRepositories()
-                        isShowingRepositoryPicker = showRepositoryPickerWhenFinished
+                        isShowingRepositoryPicker = true
                     } catch {
                         errorMessage = "Couldn't set the repository suggestion folder: \(error.localizedDescription)"
-                        isShowingRepositoryPicker = showRepositoryPickerWhenFinished
+                        isShowingRepositoryPicker = true
                     }
                 }
             }

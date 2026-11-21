@@ -46,6 +46,9 @@ struct ComposerModel: Codable, Equatable {
         var reasonDisabled: Bool
     }
 
+    /// The installed providers to switch between, then the missing ones to install (`installItems`,
+    /// in their own section). With none installed the menu itself is the Install AI provider
+    /// button: an accent `color`, and only install entries.
     struct ProviderMenu: Codable, Equatable {
         var title: String
         var value: String
@@ -53,6 +56,8 @@ struct ComposerModel: Codable, Equatable {
         var help: String
         var enabled: Bool
         var items: [Item]
+        var installItems: [Item]? = nil
+        var color: String? = nil
     }
 
     /// The model button and its popover: the models and the reasoning effort slider.
@@ -291,8 +296,9 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
         let provider = model.provider
         return AtomMenu(
             props: MenuProps(
-                color: "secondary", text: provider.title, textSize: 12, textWeight: "medium",
-                indicator: true, disabled: !provider.enabled, items: [provider.items.map(menuItem)]
+                color: provider.color ?? "secondary", text: provider.title, textSize: 12, textWeight: "medium",
+                indicator: true, disabled: !provider.enabled,
+                items: [provider.items.map(menuItem), (provider.installItems ?? []).map(menuItem)].filter { !$0.isEmpty }
             ),
             common: AtomCommon(testID: prefix + "conversation-provider-menu", label: provider.label, value: provider.value, help: provider.help),
             onMenu: actions.provider

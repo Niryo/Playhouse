@@ -189,6 +189,10 @@ struct TaskConversationView: View {
     /// The save of that switch, which a send waits for so it runs with the new provider.
     @State var providerSwitch: Task<Void, Never>?
     @State var providerNotice: String?
+    /// Which providers' CLIs are installed; empty until the daemon has answered.
+    @State var providerInstallStatuses: [ConversationProviderInstallStatus] = []
+    /// The provider whose installer is running from the provider menu.
+    @State var installingProvider: ConversationProvider?
     @State var messages: [ConversationMessage] = []
     // Oldest message currently rendered in the transcript. The transcript keeps a
     // window that starts here and runs to the newest message; opening a
@@ -354,7 +358,7 @@ struct TaskConversationView: View {
     @State var actionNotice: String?
     @State var isShowingWorkspaceEditor = false
     @State var isShowingRepositoryPicker = false
-    /// The open repository root panel; nil while none is open.
+    /// The open suggestions folder panel; nil while none is open.
     @State var repositoryParentPanel: NSOpenPanel?
     @State var repositorySearch = ""
     @State var repositorySuggestionIndex = 0
@@ -381,7 +385,7 @@ struct TaskConversationView: View {
     @FocusState var isComposerFocused: Bool
 
     var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isStopLandingOnOwnSend || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
+        isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isStopLandingOnOwnSend || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
     }
 
     /// A new task can use either schedule, and a recurring template can be edited; an existing
@@ -402,7 +406,7 @@ struct TaskConversationView: View {
     }
 
     var isScheduleSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || isSavingSchedule || isLoadingHistory
+        isApplyingSavedRepositories || isSavingSchedule || isLoadingHistory
             || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty)
     }
 
@@ -811,6 +815,7 @@ struct TaskConversationView: View {
             }
             if !isReadOnly {
                 refreshQueuedMessages()
+                await loadProviderInstallStatuses(adoptInstalledProvider: true)
                 await loadModels()
             }
             if isNewTask {

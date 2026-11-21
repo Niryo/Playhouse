@@ -66,8 +66,9 @@ function StartImplementing(props) {
 function ProviderMenu(props) {
   var model = props.model, provider = model.provider, prefix = model.prefix;
   return h(Menu, {
-    color: "secondary", text: provider.title, textSize: 12, textWeight: "medium", indicator: true, disabled: !provider.enabled,
-    items: [provider.items.map(function (item) { return menuItem(prefix, item); })],
+    color: provider.color || "secondary", text: provider.title, textSize: 12, textWeight: "medium", indicator: true, disabled: !provider.enabled,
+    items: [provider.items, provider.installItems || []].filter(function (group) { return group.length > 0; })
+      .map(function (group) { return group.map(function (item) { return menuItem(prefix, item); }); }),
     testID: prefix + "conversation-provider-menu", label: provider.label, value: provider.value, help: provider.help,
     onMenu: props.on.provider
   });

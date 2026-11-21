@@ -59,16 +59,7 @@ extension TaskConversationView {
                 reasonColor: colorScheme == .dark ? "orange" : "#2E4FAD",
                 reasonDisabled: isReadOnly
             ) : nil,
-            provider: .init(
-                title: provider.displayName,
-                value: provider.rawValue,
-                label: "Provider: \(provider.displayName)",
-                help: providerMenuHelp,
-                enabled: canSwitchProvider,
-                items: ConversationProvider.allCases.map { option in
-                    .init(id: option.rawValue, title: option.displayName, checked: option == provider, icon: nil, help: "Run this task's next turns with \(option.displayName)", testID: "conversation-provider-\(option.rawValue)")
-                }
-            ),
+            provider: providerMenu,
             model: .init(
                 name: selectedModelName,
                 effort: selectedEffort.title,
@@ -186,7 +177,11 @@ extension TaskConversationView {
             startImplementing: startImplementingPlan,
             showRepositoryPicker: showRepositoryPicker,
             provider: { id in
-                if let option = ConversationProvider(rawValue: id) { switchProvider(to: option) }
+                if id.hasPrefix("install:"), let option = ConversationProvider(rawValue: String(id.dropFirst("install:".count))) {
+                    installProvider(option)
+                } else if let option = ConversationProvider(rawValue: id) {
+                    switchProvider(to: option)
+                }
             },
             toggleModelPicker: {
                 if isModelPickerPresented {
@@ -421,6 +416,43 @@ extension TaskConversationView {
 
     var workspaceRootURLs: [URL] {
         task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
+    }
+
+    /// The installed providers, and an Add entry for each missing one. With none installed the
+    /// menu becomes the Install AI provider button, listing the providers to install.
+    var providerMenu: ComposerModel.ProviderMenu {
+        let installing = installingProvider.map { "Installing \($0.displayName)…" }
+        let installItems = missingProviders.map { option in
+            ComposerModel.Item(
+                id: "install:\(option.rawValue)", title: installedProviders.isEmpty ? option.displayName : "Add \(option.displayName)",
+                checked: false, icon: "arrow.down.circle",
+                help: "Install \(ConversationProviderInstaller.productName(option)) with its official installer",
+                testID: "conversation-provider-install-\(option.rawValue)"
+            )
+        }
+        if !providerInstallStatuses.isEmpty, installedProviders.isEmpty {
+            let title = installing ?? "Install AI provider"
+            return .init(
+                title: title, value: "none", label: title,
+                help: "Install an AI provider to run this task", enabled: installingProvider == nil,
+                items: [], installItems: installItems, color: "accent"
+            )
+        }
+        // Before the daemon answers every provider is listed, as is the task's own if it was uninstalled.
+        let switchable = providerInstallStatuses.isEmpty
+            ? ConversationProvider.allCases
+            : ConversationProvider.allCases.filter { installedProviders.contains($0) || $0 == provider }
+        return .init(
+            title: installing ?? provider.displayName,
+            value: provider.rawValue,
+            label: "Provider: \(provider.displayName)",
+            help: providerMenuHelp,
+            enabled: canSwitchProvider && installingProvider == nil,
+            items: switchable.map { option in
+                .init(id: option.rawValue, title: option.displayName, checked: option == provider, icon: nil, help: "Run this task's next turns with \(option.displayName)", testID: "conversation-provider-\(option.rawValue)")
+            },
+            installItems: installItems
+        )
     }
 
     /// Provider-owning operations run in the bridge daemon, not in this window.

@@ -238,7 +238,13 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
     var userInputContexts: [String: UserInputContext] = [:]
     @Published var pendingUserInputs: [String: PendingUserInput] = [:]
-    let codexExecutableOverride: String?
+    /// The test harness's executable as given; `codexExecutableOverride` resolves it on each
+    /// read, so a CLI installed while Playhouse runs is found without a restart.
+    let codexExecutableOverrideSetting: String?
+    var codexExecutableOverride: String? {
+        ConversationProviderFixture.currentExecutable(codexExecutableOverrideSetting, providerMarker: Self.fixtureMarker)
+    }
+    static let fixtureMarker = (name: ".playhouse-codex-fixture-owner", value: "Playhouse test owns this Codex protocol fixture (v1).\n")
     let codexHomeOverride: String?
     /// This instance's own resolved data directory, fixed at construction time
     /// (debug/test builds only; always `nil` in production). Forwarded into
@@ -269,10 +275,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     var rejectedTurnKeys = Set<String>()
 
     init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, dataDirectory: String? = nil, persistentServer: CodexSharedServer? = nil) {
-        self.codexExecutableOverride = ConversationProviderFixture.ownedExecutable(
-            codexExecutableOverride,
-            providerMarker: (".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n")
-        )
+        self.codexExecutableOverrideSetting = codexExecutableOverride
         self.codexHomeOverride = codexHomeOverride
         self.dataDirectoryOverride = dataDirectory
         self.persistentServer = persistentServer

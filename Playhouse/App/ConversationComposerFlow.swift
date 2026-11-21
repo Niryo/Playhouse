@@ -548,6 +548,10 @@ extension TaskConversationView {
 
     func confirmSchedule() {
         guard let schedule = composerSchedule, !isScheduleSendDisabled else { return }
+        guard isRepositoryRootConfigured else {
+            SuggestionsFolderPrompt.request()
+            return
+        }
         if let message = schedule.validationMessage() {
             // The chosen time passed while the composer was open.
             errorMessage = message
@@ -593,7 +597,8 @@ extension TaskConversationView {
     func sendMessage(overrideText: String? = nil) {
         guard !isApplyingSavedRepositories, !isStopLandingOnOwnSend else { return }
         guard isRepositoryRootConfigured else {
-            errorMessage = "Set the repository root folder before sending a conversation."
+            // The folder repository suggestions come from is also where a rootless task runs.
+            SuggestionsFolderPrompt.request()
             return
         }
         let freeformText = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)

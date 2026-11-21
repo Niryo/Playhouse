@@ -88,6 +88,9 @@ final class DaemonClient: @unchecked Sendable {
         request.arguments["__guiRuntime"] = .boolean(true)
         if let codex = configuration.codexExecutable { request.arguments["__codexExecutable"] = .string(codex) }
         if let claude = configuration.claudeExecutable { request.arguments["__claudeExecutable"] = .string(claude) }
+        if let installer = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_PROVIDER_INSTALLER"], !installer.isEmpty {
+            request.arguments["__providerInstaller"] = .string(installer)
+        }
         if let codexHome = configuration.codexHome { request.arguments["__codexHome"] = .string(codexHome) }
         if let claudeConfig = configuration.claudeConfigDirectory { request.arguments["__claudeConfigDirectory"] = .string(claudeConfig) }
         // Test overrides for the release feed; the daemon honors them only in a test bundle.

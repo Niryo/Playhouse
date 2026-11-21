@@ -899,13 +899,26 @@ enum ConversationProviderFixture {
 
     static func ownedExecutable(_ path: String?, providerMarker: (name: String, value: String)) -> String? {
         if path == notInstalledOverride { return notInstalledOverride }
-        guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        guard let path, FileManager.default.isExecutableFile(atPath: path),
+              ownsDirectory(of: path, providerMarker: providerMarker) else { return nil }
+        return path
+    }
+
+    /// The override as it stands now. A test that installs a provider mid-run names the
+    /// executable its installer fixture will write, in a folder the test owns: until the file
+    /// is there the provider reads as not installed, never as the machine's own CLI.
+    static func currentExecutable(_ path: String?, providerMarker: (name: String, value: String)) -> String? {
+        if let owned = ownedExecutable(path, providerMarker: providerMarker) { return owned }
+        guard let path, ownsDirectory(of: path, providerMarker: providerMarker) else { return nil }
+        return notInstalledOverride
+    }
+
+    static func ownsDirectory(of path: String, providerMarker: (name: String, value: String)) -> Bool {
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
         let markers = [providerMarker, (".playhouse-bridge-fixture", "Playhouse bridge tests own this deterministic fixture (v1).\n")]
-        for (name, value) in markers {
-            if (try? String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)) == value { return path }
+        return markers.contains { name, value in
+            (try? String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)) == value
         }
-        return nil
     }
 }
 
