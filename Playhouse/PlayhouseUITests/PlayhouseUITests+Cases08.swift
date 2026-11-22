@@ -684,9 +684,11 @@ extension PlayhouseUITests {
         changeSuggestionParent.click()
         try chooseFolder(in: openFolderPanel, folder: fixture.alternateParent, confirmationButton: "Use This Folder")
         // The alternate parent sits inside the first parent, so `alternate` is already listed before
-        // the change; the refresh is settled only once the first parent's `primary` is gone.
+        // the change; the refresh is settled only once the first parent's `primary` is gone. The
+        // reloaded list can be empty for a moment before it lists `alternate` again.
         XCTAssertTrue(waitUntil({ !self.element("conversation-repository-suggestion-primary").exists }, timeout: 10), "Suggestions from the previous parent should be replaced.")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").exists, "Changing the parent should refresh the repository suggestions.")
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 5), "Changing the parent should refresh the repository suggestions.")
+        XCTAssertFalse(element("conversation-repository-suggestion-primary").exists, "The previous parent's suggestions stay gone once the list reloads.")
         XCTAssertTrue(waitUntil({
             guard let response = try? self.runCLI(["settings", "get"]),
                   let settings = response["result"] as? [String: Any] else { return false }

@@ -330,26 +330,31 @@ struct SuggestionsFolderPromptModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .atomModal(
-                ModalProps(isPresented: isPresented, width: 440, title: "Where do your repositories live?", icon: "folder.badge.gearshape", dismissible: false),
-                common: AtomCommon(testID: "suggestions-folder-prompt"),
-                onDismiss: { isPresented = false }
-            ) {
-                AtomText(
-                    props: TextProps(text: "Choose the folder that holds all of your Git repositories, so Playhouse can suggest repositories from there. You can change it later in Settings."),
-                    common: AtomCommon(testID: "suggestions-folder-prompt-message", fillWidth: true)
-                )
-                if let error {
-                    AtomLabel(props: LabelProps(text: error, icon: "exclamationmark.triangle.fill", size: 11, weight: "medium", color: "red"))
-                }
-                AtomStack(props: StackProps(axis: "h")) {
-                    AtomSpacer()
-                    AtomButton(
-                        props: ButtonProps(style: "prominent", shortcut: "default"),
-                        common: AtomCommon(testID: "suggestions-folder-prompt-choose-button", help: "Choose the folder that holds your repositories"),
-                        action: chooseFolder
-                    ) {
-                        AtomText(props: TextProps(text: "Choose Folder…"))
+            // The modal hangs off an empty background rather than the window's content: an atom's
+            // base is rebuilt when Debug ▸ Highlight Native Atoms toggles, which would drop the
+            // board's state, such as the open task.
+            .background {
+                Color.clear.atomModal(
+                    ModalProps(isPresented: isPresented, width: 440, title: "Where do your repositories live?", icon: "folder.badge.gearshape", dismissible: false),
+                    common: AtomCommon(testID: "suggestions-folder-prompt"),
+                    onDismiss: { isPresented = false }
+                ) {
+                    AtomText(
+                        props: TextProps(text: "Choose the folder that holds all of your Git repositories, so Playhouse can suggest repositories from there. You can change it later in Settings."),
+                        common: AtomCommon(testID: "suggestions-folder-prompt-message", fillWidth: true)
+                    )
+                    if let error {
+                        AtomLabel(props: LabelProps(text: error, icon: "exclamationmark.triangle.fill", size: 11, weight: "medium", color: "red"))
+                    }
+                    AtomStack(props: StackProps(axis: "h")) {
+                        AtomSpacer()
+                        AtomButton(
+                            props: ButtonProps(style: "prominent", shortcut: "default"),
+                            common: AtomCommon(testID: "suggestions-folder-prompt-choose-button", help: "Choose the folder that holds your repositories"),
+                            action: chooseFolder
+                        ) {
+                            AtomText(props: TextProps(text: "Choose Folder…"))
+                        }
                     }
                 }
             }
