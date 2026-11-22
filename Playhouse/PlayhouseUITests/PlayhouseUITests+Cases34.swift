@@ -34,8 +34,7 @@ extension PlayhouseUITests {
         }
         func send(_ prompt: String) {
             let before = fixtureTurns(endingWith: prompt).count
-            composer.click()
-            composer.typeText(prompt)
+            typeIntoField(composer, text: prompt)
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({
                 fixtureTurns(endingWith: prompt).count > before && self.noTurnIsRunning()

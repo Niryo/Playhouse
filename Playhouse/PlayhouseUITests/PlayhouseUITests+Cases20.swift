@@ -420,7 +420,7 @@ extension PlayhouseUITests {
 
 
     }
-    // case-contract: test_conversation_models_cache_and_refresh | Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and retains an offline cached option when the provider executable is unavailable.
+    // case-contract: test_conversation_models_cache_and_refresh | Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and, when the installed provider executable fails to launch, stays on Claude and retains the cached option.
     func test_conversation_models_cache_and_refresh() throws {
         let claudeSource = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-model-cache")
@@ -468,13 +468,18 @@ extension PlayhouseUITests {
         XCTAssertEqual(refreshedClaudeCache.compactMap { $0["id"] as? String }, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"], "The real provider refresh should replace the stale persisted cache.")
 
         try seedClaudeModelCache([["value": "offline-cached-model", "displayName": "Offline Cached Claude"]])
-        XCTAssertEqual(try String(contentsOf: claudeOwnerMarker, encoding: .utf8), claudeOwnerValue, "Only remove the test-owned executable after verifying its ownership marker.")
-        try FileManager.default.removeItem(at: claudeExecutable)
+        XCTAssertEqual(try String(contentsOf: claudeOwnerMarker, encoding: .utf8), claudeOwnerValue, "Only replace the test-owned executable after verifying its ownership marker.")
+        // Claude stays installed but can't start: a missing executable would instead move the
+        // unstarted conversation to an installed provider.
+        try Data("#!/bin/sh\nexit 1\n".utf8).write(to: claudeExecutable)
         let offlineTask = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude cached offline", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let offlineTaskID = try XCTUnwrap(offlineTask["id"] as? String)
         openTask(named: "Claude cached offline")
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10),
+            "A Claude launch failure keeps the conversation on Claude.")
+        XCTAssertEqual(try taskRecord(id: offlineTaskID)?["conversationProvider"] as? String, "claude")
         let offlinePicker = element("model-picker-menu")
         XCTAssertTrue(offlinePicker.waitToExist(timeout: 5))
         offlinePicker.click()
