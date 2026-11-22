@@ -502,7 +502,7 @@ extension PlayhouseUITests {
             "Steering a queued row should deliver its image to the active turn, not only its text."
         )
     }
-    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The composer's attach button, left of the Plan button, opens a file panel limited to images, and the chosen image appears in the composer preview and persists as a draft image until removed; a non-image file picked anyway (through Go to Folder) is refused with an image-only error and adds no draft image. The conversation composer also accepts pasted images, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, stores those image URLs with the turn in Playhouse's transcript store, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The composer's attach button, left of the Plan button, opens a file panel limited to images, and the chosen image appears in the composer preview and persists as a draft image until removed; with several images attached, any one, including the first, can be removed by its own remove badge, leaving the others attached and persisted in order; a non-image file picked anyway (through Go to Folder) is refused with an image-only error and adds no draft image. The conversation composer also accepts pasted images, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, stores those image URLs with the turn in Playhouse's transcript store, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed with its Close button or by clicking the window outside it to return to the conversation; a published assistant image preserves the original file bytes.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -565,20 +565,59 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !self.element("pending-chat-images").exists }, timeout: 5), "Removing the attached image clears the preview.")
         let pasteComposer = element("message-composer")
         XCTAssertTrue(pasteComposer.waitToExist(timeout: 10))
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setData(try Data(contentsOf: image), forType: .png)
-        pasteComposer.click()
-        pasteComposer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The pasted image should appear in the composer preview.")
-        let pendingImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "pending-chat-image-")).firstMatch
+        // With several images attached, any one can be removed by its own badge. A wide image fills
+        // its thumbnail past both sides, and that overflow used to swallow the earlier badge's click.
+        let wideDraftImage = dataDirectory.appendingPathComponent("wide-draft-image.png")
+        let wideDraftBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 400, pixelsHigh: 80, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for x in 0..<400 { for y in 0..<80 { wideDraftBitmap.setColor(NSColor(calibratedRed: 0.95, green: 0.55, blue: 0.2, alpha: 1), atX: x, y: y) } }
+        try wideDraftBitmap.representation(using: .png, properties: [:])!.write(to: wideDraftImage)
+        let pendingImages = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "pending-chat-image-"))
+        for (index, pasted) in [attachImage, wideDraftImage].enumerated() {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setData(try Data(contentsOf: pasted), forType: .png)
+            pasteComposer.click()
+            pasteComposer.typeKey("v", modifierFlags: .command)
+            XCTAssertTrue(waitUntil({ pendingImages.count == index + 1 }, timeout: 5), "Pasted image \(index + 1) should appear in the composer preview.")
+        }
+        var twoDraftImages: [String] = []
+        XCTAssertTrue(waitUntil({
+            twoDraftImages = ((try? self.taskRecord(id: attachedTaskID))??["draftImageDataURLs"] as? [String]) ?? []
+            return twoDraftImages.count == 2
+        }, timeout: 5), "Both pasted images persist as draft images.")
+        XCTAssertNotEqual(twoDraftImages.first, twoDraftImages.last)
+        let firstPendingID = String(pendingImages.element(boundBy: 0).identifier.dropFirst("pending-chat-image-".count))
+        let secondPendingID = String(pendingImages.element(boundBy: 1).identifier.dropFirst("pending-chat-image-".count))
+        attachScreenshot(named: "Composer: two images attached, each with its own remove badge")
+        attachRegionScreenshot([element("pending-chat-images")], named: "Composer close-up: two attached images before removing the first")
+        app.buttons["remove-pending-chat-image-\(firstPendingID)"].click()
+        XCTAssertFalse(element("chat-image-full-size").waitToExist(timeout: 1), "The first image's remove badge must not open the next image instead.")
+        XCTAssertTrue(waitUntil({ pendingImages.count == 1 }, timeout: 5), "The first image's remove badge removes it while another image is attached.")
+        XCTAssertFalse(app.buttons["pending-chat-image-\(firstPendingID)"].exists, "The first image should be the one removed.")
+        XCTAssertTrue(app.buttons["pending-chat-image-\(secondPendingID)"].exists, "The later image stays attached.")
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: attachedTaskID))??["draftImageDataURLs"] as? [String]) == [twoDraftImages[1]] }, timeout: 5),
+                      "Removing the first image persists a draft with only the later image.")
+        attachRegionScreenshot([element("pending-chat-images")], named: "Composer close-up: the later image remains after removing the first")
+        let pendingImage = pendingImages.firstMatch
         XCTAssertTrue(pendingImage.waitToExist(timeout: 5))
         let pendingThumbnailFrame = pendingImage.frame
         pendingImage.click()
         let pendingFullSizeImage = element("chat-image-full-size")
         XCTAssertTrue(pendingFullSizeImage.waitToExist(timeout: 5), "Clicking a composer attachment should open its image in the large viewer.")
         XCTAssertGreaterThan(pendingFullSizeImage.frame.width, pendingThumbnailFrame.width, "The composer attachment viewer should be larger than its thumbnail.")
-        element("close-chat-image-viewer").click()
-        XCTAssertFalse(element("chat-image-full-size").exists, "Closing the composer image viewer should return to the conversation.")
+        attachScreenshot(named: "Image viewer: open over the conversation before an outside click")
+        // A click on the window outside the viewer dismisses it, as the Close button does.
+        let viewerSheet = app.sheets.firstMatch
+        XCTAssertTrue(viewerSheet.waitToExist(timeout: 5), "The image viewer should present as a sheet.")
+        let viewerWindow = app.windows.firstMatch
+        let windowFrame = viewerWindow.frame, sheetFrame = viewerSheet.frame
+        let outsidePoint = windowFrame.maxY - sheetFrame.maxY > 24
+            ? CGPoint(x: windowFrame.midX, y: (sheetFrame.maxY + windowFrame.maxY) / 2)
+            : CGPoint(x: (windowFrame.minX + sheetFrame.minX) / 2, y: sheetFrame.midY)
+        XCTAssertFalse(sheetFrame.contains(outsidePoint), "The outside click point must miss the viewer: \(outsidePoint) in \(sheetFrame)")
+        viewerWindow.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: outsidePoint.x - windowFrame.minX, dy: outsidePoint.y - windowFrame.minY)).click()
+        XCTAssertTrue(waitUntil({ !self.element("chat-image-full-size").exists }, timeout: 5), "Clicking outside the composer image viewer should close it.")
+        XCTAssertTrue(app.buttons["pending-chat-image-\(secondPendingID)"].exists, "Dismissing the viewer by an outside click leaves the attachment in place.")
         let imageTask = try XCTUnwrap(taskRecord(named: "Image conversation"))
         let imageTaskID = try XCTUnwrap(imageTask["id"] as? String)
         let freshImageTask = try XCTUnwrap(try runCLI(["task", "get", imageTaskID])["result"] as? [String: Any])
