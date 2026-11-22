@@ -23,8 +23,6 @@ struct PluginUIActions {
     /// is no board. The flag says every linked pull request was just seen
     /// merged, so a move to Done trusts that instead of asking GitHub again.
     var moveTask: ((UUID, TaskStatus, Bool) -> Void)? = nil
-    /// Opens a task to resolve its pull request conflicts; nil where there is no board.
-    var resolveConflicts: ((UUID) -> Void)? = nil
     /// Shows an alert with a title and a message over the window.
     var alert: ((String, String) -> Void)? = nil
     /// Asks the user to confirm and answers whether they did; nil where the
@@ -136,14 +134,6 @@ struct PluginHost {
             // records them merged, so a JavaScript plugin's moves verify as
             // dragging does.
             moveTask(id, status, plugin.builtIn && arguments.object?["pullRequestsMerged"]?.bool == true)
-        case ("ui", "resolveConflicts"):
-            guard let resolveConflicts = actions.resolveConflicts else {
-                return .failure(PluginHostError(code: "unavailable", message: "There is no board here to open a task from."))
-            }
-            guard let id = arguments.object?["taskID"]?.string.flatMap(UUID.init(uuidString:)) else {
-                return .failure(PluginHostError(code: "invalid_argument", message: "resolveConflicts needs a task ID."))
-            }
-            resolveConflicts(id)
         case ("ui", "alert"):
             guard let alert = actions.alert else {
                 return .failure(PluginHostError(code: "unavailable", message: "This window can't show an alert."))

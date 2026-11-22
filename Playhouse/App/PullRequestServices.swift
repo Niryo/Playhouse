@@ -338,7 +338,6 @@ struct PullRequestReviewState: Codable, Sendable {
     let headRefOid: String?
     let localHeadOid: String?
     let hasConflicts: Bool
-    let isConfirmedResolved: Bool
     let checks: PullRequestChecksState
     let failingChecks: [String]
     /// Nil unless the probe asked for review threads (autopilot tasks only).
@@ -348,10 +347,6 @@ struct PullRequestReviewState: Codable, Sendable {
     /// worktree the task retired (renew); such entries are read from the task's
     /// records, not probed, and nothing acts on them.
     var past: Bool? = nil
-
-    var requiresConflictResolution: Bool {
-        hasConflicts || (!merged && mergeable == "MERGEABLE" && headRefOid != nil && headRefOid != localHeadOid)
-    }
 
     init(
         repositoryPath: String, worktreePath: String, branch: String, url: String?, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?,
@@ -376,14 +371,7 @@ struct PullRequestReviewState: Codable, Sendable {
         else if checks == .pending { health = .pending }
         else { health = .green }
         hasConflicts = !merged && mergeable == "CONFLICTING"
-        isConfirmedResolved = merged || (mergeable == "MERGEABLE" && headRefOid != nil && headRefOid == localHeadOid)
     }
-}
-
-enum PullRequestResolutionCheck: String, Codable, Sendable {
-    case resolved
-    case stillConflicted
-    case inconclusive
 }
 
 extension PullRequestMode {

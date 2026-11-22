@@ -308,7 +308,7 @@ class BridgeTestCases05:
         self.assertEqual(events("plugin.pull_request_mode.follow", trigger="mode")[-1]["mode"], "merge")
         self.assertEqual(created_numbers(), ["901"], "The pull request is opened exactly once.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review", "Merging leaves the task in Review.")
-    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); each pass records its result, and a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
+    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, states outside the editable Green prompt that an unresolved review thread keeps the pull request red until it is resolved on GitHub (a pull request without threads gets no such line), and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); each pass records its result, and a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
     def test_task_pr_autopilot_fixes_red_pull_request_until_green(self):
         missing, _ = self.call_cli("task", "pr", "autopilot", str(uuid.uuid4()), expected_status=3)
         self.assert_failure(missing, "not_found")
@@ -422,7 +422,8 @@ class BridgeTestCases05:
         self.assertEqual(fixed["taskStatus"], "Review", "Reporting completed returns the fixed task to Review.")
         prompt = history_texts("user")[-1]
         self.assertTrue(prompt.startswith("Playhouse autopilot:"), prompt)
-        for expected in ("#801", "failing checks: fixture-ci", "2 unresolved review threads", "critically", "reply", "resolve", "waiting-response", "Jira"):
+        for expected in ("#801", "failing checks: fixture-ci", "2 unresolved review threads", "critically", "reply", "resolve",
+                         "keeps the pull request red until it is resolved on GitHub", "waiting-response", "Jira"):
             self.assertIn(expected, prompt)
         rerun = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
         self.assertEqual(rerun["action"], "pending", "Rerunning checks after a fix are followed, not fixed again.")
@@ -564,6 +565,77 @@ class BridgeTestCases05:
                                   for event in self.diagnostic_events()), "The plugin declined the merge.")
         self.assert_failure(self.call_cli("task", "pr", "autopilot", followed["id"], "--confirm-with", expected_status=2)[0], "invalid_argument")
         self.set_pull_request_mode(followed["id"], None)
+    # case-contract: test_green_mode_fixes_pull_request_conflicts_with_custom_prompts | Green mode fixes a pull request's merge conflicts, so the task card needs no separate conflict action: an autopilot pass for a task in Review whose linked pull request conflicts with its base branch, with passing checks and one unresolved review thread, sends one visible Playhouse autopilot fix turn through the task's provider that names the merge conflicts and the thread, carries the Green prompt's guidance, states that an unresolved review thread keeps the pull request red until it is resolved on GitHub even when the Green prompt is changed, tells the agent to merge the pull request's base branch into the task branch and resolve the conflicts by the Merge conflict resolution prompt, and keeps Playhouse's commit and waiting-response rules after them. With both prompts changed in Settings, the turn carries the changed guidance instead of the defaults. The task is In Progress during the turn and returns to Review when it reports completed, and a red pull request without conflicts or review threads gets no merge conflict or review thread instructions. In the window, the conflicting pull request's number shows red with no conflict action beside it, choosing Green for the task sends that fix turn, and the conversation shows it as an automatic Playhouse message.
+    def test_green_mode_fixes_pull_request_conflicts_with_custom_prompts(self):
+        task = self.create_repo_task("Green conflicts", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.seed_done_task_pull_request(task["id"], number=803)
+        gh_directory = self.data_directory / "green-conflicts-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "calls"),
+        }
+        green_guidance = "Fix only what the failing checks and conflicts require, and keep each commit small."
+        conflict_guidance = "When both sides changed the same lines, keep the base branch's behavior and reapply the task's change on top."
+        self.assert_success(self.call_cli("settings", "set-prompt", "green", "--text", green_guidance)[0])
+        self.assert_success(self.call_cli("settings", "set-prompt", "merge-conflicts", "--text", conflict_guidance)[0])
+
+        def last_user_message():
+            history = self.assert_success(self.call_cli(
+                "conversation", "history", task["id"],
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
+            )[0])
+            return [item["text"] for item in history["messages"] if item["role"] == "user"][-1]
+
+        gh_state.write_text("803=conflicting\n803.checks=success\n803.threads=1\n", encoding="utf-8")
+        status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual((status[0]["hasConflicts"], status[0]["health"], status[0]["checks"]), (True, "red", "success"))
+        observed = {}
+
+        def while_fixing(environment):
+            observed["status"] = self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"]
+            observed["prompt"] = last_user_message()
+            # The agent merges the base branch, resolves the conflicts and pushes; CI reruns.
+            gh_state.write_text("803=unmerged\n803.checks=pending\n", encoding="utf-8")
+
+        fixed = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "completed", on_hold=while_fixing, extra_environment=gh_environment,
+        )
+        self.assertEqual(fixed["action"], "fixed", "Conflicts make Green send a fix turn.")
+        self.assertEqual(observed["status"], "In Progress", "A fix turn brings the task back to In Progress.")
+        self.assertEqual(fixed["taskStatus"], "Review", "Reporting completed returns the task to Review.")
+        prompt = observed["prompt"]
+        self.assertTrue(prompt.startswith("Playhouse autopilot:"), prompt)
+        for expected in ("#803", "merge conflicts with its base branch", "1 unresolved review thread", green_guidance,
+                         "keeps the pull request red until it is resolved on GitHub",
+                         "Merge conflicts: merge the pull request's base branch into the task branch", conflict_guidance,
+                         "Playhouse pushes the task branch when you report `completed`", "waiting-response"):
+            self.assertIn(expected, prompt)
+        self.assertLess(prompt.index(green_guidance), prompt.index(conflict_guidance), "The conflict steps follow the Green guidance.")
+        self.assertLess(prompt.index(conflict_guidance), prompt.index("waiting-response"), "Playhouse's rules come last.")
+        self.assertNotIn("critically", prompt, "A changed Green prompt replaces the default guidance.")
+        self.assertNotIn("Preserve the intended changes from both sides", prompt, "A changed conflict prompt replaces the default guidance.")
+
+        # Failing checks without conflicts, with the default prompts: no conflict steps.
+        for kind in ("green", "merge-conflicts"):
+            self.assert_success(self.call_cli("settings", "reset-prompt", kind)[0])
+        gh_state.write_text("803=unmerged\n803.checks=failure\n803.threads=0\n", encoding="utf-8")
+        observed.clear()
+        failing = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "completed",
+            on_hold=lambda environment: observed.update(prompt=last_user_message()), extra_environment=gh_environment,
+        )
+        self.assertEqual(failing["action"], "fixed")
+        self.assertIn("failing checks: fixture-ci", observed["prompt"])
+        self.assertIn("critically", observed["prompt"], "The default Green guidance is back.")
+        self.assertNotIn("Merge conflicts:", observed["prompt"], "A pull request without conflicts gets no conflict steps.")
+        self.assertNotIn("Review threads:", observed["prompt"], "A pull request without review threads gets no review thread line.")
     # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode (a `task pr autopilot --merge` pass, which the pull-request-mode plugin runs for its Merge tasks) does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
     def test_task_pr_merge_mode_merges_green_pull_request(self):
         task = self.create_repo_task("PR merge mode", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
@@ -669,8 +741,8 @@ class BridgeTestCases05:
         listed = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)[0])
         self.assertEqual([(item["number"], item.get("past")) for item in listed], [(123, None)],
                          "A Done task whose worktree was removed lists only its recorded pull request, without probing GitHub.")
-    # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
-    def test_review_pr_conflicts_probe_and_verify(self):
+    # case-contract: test_review_pr_conflicts_probe_shows_red_link | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. `task pr status` reports a conflicting pull request with hasConflicts and red health beside a mergeable green one, and a mergeable pull request whose remote head is not pushed locally with its differing remote and local heads and no conflict. The board colours the conflicting pull request's number red and the mergeable one's green, with no separate conflict action on either card (Green mode fixes conflicts), and gives each PR link a hit target of at least 30×30 points. `task pr verify` is no longer a command: it fails as invalid_argument pointing at help.
+    def test_review_pr_conflicts_probe_shows_red_link(self):
         task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
         self.assertEqual(task["status"], "Review")
         self.assertEqual(self.assert_success(self.call_cli("task", "pr", "status", task["id"])[0]), [])
@@ -708,27 +780,23 @@ class BridgeTestCases05:
         self.assertTrue(all(item["headRefOid"] == item["localHeadOid"] for item in states))
         self.assertTrue((started / "123").is_file() and (started / "456").is_file(), "Both linked PR probes should overlap.")
 
-        (started / "123").unlink()
-        (started / "456").unlink()
-        still_conflicted, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
-        self.assertEqual(self.assert_success(still_conflicted)["status"], "stillConflicted")
-        self.assertTrue((started / "123").is_file() and (started / "456").is_file())
+        conflicting = {item["number"]: item for item in states}
+        self.assertEqual((conflicting[123]["health"], conflicting[456]["health"]), ("red", "green"), "A conflicting PR reads red beside a green one.")
+        self.assertFalse(conflicting[456]["hasConflicts"])
 
         state.write_text("123=MERGEABLE\n456=HEAD_MISMATCH\n", encoding="utf-8")
         for number in (123, 456):
             (started / str(number)).unlink()
-        mismatch, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
-        self.assertEqual(self.assert_success(mismatch)["status"], "stillConflicted", "A mergeable PR with a remote head that is not pushed locally must retain the conflict indicator.")
         mismatch_status, _ = self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)
-        mismatch_state = next(item for item in self.assert_success(mismatch_status) if item["number"] == 456)
-        self.assertNotEqual(mismatch_state["headRefOid"], mismatch_state["localHeadOid"])
-
-        state.write_text("123=MERGEABLE\n456=MERGEABLE\n", encoding="utf-8")
-        for number in (123, 456):
-            (started / str(number)).unlink()
-        verification, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
-        self.assertEqual(self.assert_success(verification)["status"], "resolved")
-    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
+        mismatch = {item["number"]: item for item in self.assert_success(mismatch_status)}
+        self.assertNotEqual(mismatch[456]["headRefOid"], mismatch[456]["localHeadOid"], "A remote head not pushed locally is reported as such.")
+        self.assertFalse(mismatch[456]["hasConflicts"], "An unpushed head is not a conflict.")
+        self.assertFalse(mismatch[123]["hasConflicts"])
+        self.assertTrue((started / "123").is_file() and (started / "456").is_file(), "Every status read probes both PRs in parallel.")
+        retired = self.call_cli("task", "pr", "verify", task["id"], expected_status=2)[0]
+        self.assert_failure(retired, "invalid_argument")
+        self.assertIn("help", retired["error"]["message"], "The retired verify command points at help.")
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. PR creation writes its description with the task's provider, sending the Pull request description prompt, changed in Settings here, followed by the task title and the conversation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch, and once the conflicting PR is linked its number shows red with no separate conflict action beside it.
     def test_task_pr_conflicts_detect_without_mutation(self):
         task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -776,7 +844,12 @@ class BridgeTestCases05:
             "PLAYHOUSE_E2E_GH_CREATE_LOG": str(gh_create_log),
             "PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH": str(gh_create_failure),
         }
+        description_prompt = "Write a very concise GitHub pull request description. Format it as a changelog with Added, Changed and Fixed sections."
+        self.assert_success(self.call_cli("settings", "set-prompt", "pr-description", "--text", description_prompt)[0])
         pr_attempt, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1, extra_environment=gh_environment)
+        summary_prompt = [prompt for prompt in self.codex_turn_start_prompts(self.data_directory / "codex-fixture")
+                          if prompt.startswith("Write a very concise GitHub pull request description.")][-1]
+        self.assertTrue(summary_prompt.startswith(f"{description_prompt}\n\nTask: PR conflict detection\n\nConversation:\n"), summary_prompt)
         self.assert_failure(pr_attempt, "operation_failed")
         self.assertNotIn("conflicts_require_confirmation", json.dumps(pr_attempt))
         self.assertNotIn("Pull request conflicts were found", pr_attempt["error"]["message"])

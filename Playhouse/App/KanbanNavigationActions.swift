@@ -183,7 +183,6 @@ extension KanbanBoardView {
                     skillFixPrompts[id] = prompt.isEmpty ? nil : prompt
                     setChatSidebarVisible(false)
                     isSelectedTaskNew = false
-                    conflictResolutionTaskID = nil
                     withAnimation(.easeInOut(duration: 0.3)) {
                         selectedTask = task
                         pluginSetupPlacement = nil

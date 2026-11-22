@@ -9,10 +9,9 @@ import SwiftUI
 ///   link coloured by what `task.pr.status` last reported;
 /// - in Review, a task whose pull requests have all merged gets a check that
 ///   moves it to Done (`Playhouse.ui.moveTask`, trusting the merge it just
-///   saw), one with conflicts gets a
-///   button that opens it to resolve them (`Playhouse.ui.resolveConflicts`),
-///   and one whose local branch and pull request have diverged is synced with
-///   `task.pr.sync`;
+///   saw), and one whose local branch and pull request have diverged is
+///   synced with `task.pr.sync`; conflicts show as a red link, which the
+///   Green and Merge modes fix;
 /// - failures show as an alert (`Playhouse.ui.alert`).
 /// It probes when it appears, when the task moves (`task.statusChanged`) and
 /// when the app comes to the front (`app.focus`), through the shared
@@ -24,13 +23,13 @@ struct PullRequestsPlugin: View {
 
     @State private var probedStates: [PullRequestReviewState]?
     /// Each task's last probe, so a card rebuilt (on the way back to the
-    /// board) keeps its colours and conflict action while it probes again;
+    /// board) keeps its colours while it probes again;
     /// a JavaScript plugin keeps the same in its saved state.
     private static var lastProbed: [String: [PullRequestReviewState]] = [:]
     @State private var isCreating = false
     @State private var isSyncing = false
     /// Each local/remote head pairing is synced once, so a repository the sync
-    /// can't act on keeps its conflict action without a retry loop.
+    /// can't act on isn't retried in a loop.
     @State private var attemptedSyncSignature: String?
     @State private var isPollScheduled = false
 
@@ -130,15 +129,6 @@ struct PullRequestsPlugin: View {
                     }
                 }
             } else {
-                if hasConflicts {
-                    AtomButton(
-                        props: ButtonProps(style: "borderless", emphasis: 10),
-                        common: AtomCommon(testID: "task-resolve-pr-conflicts-\(taskID)", label: "Resolve pull request conflicts", help: "Resolve pull request conflicts with \(providerName)"),
-                        action: { ui("resolveConflicts", ["taskID": .string(taskID)]) }
-                    ) {
-                        AtomIcon(props: IconProps(asset: "ConflictIndicator", color: "orange"), common: AtomCommon(testID: "task-resolve-pr-conflicts-icon-\(taskID)", width: 16, height: 16))
-                    }
-                }
                 links
             }
         } else {
@@ -210,14 +200,6 @@ struct PullRequestsPlugin: View {
         return active.allSatisfy { link in
             link.merged || states.contains { $0.merged && $0.number == link.number && ($0.worktreePath == link.worktreePath || $0.repositoryPath == link.repositoryPath) }
         }
-    }
-
-    private var hasConflicts: Bool {
-        isInReview && !active.isEmpty && (states?.contains(where: \.requiresConflictResolution) ?? false)
-    }
-
-    private var providerName: String {
-        ConversationProvider(rawValue: task["provider"]?.string ?? "")?.displayName ?? "the agent"
     }
 
     /// A link keeps its last probed colour while the task is worked on, and

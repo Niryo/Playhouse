@@ -199,6 +199,132 @@ enum TaskThreadDeveloperInstructions {
     }
 }
 
+/// The prompts Playhouse sends on its own that the user can rewrite in Settings > System
+/// Prompts. The user edits only the guidance; Playhouse wraps it in the parts its flows
+/// depend on (the request, the conversation, the autopilot marker, Git and outcome rules),
+/// so a custom prompt can change style but never break a flow. Each prompt reaches Claude
+/// and Codex alike: the helper turns pick either provider, and autopilot sends through the
+/// task's own provider.
+enum SystemPromptKind: String, CaseIterable, Sendable {
+    case pullRequestDescription = "pr-description"
+    case greenFix = "green"
+    case mergeConflicts = "merge-conflicts"
+    case taskTitle = "task-title"
+
+    var title: String {
+        switch self {
+        case .pullRequestDescription: "Pull request description"
+        case .greenFix: "Green / autopilot fix"
+        case .mergeConflicts: "Merge conflict resolution"
+        case .taskTitle: "Task title"
+        }
+    }
+
+    /// When Playhouse sends the prompt and what it adds around the user's text.
+    var usage: String {
+        switch self {
+        case .pullRequestDescription:
+            "Used when Playhouse opens a pull request. Playhouse adds the task title and the task's conversation after it."
+        case .greenFix:
+            "Sent to the task's agent in Green and Merge modes while a pull request is red. Playhouse adds the failing checks, conflicts and unresolved review threads before it, the merge conflict guidance when there are conflicts, and its commit and outcome rules after it."
+        case .mergeConflicts:
+            "How the agent resolves merge conflicts: in Green and Merge modes, and when Playhouse syncs a task's branch with its pull request. Playhouse adds the Git steps around it."
+        case .taskTitle:
+            "Used to name a new task. Playhouse adds the task's request after it."
+        }
+    }
+
+    var defaultText: String {
+        switch self {
+        case .pullRequestDescription:
+            "Write a very concise GitHub pull request description. Explain what problem this change solves, how it solves it, and briefly mention any special issue or caveat from the conversation. Use Markdown, no more than three short sections, and return only the description."
+        case .greenFix:
+            """
+            1. Read the details with the GitHub CLI from the task worktree: `gh pr checks <number>`, `gh run view <run-id> --log-failed` for failing runs, and the review threads through `gh api graphql` (`reviewThreads` with their comments).
+            2. Fix genuine failures in the task worktree.
+            3. Treat every unresolved review comment critically: reviewers and bots can be wrong, noisy, or out of scope. Change the code only for comments that really deserve it. For every thread, fixed or not, reply with what you changed or why you left the code as it is, then resolve the thread (GraphQL `addPullRequestReviewThreadReply` and `resolveReviewThread`).
+            """
+        case .mergeConflicts:
+            "Resolve every Git merge conflict. Preserve the intended changes from both sides and inspect the resulting files."
+        case .taskTitle:
+            "Write a concise task title of at most 8 words for this request. Return only the title:"
+        }
+    }
+}
+
+/// Reads the saved system prompts and builds what Playhouse sends from them. A prompt the
+/// user never changed (or reset) has no stored value and reads as its default.
+enum SystemPrompts {
+    static let maximumLength = 8_000
+
+    static func key(_ kind: SystemPromptKind) -> String { "systemPrompt.\(kind.rawValue)" }
+
+    static func storedText(_ kind: SystemPromptKind, defaults: UserDefaults = WorkspaceSettings.preferencesStore) -> String? {
+        defaults.string(forKey: key(kind))
+    }
+
+    static func text(_ kind: SystemPromptKind, defaults: UserDefaults = WorkspaceSettings.preferencesStore) -> String {
+        storedText(kind, defaults: defaults) ?? kind.defaultText
+    }
+
+    static func pullRequestDescription(title: String, conversation: String) -> String {
+        "\(text(.pullRequestDescription))\n\nTask: \(title)\n\nConversation:\n\(conversation)"
+    }
+
+    static func taskTitle(request: String) -> String {
+        "\(text(.taskTitle))\n\n\(request)"
+    }
+
+    /// The helper turn that resolves conflicts Playhouse's own merge left staged; Playhouse
+    /// commits and pushes the result itself.
+    static func stagedMergeConflicts() -> String {
+        """
+        The Git merge in the current workspace stopped on conflicts.
+
+        \(text(.mergeConflicts))
+
+        Stage the resolved files. Do not commit or push. Report which conflicts you resolved.
+        """
+    }
+
+    /// The Green and Merge modes' fix turn for red pull requests.
+    static func pullRequestAutopilot(_ states: [PullRequestReviewState]) -> String {
+        let open = states.filter { !$0.merged }
+        let problems = open.compactMap { state -> String? in
+            var issues: [String] = []
+            if state.checks == .failure {
+                issues.append(state.failingChecks.isEmpty ? "failing checks" : "failing checks: \(state.failingChecks.joined(separator: ", "))")
+            }
+            if state.hasConflicts { issues.append("merge conflicts with its base branch") }
+            if let threads = state.unresolvedReviewThreads, threads > 0 {
+                issues.append("\(threads) unresolved review \(threads == 1 ? "thread" : "threads")")
+            }
+            guard !issues.isEmpty else { return nil }
+            return "- Pull request #\(state.number) (\(state.repositoryPath)): \(issues.joined(separator: "; "))."
+        }
+        let conflicts = open.contains(where: \.hasConflicts) ? """
+
+
+        Merge conflicts: merge the pull request's base branch into the task branch in the task worktree, then resolve the conflicts:
+        \(text(.mergeConflicts))
+        """ : ""
+        let threads = open.contains { ($0.unresolvedReviewThreads ?? 0) > 0 } ? """
+
+
+        Review threads: an unresolved review thread keeps the pull request red until it is resolved on GitHub.
+        """ : ""
+        return """
+        \(PlayhouseSentMessage.pullRequestAutopilotMarker) this task's pull request isn't green yet. Please get it there.
+
+        \(problems.joined(separator: "\n"))
+
+        \(text(.greenFix))\(threads)\(conflicts)
+
+        Commit your work; Playhouse pushes the task branch when you report `completed`. If something can't be fixed from here — for example GitHub or CI is down, a check needs credentials or permissions you don't have, or the user must act (such as adding a Jira ticket to the pull request title) — don't retry in a loop. Report `waiting-response` and tell the user exactly what is blocking the pull request and what they need to do. Otherwise report `completed` when you're done; Playhouse keeps watching the pull request and sends another turn if it is still red.
+        """
+    }
+}
+
 enum TaskProgressReportInstructions {
     static let executableName = "playhouse-cli"
     static let progressSubcommand = "task progress"

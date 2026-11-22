@@ -323,7 +323,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Choosing Merge in Review merged the green pull request")
         attachElementScreenshot(element("task-card-\(taskID)"), named: "Choosing Merge in Review merged the green pull request (card)")
     }
-    // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); each pass records its result, and a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
+    // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only when asked (`--review-threads`, as every autopilot pass does), so a PR-mode card's probe never reads them; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. `task pr autopilot` is one pass of the pull-request-mode plugin's Green mode, which the plugin runs for its Green tasks when they reach Review, when Green is chosen for a task in Review, and on focus; a pass leaves a task inactive unless it sits in Review with a linked pull request. With checks still running it sends no turn, and the plugin re-probes only those Green PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, states outside the editable Green prompt that an unresolved review thread keeps the pull request red until it is resolved on GitHub (a pull request without threads gets no such line), and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop after a fresh set of attempts (`--reset-attempts`, as choosing the mode again passes). A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order. The pull-request-mode plugin's service runs these passes itself and records each follow: when Green is chosen for a task in Review, when a Green task reaches Review, on the slow poll while checks run, and on focus through its throttle (the CLI case counts three focus events within the cooldown as one follow at once and one when it ends); each pass records its result, and a pass skipped because the turn that moved the task to Review still holds it is looked at again on the poll. A pass the plugin started (`--confirm-with pull-request-mode`) asks it again right before merging or sending a fix turn, so a Green task's `--merge` pass merges nothing and reports inactive, and `--confirm-with` with no plugin id is invalid_argument. A shared status probe (`task pr status --shared`, as the card's plugins probe) shares a probe already running, so two at once ask GitHub once, and reuses its answer for a few seconds, while an explicit read always asks GitHub and leaves the shared answer alone; creating a task's pull requests or running a pass forgets the shared answer, and a failed probe is not kept.
     func test_task_pr_autopilot_fixes_red_pull_request_until_green() throws {
         let executable = try makeCodexFixture(emptyQuestions: false)
         codexFixtureExecutable = executable.path
@@ -475,7 +475,8 @@ extension PlayhouseUITests {
             XCTAssertTrue(self.waitUntil({ (prLink.value as? String) == "red" }, timeout: 10), "Failing checks should colour the PR number red.")
             let prompt = try lastUserMessage()
             XCTAssertTrue(prompt.hasPrefix("Playhouse autopilot:"), prompt)
-            for expected in ["#801", "failing checks: fixture-ci", "2 unresolved review threads", "critically", "reply", "resolve", "waiting-response", "Jira"] {
+            for expected in ["#801", "failing checks: fixture-ci", "2 unresolved review threads", "critically", "reply", "resolve",
+                             "keeps the pull request red until it is resolved on GitHub", "waiting-response", "Jira"] {
                 XCTAssertTrue(prompt.contains(expected), "The fix prompt should mention \(expected): \(prompt)")
             }
             self.attachScreenshot(named: "Autopilot moved the red PR's task back to In Progress with a fix turn")
@@ -557,6 +558,106 @@ extension PlayhouseUITests {
         XCTAssertEqual((missingPlugin["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
         assertTaskVisible("PR autopilot UI", inColumn: "Review")
         attachElementScreenshot(element("task-card-\(taskID)"), named: "A Green task's merge pass merges nothing (card)")
+    }
+    // case-contract: test_green_mode_fixes_pull_request_conflicts_with_custom_prompts | Green mode fixes a pull request's merge conflicts, so the task card needs no separate conflict action: an autopilot pass for a task in Review whose linked pull request conflicts with its base branch, with passing checks and one unresolved review thread, sends one visible Playhouse autopilot fix turn through the task's provider that names the merge conflicts and the thread, carries the Green prompt's guidance, states that an unresolved review thread keeps the pull request red until it is resolved on GitHub even when the Green prompt is changed, tells the agent to merge the pull request's base branch into the task branch and resolve the conflicts by the Merge conflict resolution prompt, and keeps Playhouse's commit and waiting-response rules after them. With both prompts changed in Settings, the turn carries the changed guidance instead of the defaults. The task is In Progress during the turn and returns to Review when it reports completed, and a red pull request without conflicts or review threads gets no merge conflict or review thread instructions. In the window, the conflicting pull request's number shows red with no conflict action beside it, choosing Green for the task sends that fix turn, and the conversation shows it as an automatic Playhouse message.
+    func test_green_mode_fixes_pull_request_conflicts_with_custom_prompts() throws {
+        let executable = try makeCodexFixture(emptyQuestions: false)
+        codexFixtureExecutable = executable.path
+        var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: []).merging(Self.prCheckCooldownEnvironment) { $1 }
+        ghEnvironment["PLAYHOUSE_E2E_PR_AUTOPILOT_POLL_SECONDS"] = "2"
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
+        func setPullRequest(_ state: String) throws {
+            try state.write(to: stateURL, atomically: true, encoding: .utf8)
+        }
+        let holdRelease = URL(fileURLWithPath: executable.path + ".hold-release")
+        let turnActive = URL(fileURLWithPath: executable.path + ".turn-active")
+        let turnRelease = URL(fileURLWithPath: executable.path + ".turn-release")
+        defer {
+            try? "Release the fixture turn.\n".write(to: turnRelease, atomically: true, encoding: .utf8)
+            try? FileManager.default.removeItem(at: holdRelease)
+        }
+        try setPullRequest("803=conflicting\n803.checks=success\n803.threads=1\n")
+
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Green conflicts UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main", "--prompt", Self.fixtureTaskPrompt,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Green conflicts UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Green conflicts UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 803, url: "https://github.com/playhouse-test/fixture/pull/803")
+        let greenGuidance = "Fix only what the failing checks and conflicts require, and keep each commit small."
+        let conflictGuidance = "When both sides changed the same lines, keep the base branch's behavior and reapply the task's change on top."
+        _ = try runCLI(["settings", "set-prompt", "green", "--text", greenGuidance])
+        _ = try runCLI(["settings", "set-prompt", "merge-conflicts", "--text", conflictGuidance])
+        func lastUserMessage() throws -> String {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+            let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+            return try XCTUnwrap(messages.last(where: { $0["role"] as? String == "user" })?["text"] as? String)
+        }
+        /// Holds the next fix turn, checks its prompt while it runs, then reports completed.
+        func driveFixTurn(whileHeld: (String) throws -> Void) throws {
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: turnActive.path) }, timeout: 20), "Green should send a fix turn for the red pull request.")
+            XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "In Progress" }, timeout: 10), "A fix turn brings the task back to In Progress.")
+            let prompt = try lastUserMessage()
+            XCTAssertTrue(prompt.hasPrefix("Playhouse autopilot:"), prompt)
+            try whileHeld(prompt)
+            _ = try runCLI(["task", "outcome", taskID, "completed"])
+            try "Release the fixture turn.\n".write(to: turnRelease, atomically: true, encoding: .utf8)
+            XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: turnActive.path) }, timeout: 10))
+            XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 20), "Reporting completed returns the task to Review.")
+        }
+
+        // The conflicting pull request shows red, with no separate conflict action.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let prLink = app.links["task-pr-link-\(taskID)-803"]
+        XCTAssertTrue(prLink.waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ (prLink.value as? String) == "red" }, timeout: 15), "A conflicting pull request's number shows red.")
+        let conflictActions = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "task-resolve-pr-conflicts-"))
+        XCTAssertEqual(conflictActions.count, 0, "The task card offers no separate conflict action; Green fixes conflicts.")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "A conflicting PR shows red with no conflict action (card)")
+
+        // Choosing Green sends the fix turn with the conflict steps and the changed prompts.
+        try Data().write(to: holdRelease, options: .atomic)
+        try selectPullRequestMode("autopilot", taskID: taskID)
+        try driveFixTurn { prompt in
+            for expected in ["#803", "merge conflicts with its base branch", "1 unresolved review thread", greenGuidance,
+                             "keeps the pull request red until it is resolved on GitHub",
+                             "Merge conflicts: merge the pull request's base branch into the task branch", conflictGuidance,
+                             "Playhouse pushes the task branch when you report `completed`", "waiting-response"] {
+                XCTAssertTrue(prompt.contains(expected), "The fix prompt should carry \(expected): \(prompt)")
+            }
+            let green = try XCTUnwrap(prompt.range(of: greenGuidance)), conflicts = try XCTUnwrap(prompt.range(of: conflictGuidance))
+            let rules = try XCTUnwrap(prompt.range(of: "waiting-response"))
+            XCTAssertTrue(green.lowerBound < conflicts.lowerBound && conflicts.lowerBound < rules.lowerBound, "Green guidance, then the conflict steps, then Playhouse's rules.")
+            XCTAssertFalse(prompt.contains("critically"), "A changed Green prompt replaces the default guidance.")
+            XCTAssertFalse(prompt.contains("Preserve the intended changes from both sides"), "A changed conflict prompt replaces the default guidance.")
+            attachScreenshot(named: "Green sent a fix turn for the conflicting PR")
+            // The agent merges the base branch, resolves the conflicts and pushes; CI reruns.
+            try setPullRequest("803=unmerged\n803.checks=pending\n")
+        }
+
+        // Failing checks without conflicts, with the default prompts: no conflict steps.
+        _ = try runCLI(["settings", "reset-prompt", "green"])
+        _ = try runCLI(["settings", "reset-prompt", "merge-conflicts"])
+        XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 20), "Rerunning checks after the fix show blue.")
+        try setPullRequest("803=unmerged\n803.checks=failure\n803.threads=0\n")
+        try driveFixTurn { prompt in
+            XCTAssertTrue(prompt.contains("failing checks: fixture-ci"), prompt)
+            XCTAssertTrue(prompt.contains("critically"), "The default Green guidance is back: \(prompt)")
+            XCTAssertFalse(prompt.contains("Merge conflicts:"), "A pull request without conflicts gets no conflict steps: \(prompt)")
+            XCTAssertFalse(prompt.contains("Review threads:"), "A pull request without review threads gets no review thread line: \(prompt)")
+            try setPullRequest("803=unmerged\n803.checks=pending\n")
+        }
+        try FileManager.default.removeItem(at: holdRelease)
+
+        openTask(named: "Green conflicts UI")
+        let bubble = try assertAutomaticMessageBubble(taskID: taskID, containing: "Merge conflicts:")
+        attachElementScreenshot(bubble, named: "Green's conflict fix turn shown as an automatic Playhouse message")
     }
     // case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode (a `task pr autopilot --merge` pass, which the pull-request-mode plugin runs for its Merge tasks) does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
     func test_task_pr_merge_mode_merges_green_pull_request() throws {
@@ -654,7 +755,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(merges().filter { $0.contains("\t812\t") }, ["merge-failed\t812\t--squash", "merge-failed\t812\t--merge"], "A refused merge is not retried within a pass.")
         attachScreenshot(named: "A refused merge stops in Waiting Response with GitHub's reason")
     }
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. PR creation writes its description with the task's provider, sending the Pull request description prompt, changed in Settings here, followed by the task title and the conversation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch, and once the conflicting PR is linked its number shows red with no separate conflict action beside it.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         // The fixture gh fails the first create, so the click reaches the normal GitHub CLI
@@ -702,6 +803,10 @@ extension PlayhouseUITests {
         XCTAssertEqual(try String(contentsOf: worktree.appendingPathComponent(conflictPath), encoding: .utf8), "task branch version\n")
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent(conflictPath), encoding: .utf8), "target branch version\n")
 
+        // PR creation writes its description with the changed Pull request description prompt.
+        let descriptionPrompt = "Write a very concise GitHub pull request description. Format it as a changelog with Added, Changed and Fixed sections."
+        _ = try runCLI(["settings", "set-prompt", "pr-description", "--text", descriptionPrompt])
+
         element("back-to-board-button").click()
         let prButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(prButton.waitToExist(timeout: 5))
@@ -738,20 +843,27 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
         XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
 
-        // The fixture creates PR 501 on the retry and reports it conflicting, so the board's
-        // review probe must bring back the Fix Conflicts action once the PR is linked.
-        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
-        XCTAssertFalse(resolveButton.exists, "No conflict action can appear before a PR is linked.")
+        let codexExecutable = try XCTUnwrap(codexFixtureExecutable)
+        let turnPrompts = ((try? String(contentsOf: URL(fileURLWithPath: codexExecutable + ".turn-starts"), encoding: .utf8)) ?? "").split(separator: "\n")
+            .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])?["text"] as? String }
+        let summaryPrompt = try XCTUnwrap(turnPrompts.last { $0.hasPrefix("Write a very concise GitHub pull request description.") }, "PR creation should ask the provider for its description.")
+        XCTAssertTrue(summaryPrompt.hasPrefix("\(descriptionPrompt)\n\nTask: PR conflict choice UI\n\nConversation:\n"), summaryPrompt)
+
+        // The fixture creates PR 501 on the retry and reports it conflicting: once it is
+        // linked, the board's review probe colours its number red, with no conflict action.
+        let conflictActions = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "task-resolve-pr-conflicts-"))
         try "501=conflicting\n".write(to: URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"])), atomically: true, encoding: .utf8)
         prButton.click()
         XCTAssertTrue(element("task-pr-link-\(taskID)-501").waitToExist(timeout: 15), "The retried PR creation should link the fixture PR.")
         XCTAssertEqual((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"] as? Int, 501)
+        let linkedPR = element("task-pr-link-\(taskID)-501")
         XCTAssertTrue(waitUntil({
-            if resolveButton.exists { return true }
+            if (linkedPR.value as? String) == "red" { return true }
             activateOtherAppThenReturn()
-            return resolveButton.waitToExist(timeout: Self.prCheckCooldown + 1)
-        }, timeout: 20), "The linked conflicting PR should show the existing Fix Conflicts action.")
-        attachScreenshot(named: "A linked conflicting PR shows the Fix Conflicts action")
+            return self.waitUntil({ (linkedPR.value as? String) == "red" }, timeout: Self.prCheckCooldown + 1)
+        }, timeout: 20), "The linked conflicting PR's number should show red.")
+        XCTAssertEqual(conflictActions.count, 0, "The card offers no separate conflict action; Green mode fixes conflicts.")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "A linked conflicting PR shows red with no conflict action (card)")
     }
     // case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, a board probe that was already running when it moved raises no alert, and `task pr status` of the Done task lists only its recorded pull request, without probing, instead of the GitHub CLI's error.
     func test_review_probe_failure_alerts_only_while_in_review() throws {

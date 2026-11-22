@@ -202,9 +202,9 @@ extension PlayhouseCLI {
                     "allowDiscardingUncommittedChanges": .boolean(flags.contains("--discard-changes"))
                 ])
             case "pr":
-                let prUsage = "Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr create <task-id> [--if-needed] [--title <title>] [--body <text>], playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>, playhouse task pr status <task-id> [--review-threads] [--shared], or playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]"
+                let prUsage = "Use: playhouse task pr create|conflicts|status|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr create <task-id> [--if-needed] [--title <title>] [--body <text>], playhouse task pr link <task-id> (--worktree <path>|--repo <path>) --url <pr-url>, playhouse task pr status <task-id> [--review-threads] [--shared], or playhouse task pr autopilot <task-id> [--merge] [--reset-attempts] [--confirm-with <plugin-id>]"
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [action]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|resolve|sync|autopilot <task-id> [action]")
                 }
                 switch tail[0] {
                 // One pass of the `pull-request-mode` plugin's Green mode, or Merge with `--merge`.
@@ -243,9 +243,6 @@ extension PlayhouseCLI {
                         // Every recorded pull request, closed and retired ones included.
                         "all": .boolean(true)
                     ])
-                case "verify":
-                    guard tail.count == 2 else { throw CLIError.usage(prUsage) }
-                    return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve":
                     guard tail.count == 3 else { throw CLIError.usage(prUsage) }
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
@@ -1068,6 +1065,25 @@ extension PlayhouseCLI {
                 }
                 guard !arguments.isEmpty else { throw CLIError.usage(usage) }
                 return BridgeRequest(command: "settings.set-auto-compaction", arguments: arguments)
+            case "prompts":
+                guard rest.count == 1 else { throw CLIError.usage("Use: playhouse settings prompts") }
+                return BridgeRequest(command: "settings.prompts")
+            case "set-prompt":
+                let usage = "Use: playhouse settings set-prompt <pr-description|green|merge-conflicts|task-title> (--text <text> | --file <path>)"
+                guard rest.count >= 2, !rest[1].hasPrefix("--") else { throw CLIError.usage(usage) }
+                let flags = try parseFlags(Array(rest.dropFirst(2)), valueFlags: ["--text", "--file"])
+                guard (flags["--text"] == nil) != (flags["--file"] == nil) else { throw CLIError.usage(usage) }
+                var text = flags["--text"]?.last ?? ""
+                if let path = flags["--file"]?.last {
+                    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                        throw CLIError.usage("Couldn't read the prompt file at \(path).")
+                    }
+                    text = content
+                }
+                return BridgeRequest(command: "settings.set-prompt", arguments: ["prompt": .string(rest[1]), "text": .string(text)])
+            case "reset-prompt":
+                guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings reset-prompt <pr-description|green|merge-conflicts|task-title>") }
+                return BridgeRequest(command: "settings.reset-prompt", arguments: ["prompt": .string(rest[1])])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])

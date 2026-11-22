@@ -22,6 +22,16 @@ struct WorkspaceSettingsView: View {
     }
 
     var body: some View {
+        TabView {
+            general
+                .tabItem { Label("General", systemImage: "gearshape") }
+            SystemPromptsSettingsView()
+                .tabItem { Label("System Prompts", systemImage: "text.bubble") }
+        }
+        .preferredColorScheme(appearance == "light" ? .light : .dark)
+    }
+
+    private var general: some View {
         Form {
             Section("Appearance") {
                 Picker("Theme", selection: Binding(
@@ -189,7 +199,6 @@ struct WorkspaceSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 560, height: 420)
-        .preferredColorScheme(appearance == "light" ? .light : .dark)
         .alert("Couldn't choose folder", isPresented: Binding(
             get: { pickerError != nil },
             set: { if !$0 { pickerError = nil } }
@@ -289,6 +298,111 @@ struct WorkspaceSettingsView: View {
                     pickerError = error.localizedDescription
                 }
             }
+        }
+    }
+}
+
+/// Settings > System Prompts: the prompts Playhouse sends on its own that the user can
+/// rewrite. Each edit goes through `WorkspaceSettingsManager`, the same code the CLI's
+/// `settings set-prompt` and `settings reset-prompt` reach.
+struct SystemPromptsSettingsView: View {
+    @State private var saved = Self.load()
+    @State private var drafts: [SystemPromptKind: String] = [:]
+    @State private var saveError: String?
+
+    private static func load() -> [SystemPromptKind: SavedPrompt] {
+        let manager = WorkspaceSettingsManager()
+        return Dictionary(uniqueKeysWithValues: SystemPromptKind.allCases.map { kind in
+            let prompt = manager.systemPrompt(kind)
+            return (kind, SavedPrompt(text: prompt.text, isCustom: prompt.isCustom))
+        })
+    }
+
+    struct SavedPrompt: Equatable {
+        var text: String
+        var isCustom: Bool
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Text("Change how the agent writes these. Playhouse still adds what each flow needs, such as the task's conversation or its Git and outcome rules, so a changed prompt can't break the flow.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // The Form's first row carries its scroller reveal.
+                    .hoverRevealScrollers()
+            }
+            ForEach(SystemPromptKind.allCases, id: \.self) { kind in
+                promptSection(kind)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 640, height: 420)
+        .task {
+            // Follows changes made through the CLI; an edit in progress keeps its draft.
+            while !Task.isCancelled {
+                WorkspaceSettings.preferencesStore.synchronize()
+                let latest = Self.load()
+                if latest != saved {
+                    for (kind, prompt) in latest where drafts[kind] == saved[kind]?.text {
+                        drafts[kind] = prompt.text
+                    }
+                    saved = latest
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        .alert("Couldn't save system prompt", isPresented: Binding(
+            get: { saveError != nil }, set: { if !$0 { saveError = nil } }
+        )) {
+            Button("OK", role: .cancel) { saveError = nil }
+            .buttonHoverPointer()
+            .nativeHelp("Dismiss system prompt error")
+        } message: { Text(saveError ?? "Please try again.") }
+    }
+
+    private func promptSection(_ kind: SystemPromptKind) -> some View {
+        let stored = saved[kind] ?? SavedPrompt(text: kind.defaultText, isCustom: false)
+        let draft = drafts[kind] ?? stored.text
+        return Section {
+            Text(kind.usage)
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            SkillTextEditor(
+                text: Binding(get: { drafts[kind] ?? stored.text }, set: { drafts[kind] = $0 }),
+                identifier: "system-prompt-editor-\(kind.rawValue)"
+            )
+            .frame(height: kind == .greenFix ? 150 : 90)
+            HStack(spacing: 10) {
+                Text(stored.isCustom ? "Custom" : "Default")
+                    .font(.system(size: 12)).foregroundStyle(stored.isCustom ? Color.accentColor : .secondary)
+                    .accessibilityIdentifier("system-prompt-status-\(kind.rawValue)")
+                Spacer()
+                Button("Reset to Default") {
+                    WorkspaceSettingsManager().resetSystemPrompt(kind)
+                    drafts[kind] = kind.defaultText
+                    saved = Self.load()
+                }
+                .buttonHoverPointer()
+                .nativeHelp("Go back to Playhouse's default \(kind.title.lowercased()) prompt")
+                .disabled(!stored.isCustom && draft == kind.defaultText)
+                .accessibilityIdentifier("system-prompt-reset-\(kind.rawValue)")
+                Button("Save") {
+                    do {
+                        try WorkspaceSettingsManager().setSystemPrompt(kind, text: draft)
+                        saved = Self.load()
+                        drafts[kind] = saved[kind]?.text
+                    } catch {
+                        saveError = error.localizedDescription
+                    }
+                }
+                .buttonHoverPointer()
+                .nativeHelp("Save the \(kind.title.lowercased()) prompt")
+                .disabled(draft == stored.text)
+                .accessibilityIdentifier("system-prompt-save-\(kind.rawValue)")
+            }
+        } header: {
+            Text(kind.title)
         }
     }
 }

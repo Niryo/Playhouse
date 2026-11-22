@@ -65,8 +65,6 @@ struct TaskConversationView: View {
     let task: any ConversationSubject
     var isNewTask = false
     var isReadOnly = false
-    var conflictResolutionRequested = false
-    var onConflictResolutionChecked: (Bool) -> Void = { _ in }
     /// The prompt a task opened from the Skills page's Fix with Agent sends on arrival.
     var skillFixPrompt: String? = nil
     /// Text prefilled into the composer without starting a turn.
@@ -318,7 +316,6 @@ struct TaskConversationView: View {
     @State var isApplyingSavedRepositories = false
     @State var isResponding = false
     @State var isPreparingSubmittedMessage = false
-    @State var conflictResolutionAttempt = 0
     @State var hasPausedResponse = false
     /// The user stopped the response. The window shows the stop at once and keeps showing it
     /// while the provider winds the turn down (or finishes launching it, only to stop it), so
@@ -837,10 +834,7 @@ struct TaskConversationView: View {
                 await Task.yield()
                 isComposerFocused = true
             }
-            if conflictResolutionRequested && !isReadOnly && !isResponding {
-                conflictResolutionAttempt = 1
-                sendMessage(overrideText: PlayhouseSentMessage.pullRequestConflicts)
-            } else if let initialDraft, !initialDraft.isEmpty, draft.isEmpty, !isReadOnly,
+            if let initialDraft, !initialDraft.isEmpty, draft.isEmpty, !isReadOnly,
                       !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
                 draft = initialDraft
             } else if let skillFixPrompt, !isReadOnly, !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {

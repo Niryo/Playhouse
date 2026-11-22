@@ -26,6 +26,16 @@ extension PlayhouseBridgeRuntime {
             }
             try manager.setContextCompaction(enabled: enabled, idleMinutes: idleMinutes, minimumTokens: minimum)
             return .object(["autoCompaction": Self.autoCompactionValue(manager.contextCompaction)])
+        case "settings.prompts":
+            return .object(["prompts": .array(SystemPromptKind.allCases.map { Self.systemPromptValue($0, manager: manager) })])
+        case "settings.set-prompt":
+            let kind = try WorkspaceSettingsManager.systemPromptKind(request.requiredString("prompt"))
+            try manager.setSystemPrompt(kind, text: request.requiredString("text"))
+            return Self.systemPromptValue(kind, manager: manager)
+        case "settings.reset-prompt":
+            let kind = try WorkspaceSettingsManager.systemPromptKind(request.requiredString("prompt"))
+            manager.resetSystemPrompt(kind)
+            return Self.systemPromptValue(kind, manager: manager)
         case "settings.set-token-usage-color-max":
             try manager.setTokenUsageColorMax(request.requiredInt("max"))
             return .object(["tokenUsageColorMax": .integer(manager.tokenUsageColorMax)])
@@ -57,6 +67,18 @@ extension PlayhouseBridgeRuntime {
         default:
             throw BridgeCommandError(code: "unsupported_command", message: "Unsupported settings command: \(request.command).")
         }
+    }
+
+    static func systemPromptValue(_ kind: SystemPromptKind, manager: WorkspaceSettingsManager) -> BridgeValue {
+        let prompt = manager.systemPrompt(kind)
+        return .object([
+            "id": .string(kind.rawValue),
+            "title": .string(kind.title),
+            "usage": .string(kind.usage),
+            "text": .string(prompt.text),
+            "defaultText": .string(kind.defaultText),
+            "custom": .boolean(prompt.isCustom)
+        ])
     }
 
 }

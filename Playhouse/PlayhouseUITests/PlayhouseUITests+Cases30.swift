@@ -115,6 +115,117 @@ extension PlayhouseUITests {
             "PLAYHOUSE_MUTE_SOUNDS=1 should reach the process that plays the sounds, so they play at volume 0."
         )
     }
+    // case-contract: test_settings_system_prompts_customize_and_reset | `settings prompts` lists the four prompts Playhouse sends on its own, in order pr-description, green, merge-conflicts and task-title, each with its title, when it is used, its default text and its current text, all at their defaults. `settings set-prompt` saves a changed prompt from --text or from a --file (trimmed), which is reported as custom and persists across fresh reads; text equal to the default is stored as no change; blank text, text over 8,000 characters and an unknown prompt are invalid_argument and leave the stored prompt alone, and resetting an unknown prompt is invalid_argument too. A changed task title prompt is what the next title generation sends to the task's provider, followed by the task's request, and `settings reset-prompt` returns a prompt to its default, which the next title generation sends again. In the visible UI, Workspace Settings has a System Prompts tab beside General that shows each prompt in an editor with a Default status; editing the task title prompt and clicking Save stores it where the bridge reads it and shows Custom, a prompt changed through the CLI shows in the open tab, and Reset to Default returns a prompt to its default.
+    func test_settings_system_prompts_customize_and_reset() throws {
+        let executable = try makeCodexFixture(emptyQuestions: false)
+        codexFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        func prompts() throws -> [[String: Any]] {
+            try XCTUnwrap((try runCLI(["settings", "prompts"])["result"] as? [String: Any])?["prompts"] as? [[String: Any]])
+        }
+        func prompt(_ id: String) throws -> [String: Any] {
+            try XCTUnwrap(try prompts().first { $0["id"] as? String == id })
+        }
+        let ids = try prompts().compactMap { $0["id"] as? String }
+        XCTAssertEqual(ids, ["pr-description", "green", "merge-conflicts", "task-title"])
+        let defaults = Dictionary(uniqueKeysWithValues: try prompts().compactMap { item in
+            (item["id"] as? String).flatMap { id in (item["defaultText"] as? String).map { (id, $0) } }
+        })
+        let defaultTitle = try XCTUnwrap(defaults["task-title"])
+
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertTrue(settingsWindow.waitToExist(timeout: 10), "Workspace Settings did not open.")
+        let promptsTab = settingsWindow.toolbars.buttons["System Prompts"]
+        XCTAssertTrue(promptsTab.waitToExist(timeout: 5), "Settings should have a System Prompts tab.")
+        XCTAssertTrue(settingsWindow.toolbars.buttons["General"].exists, "The System Prompts tab sits beside General.")
+        promptsTab.click()
+        func control(_ identifier: String) -> XCUIElement {
+            settingsWindow.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func editorText(_ id: String) -> String { control("system-prompt-editor-\(id)").value as? String ?? "" }
+        /// Scrolls the tab's form until `element` is on screen. The wheel turns at the form's
+        /// left margin, outside the prompt editors, which scroll on their own.
+        @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
+            XCTAssertTrue(element.waitToExist(timeout: 5), "\(element) should exist before scrolling to it.")
+            let margin = settingsWindow.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.6))
+            for _ in 0..<20 {
+                guard !element.isHittable else { break }
+                margin.scroll(byDeltaX: 0, deltaY: element.frame.midY > settingsWindow.frame.midY ? -200 : 200)
+            }
+            XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the System Prompts tab.")
+            return element
+        }
+        func status(_ id: String) -> String { accessibleLabelOrValue(of: control("system-prompt-status-\(id)")) }
+        for id in ids {
+            XCTAssertTrue(control("system-prompt-editor-\(id)").waitToExist(timeout: 5), "The tab shows the \(id) prompt.")
+            XCTAssertEqual(editorText(id), defaults[id], "The \(id) editor shows its default.")
+            XCTAssertEqual(status(id), "Default")
+        }
+        attachScreenshot(named: "System Prompts tab with every prompt at its default")
+
+        // Editing the task title prompt and saving it stores it where the bridge reads it.
+        let customTitle = "Write a concise task title of at most 8 words, in the imperative mood, for this request. Return only the title:"
+        let titleEditor = control("system-prompt-editor-task-title")
+        reveal(titleEditor).click()
+        titleEditor.typeKey("a", modifierFlags: .command)
+        titleEditor.typeText(customTitle)
+        let saveTitle = control("system-prompt-save-task-title")
+        XCTAssertTrue(saveTitle.isEnabled, "An edited prompt can be saved.")
+        reveal(saveTitle).click()
+        XCTAssertTrue(waitUntil({ (try? prompt("task-title"))?["text"] as? String == customTitle }, timeout: 10),
+                      "Saving should store the prompt through the settings the CLI reads.")
+        XCTAssertEqual(try prompt("task-title")["custom"] as? Bool, true)
+        XCTAssertTrue(waitUntil({ status("task-title") == "Custom" }, timeout: 5), "A saved change shows Custom.")
+        XCTAssertFalse(saveTitle.isEnabled, "Nothing is left to save.")
+        attachElementScreenshot(titleEditor, named: "Task title prompt edited in the System Prompts tab")
+
+        // A blank prompt is refused, and the saved one stays.
+        reveal(titleEditor).click()
+        titleEditor.typeKey("a", modifierFlags: .command)
+        titleEditor.typeKey(.delete, modifierFlags: [])
+        reveal(saveTitle).click()
+        let saveError = app.sheets.firstMatch
+        XCTAssertTrue(saveError.waitToExist(timeout: 5), "A blank prompt should be refused with an alert.")
+        XCTAssertTrue(saveError.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "Couldn't save system prompt")).firstMatch.exists)
+        attachElementScreenshot(saveError, named: "A blank system prompt is refused")
+        saveError.buttons["OK"].click()
+        XCTAssertEqual(try prompt("task-title")["text"] as? String, customTitle, "A refused prompt leaves the saved one alone.")
+        reveal(titleEditor).click()
+        titleEditor.typeText(customTitle)
+
+        // The saved prompt is what title generation sends, followed by the request.
+        try createTaskFixture(title: "System prompt title", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "System prompt title")
+        func generatedTitlePrompt(_ request: String) throws -> String {
+            let generated = try XCTUnwrap(try runCLI(["task", "title", taskID, "--prompt", request])["result"] as? [String: Any])
+            XCTAssertEqual(generated["title"] as? String, "Generated fixture title")
+            // The fixture logs every turn/start, helper turns such as title generation included.
+            let texts = ((try? String(contentsOf: URL(fileURLWithPath: executable.path + ".turn-starts"), encoding: .utf8)) ?? "").split(separator: "\n")
+            .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])?["text"] as? String }
+            return try XCTUnwrap(texts.last { $0.hasPrefix("Write a concise task title") })
+        }
+        XCTAssertEqual(try generatedTitlePrompt("Fix the flaky login test"), "\(customTitle)\n\nFix the flaky login test",
+                       "Title generation sends the changed prompt, then the task's request.")
+
+        // A prompt changed through the CLI shows in the open tab.
+        let changelog = "Write the pull request description as a short changelog."
+        _ = try runCLI(["settings", "set-prompt", "pr-description", "--text", changelog])
+        XCTAssertTrue(waitUntil({ editorText("pr-description") == changelog && status("pr-description") == "Custom" }, timeout: 5),
+                      "The open tab follows a change made through the CLI.")
+        reveal(control("system-prompt-status-pr-description"))
+        attachScreenshot(named: "System Prompts tab showing two changed prompts")
+
+        // Reset to Default returns each prompt to its default.
+        for id in ["pr-description", "task-title"] {
+            reveal(control("system-prompt-reset-\(id)")).click()
+            XCTAssertTrue(waitUntil({ (try? prompt(id))?["custom"] as? Bool == false }, timeout: 5), "Reset to Default clears the \(id) change.")
+            XCTAssertTrue(waitUntil({ editorText(id) == defaults[id] && status(id) == "Default" }, timeout: 5))
+        }
+        XCTAssertEqual(try generatedTitlePrompt("Add dark mode"), "\(defaultTitle)\n\nAdd dark mode", "A reset prompt sends the default again.")
+        assertCLIError(try runCLI(["settings", "set-prompt", "unknown", "--text", "Anything"], expectedStatus: 2), code: "invalid_argument")
+        attachScreenshot(named: "System Prompts tab after Reset to Default")
+        app.typeKey("w", modifierFlags: .command)
+    }
     // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Markdown, Icon, Image, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text or Markdown, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
@@ -491,7 +602,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(pluginText(pair("task-title-").js), "Add a React renderer for plugins")
         XCTAssertEqual(pluginText(pair("task-title-").js), pluginText(pair("task-title-").native), "Both show the same title.")
         XCTAssertEqual(pluginText(pair("task-progress-label-").js), "Building")
-        for prefix in ["task-pr-mode-", "task-resolve-pr-conflicts-", "task-create-pr-"] {
+        for prefix in ["task-pr-mode-", "task-create-pr-"] {
             XCTAssertFalse(pair(prefix).js.exists || pair(prefix).native.exists,
                            "The pull request controls (\(prefix)…) are task card plugins, not part of the task item.")
         }

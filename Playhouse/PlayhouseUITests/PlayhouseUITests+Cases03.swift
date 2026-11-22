@@ -241,10 +241,10 @@ extension PlayhouseUITests {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the archived conversation must not alter the archived task.")
         attachScreenshot(named: "Completed task opens from the searchable archive with its composer")
     }
-    // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
-    func test_review_pr_conflicts_probe_and_verify() throws {
+    // case-contract: test_review_pr_conflicts_probe_shows_red_link | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. `task pr status` reports a conflicting pull request with hasConflicts and red health beside a mergeable green one, and a mergeable pull request whose remote head is not pushed locally with its differing remote and local heads and no conflict. The board colours the conflicting pull request's number red and the mergeable one's green, with no separate conflict action on either card (Green mode fixes conflicts), and gives each PR link a hit target of at least 30×30 points. `task pr verify` is no longer a command: it fails as invalid_argument pointing at help.
+    func test_review_pr_conflicts_probe_shows_red_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 456]).merging(Self.prCheckCooldownEnvironment) { $1 }
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 456]).merging(Self.prCheckCooldownEnvironment) { $1 }
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Review PR conflict UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
@@ -267,30 +267,10 @@ extension PlayhouseUITests {
         XCTAssertTrue(terminateAppAndWait(app))
         try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/playhouse-test/fixture/pull/123")
         try seedTaskPullRequest(taskID: secondTaskID, number: 456, url: "https://github.com/playhouse-test/fixture/pull/456")
-        let remote = runDirectory.appendingPathComponent("conflict-solver-origin.git", isDirectory: true)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
-        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
-        _ = try runGitOutput(remote, "init", "--bare")
-        for (id, number) in [(taskID, 123), (secondTaskID, 456)] {
-            let record = try XCTUnwrap((try taskRecord(id: id)?["repositoryWorktrees"] as? [[String: Any]])?.first)
-            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
-            try runGit(worktree, "push", remote.path, "HEAD:refs/heads/pr-\(number)")
-        }
-        ghEnvironment["PLAYHOUSE_E2E_GH_REMOTE_REPOSITORY"] = remote.path
-
-        let resolutionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success-wait")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: resolutionFixture.path))
-        codexFixtureExecutable = resolutionFixture.path
-        let readyURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-ready")
-        let continueURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-continue")
-        let startCountURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-start-count")
-        try? FileManager.default.removeItem(at: readyURL)
-        try? FileManager.default.removeItem(at: continueURL)
-        try? FileManager.default.removeItem(at: startCountURL)
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
 
         let link = element("task-pr-link-\(taskID)-123")
-        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
+        let conflictActions = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "task-resolve-pr-conflicts-"))
         XCTAssertTrue(link.waitToExist(timeout: 10))
         let secondLink = element("task-pr-link-\(secondTaskID)-456")
         XCTAssertTrue(secondLink.waitToExist(timeout: 10))
@@ -299,7 +279,7 @@ extension PlayhouseUITests {
         let startedDirectory = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STARTED_DIRECTORY"]))
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path) }, timeout: 10))
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path) }, timeout: 10), "Both Review task probes should overlap on focus.")
-        XCTAssertFalse(resolveButton.exists, "A mergeable PR should not show the conflict action.")
+        XCTAssertTrue(waitUntil({ (link.value as? String) == "green" }, timeout: 10), "A mergeable PR's number shows green.")
         let ghCallsURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CALL_LOG"]))
         func ghCallCount() -> Int {
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8))?.split(whereSeparator: \.isNewline).count) ?? 0
@@ -343,61 +323,26 @@ extension PlayhouseUITests {
         }, timeout: 25), "Cooldown focus events should coalesce into one trailing probe after 20 seconds.")
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertEqual((try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count, callsBeforeCooldownFocus + 2, "Four focus changes should produce exactly one probe per linked PR.")
-        XCTAssertTrue(resolveButton.waitToExist(timeout: 10), "Focus should discover the conflicting PR.")
-        XCTAssertGreaterThanOrEqual(resolveButton.frame.width, 30, "The conflict action should have a comfortable horizontal hit target.")
-        XCTAssertGreaterThanOrEqual(resolveButton.frame.height, 30, "The conflict action should have a comfortable vertical hit target.")
+        XCTAssertTrue(waitUntil({ (link.value as? String) == "red" }, timeout: 10), "Focus should discover the conflicting PR and colour its number red.")
+        XCTAssertEqual(secondLink.value as? String, "green", "The mergeable PR stays green.")
+        XCTAssertEqual(conflictActions.count, 0, "The card offers no separate conflict action; Green mode fixes conflicts.")
         XCTAssertGreaterThanOrEqual(link.frame.width, 30, "A PR link should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(link.frame.height, 30, "A PR link should have a comfortable vertical hit target.")
-        assertConflictIndicatorArtwork(resolveButton)
-        XCTAssertLessThanOrEqual(resolveButton.frame.maxX, link.frame.minX + 1, "The conflict action should sit beside its PR link.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Focus refresh should probe separate Review cards concurrently.")
+        attachElementScreenshot(element("task-card-\(taskID)"), named: "A conflicting PR's number shows red with no conflict action (card)")
+        attachScreenshot(named: "Review cards with a conflicting red PR and a mergeable green PR")
 
-        resolveButton.click()
-        let initialPrompt = "The PR has conflicts. Fix them, commit, and push."
-        let initialPromptElement = element("conversation-scroll-view").descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", initialPrompt)).firstMatch
-        XCTAssertTrue(initialPromptElement.waitToExist(timeout: 10), "The conflict action should send the corrected instruction into the task conversation.")
-        XCTAssertTrue(initialPromptElement.identifier.hasPrefix("playhouse-message-"), "The conflict instruction renders as an automatic Playhouse message: \(initialPromptElement.identifier)")
-        attachScreenshot(named: "Conflict instruction shown as an automatic Playhouse message")
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: readyURL.path) }, timeout: 10), "Codex should start the conflict resolution turn.")
-        try "Continue after first conflict attempt.\n".write(to: continueURL, atomically: true, encoding: .utf8)
-
-        let retryPrompt = "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing."
-        let retryPromptElement = element("conversation-scroll-view").descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", retryPrompt)).firstMatch
-        XCTAssertTrue(retryPromptElement.waitToExist(timeout: 15), "A still-conflicting PR should receive one follow-up turn.")
-        XCTAssertTrue(retryPromptElement.identifier.hasPrefix("playhouse-message-"), "The retry instruction renders as an automatic Playhouse message: \(retryPromptElement.identifier)")
-        XCTAssertTrue(waitUntil({
-            (try? String(contentsOf: startCountURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) == 2
-        }, timeout: 10), "Codex should start exactly two resolution turns.")
-        let primaryRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
-        let primaryWorktree = URL(fileURLWithPath: try XCTUnwrap(primaryRecord["worktreePath"] as? String), isDirectory: true)
-        try "Resolution from the conflict solver.\n".write(
-            to: primaryWorktree.appendingPathComponent("conflict-solver-resolution.txt"), atomically: true, encoding: .utf8
-        )
-        try runGit(primaryWorktree, "add", "conflict-solver-resolution.txt")
-        try runGit(primaryWorktree, "commit", "-m", "Resolve pull request conflicts")
-        let resolvedLocalHead = try runGitOutput(primaryWorktree, "rev-parse", "HEAD")
-        let staleRemoteHead = try runGitOutput(remote, "rev-parse", "refs/heads/pr-123")
-        XCTAssertNotEqual(resolvedLocalHead, staleRemoteHead, "A local resolution commit must remain unconfirmed until it is pushed.")
-        try "123=remote\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
-        _ = try runCLI(
-            ["task", "outcome", taskID, "completed"],
-            extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": resolutionFixture.path]
-        )
-        try "Continue after verified conflict resolution.\n".write(to: continueURL, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ element("send-message-button").exists }, timeout: 15), "The second Codex turn should finish after the verified push.")
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
-        returnToBoard()
-        XCTAssertTrue(resolveButton.exists, "A mergeable PR with a mismatched remote head must retain the conflict action.")
-        try runGit(primaryWorktree, "push", remote.path, "HEAD:refs/heads/pr-123")
-        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/pr-123"), resolvedLocalHead)
-        try "123=remote\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
-        for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
-        Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
-        activateOtherAppThenReturn()
-        XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
+        // A remote head not pushed locally is reported, and is not a conflict.
+        let states = try XCTUnwrap(try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]])
+        XCTAssertEqual(states.first?["hasConflicts"] as? Bool, true)
+        XCTAssertEqual(states.first?["health"] as? String, "red")
+        try "123=unmerged\n456=head-mismatch\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        let mismatch = try XCTUnwrap((try runCLI(["task", "pr", "status", secondTaskID], extraEnvironment: ghEnvironment)["result"] as? [[String: Any]])?.first)
+        XCTAssertNotEqual(mismatch["headRefOid"] as? String, mismatch["localHeadOid"] as? String, "A remote head not pushed locally is reported as such.")
+        XCTAssertEqual(mismatch["hasConflicts"] as? Bool, false, "An unpushed head is not a conflict.")
+        XCTAssertEqual(conflictActions.count, 0)
+        assertCLIError(try runCLI(["task", "pr", "verify", taskID], expectedStatus: 2), code: "invalid_argument")
     }
     // case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A worktree switched off its task branch fails the sync with a message naming both branches and blocks the task, leaving that other branch and the remote untouched; once switched back, a remote commit whose changes the branch already holds is concluded as a merge commit and pushed, the task returns to Review, and the next sync is up-to-date instead of failing on an unfinished merge. A merge Git refuses outright, such as one with unrelated history, blocks the task with Git's own error after the generic merge failure message, and restoring the remote branch heals it back to Review. A clean merge an earlier sync left unfinished on the task branch is concluded as a merge commit and pushed. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
     func test_review_sync_pushes_unpushed_changes_on_completion() throws {
@@ -569,7 +514,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(deletedSync["status"] as? String, "Review")
         assertTaskVisible("Review sync push UI", inColumn: "Review")
     }
-    // case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
+    // case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head. With the Merge conflict resolution prompt changed in Settings, that provider turn says the merge stopped on conflicts, carries the changed guidance instead of the default, and ends with Playhouse's rule to stage the resolved files without committing or pushing.
     func test_review_sync_resolves_conflicts_with_provider_or_blocks() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -611,12 +556,7 @@ extension PlayhouseUITests {
             (try? self.runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")) == localHead
         }, timeout: 30), "The board should push the diverged local head automatically.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
-        // Once the PR head reports the pushed commit, no conflict action remains.
         try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
-        Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
-        activateOtherAppThenReturn()
-        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
-        XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "A synced PR should not keep the conflict action.")
         XCTAssertTrue(terminateAppAndWait(app))
 
         // Conflicting local and remote PR commits: the provider turn resolves nothing,
@@ -638,11 +578,20 @@ extension PlayhouseUITests {
         try "local version\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
         try runGit(worktree, "add", conflictPath)
         try runGit(worktree, "commit", "-m", "Local conflicting commit")
+        let conflictGuidance = "Keep the remote version of every conflicting line and note what the local commit wanted."
+        _ = try runCLI(["settings", "set-prompt", "merge-conflicts", "--text", conflictGuidance])
 
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked"
         }, timeout: 30), "An unresolvable sync conflict should move the task to Blocked.")
+        let codexExecutable = try XCTUnwrap(codexFixtureExecutable)
+        let turnPrompts = ((try? String(contentsOf: URL(fileURLWithPath: codexExecutable + ".turn-starts"), encoding: .utf8)) ?? "").split(separator: "\n")
+            .compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])?["text"] as? String }
+        let resolutionPrompt = try XCTUnwrap(turnPrompts.last { $0.contains("stopped on conflicts") }, "The sync should ask the provider to resolve the conflicts.")
+        XCTAssertTrue(resolutionPrompt.contains(conflictGuidance), "The changed conflict prompt reaches the provider: \(resolutionPrompt)")
+        XCTAssertFalse(resolutionPrompt.contains("Preserve the intended changes from both sides"), resolutionPrompt)
+        XCTAssertTrue(resolutionPrompt.hasSuffix("Stage the resolved files. Do not commit or push. Report which conflicts you resolved."), resolutionPrompt)
         assertTaskVisible("Review sync conflict UI", inColumn: "Blocked")
         let blockedMessage = try taskRecord(id: taskID)?["statusMessage"] as? String
         XCTAssertTrue((blockedMessage ?? "").contains("couldn't sync this task's changes with its pull request"), blockedMessage ?? "nil")

@@ -773,7 +773,7 @@ struct PluginLibrary: Sendable {
 /// What a host refuses from a plugin, the same in the window and in
 /// `plugin render`, so the headless check matches what the user sees.
 enum PluginHostRules {
-    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "resolveConflicts", "alert", "openURL", "confirm", "newTask", "openLoginItems", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus", "composer.setMode", "openSkills", "editPlugin"]
+    static let uiCalls: Set<String> = ["close", "openTask", "openDiff", "refreshWorkspace", "moveTask", "alert", "openURL", "confirm", "newTask", "openLoginItems", "composer.setDraft", "composer.insertText", "composer.replaceSelection", "composer.focus", "composer.setMode", "openSkills", "editPlugin"]
 
     /// Nil when the host should answer `call`. `placement` is nil for a plugin
     /// rendered from a file or a catalog page, which may call anything.
@@ -796,7 +796,7 @@ enum PluginHostRules {
                 return PluginHostError(code: "unavailable", message: "There is no task's workspace at the \(placement.title) placement.")
             }
             // Only the board answers these, for the cards it shows.
-            if ["moveTask", "resolveConflicts", "alert"].contains(name), let placement, placement != .taskItem {
+            if ["moveTask", "alert"].contains(name), let placement, placement != .taskItem {
                 return PluginHostError(code: "unavailable", message: "Only a task card's plugin can call ui.\(name), not one at the \(placement.title) placement.")
             }
             // The board window and the composer's commands ask the user to confirm.

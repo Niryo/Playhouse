@@ -269,7 +269,7 @@ extension BoardTaskManager {
                 do {
                     let summaryThread = try await client.startThread(workspace: workspace, modelID: client.provider.defaultModelID, developerInstructions: nil)
                     try await client.sendMessage(
-                        "Write a very concise GitHub pull request description. Explain what problem this change solves, how it solves it, and briefly mention any special issue or caveat from the conversation. Use Markdown, no more than three short sections, and return only the description.\n\nTask: \(currentTitle)\n\nConversation:\n\(conversationText)",
+                        SystemPrompts.pullRequestDescription(title: currentTitle, conversation: conversationText),
                         mode: .plan,
                         modelID: client.provider.defaultModelID,
                         threadID: summaryThread,
@@ -630,19 +630,6 @@ extension BoardTaskManager {
         }
     }
 
-    func verifyPullRequestResolution(_ id: UUID) async throws -> PullRequestResolutionCheck {
-        var latest: [PullRequestReviewState] = []
-        for attempt in 0..<5 {
-            latest = try await reviewPullRequests(id)
-            if !latest.isEmpty && latest.allSatisfy(\.isConfirmedResolved) { return .resolved }
-            if attempt < 4 { try await Task.sleep(for: .seconds(1)) }
-        }
-        guard !latest.isEmpty else { return .inconclusive }
-        return latest.contains(where: {
-            $0.hasConflicts || ($0.headRefOid != nil && $0.headRefOid != $0.localHeadOid)
-        }) ? .stillConflicted : .inconclusive
-    }
-
     func pullRequestConflictRepositoriesUnlocked(_ id: UUID) async throws -> [String] {
         let task = try requireSubject(id)
         guard !task.repositoryWorktrees.isEmpty else { return [] }
@@ -702,7 +689,7 @@ extension BoardTaskManager {
         let thread = try await client.startThread(workspace: roots, modelID: client.provider.defaultModelID, developerInstructions: nil)
         do {
             try await client.sendMessage(
-                "Resolve every Git merge conflict in the current workspace. Preserve the intended changes from both sides, inspect the resulting files, and stage the resolved files. Do not commit or push. Report which conflicts you resolved.",
+                SystemPrompts.stagedMergeConflicts(),
                 mode: .code,
                 modelID: client.provider.defaultModelID,
                 threadID: thread,

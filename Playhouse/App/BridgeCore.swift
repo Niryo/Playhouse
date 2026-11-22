@@ -186,7 +186,7 @@ struct ConversationTitleGenerator {
             var generated: String?
             phase = "title-turn"
             try await client.sendMessage(
-                "Write a concise task title of at most 8 words for this request. Return only the title:\n\n\(prompt)",
+                SystemPrompts.taskTitle(request: prompt),
                 mode: .plan,
                 modelID: client.provider.titleModelID,
                 threadID: threadID,

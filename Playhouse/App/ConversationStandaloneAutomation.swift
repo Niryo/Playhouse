@@ -277,7 +277,7 @@ extension ConversationManager {
                 do {
                     _ = try await send(
                         taskID: taskID,
-                        text: Self.pullRequestAutopilotPrompt(states),
+                        text: SystemPrompts.pullRequestAutopilot(states),
                         onTurnStarting: { turnStarted = true },
                         historyMessageLimit: 1
                     )
@@ -293,31 +293,6 @@ extension ConversationManager {
     static var autopilotRunningTaskIDs = Set<UUID>()
 
     static let pullRequestAutopilotPromptMarker = PlayhouseSentMessage.pullRequestAutopilotMarker
-
-    static func pullRequestAutopilotPrompt(_ states: [PullRequestReviewState]) -> String {
-        let problems = states.filter { !$0.merged }.compactMap { state -> String? in
-            var issues: [String] = []
-            if state.checks == .failure {
-                issues.append(state.failingChecks.isEmpty ? "failing checks" : "failing checks: \(state.failingChecks.joined(separator: ", "))")
-            }
-            if state.hasConflicts { issues.append("merge conflicts with its base branch") }
-            if let threads = state.unresolvedReviewThreads, threads > 0 {
-                issues.append("\(threads) unresolved review \(threads == 1 ? "thread" : "threads")")
-            }
-            guard !issues.isEmpty else { return nil }
-            return "- Pull request #\(state.number) (\(state.repositoryPath)): \(issues.joined(separator: "; "))."
-        }
-        return """
-        \(pullRequestAutopilotPromptMarker) this task's pull request isn't green yet. Please get it there.
-
-        \(problems.joined(separator: "\n"))
-
-        1. Read the details with the GitHub CLI from the task worktree: `gh pr checks <number>`, `gh run view <run-id> --log-failed` for failing runs, and the review threads through `gh api graphql` (`reviewThreads` with their comments).
-        2. Fix genuine failures in the task worktree. For merge conflicts, merge the base branch and resolve them. Commit your work; Playhouse pushes the task branch when you report `completed`.
-        3. Treat every unresolved review comment critically: reviewers and bots can be wrong, noisy, or out of scope. Change the code only for comments that really deserve it. For every thread, fixed or not, reply with what you changed or why you left the code as it is, then resolve the thread (GraphQL `addPullRequestReviewThreadReply` and `resolveReviewThread`).
-        4. If something can't be fixed from here — for example GitHub or CI is down, a check needs credentials or permissions you don't have, or the user must act (such as adding a Jira ticket to the pull request title) — don't retry in a loop. Report `waiting-response` and tell the user exactly what is blocking the pull request and what they need to do. Otherwise report `completed` when you're done; Playhouse keeps watching the pull request and sends another turn if it is still red.
-        """
-    }
 
     /// A status nudge, and the agent's reply to it, only mean something in the session they were sent to,
     /// so neither is replayed to another provider or into a fresh session. A message the user steered
