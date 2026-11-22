@@ -52,25 +52,30 @@ extension BoardTaskManager {
         }
     }
 
-    /// Whether the task's follow-ups resume the whole conversation or start fresh,
-    /// seeded sessions. Only a board task chooses: the standalone chat pages itself.
+    /// Whether board tasks' follow-ups resume the whole conversation or start fresh,
+    /// seeded sessions. The choice is sticky: it is saved on every board task and as the
+    /// default new tasks copy, so turning it on or off in one task does so in all of them.
+    /// Only a board task chooses: the standalone chat pages itself.
     func setConversationContextMode(_ id: UUID, mode: ConversationContextMode) async throws -> BoardTaskRecord {
         try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
-            guard let boardTask = task as? BoardTask else {
+            guard task is BoardTask else {
                 throw BridgeCommandError(
                     code: "invalid_argument",
                     message: "The standalone chat already splits its context into pages, so it has no context mode."
                 )
             }
-            let previous = boardTask.conversationContextModeRawValue
-            boardTask.conversationContextModeRawValue = mode.rawValue
+            let changed = try modelContext.fetch(FetchDescriptor<BoardTask>())
+                .filter { $0.conversationContextModeRawValue != mode.rawValue }
+            let previous = changed.map(\.conversationContextModeRawValue)
+            for boardTask in changed { boardTask.conversationContextModeRawValue = mode.rawValue }
             do {
                 try await saveTaskContext(taskID: id)
             } catch {
-                boardTask.conversationContextModeRawValue = previous
+                for (boardTask, value) in zip(changed, previous) { boardTask.conversationContextModeRawValue = value }
                 throw error
             }
+            preferences.set(mode.rawValue, forKey: WorkspaceSettings.conversationContextModeKey)
             return BoardTaskRecord(task: task)
         }
     }

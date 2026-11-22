@@ -179,7 +179,8 @@ final class BoardTask {
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
-    /// Nil for tasks that never chose; those resume their full conversation.
+    /// Nil for tasks that never chose; those resume their full conversation. Choosing in
+    /// one task sets it on every board task and as the default new tasks copy.
     var conversationContextModeRawValue: String?
     // Retained for one-time migration to the global provider model preference.
     var conversationModelIDsData: Data?
