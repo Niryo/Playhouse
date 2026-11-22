@@ -1664,7 +1664,7 @@ extension PlayhouseUITests {
                                        extraEnvironment: daemon.merging(["PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"]) { _, new in new })), "unavailable")
     }
 
-    // case-contract: test_provider_install_from_composer | With neither CLI installed, providers list reports Claude Code and Codex CLI missing with their official curl installers, and the composer shows an Install AI provider button whose menu lists Claude and Codex instead of the provider picker. Installing Codex runs its installer once; Codex is then listed as installed and runs the task's turn without a restart, and the provider menu shows Codex with an Add Claude entry. A new task whose default provider (Claude) is missing starts on the installed Codex instead, without changing the saved default. A failing installer reports its output and leaves Claude missing; adding Claude again installs it and switches the task to Claude. Installing a provider that is already installed doesn't rerun its installer, and an unknown provider is rejected.
+    // case-contract: test_provider_install_from_composer | With neither CLI installed, providers list reports Claude Code and Codex CLI missing with their official curl installers, and the composer shows an Install AI provider button whose menu lists Claude and Codex instead of the provider picker, with no model and effort picker beside it. Installing Codex runs its installer once; Codex is then listed as installed and runs the task's turn without a restart, and the provider menu shows Codex with an Add Claude entry, with the model and effort picker back beside it. A new task whose default provider (Claude) is missing starts on the installed Codex instead, without changing the saved default. A failing installer reports its output and leaves Claude missing; adding Claude again installs it and switches the task to Claude. Installing a provider that is already installed doesn't rerun its installer, and an unknown provider is rejected.
     func test_provider_install_from_composer() throws {
         // The installer fixture installs each provider's CLI fixture into this folder, where the
         // provider executables point; until it runs, both providers read as not installed.
@@ -1700,7 +1700,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ providerMenu.exists && providerMenu.label == "Install AI provider" }, timeout: 15),
                       "With no provider installed the provider picker becomes Install AI provider: \(providerMenu.label)")
         XCTAssertFalse(element("provider-capabilities-notice").exists, "No grey provider notice explains a missing CLI.")
-        attachRegionScreenshot([providerMenu, element("send-message-button")], named: "Install AI provider replaces the provider picker")
+        let modelPicker = element("model-picker-menu")
+        XCTAssertFalse(modelPicker.exists, "With no provider installed the model and effort picker is hidden.")
+        attachRegionScreenshot([providerMenu, element("send-message-button")], named: "Install AI provider stands alone, with no model and effort picker")
         providerMenu.click()
         let installClaude = app.menuItems["conversation-provider-install-claude"]
         let installCodex = app.menuItems["conversation-provider-install-codex"]
@@ -1717,6 +1719,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try statuses()["codex"]?["isInstalled"] as? Bool, true)
         XCTAssertEqual(try statuses()["claude"]?["isInstalled"] as? Bool, false)
         XCTAssertEqual(try taskRecord(id: installTaskID)?["conversationProvider"] as? String, "codex")
+        XCTAssertTrue(modelPicker.waitToExist(timeout: 10), "Once Codex is installed the model and effort picker is back.")
 
         providerMenu.click()
         XCTAssertTrue(app.menuItems["conversation-provider-codex"].waitToExist(timeout: 5), "The menu lists the installed Codex.")

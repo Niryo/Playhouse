@@ -116,7 +116,8 @@ struct ComposerModel: Codable, Equatable {
     var goal: ModeToggle?
     var startImplementing: StartImplementing?
     var provider: ProviderMenu
-    var model: ModelPicker
+    /// Nil while no provider is installed: the Install AI provider button stands alone.
+    var model: ModelPicker?
     /// Nil where the conversation can't be scheduled.
     var schedule: Schedule?
     var parallelSend: ParallelSend? = nil
@@ -226,7 +227,9 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
             }
             AtomStack(props: StackProps(axis: "h", spacing: 12)) {
                 providerMenu
-                modelPicker
+                if let picker = model.model {
+                    modelPicker(picker)
+                }
                 if let schedule = model.schedule {
                     scheduleButton(schedule)
                 }
@@ -319,9 +322,9 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
         )
     }
 
-    private var modelPicker: some View {
+    private func modelPicker(_ picker: ComposerModel.ModelPicker) -> some View {
         ComposerModelPicker(
-            picker: model.model, prefix: prefix,
+            picker: picker, prefix: prefix,
             toggle: actions.toggleModelPicker, dismiss: actions.dismissModelPicker,
             selectModel: actions.selectModel, selectEffort: actions.selectEffort
         )
