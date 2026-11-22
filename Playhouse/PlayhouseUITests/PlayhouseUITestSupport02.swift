@@ -212,6 +212,11 @@ extension PlayhouseUITests {
     /// typeText then fails with "Neither element nor any descendant has
     /// keyboard focus".
     func typeIntoField(_ field: XCUIElement, text: String, file: StaticString = #filePath, line: UInt = #line) {
+        focusField(field, file: file, line: line)
+        field.typeText(text)
+    }
+    /// The focusing half of `typeIntoField`, for a caller that types keys of its own next.
+    func focusField(_ field: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(field.waitToExist(timeout: 5), "Text field is missing.", file: file, line: line)
         waitForStableFrame(field)
         field.click()
@@ -219,7 +224,6 @@ extension PlayhouseUITests {
             field.click()
             XCTAssertTrue(waitUntil({ (field.value(forKey: "hasKeyboardFocus") as? Bool) == true }, timeout: 2), "Clicking the text field should focus it.", file: file, line: line)
         }
-        field.typeText(text)
     }
     /// Selects a question option once the form has settled. The question form
     /// arrives with a transcript reload that scrolls it; a click issued the
@@ -938,22 +942,24 @@ extension PlayhouseUITests {
             || app.textViews.matching(NSPredicate(format: "value CONTAINS %@", text)).firstMatch.exists
             || app.otherElements.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch.exists
     }
-    /// Refreshes a standalone chat through its visible navigation controls. The board's
-    /// Chat button moves off-screen while the 460-point sidebar and 980-point board coexist.
+    /// Refreshes a standalone chat through its visible navigation controls: the board sidebar's
+    /// Chat entry hides it, then after a relaunch the same entry shows it again.
     func refreshStandaloneChatSidebar() {
-        let backButton = element("back-to-board-button")
-        XCTAssertTrue(waitUntil({ backButton.exists && backButton.isHittable }, timeout: 5), "The sidebar should offer a visible way back to the board.")
-        backButton.click()
-        XCTAssertTrue(waitUntil({ !self.element("chat-sidebar").exists }, timeout: 5), "Returning to the board should slide the chat sidebar away.")
+        let chatEntry = element("chat-sidebar-button")
+        XCTAssertTrue(waitUntil({ chatEntry.exists && chatEntry.isHittable }, timeout: 5), "The board sidebar's Chat entry should be a visible way to hide the chat.")
+        chatEntry.click()
+        XCTAssertTrue(waitUntil({ !self.element("chat-sidebar").exists }, timeout: 5), "Pressing the Chat entry should slide the chat sidebar away.")
         let parent = launchDefaultParent
         XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before restoring the test window frame.")
         clearSavedWindowFrames()
         launchApp(defaultParent: parent)
         let chatButton = element("chat-sidebar-button")
-        XCTAssertTrue(waitUntil({ chatButton.exists && chatButton.isHittable }, timeout: 5), "The board's Chat button should be available again after leaving the sidebar.")
+        XCTAssertTrue(waitUntil({ chatButton.exists && chatButton.isHittable }, timeout: 5), "The board sidebar's Chat entry should be available again after the relaunch.")
         chatButton.click()
         XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10), "The standalone chat should reopen from the board.")
         waitForConversationLoad()
+        // The chat slides out from the sidebar's edge; callers click its composer next.
+        XCTAssertTrue(waitForStableFrame(element("message-composer")), "The reopened chat's composer settles.")
     }
     /// Waits for transcript text, scrolling down on each miss: the lazy transcript
     /// only exposes rows near the viewport.

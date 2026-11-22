@@ -361,7 +361,7 @@ extension PlayhouseUITests {
         // The mode's bar slides in above the board, moving the header down; click once it rests.
         XCTAssertTrue(element("plugin-mode-banner").waitToExist(timeout: 10))
         let chatButton = element("chat-sidebar-button")
-        XCTAssertTrue(waitForStableFrame(chatButton), "The Chat button stops moving once the bar is in.")
+        XCTAssertTrue(waitForStableFrame(chatButton), "The sidebar's Chat entry stops moving once the bar is in.")
         chatButton.click()
         let chat = element("chat-sidebar")
         XCTAssertTrue(chat.waitToExist(timeout: 10))

@@ -45,8 +45,8 @@ Pass --live-provider only when the guest has that provider's CLI and a login
 Environment:
   PLAYHOUSE_UI_TART_VM         VM name (default: playhouse-ui)
   PLAYHOUSE_UI_TART_ARTIFACTS  Host artifact root
-  PLAYHOUSE_UI_SCREEN_WIDTH    Guest screen width in points for the run (default: 1024)
-  PLAYHOUSE_UI_SCREEN_HEIGHT   Guest screen height in points for the run (default: 768)
+  PLAYHOUSE_UI_SCREEN_WIDTH    Guest screen width in points for the run (default: 1280)
+  PLAYHOUSE_UI_SCREEN_HEIGHT   Guest screen height in points for the run (default: 960)
   PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS Per-case XCTest allowance (default: 180)
   --live-provider <provider>   Run live UI cases against claude or codex; guest access is required
   --stop-vm-after-run          Stop the persistent VM after this run
@@ -323,8 +323,8 @@ fi
 # The guest picks its screen size at boot, and it has come up both 1024 and 2560 points wide.
 # Window sizes, layout limits and scroll extents in the UI cases follow from it, so every run
 # uses the same screen. The setter is compiled once into the guest and reused.
-ui_screen_width="${PLAYHOUSE_UI_SCREEN_WIDTH:-1024}"
-ui_screen_height="${PLAYHOUSE_UI_SCREEN_HEIGHT:-768}"
+ui_screen_width="${PLAYHOUSE_UI_SCREEN_WIDTH:-1280}"
+ui_screen_height="${PLAYHOUSE_UI_SCREEN_HEIGHT:-960}"
 if ! tart exec -i "$vm_name" /bin/bash -c '
 	set -e
 	tool_dir="$HOME/PlayhouseUITestRuns/bin"
