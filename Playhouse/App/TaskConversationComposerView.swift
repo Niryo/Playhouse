@@ -390,8 +390,8 @@ extension TaskConversationView {
     /// The skill gallery as a modal card centered over the task, about as wide
     /// as the composer, over a dimmed backdrop that blocks the task under it.
     /// In the standalone chat sidebar, `skillsPageWindowWidth` widens the
-    /// backdrop from the sidebar's leading edge across the whole window, so the
-    /// card centers in the window, and `SkillsPageShowingKey` tells the board it is open.
+    /// backdrop from the chat's leading edge across the board beside the main sidebar,
+    /// so the card centers in that board, and `SkillsPageShowingKey` tells the board it is open.
     var skillsPage: some View {
         SkillsPageWindowFrame {
             GeometryReader { geometry in

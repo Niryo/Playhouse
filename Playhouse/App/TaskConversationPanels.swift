@@ -102,13 +102,16 @@ extension TaskConversationView {
                     }
                     .padding(.horizontal, 26)
                     .padding(.vertical, 15)
-                } else {
+                } else if !task.isStandaloneChat || task.isParallelChatBubble {
                     conversationHeader
                 }
 
-                Rectangle()
-                    .fill(Color.primary.opacity(0.07))
-                    .frame(height: 1)
+                // The standalone chat beside the board has no header: the sidebar's Chat entry names and hides it.
+                if !task.isStandaloneChat || task.isParallelChatBubble {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(height: 1)
+                }
 
                 safetyNotice
 

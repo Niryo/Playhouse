@@ -174,7 +174,7 @@ extension KanbanBoardView {
         let store = ParallelChatBubbleStore.shared
         let runningIDs = Set(parallelBubbles.map(\.id).filter { conversationRuntime.isTurnActive(taskID: $0) })
         let expandedBubble = parallelBubbles.first { $0.id == openParallelBubbleID }
-        let sidebarEdge = chatSidebarShownWidth + 12
+        let sidebarEdge = ChatSidebarLayout.chatLeadingEdge + chatSidebarShownWidth + 12
         let window = NSApp.keyWindow
         let windowWidth = boardContentWidth > 0 ? boardContentWidth : window?.frame.width ?? sidebarEdge + 520
         let visibleRightEdge = (window?.screen ?? NSScreen.main)?.visibleFrame.maxX
@@ -215,7 +215,7 @@ extension KanbanBoardView {
                     }
                 }
                 .padding(.leading, leading)
-                .padding(.top, 64)
+                .padding(.top, 16)
                 .padding(.bottom, 16)
                 .frame(maxHeight: .infinity, alignment: .topLeading)
                 .transition(.opacity)
