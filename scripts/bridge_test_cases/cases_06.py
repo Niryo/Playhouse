@@ -2,7 +2,7 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases06:
-    # case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
+    # case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head. With the Merge conflict resolution prompt changed in Settings, that provider turn says the merge stopped on conflicts, carries the changed guidance instead of the default, and ends with Playhouse's rule to stage the resolved files without committing or pushing.
     def test_review_sync_resolves_conflicts_with_provider_or_blocks(self):
         task = self.create_repo_task("Review sync conflicts", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -39,9 +39,15 @@ class BridgeTestCases06:
         copy_file(fixture, executable)
         executable.chmod(0o755)
         environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        conflict_guidance = "Keep the remote version of every conflicting line and note what the local commit wanted."
+        self.assert_success(self.call_cli("settings", "set-prompt", "merge-conflicts", "--text", conflict_guidance)[0])
         failed, _ = self.call_cli("task", "pr", "sync", task["id"], extra_environment=environment, expected_status=1)
         self.assert_failure(failed, "operation_failed")
         self.assertIn("couldn't resolve every merge conflict", failed["error"]["message"])
+        resolution_prompt = [prompt for prompt in self.codex_turn_start_prompts(executable) if "stopped on conflicts" in prompt][-1]
+        self.assertIn(conflict_guidance, resolution_prompt, "The changed conflict prompt reaches the provider.")
+        self.assertNotIn("Preserve the intended changes from both sides", resolution_prompt)
+        self.assertTrue(resolution_prompt.endswith("Stage the resolved files. Do not commit or push. Report which conflicts you resolved."), resolution_prompt)
         blocked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(blocked["status"], "Blocked")
         self.assertIn("couldn't sync this task's changes with its pull request", blocked.get("statusMessage") or "")

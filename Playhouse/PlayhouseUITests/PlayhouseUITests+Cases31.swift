@@ -1771,15 +1771,15 @@ function CardButton() {
   }
   return h(Stack, { spacing: 6, align: "leading" },
     h(Text, { testID: "button-task" }, props.task ? props.task.title : "no task"),
+    h(Text, { size: 11, testID: "button-api" }, "resolveConflicts: " + typeof Playhouse.ui.resolveConflicts),
     h(Text, { size: 11, testID: "button-result" }, result[0]),
     act("button-alert", "alert", function () { return Playhouse.ui.alert("Card plugin alert", "Raised from the task card."); }),
     act("button-compose", "composer", function () { return Playhouse.ui.composer.setDraft("from the card"); }),
-    act("button-resolve", "resolveConflicts", function () { return Playhouse.ui.resolveConflicts(id); }),
     act("button-move", "moveTask", function () { return Playhouse.ui.moveTask(id, "Review"); }));
 }
 Playhouse.render(h(CardButton));
 """#
-    // case-contract: test_plugin_task_card_placement_events_and_throttle | A plugin installed at the taskItem placement (inline or as a button) is valid and runs with its card's task as `props.task`. Playhouse.on delivers app events to a plugin's listeners: task.statusChanged with {taskID, from, to} when its task moves between columns, app.focus when the app comes to the front, and plugin.stateChanged with {pluginID, key, value} when a saved value changes; `plugin render --event @<name>[:json]` reports how many listeners heard each, and the function Playhouse.on returns stops listening. Playhouse.throttle(fn, seconds) runs the first call at once and collapses the calls made within its cooldown into one trailing call with the latest arguments when the cooldown ends. `plugin event <name> [--payload <json>]` hands an app event to the built-in plugins' services; an unknown name is invalid_argument and a payload that is not a JSON object is a usage error. In the window, an installed task card plugin renders on every card, a Backlog card included (which has no built-in pull request controls yet), in the bottom row beside the built-in mode pill once the task has started, shows its task's status, hears the task move to Review and probes through its throttle, and probes through it again when the app comes back to the front (the window's app.focus), repeated focuses within its cooldown collapsing into at most two probes; a task card plugin with a button opens a popover showing its card's task. Only a task card's plugin may call ui.moveTask (which moves its task as dragging the card does), ui.resolveConflicts (which in the window opens its task and sends the conflict instruction) and ui.alert (which shows the board's alert); from the conversation sidebar or the board's sidebar they are unavailable, and so is the composer from a task card, the same in `plugin render`, which records each call in hostCalls, and in the window. The Plugins menu lists the card's built-ins, and disabling the built-in Pull request mode removes the card's mode pill while installed task card plugins stay, until it is enabled again. A turn's move of its task, on Codex and on Claude, is published to the services from the provider's own callbacks, and no move is dropped.
+    // case-contract: test_plugin_task_card_placement_events_and_throttle | A plugin installed at the taskItem placement (inline or as a button) is valid and runs with its card's task as `props.task`. Playhouse.on delivers app events to a plugin's listeners: task.statusChanged with {taskID, from, to} when its task moves between columns, app.focus when the app comes to the front, and plugin.stateChanged with {pluginID, key, value} when a saved value changes; `plugin render --event @<name>[:json]` reports how many listeners heard each, and the function Playhouse.on returns stops listening. Playhouse.throttle(fn, seconds) runs the first call at once and collapses the calls made within its cooldown into one trailing call with the latest arguments when the cooldown ends. `plugin event <name> [--payload <json>]` hands an app event to the built-in plugins' services; an unknown name is invalid_argument and a payload that is not a JSON object is a usage error. In the window, an installed task card plugin renders on every card, a Backlog card included (which has no built-in pull request controls yet), in the bottom row beside the built-in mode pill once the task has started, shows its task's status, hears the task move to Review and probes through its throttle, and probes through it again when the app comes back to the front (the window's app.focus), repeated focuses within its cooldown collapsing into at most two probes; a task card plugin with a button opens a popover showing its card's task. Only a task card's plugin may call ui.moveTask (which moves its task as dragging the card does) and ui.alert (which shows the board's alert); from the conversation sidebar or the board's sidebar they are unavailable, and so is the composer from a task card, the same in `plugin render`, which records each call in hostCalls, and in the window. The Plugins menu lists the card's built-ins, and disabling the built-in Pull request mode removes the card's mode pill while installed task card plugins stay, until it is enabled again. A turn's move of its task, on Codex and on Claude, is published to the services from the provider's own callbacks, and no move is dropped. Plugins have no ui.resolveConflicts any more (Green mode fixes pull request conflicts): `typeof Playhouse.ui.resolveConflicts` is undefined in `plugin render` and in the window.
     func test_plugin_task_card_placement_events_and_throttle() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         try writeInstalledPlugin("card-probe", source: Self.taskCardPluginSource, placement: "taskItem", presentation: "inline", name: "Card Probe", icon: "eye")
@@ -1853,6 +1853,7 @@ Playhouse.render(h(CardButton));
         let buttonTask = element("button-task")
         XCTAssertTrue(waitUntil({ buttonTask.exists && self.pluginText(buttonTask) == "Task card plugin" }, timeout: 10),
                       "The popover gets its card's task: \(buttonTask.exists ? pluginText(buttonTask) : "absent")")
+        XCTAssertEqual(pluginText(element("button-api")), "resolveConflicts: undefined", "Plugins have no ui.resolveConflicts: Green mode fixes pull request conflicts.")
         attachScreenshot(named: "Task card plugin opened from its card button")
         // The board answers a card plugin's alert; a task card has no composer.
         let buttonResult = element("button-result")
@@ -1914,11 +1915,11 @@ Playhouse.render(h(CardButton));
         attachElementScreenshot(card, named: "Task card plugin probed on focus through its throttle")
         attachScreenshot(named: "Board with a task card plugin")
 
-        // Only a task card's plugin may move a task, resolve conflicts or raise an alert:
+        // Only a task card's plugin may move a task or raise an alert:
         // from the board's sidebar and the conversation sidebar the window refuses them.
         func assertCardOnlyCallsRefused(_ surface: XCUIElement, _ context: String) {
             let result = surface.descendants(matching: .any)["button-result"]
-            for (button, label) in [("button-move", "moveTask"), ("button-resolve", "resolveConflicts"), ("button-alert", "alert")] {
+            for (button, label) in [("button-move", "moveTask"), ("button-alert", "alert")] {
                 surface.descendants(matching: .any)[button].click()
                 XCTAssertTrue(waitUntil({ self.pluginText(result) == "\(label): unavailable" }, timeout: 5), "\(context) refuses \(label): \(pluginText(result))")
             }
@@ -1936,17 +1937,8 @@ Playhouse.render(h(CardButton));
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitForDisappearance(boardPopover, timeout: 5))
 
-        // A card's ui.resolveConflicts opens its task and sends the conflict instruction.
-        entry.click()
-        XCTAssertTrue(waitUntil({ buttonTask.exists && self.pluginText(buttonTask) == "Task card plugin" }, timeout: 10))
-        element("button-resolve").click()
-        XCTAssertTrue(waitForDisappearance(buttonTask, timeout: 5), "Resolving closes the card's popover.")
-        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Task card plugin" }, timeout: 15),
-                      "ui.resolveConflicts opens the card's task.")
-        let conflictPrompt = element("conversation-scroll-view").descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", "The PR has conflicts. Fix them, commit, and push.")).firstMatch
-        XCTAssertTrue(conflictPrompt.waitToExist(timeout: 10), "The opened task gets the conflict instruction.")
-        attachScreenshot(named: "A card plugin's ui.resolveConflicts opened its task with the conflict instruction")
+        openTask(named: "Task card plugin")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Task card plugin" }, timeout: 15))
 
         let sidebarEntry = element("plugin-entry-sidebar-button")
         XCTAssertTrue(sidebarEntry.waitToExist(timeout: 10))

@@ -115,8 +115,6 @@ struct StandaloneChatPanel: View, Equatable {
     var body: some View {
         TaskConversationView(
             task: chat, isNewTask: false,
-            conflictResolutionRequested: false,
-            onConflictResolutionChecked: { _ in },
             initialDraft: initialDraft,
             onOpenTask: onOpenTask,
             onBack: onClose
@@ -132,16 +130,13 @@ struct StandaloneChatPanel: View, Equatable {
 struct TaskConversationPanel: View, Equatable {
     let task: BoardTask
     let isNewTask: Bool
-    let conflictResolutionRequested: Bool
     let skillFixPrompt: String?
     let presentScheduleOnAppear: TaskScheduleKind?
-    let onConflictResolutionChecked: (Bool) -> Void
     let onOpenTask: (UUID, String) -> Void
     let onBack: () -> Void
 
     static func == (lhs: TaskConversationPanel, rhs: TaskConversationPanel) -> Bool {
         lhs.task === rhs.task && lhs.isNewTask == rhs.isNewTask
-            && lhs.conflictResolutionRequested == rhs.conflictResolutionRequested
             && lhs.skillFixPrompt == rhs.skillFixPrompt
             && lhs.presentScheduleOnAppear == rhs.presentScheduleOnAppear
     }
@@ -149,8 +144,6 @@ struct TaskConversationPanel: View, Equatable {
     var body: some View {
         TaskConversationView(
             task: task, isNewTask: isNewTask,
-            conflictResolutionRequested: conflictResolutionRequested,
-            onConflictResolutionChecked: onConflictResolutionChecked,
             skillFixPrompt: skillFixPrompt,
             onOpenTask: onOpenTask,
             presentScheduleOnAppear: presentScheduleOnAppear,
@@ -215,7 +208,6 @@ struct KanbanBoardView: View {
     @State var archiveHasMore = true
     @State var isLoadingArchivePage = false
     @State var taskCreatingPullRequests = Set<UUID>()
-    @State var conflictResolutionTaskID: UUID?
     /// Prompts that tasks opened by the Skills page's Fix with Agent send when they appear.
     @State var skillFixPrompts: [UUID: String] = [:]
     @State var taskAwaitingUnmergedConfirmation: UUID?
@@ -269,16 +261,13 @@ struct KanbanBoardView: View {
     func conversationView(for selectedTask: BoardTask) -> some View {
         TaskConversationPanel(
             task: selectedTask, isNewTask: isSelectedTaskNew,
-            conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
             skillFixPrompt: skillFixPrompts[selectedTask.id],
             presentScheduleOnAppear: presentScheduleOnOpen,
-            onConflictResolutionChecked: { _ in },
             onOpenTask: openTask(_:sending:)
         ) {
             self.skillFixPrompts[selectedTask.id] = nil
             self.selectedTask = nil
             self.isSelectedTaskNew = false
-            self.conflictResolutionTaskID = nil
             self.presentScheduleOnOpen = nil
         }
         .equatable()
@@ -1011,7 +1000,6 @@ struct KanbanBoardView: View {
                 // A page stays up behind the task, so closing the task returns to it.
                 if openBoardPlugin?.presentationKind != .page { openBoardPlugin = nil }
                 isSelectedTaskNew = false
-                conflictResolutionTaskID = nil
                 presentScheduleOnOpen = nil
                 selectedTask = task
             }
@@ -1023,17 +1011,11 @@ struct KanbanBoardView: View {
     }
 
     /// What a task card's plugins can do: the board's actions, plus moving a
-    /// card, opening it to resolve conflicts, and raising an alert.
+    /// card and raising an alert.
     var taskItemPluginActions: PluginUIActions {
         var actions = boardPluginActions
         actions.close = { openTaskItemPlugin = nil }
         actions.moveTask = { id, status, merged in moveTask(id: id, to: status, skipMergeVerification: merged) }
-        actions.resolveConflicts = { id in
-            guard let task = tasks.first(where: { $0.id == id }) else { return }
-            openTaskItemPlugin = nil
-            conflictResolutionTaskID = id
-            selectedTask = task
-        }
         actions.alert = { title, message in pluginAlert = PluginAlert(title: title, message: message) }
         return actions
     }

@@ -716,19 +716,6 @@ extension PlayhouseUITests {
         XCTAssertEqual(Int((color.greenComponent * 255).rounded()), expected.1, accuracy: accuracy, file: file, line: line)
         XCTAssertEqual(Int((color.blueComponent * 255).rounded()), expected.2, accuracy: accuracy, file: file, line: line)
     }
-    func assertConflictIndicatorArtwork(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
-        let image = element.screenshot().image
-        let bluePixels = pixelCount(in: image) {
-            $0.blueComponent > 0.55 && $0.blueComponent > $0.redComponent + 0.15 && $0.blueComponent > $0.greenComponent + 0.10
-        }
-        let orangePixels = pixelCount(in: image) {
-            $0.redComponent > 0.75 && $0.greenComponent > 0.25 && $0.greenComponent < 0.75 && $0.blueComponent < 0.35
-        }
-        // The indicator is a single orange repair glyph; any blue would mean the old
-        // two-tone branch artwork came back.
-        XCTAssertGreaterThan(orangePixels, 2, "The conflict indicator should render its orange repair icon inside the action.", file: file, line: line)
-        XCTAssertEqual(bluePixels, 0, "The conflict indicator should no longer render the old blue branch artwork.", file: file, line: line)
-    }
     func assertTrackThickness(_ image: NSImage, file: StaticString = #filePath, line: UInt = #line) {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             XCTFail("Could not read effort slider pixels.", file: file, line: line)

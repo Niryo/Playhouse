@@ -388,8 +388,9 @@ final class PlayhouseUITests: XCTestCase {
         app.windows.matching(identifier: "open-panel").firstMatch
     }
 
+    /// The Settings window, titled by its selected tab (General or System Prompts).
     var settingsWindow: XCUIElement {
-        app.windows.matching(NSPredicate(format: "title CONTAINS 'Settings'")).firstMatch
+        app.windows.matching(NSPredicate(format: "title CONTAINS 'Settings' OR title IN {'General', 'System Prompts'}")).firstMatch
     }
 
     // MARK: - Agents that outlive the daemon

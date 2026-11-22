@@ -242,6 +242,46 @@ final class WorkspaceSettingsManager {
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: fields)
     }
 
+    /// A system prompt's current text, and whether the user changed it from its default.
+    func systemPrompt(_ kind: SystemPromptKind) -> (text: String, isCustom: Bool) {
+        let stored = SystemPrompts.storedText(kind, defaults: defaults)
+        return (stored ?? kind.defaultText, stored != nil)
+    }
+
+    static func systemPromptKind(_ value: String) throws -> SystemPromptKind {
+        guard let kind = SystemPromptKind(rawValue: value) else {
+            let valid = SystemPromptKind.allCases.map(\.rawValue).joined(separator: ", ")
+            throw BridgeCommandError(code: "invalid_argument", message: "Unknown system prompt '\(value)'. Valid prompts: \(valid).")
+        }
+        return kind
+    }
+
+    /// Saves the user's text for a system prompt. Text equal to the default is stored as no
+    /// change, so the prompt keeps following the default.
+    func setSystemPrompt(_ kind: SystemPromptKind, text: String) throws {
+        let fields = ["setting": "systemPrompt", "prompt": kind.rawValue, "length": String(text.count)]
+        PlayhouseDiagnostics.record("settings.write.started", fields: fields)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= SystemPrompts.maximumLength else {
+            PlayhouseDiagnostics.record("settings.write.failed", fields: fields.merging(["errorCode": "invalid_argument"]) { _, new in new })
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "A system prompt must contain 1 to \(SystemPrompts.maximumLength.formatted()) characters. Reset it to go back to the default."
+            )
+        }
+        if trimmed == kind.defaultText {
+            defaults.removeObject(forKey: SystemPrompts.key(kind))
+        } else {
+            defaults.set(trimmed, forKey: SystemPrompts.key(kind))
+        }
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: fields)
+    }
+
+    func resetSystemPrompt(_ kind: SystemPromptKind) {
+        defaults.removeObject(forKey: SystemPrompts.key(kind))
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "systemPrompt", "prompt": kind.rawValue, "reset": "true"])
+    }
+
     /// The provider new tasks start with. Codex until the user chooses otherwise.
     var defaultConversationProvider: ConversationProvider {
         let value = defaults.string(forKey: WorkspaceSettings.defaultConversationProviderKey)

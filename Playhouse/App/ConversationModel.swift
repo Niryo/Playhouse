@@ -81,6 +81,8 @@ enum PrivatePromptPlaceholder {
 /// conversation shows them, but as automatic messages rather than something the user wrote.
 enum PlayhouseSentMessage {
     static let pullRequestAutopilotMarker = "Playhouse autopilot:"
+    /// Sent by the task card's former Resolve conflicts button, which Green mode replaced;
+    /// conversations from then still show them as automatic messages.
     static let pullRequestConflicts = "The PR has conflicts. Fix them, commit, and push."
     static let pullRequestConflictsRetry = "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing."
 

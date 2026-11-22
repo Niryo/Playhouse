@@ -636,7 +636,6 @@ extension TaskConversationView {
         }
         // A page the user started from the composer goes with the message they typed for it.
         let startsNewPage = usesComposerDraft && task.isStandaloneChat && startsNewChatPage
-        let resolutionAttempt = conflictResolutionAttempt
         if usesComposerDraft && isEnteringGoal && pendingAnnotations.isEmpty {
             isPreparingSubmittedMessage = true
             draft = ""
@@ -740,10 +739,6 @@ extension TaskConversationView {
             )
             isPreparingSubmittedMessage = false
             guard saved else {
-                if resolutionAttempt > 0 {
-                    conflictResolutionAttempt = 0
-                    onConflictResolutionChecked(false)
-                }
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                 if usesComposerDraft {
                     draft = freeformText
@@ -794,41 +789,11 @@ extension TaskConversationView {
                 // A turn that finished despite a late stop has nothing left to continue.
                 if sendGeneration == generation { hasPausedResponse = false }
                 isComposerFocused = true
-                if resolutionAttempt > 0 {
-                    do {
-                        switch try await BoardTaskManager(modelContext: modelContext).verifyPullRequestResolution(task.id) {
-                        case .resolved:
-                            conflictResolutionAttempt = 0
-                            onConflictResolutionChecked(true)
-                        case .stillConflicted where resolutionAttempt == 1:
-                            conflictResolutionAttempt = 2
-                            isResponding = false
-                            sendMessage(overrideText: PlayhouseSentMessage.pullRequestConflictsRetry)
-                            return
-                        case .stillConflicted:
-                            conflictResolutionAttempt = 0
-                            onConflictResolutionChecked(false)
-                            errorMessage = "The PR still has conflicts after two turns. Review the PR and try again."
-                        case .inconclusive:
-                            conflictResolutionAttempt = 0
-                            onConflictResolutionChecked(false)
-                            errorMessage = "GitHub hasn't confirmed that the PR is conflict-free at the pushed head. Try again after its merge check finishes."
-                        }
-                    } catch {
-                        conflictResolutionAttempt = 0
-                        onConflictResolutionChecked(false)
-                        errorMessage = error.localizedDescription
-                    }
-                }
             } catch {
                 // Text that streamed before the failure is part of what the window showed.
                 flushStreamedTextDeltas()
                 if task.authoringPluginID != nil, error is DaemonClientError {
                     pluginBridgeRecoveryError = error.localizedDescription
-                }
-                if resolutionAttempt > 0 {
-                    conflictResolutionAttempt = 0
-                    onConflictResolutionChecked(false)
                 }
                 let stoppedBeforeStart = ConversationTurnLaunch.isStoppedBeforeStart(error)
                 guard sendGeneration == generation else {

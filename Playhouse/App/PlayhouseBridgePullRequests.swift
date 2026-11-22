@@ -65,8 +65,6 @@ extension PlayhouseBridgeRuntime {
             // and retired worktrees' pull requests. The card's probe asks without it.
             guard request.arguments["all"]?.bool == true else { return try Self.value(probed) }
             return try Self.value(probed + taskManager.recordedPullRequests(taskID, besides: probed))
-        case "task.pr.verify":
-            return .object(["status": .string(try await taskManager.verifyPullRequestResolution(request.requiredUUID("taskID")).rawValue)])
         case "task.pr.resolve":
             defer { if let taskID = try? request.requiredUUID("taskID") { PullRequestStatusCache.invalidate(request, taskID: taskID) } }
             return try Self.value(await taskManager.resolvePullRequestConflicts(

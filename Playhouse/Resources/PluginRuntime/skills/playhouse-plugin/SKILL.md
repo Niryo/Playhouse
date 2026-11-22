@@ -120,8 +120,7 @@ It uses these globals:
     task's files changed, which bumps `workspace.revision`. Both work in
     conversation placements only.
   - `moveTask(taskID, status)` moves a task to a board column as dragging its
-    card does, `resolveConflicts(taskID)` starts resolving its pull request's
-    conflicts, and `alert(title, message)` shows an alert. They work only from
+    card does, and `alert(title, message)` shows an alert. They work only from
     `taskItem`; elsewhere they reject with `unavailable`.
   - `composer.setMode(mode)` turns on the composer's `"plan"` mode or opens
     its `"goal"` entry, in conversation placements.

@@ -376,7 +376,7 @@ final class PlayhouseBridgeRuntime {
                     ))
                 }
             case "task.pr.autopilot", "task.pr.create", "task.pr.link",
-                 "task.pr.conflicts", "task.pr.status", "task.pr.verify", "task.pr.resolve", "task.pr.sync":
+                 "task.pr.conflicts", "task.pr.status", "task.pr.resolve", "task.pr.sync":
                 result = try await pullRequestOperation(
                     request, taskManager: taskManager, settings: settings,
                     conversationClients: conversationClients, eventHandler: eventHandler
@@ -480,7 +480,8 @@ final class PlayhouseBridgeRuntime {
                 result = .object(["requiresConfirmation": .boolean(requiresConfirmation)])
             case "settings.get", "settings.set-auto-compaction", "settings.set-token-usage-color-max",
                  "settings.set-cpu-usage-color-max", "settings.set-status-sounds", "settings.set-default-provider", "settings.set-appearance",
-                 "settings.set-parent", "settings.clear-parent", "settings.set-last-repositories":
+                 "settings.set-parent", "settings.clear-parent", "settings.set-last-repositories",
+                 "settings.prompts", "settings.set-prompt", "settings.reset-prompt":
                 result = try settingsOperation(request, manager: settings)
             case "usage.get":
                 result = try Self.value(await AgentUsageService.report(

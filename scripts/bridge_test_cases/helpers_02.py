@@ -377,6 +377,12 @@ class BridgeTestHelpers02:
         if not history.is_file():
             return []
         return [turn.get("userText") or "" for turn in json.loads(history.read_text(encoding="utf-8")).get("turns", [])]
+    def codex_turn_start_prompts(self, executable):
+        """Every prompt the Codex fixture's turn/start received, helper turns (titles, PR descriptions) included."""
+        starts = Path(str(executable) + ".turn-starts")
+        if not starts.is_file():
+            return []
+        return [json.loads(line)["text"] for line in starts.read_text(encoding="utf-8").splitlines() if line.strip()]
     def plugins_folder(self):
         return self.data_directory / "plugins"
     def set_pull_request_mode(self, task_id, mode, extra_environment=None):

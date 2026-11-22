@@ -625,7 +625,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
                         f"task-progress-label-{task}", f"task-progress-detail-{task}", f"task-status-message-{task}",
                         f"task-token-usage-counter-{task}"]:
             self.plugin_node(tree, test_id)
-        self.assertFalse(any(str(node.get("props", {}).get("testID", "")).startswith(("task-pr-mode-", "task-pr-link-", "task-resolve-pr-conflicts-", "task-create-pr-"))
+        self.assertFalse(any(str(node.get("props", {}).get("testID", "")).startswith(("task-pr-mode-", "task-pr-link-", "task-create-pr-"))
                              for node in self.plugin_nodes(tree)),
                          "The pull request controls are task card plugins, not part of the task item.")
         card = self.plugin_node(tree, f"task-card-{task}")

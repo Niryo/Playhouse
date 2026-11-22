@@ -510,8 +510,6 @@
         refreshWorkspace: function () { return hostCall("ui", "refreshWorkspace", {}); },
         // Moves the task to a board column ("Done", "Review", …), as dragging its card would.
         moveTask: function (taskID, status) { return hostCall("ui", "moveTask", { taskID: String(taskID), status: String(status) }); },
-        // Opens the task with its pull request conflicts ready to resolve.
-        resolveConflicts: function (taskID) { return hostCall("ui", "resolveConflicts", { taskID: String(taskID) }); },
         // Shows an alert over the window, for a failure the user should see.
         alert: function (title, message) { return hostCall("ui", "alert", { title: String(title), message: message == null ? "" : String(message) }); },
         // Opens an http(s) link in the default browser.

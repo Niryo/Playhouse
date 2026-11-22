@@ -116,6 +116,58 @@ class BridgeTestCases18:
         played = [e for e in self.diagnostic_events() if e.get("event") == "task.status_sound.played" and e.get("taskID") == audible_id]
         self.assertEqual([e.get("environmentMuted") for e in played], ["true", "true"],
                          "PLAYHOUSE_MUTE_SOUNDS=1 should reach the daemon that plays the sounds, so they play at volume 0.")
+    # case-contract: test_settings_system_prompts_customize_and_reset | `settings prompts` lists the four prompts Playhouse sends on its own, in order pr-description, green, merge-conflicts and task-title, each with its title, when it is used, its default text and its current text, all at their defaults. `settings set-prompt` saves a changed prompt from --text or from a --file (trimmed), which is reported as custom and persists across fresh reads; text equal to the default is stored as no change; blank text, text over 8,000 characters and an unknown prompt are invalid_argument and leave the stored prompt alone, and resetting an unknown prompt is invalid_argument too. A changed task title prompt is what the next title generation sends to the task's provider, followed by the task's request, and `settings reset-prompt` returns a prompt to its default, which the next title generation sends again. In the visible UI, Workspace Settings has a System Prompts tab beside General that shows each prompt in an editor with a Default status; editing the task title prompt and clicking Save stores it where the bridge reads it and shows Custom, a prompt changed through the CLI shows in the open tab, and Reset to Default returns a prompt to its default.
+    def test_settings_system_prompts_customize_and_reset(self):
+        def prompts():
+            return {item["id"]: item for item in self.assert_success(self.call_cli("settings", "prompts")[0])["prompts"]}
+
+        listed = prompts()
+        self.assertEqual(list(listed), ["pr-description", "green", "merge-conflicts", "task-title"])
+        for item in listed.values():
+            self.assertIs(item["custom"], False, item["id"])
+            self.assertEqual(item["text"], item["defaultText"], item["id"])
+            self.assertTrue(item["title"] and item["usage"], item["id"])
+        default_title = listed["task-title"]["defaultText"]
+        self.assertTrue(default_title.startswith("Write a concise task title of at most 8 words"), default_title)
+
+        custom_title = "Write a concise task title of at most 8 words, in the imperative mood, for this request. Return only the title:"
+        saved = self.assert_success(self.call_cli("settings", "set-prompt", "task-title", "--text", custom_title)[0])
+        self.assertEqual((saved["id"], saved["text"], saved["custom"]), ("task-title", custom_title, True))
+        self.assertEqual(prompts()["task-title"]["text"], custom_title, "A changed prompt survives a fresh read.")
+        prompt_file = self.data_directory / "pr-description-prompt.md"
+        prompt_file.write_text("  Write the pull request description as a short changelog.\n", encoding="utf-8")
+        from_file = self.assert_success(self.call_cli("settings", "set-prompt", "pr-description", "--file", str(prompt_file))[0])
+        self.assertEqual((from_file["text"], from_file["custom"]), ("Write the pull request description as a short changelog.", True))
+        unchanged = self.assert_success(self.call_cli("settings", "set-prompt", "green", "--text", listed["green"]["defaultText"])[0])
+        self.assertIs(unchanged["custom"], False, "Text equal to the default is stored as no change.")
+        for arguments in (["task-title", "--text", "   "], ["task-title", "--text", "x" * 8001], ["unknown", "--text", "Anything"]):
+            rejected, _ = self.call_cli("settings", "set-prompt", *arguments, expected_status=2)
+            self.assert_failure(rejected, "invalid_argument")
+        self.assert_failure(self.call_cli("settings", "reset-prompt", "unknown", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(prompts()["task-title"]["text"], custom_title, "A rejected prompt leaves the stored one alone.")
+
+        task = self.create_task("System prompt title")
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-system-prompts"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        copy_file(fixture, executable)
+        executable.chmod(0o755)
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+
+        def generated_title_prompt(request):
+            generated = self.assert_success(self.call_cli("task", "title", task["id"], "--prompt", request, extra_environment=environment)[0])
+            self.assertEqual(generated["title"], "Generated fixture title")
+            return [prompt for prompt in self.codex_turn_start_prompts(executable) if prompt.startswith("Write a concise task title")][-1]
+
+        self.assertEqual(generated_title_prompt("Fix the flaky login test"), f"{custom_title}\n\nFix the flaky login test",
+                         "Title generation sends the changed prompt, then the task's request.")
+        reset = self.assert_success(self.call_cli("settings", "reset-prompt", "task-title")[0])
+        self.assertEqual((reset["text"], reset["custom"]), (default_title, False))
+        self.assert_success(self.call_cli("settings", "reset-prompt", "pr-description")[0])
+        self.assertTrue(all(not item["custom"] for item in prompts().values()))
+        self.assertEqual(generated_title_prompt("Add dark mode"), f"{default_title}\n\nAdd dark mode", "A reset prompt sends the default again.")
     # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the Skills button beside the terminal button at the bottom of the task sidebar (the composer has no Skills button there; with the sidebar collapsed, its rail keeps that one Skills button and it opens the page) as a modal card centered over the task, a narrow column 403 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the composer's Skills button in a standalone chat, which has no task sidebar, its backdrop covers the board beside the main sidebar, from the chat's leading edge to the window's, rather than only the chat, leaving the main sidebar uncovered, the card centers in that board, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session), whose section starts collapsed until its header or anchor expands it. The header shows the Skills | Rules | MCP tabs after the page's icon. Each section's header has an info icon whose hover hint (not a tooltip) opens below it and explains the section. Each skill row shows only its name led by one icon for the agents that can use it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), on the name's line left of the name and without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged right of the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     def test_skills_catalog_lists_repo_global_and_builtin_skills(self):
         manifest = self.skill_manifest
