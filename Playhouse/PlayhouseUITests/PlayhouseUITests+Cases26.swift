@@ -851,7 +851,7 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
     }
-    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the Skills button beside the terminal button at the bottom of the task sidebar (the composer has no Skills button there; with the sidebar collapsed, its rail keeps that one Skills button and it opens the page) as a modal card centered over the task, a narrow column 403 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the composer's Skills button in a standalone chat, which has no task sidebar, its backdrop likewise covers the whole window rather than only the sidebar, the card centers in the window, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session), whose section starts collapsed until its header or anchor expands it. The header shows the Skills | Rules | MCP tabs after the page's icon. Each section's header has an info icon whose hover hint (not a tooltip) opens below it and explains the section. Each skill row shows only its name led by one icon for the agents that can use it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), on the name's line left of the name and without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged right of the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the Skills button beside the terminal button at the bottom of the task sidebar (the composer has no Skills button there; with the sidebar collapsed, its rail keeps that one Skills button and it opens the page) as a modal card centered over the task, a narrow column 403 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the composer's Skills button in a standalone chat, which has no task sidebar, its backdrop covers the board beside the main sidebar, from the chat's leading edge to the window's, rather than only the chat, leaving the main sidebar uncovered, the card centers in that board, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session), whose section starts collapsed until its header or anchor expands it. The header shows the Skills | Rules | MCP tabs after the page's icon. Each section's header has an info icon whose hover hint (not a tooltip) opens below it and explains the section. Each skill row shows only its name led by one icon for the agents that can use it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), on the name's line left of the name and without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged right of the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     func test_skills_catalog_lists_repo_global_and_builtin_skills() throws {
         let repository = try makeSkillRepository("skills-catalog-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Agents layout repository skill"),
@@ -1040,7 +1040,7 @@ extension PlayhouseUITests {
         element("show-task-sidebar-button").click()
         XCTAssertTrue(element("hide-task-sidebar-button").waitToExist(timeout: 5), "The sidebar opens again.")
 
-        // From the standalone chat sidebar, the backdrop covers the whole window, not just the sidebar, and the card centers in it.
+        // From the standalone chat sidebar, the backdrop covers the board beside the main sidebar, not just the chat, and the card centers in it.
         returnToBoard()
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
@@ -1071,17 +1071,22 @@ extension PlayhouseUITests {
             return NSImage(cgImage: try XCTUnwrap(cgImage.cropping(to: region)), size: boardStripe.size)
         }
         let boardBefore = try boardStripeImage()
+        // The chat opens beside the main sidebar, so the page covers the board from the chat's leading edge, never the sidebar.
+        let chatLeadingEdge = element("chat-sidebar").frame.minX
+        let pageBoard = CGRect(x: chatLeadingEdge, y: chatWindow.minY, width: chatWindow.maxX - chatLeadingEdge, height: chatWindow.height)
+        XCTAssertGreaterThanOrEqual(chatLeadingEdge, element(withAccessibilityLabel: "Kanban sidebar").frame.maxX, "The chat opens beside the main sidebar.")
         openSkillsPage()
         XCTAssertTrue(waitUntil({
             let page = self.element("skills-page").frame
-            return abs(page.width - min(403, chatWindow.width - 48)) < 2 && abs(page.midX - chatWindow.midX) < 2
-        }, timeout: 5), "The chat's Skills modal centers in the whole window, not only the chat sidebar.")
+            return abs(page.width - min(403, pageBoard.width - 48)) < 2 && abs(page.midX - pageBoard.midX) < 2
+        }, timeout: 5), "The chat's Skills modal centers in the board beside the main sidebar, not only the chat sidebar: page=\(element("skills-page").frame), board=\(pageBoard).")
+        XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").exists, "The page leaves the main sidebar uncovered.")
         XCTAssertTrue(waitUntil({ !self.element("chat-sidebar-resize-handle").exists }, timeout: 5),
                       "The sidebar's resize edge hides while the page covers the window.")
         let changedBoardPixels = try XCTUnwrap(changedPixelCount(before: boardBefore, after: try boardStripeImage(), step: 4, threshold: 0.08),
                                                "Could not compare the board's pixels.")
         XCTAssertGreaterThan(changedBoardPixels, 20, "The backdrop dims the board beside the sidebar, not only the sidebar.")
-        attachScreenshot(named: "Skills modal opened from the standalone chat centers in the window")
+        attachScreenshot(named: "Skills modal opened from the standalone chat centers in the board beside the sidebar")
         // The chat window is wider than the VM's screen, so the centered modal's
         // Close button can sit off screen; Esc is the same Close button's shortcut.
         app.typeKey(.escape, modifierFlags: [])

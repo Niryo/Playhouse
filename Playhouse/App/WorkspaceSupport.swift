@@ -196,6 +196,9 @@ enum WorkspaceSettings {
     static func statusSoundsEnabled(in defaults: UserDefaults) -> Bool {
         defaults.object(forKey: statusSoundsEnabledKey) as? Bool ?? true
     }
+    /// The Optimized context choice last made in any board task's composer (full or
+    /// optimized), which every new board task starts with. Unset until first chosen.
+    static let conversationContextModeKey = "conversationContextMode"
     /// Playhouse's own context compaction triggers, shared by Claude and Codex task
     /// sessions. A threshold saved by earlier builds under "autoCompactionThresholdTokens"
     /// is no longer read: each provider's native auto-compaction owns that decision.

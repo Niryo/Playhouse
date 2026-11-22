@@ -1182,8 +1182,8 @@ extension TaskConversationView {
     }
 
     /// Optimized context is independent of Plan and Goal: it changes what a follow-up's
-    /// session holds, not how the agent works. The task saves it, so it stays on until
-    /// turned off; a failed save puts the toggle back.
+    /// session holds, not how the agent works. One saved choice is shared by every board
+    /// task, so it stays on (or off) across tasks until toggled; a failed save puts it back.
     func toggleOptimizedContext() {
         let previous = conversationContextMode
         let next: ConversationContextMode = previous == .optimized ? .full : .optimized

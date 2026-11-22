@@ -10,12 +10,16 @@ enum ChatSidebarLayout {
     static let minimumWidth: CGFloat = 320
     /// The board's own minimum width (see the board's `minWidth`).
     static let minimumBoardWidth: CGFloat = 980
+    /// The board's main sidebar, which the chat opens beside rather than over.
+    static let boardSidebarWidth: CGFloat = 216
+    /// The chat's leading edge: just past the main sidebar and its 1-point border.
+    static let chatLeadingEdge: CGFloat = boardSidebarWidth + 1
 
-    /// The window grows to fit the sidebar and the board's minimum width, so the sidebar can
-    /// widen only until that total reaches the screen, and never below its default width.
+    /// The window grows to fit the main sidebar, the chat and the board's minimum width, so the
+    /// chat can widen only until that total reaches the screen, and never below its default width.
     static func clampedWidth(_ width: CGFloat) -> CGFloat {
         let screenWidth = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame.width ?? 0
-        let maximum = max(defaultWidth, screenWidth - minimumBoardWidth)
+        let maximum = max(defaultWidth, screenWidth - minimumBoardWidth - chatLeadingEdge)
         return min(max(width, minimumWidth), maximum)
     }
 }
@@ -25,8 +29,8 @@ private struct SkillsPageWindowWidthKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    /// The window's width, set on the standalone chat sidebar so the chat's Skills page covers
-    /// the whole window from the sidebar's leading edge instead of only the sidebar.
+    /// The board's width beside the main sidebar, set on the standalone chat sidebar so the chat's
+    /// Skills page covers the whole board from the chat's leading edge instead of only the chat.
     var skillsPageWindowWidth: CGFloat? {
         get { self[SkillsPageWindowWidthKey.self] }
         set { self[SkillsPageWindowWidthKey.self] = newValue }
@@ -82,7 +86,7 @@ struct SkillsPageShowingKey: PreferenceKey {
 }
 
 /// Clips the chat sidebar to its own width from its leading edge, or, while its Skills page is
-/// open, to the given wider width so the page reaches across the window.
+/// open, to the given wider width so the page reaches across the board beside the main sidebar.
 private struct ChatSidebarClip: Shape {
     var width: CGFloat?
 
@@ -149,7 +153,7 @@ struct TaskConversationPanel: View, Equatable {
 }
 
 struct KanbanBoardView: View {
-    let boardSidebarWidth: CGFloat = 216
+    let boardSidebarWidth = ChatSidebarLayout.boardSidebarWidth
     @AppStorage(ChatSidebarLayout.widthKey, store: WorkspaceSettings.preferencesStore)
     var storedChatSidebarWidth = Double(ChatSidebarLayout.defaultWidth)
     @State var chatSidebarResizeStartWidth: CGFloat?
@@ -233,6 +237,8 @@ struct KanbanBoardView: View {
     /// The chat's Skills page is open and covers the whole board, laid out `boardContentWidth` wide.
     @State var isChatSkillsPageShowing = false
     @State var boardContentWidth: CGFloat = 0
+    /// Where the board's sidebar and columns start, below the header and its divider.
+    @State var boardBodyTop: CGFloat = 0
     /// A modal, sidebar or page plugin opened from the board's sidebar.
     @State var openBoardPlugin: PluginRecord?
     @State var pluginSetupPlacement: PluginPlacement?
@@ -309,9 +315,9 @@ struct KanbanBoardView: View {
                 .buttonHoverPointer().nativeHelp("Close plugin editor")
         } message: { Text("Your changes are saved as a draft. You can return and continue editing later.") }
         .background(WorkspaceTheme.windowBackground)
-        // The open chat adds its width to the board's minimum, so the content-sized window grows
-        // to keep the pushed columns visible, as it did when the chat sat beside the board.
-        .frame(minWidth: ChatSidebarLayout.minimumBoardWidth + (isChatOverlayVisible ? chatSidebarWidth : 0), minHeight: 640)
+        // The open chat adds its width and the main sidebar's to the board's minimum, so the
+        // content-sized window grows to keep the pushed columns visible beside them.
+        .frame(minWidth: ChatSidebarLayout.minimumBoardWidth + (isChatOverlayVisible ? ChatSidebarLayout.chatLeadingEdge + chatSidebarWidth : 0), minHeight: 640)
         .task(id: allTasks.contains { $0.scheduleKind != nil && !$0.schedulePaused }) {
             SchedulerAgent.sync(hasActiveSchedules: allTasks.contains { $0.scheduleKind != nil && !$0.schedulePaused })
         }
@@ -502,11 +508,14 @@ struct KanbanBoardView: View {
     var boardContent: some View {
         ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
-                boardHeader
+                VStack(spacing: 0) {
+                    boardHeader
 
-                Rectangle()
-                    .fill(Color.primary.opacity(0.07))
-                    .frame(height: 1)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(height: 1)
+                }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { boardBodyTop = $0 }
 
                 HStack(spacing: 0) {
                     boardSidebar
@@ -517,7 +526,7 @@ struct KanbanBoardView: View {
 
                     if isChatOverlayVisible {
                         Color.clear
-                            .frame(width: max(0, chatSidebarShownWidth - boardSidebarWidth - 1))
+                            .frame(width: chatSidebarShownWidth)
                             .accessibilityHidden(true)
                     }
 
@@ -602,8 +611,17 @@ struct KanbanBoardView: View {
                 }
             }
 
+            // The chat opens beside the board sidebar, aligned with its top under the header, and
+            // slides out from the sidebar's edge rather than over the sidebar or the header.
             standaloneChatOverlay
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .clipped()
+                .padding(.leading, ChatSidebarLayout.chatLeadingEdge)
+                .padding(.top, boardBodyTop)
+
+            // Bubbles float from the chat's right edge, below the header.
             parallelChatBubblesOverlay
+                .padding(.top, boardBodyTop)
         }
         .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -689,7 +707,26 @@ struct KanbanBoardView: View {
         }
     }
 
-    /// The chat sidebar's right border; dragging it right widens the chat and left narrows it.
+    /// The width the chat's Skills page covers: the board from the sidebar's edge to the window's.
+    var chatSkillsPageWidth: CGFloat? {
+        boardContentWidth > 0 ? max(0, boardContentWidth - ChatSidebarLayout.chatLeadingEdge) : nil
+    }
+
+    /// The board sidebar's Chat entry, drawn like the plugin entries below it: it shows the
+    /// standalone chat beside the sidebar, and shows as selected while the chat is open, when
+    /// pressing it again hides the chat.
+    var chatSidebarEntry: some View {
+        AtomButton(
+            props: ButtonProps(disabled: isOpeningChatSidebar, shortcut: AppShortcut.chat),
+            common: AtomCommon(testID: "chat-sidebar-button", label: "Chat", help: isChatOverlayVisible ? "Hide the standalone chat" : "Open the standalone chat", fillWidth: true),
+            action: openChatSidebar
+        ) {
+            AtomStack(props: StackProps(align: "leading", fill: "accent", fillOpacity: isChatOverlayVisible ? 0.14 : 0, cornerRadius: 8), common: AtomCommon(fillWidth: true, paddingX: 12, paddingY: 9)) {
+                AtomLabel(props: LabelProps(text: "Chat", icon: "bubble.left.and.bubble.right", size: 12, weight: "medium"))
+            }
+        }
+        .accessibilityValue(isChatOverlayVisible ? "Shown" : "Hidden")
+    }
 
     var standaloneChatOverlay: some View {
         Group {
@@ -698,8 +735,8 @@ struct KanbanBoardView: View {
                     setChatSidebarVisible(false)
                 }
                 .equatable()
-                // The chat's Skills page spans the window, not just the sidebar.
-                .environment(\.skillsPageWindowWidth, boardContentWidth > 0 ? boardContentWidth : nil)
+                // The chat's Skills page spans the board beside the sidebar, not just the chat.
+                .environment(\.skillsPageWindowWidth, chatSkillsPageWidth)
                 .environment(\.showTokenStats, ShowTokenStatsAction { taskShowingTokenStats = $0 })
                 .onPreferenceChange(SkillsPageShowingKey.self) { isChatSkillsPageShowing = $0 }
                 // The open page labels widen the sidebar, pushing the board aside, and the chat moves
@@ -719,7 +756,7 @@ struct KanbanBoardView: View {
                 .frame(width: (chatSidebarReflowWidth ?? chatSidebarWidth) + chatPageAnchorsPush)
                 .frame(width: chatSidebarShownWidth, alignment: .leading)
                 .background(WorkspaceTheme.windowBackground)
-                .clipShape(ChatSidebarClip(width: isChatSkillsPageShowing ? boardContentWidth : nil))
+                .clipShape(ChatSidebarClip(width: isChatSkillsPageShowing ? chatSkillsPageWidth : nil))
                 .task(id: chatSidebarDragWidth) {
                     // Each move restarts this wait, so the chat reflows once the edge rests.
                     guard let chatSidebarDragWidth else { return }
@@ -834,14 +871,19 @@ struct KanbanBoardView: View {
 
     var boardSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            PluginSlot(
-                placement: .mainSidebar,
-                props: mainSidebarPluginProps,
-                actions: boardPluginActions,
-                open: { openBoardPlugin = $0 },
-                add: startPluginTask,
-                openPluginID: openBoardPlugin?.id
-            )
+            // Spaced like the plugin entries, so Chat reads as the first of them.
+            VStack(alignment: .leading, spacing: 6) {
+                chatSidebarEntry
+
+                PluginSlot(
+                    placement: .mainSidebar,
+                    props: mainSidebarPluginProps,
+                    actions: boardPluginActions,
+                    open: { openBoardPlugin = $0 },
+                    add: startPluginTask,
+                    openPluginID: openBoardPlugin?.id
+                )
+            }
 
             Spacer(minLength: 0)
 
@@ -853,7 +895,6 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Kanban sidebar")
-        .accessibilityHidden(isChatOverlayVisible)
     }
 
     /// The board's header, composed only of plugin atoms (Plugins/Atoms). The
@@ -867,20 +908,12 @@ struct KanbanBoardView: View {
                     AtomText(props: TextProps(text: "Let the show begin.", size: 12.5, color: "secondary"))
                 }
             }
-            .accessibilityHidden(isChatOverlayVisible)
 
             AtomSpacer(props: SpacerProps(minLength: 20))
 
             AtomStack(props: StackProps(axis: "h", spacing: 14)) {
                 DoneArchiveButton(shortcut: AppShortcut.doneArchive) {
                     withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
-                }
-                AtomButton(
-                    props: ButtonProps(style: "bordered", disabled: isOpeningChatSidebar, shortcut: AppShortcut.chat),
-                    common: AtomCommon(testID: "chat-sidebar-button", help: "Open the standalone chat", paddingX: 7, paddingY: 3),
-                    action: openChatSidebar
-                ) {
-                    AtomLabel(props: LabelProps(text: "Chat", icon: "bubble.left.and.bubble.right", size: 13, weight: "semibold"))
                 }
                 AtomButton(
                     props: ButtonProps(style: "prominent", disabled: isCreatingNewTask, shortcut: AppShortcut.newTask),

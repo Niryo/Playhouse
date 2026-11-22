@@ -60,7 +60,7 @@ extension TaskConversationView {
                 reasonDisabled: isReadOnly
             ) : nil,
             provider: providerMenu,
-            model: .init(
+            model: isAwaitingProviderInstall ? nil : .init(
                 name: selectedModelName,
                 effort: selectedEffort.title,
                 label: "Model: \(selectedModelName), effort: \(selectedEffort.title)",
@@ -390,8 +390,8 @@ extension TaskConversationView {
     /// The skill gallery as a modal card centered over the task, about as wide
     /// as the composer, over a dimmed backdrop that blocks the task under it.
     /// In the standalone chat sidebar, `skillsPageWindowWidth` widens the
-    /// backdrop from the sidebar's leading edge across the whole window, so the
-    /// card centers in the window, and `SkillsPageShowingKey` tells the board it is open.
+    /// backdrop from the chat's leading edge across the board beside the main sidebar,
+    /// so the card centers in that board, and `SkillsPageShowingKey` tells the board it is open.
     var skillsPage: some View {
         SkillsPageWindowFrame {
             GeometryReader { geometry in
@@ -442,6 +442,11 @@ extension TaskConversationView {
         task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
     }
 
+    /// Whether no provider is installed, so the composer offers only the Install AI provider button.
+    var isAwaitingProviderInstall: Bool {
+        !providerInstallStatuses.isEmpty && installedProviders.isEmpty
+    }
+
     /// The installed providers, and an Add entry for each missing one. With none installed the
     /// menu becomes the Install AI provider button, listing the providers to install.
     var providerMenu: ComposerModel.ProviderMenu {
@@ -454,7 +459,7 @@ extension TaskConversationView {
                 testID: "conversation-provider-install-\(option.rawValue)"
             )
         }
-        if !providerInstallStatuses.isEmpty, installedProviders.isEmpty {
+        if isAwaitingProviderInstall {
             let title = installing ?? "Install AI provider"
             return .init(
                 title: title, value: "none", label: title,

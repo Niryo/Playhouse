@@ -598,7 +598,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try tasksFromBoardList().count, 0)
         attachScreenshot(named: "Failed task deletion can be retried after repository recovery")
     }
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Launching with no folder set opens the Suggestions from prompt, which asks for the folder that holds the user's Git repositories; Not Now closes it, no root notice sits above the composer, and a send or a schedule without a folder reopens the prompt, keeping the message as the draft and saving no schedule. Cancelling its folder panel returns to the prompt, and choosing a folder there saves it as the default parent.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Launching with no folder set opens the Suggestions from prompt, which asks for the folder that holds the user's Git repositories and can't be dismissed: it has no Not Now or close button and Escape leaves it open. Cancelling its folder panel returns to the prompt, and choosing a folder there saves it as the default parent and closes it. With the folder cleared again, no root notice sits above the composer, and a send or a schedule without a folder reopens the prompt, keeping the message as the draft and saving no schedule.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         keepsSuggestionsFolderPrompt = true
         launchApp(defaultParent: nil)
@@ -607,14 +607,35 @@ extension PlayhouseUITests {
         // A launch with no folder asks where the repositories are.
         let promptTitle = element("suggestions-folder-prompt-title")
         XCTAssertTrue(promptTitle.waitToExist(timeout: 10), "Launching without a suggestions folder should open the Suggestions from prompt.")
+        func chooseFolderInPrompt() throws {
+            element("suggestions-folder-prompt-choose-button").click()
+            try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
+            XCTAssertTrue(waitUntil({ !promptTitle.exists && !self.openFolderPanel.exists }, timeout: 10), "Choosing a folder should close the prompt.")
+        }
         XCTAssertEqual(pluginText(promptTitle), "Where do your repositories live?")
         XCTAssertFalse(app.sheets.firstMatch.staticTexts["Suggestions from"].exists, "The prompt's question is its only title.")
         let promptMessage = element("suggestions-folder-prompt-message")
         XCTAssertTrue(pluginText(promptMessage).contains("holds all of your Git repositories"), "The prompt should explain which folder to choose.")
+        // The prompt can't be dismissed: it offers only Choose Folder…, and Escape leaves it open.
+        XCTAssertFalse(element("suggestions-folder-prompt-later-button").exists, "The prompt has no Not Now button.")
+        XCTAssertFalse(element("suggestions-folder-prompt-close").exists, "The prompt has no close button.")
+        let chooseButton = element("suggestions-folder-prompt-choose-button")
+        XCTAssertTrue(chooseButton.exists)
+        XCTAssertEqual(app.sheets.firstMatch.buttons.count, 1, "Choose Folder… is the prompt's only button.")
         attachScreenshot(named: "Launch asks for the folder repository suggestions come from")
-        attachElementScreenshot(app.sheets.firstMatch, named: "Suggestions from prompt")
-        element("suggestions-folder-prompt-later-button").click()
-        XCTAssertTrue(waitUntil({ !promptTitle.exists }, timeout: 5), "Not Now should close the prompt.")
+        attachElementScreenshot(app.sheets.firstMatch, named: "Suggestions from prompt: Choose Folder… only")
+        app.typeKey(.escape, modifierFlags: [])
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertTrue(promptTitle.exists, "Escape should leave the prompt open.")
+        // Cancelling the folder panel comes back to the prompt.
+        chooseButton.click()
+        XCTAssertTrue(openFolderPanel.waitToExist(timeout: 10), "Choose Folder… should open the folder panel.")
+        XCTAssertEqual(app.windows.matching(identifier: "open-panel").count, 1)
+        openFolderPanel.buttons["Cancel"].click()
+        XCTAssertTrue(promptTitle.waitToExist(timeout: 5), "Cancelling the folder panel should return to the prompt.")
+        try chooseFolderInPrompt()
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["defaultParentFolder"] as? String, fixture.parent.path, "Choosing a folder in the prompt saves it as the default parent.")
+        _ = try runCLI(["settings", "clear-parent"])
         openNewTaskConversation()
         XCTAssertEqual(try tasksFromBoardList().count, 1, "New Task should create its pending conversation before folder discovery.")
         XCTAssertFalse(element("repository-root-required-notice").exists, "No root notice sits above the composer.")
@@ -630,8 +651,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(composer.value as? String, draft, "The message waits in the composer while the folder is chosen.")
         let draftTaskID = try XCTUnwrap(try tasksFromBoardList().first?["id"] as? String)
         // Scheduling without a folder asks for it too, and saves no schedule.
-        element("suggestions-folder-prompt-later-button").click()
-        XCTAssertTrue(waitUntil({ !promptTitle.exists }, timeout: 5))
+        try chooseFolderInPrompt()
+        _ = try runCLI(["settings", "clear-parent"])
         let send = element("send-message-button")
         _ = openScheduleHint()
         element("schedule-done-button").click()
@@ -640,23 +661,11 @@ extension PlayhouseUITests {
         send.click()
         XCTAssertTrue(promptTitle.waitToExist(timeout: 5), "Scheduling without a suggestions folder should open the prompt.")
         XCTAssertNil(try taskRecord(id: draftTaskID)?["schedule"] as? [String: Any], "A schedule refused for want of a folder isn't saved.")
-        element("suggestions-folder-prompt-later-button").click()
-        XCTAssertTrue(waitUntil({ !promptTitle.exists }, timeout: 5))
+        try chooseFolderInPrompt()
         _ = openScheduleHint()
         element("schedule-remove-button").click()
         XCTAssertTrue(waitForDisappearance(element("schedule-hint")))
         XCTAssertTrue(waitUntil({ send.label == "Send message" }, timeout: 5))
-        send.click()
-        XCTAssertTrue(promptTitle.waitToExist(timeout: 5))
-        // Cancelling the folder panel comes back to the prompt.
-        element("suggestions-folder-prompt-choose-button").click()
-        XCTAssertTrue(openFolderPanel.waitToExist(timeout: 10), "Choose Folder… should open the folder panel.")
-        XCTAssertEqual(app.windows.matching(identifier: "open-panel").count, 1)
-        openFolderPanel.buttons["Cancel"].click()
-        XCTAssertTrue(promptTitle.waitToExist(timeout: 5), "Cancelling the folder panel should return to the prompt.")
-        element("suggestions-folder-prompt-choose-button").click()
-        try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
-        XCTAssertTrue(waitUntil({ !promptTitle.exists && !self.openFolderPanel.exists }, timeout: 10), "Choosing a folder should close the prompt.")
         XCTAssertFalse(element("conversation-repository-search").exists, "Choosing the folder should leave the repo picker closed.")
         composer.click()
         composer.typeKey("a", modifierFlags: .command)
@@ -675,9 +684,11 @@ extension PlayhouseUITests {
         changeSuggestionParent.click()
         try chooseFolder(in: openFolderPanel, folder: fixture.alternateParent, confirmationButton: "Use This Folder")
         // The alternate parent sits inside the first parent, so `alternate` is already listed before
-        // the change; the refresh is settled only once the first parent's `primary` is gone.
+        // the change; the refresh is settled only once the first parent's `primary` is gone. The
+        // reloaded list can be empty for a moment before it lists `alternate` again.
         XCTAssertTrue(waitUntil({ !self.element("conversation-repository-suggestion-primary").exists }, timeout: 10), "Suggestions from the previous parent should be replaced.")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").exists, "Changing the parent should refresh the repository suggestions.")
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 5), "Changing the parent should refresh the repository suggestions.")
+        XCTAssertFalse(element("conversation-repository-suggestion-primary").exists, "The previous parent's suggestions stay gone once the list reloads.")
         XCTAssertTrue(waitUntil({
             guard let response = try? self.runCLI(["settings", "get"]),
                   let settings = response["result"] as? [String: Any] else { return false }

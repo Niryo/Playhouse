@@ -34,8 +34,7 @@ extension PlayhouseUITests {
         }
         func send(_ prompt: String) {
             let before = fixtureTurns(endingWith: prompt).count
-            composer.click()
-            composer.typeText(prompt)
+            typeIntoField(composer, text: prompt)
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({
                 fixtureTurns(endingWith: prompt).count > before && self.noTurnIsRunning()
@@ -590,7 +589,7 @@ extension PlayhouseUITests {
         }
     }
 
-    // case-contract: test_optimized_context_steer_and_queued_follow_ups | With optimized context on, a steer joins the running turn in that turn's own session instead of starting a new one, and follow-ups queued while the turn runs are each delivered afterwards in a fresh seeded session of their own, including the second one, which was queued against a session the first follow-up replaced, so no queued follow-up is stranded. The queued follow-ups are listed while they wait. The context mode is saved on the task, reported by task get and conversation context-mode, and survives a restart (of the daemon from the CLI, of the app in the window, where the button is still on); an unknown mode is rejected, and the standalone chat, which pages its own context, has no context mode to set and no Optimized context button in its composer.
+    // case-contract: test_optimized_context_steer_and_queued_follow_ups | With optimized context on, a steer joins the running turn in that turn's own session instead of starting a new one, and follow-ups queued while the turn runs are each delivered afterwards in a fresh seeded session of their own, including the second one, which was queued against a session the first follow-up replaced, so no queued follow-up is stranded. The queued follow-ups are listed while they wait. The context mode is one setting shared by every board task, reported by task get and conversation context-mode: turning it on in one task turns it on in another task, including one created afterwards, turning it off there turns it off in the first task too, and it survives a restart (of the daemon from the CLI, of the app in the window, where the button is still on in both tasks); an unknown mode is rejected, and the standalone chat, which pages its own context, has no context mode to set and no Optimized context button in its composer.
     func test_optimized_context_steer_and_queued_follow_ups() throws {
         var environment = try installClaudeFixture(named: "claude-fixture-ui-optimized-steer-queue")
         environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
@@ -676,6 +675,34 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ self.isModeOn("conversation-optimized-context-button") }, timeout: 10),
                       "The task's optimized context stays on after the app restarts.")
         attachElementScreenshot(element("conversation-optimized-context-button"), named: "Optimized context stays on after relaunch")
+
+        // One setting shared by every board task: a task created afterwards opens with it on,
+        // and turning it off there turns it off in the first task as well.
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 15))
+        let otherTitle = "Optimized shared by another task"
+        let otherID = try createOptimizedTask(title: otherTitle, provider: "claude")
+        XCTAssertEqual(optimizedContextMode(otherID), "optimized")
+        openTask(named: otherTitle)
+        let otherButton = element("conversation-optimized-context-button")
+        XCTAssertTrue(otherButton.waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.isModeOn("conversation-optimized-context-button") }, timeout: 10),
+                      "Optimized context is on in another task once turned on in one.")
+        attachAppWindowScreenshot(named: "Optimized context is already on in a task created afterwards")
+        attachScreenshot(named: "Optimized context button on in the task created afterwards",
+                         around: [otherButton, element("message-composer")])
+        otherButton.click()
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-optimized-context-button") }, timeout: 5), "Clicking turns optimized context off.")
+        XCTAssertTrue(waitUntil({ self.optimizedContextMode(taskID) == "full" }, timeout: 10),
+                      "Turning optimized context off in one task turns it off in every task.")
+        openTask(named: "Optimized steer and queue")
+        XCTAssertTrue(element("conversation-optimized-context-button").waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ !self.isModeOn("conversation-optimized-context-button") }, timeout: 10),
+                      "The first task's button is off after it was turned off in the other task.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["conversationContextMode"] as? String, "full")
+        attachAppWindowScreenshot(named: "Optimized context off in the first task after turning it off in the other")
+        attachScreenshot(named: "Optimized context button off in the first task",
+                         around: [element("conversation-optimized-context-button"), element("message-composer")])
 
         // The standalone chat pages its own context, so its composer has no Optimized context button.
         // Its sidebar opens from the board.

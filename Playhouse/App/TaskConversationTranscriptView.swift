@@ -579,6 +579,9 @@ extension TaskConversationView {
                                     Image(nsImage: attachment.image).resizable().scaledToFill()
                                         .frame(width: 64, height: 52)
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        // Clipping only hides the filled image's overflow; without a shape the
+                                        // overflow still takes clicks, covering the previous thumbnail's remove badge.
+                                        .contentShape(RoundedRectangle(cornerRadius: 8))
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Open attached image")
@@ -596,6 +599,7 @@ extension TaskConversationView {
                                 .nativeHelp("Remove image")
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Remove image")
+                                .accessibilityIdentifier("remove-pending-chat-image-\(attachment.id)")
                             }
                         }
                     }

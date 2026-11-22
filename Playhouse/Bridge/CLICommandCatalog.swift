@@ -209,7 +209,7 @@ enum CLICommandCatalog {
         command("conversation model", "<task-id> [set <model-id>]", "Show or set the task's model.", chat),
         command("conversation effort", "<task-id> [set <low|medium|high|xhigh>]", "Show or set the task's reasoning effort.", chat),
         command("conversation context-mode", "<task-id> [set <full|optimized>]",
-                "Show or set whether the task's follow-ups resume the whole conversation (full) or start fresh, seeded sessions (optimized).", chat),
+                "Show or set whether follow-ups resume the whole conversation (full) or start fresh, seeded sessions (optimized); one setting shared by every board task.", chat),
         command("conversation provider", "<task-id> [set <codex|claude> [--keep-default]|capabilities]", "Show or set the task's provider (which also becomes the default unless --keep-default), or show what it supports.", chat),
         command("conversation goal", "<task-id> <get|set|pause|resume|clear> [--text <objective>]", "Manage a Codex task's goal.", chat),
         command("conversation present-image", "<task-id> --image <path> [--caption <text>]", "Show an image in the task's conversation.", task),

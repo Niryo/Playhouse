@@ -434,7 +434,7 @@ class BridgeTestCases28:
             self.assert_failure(failed, code)
             self.assertIn(fragment, failed["error"]["message"])
 
-    # case-contract: test_optimized_context_steer_and_queued_follow_ups | With optimized context on, a steer joins the running turn in that turn's own session instead of starting a new one, and follow-ups queued while the turn runs are each delivered afterwards in a fresh seeded session of their own, including the second one, which was queued against a session the first follow-up replaced, so no queued follow-up is stranded. The queued follow-ups are listed while they wait. The context mode is saved on the task, reported by task get and conversation context-mode, and survives a restart (of the daemon from the CLI, of the app in the window, where the button is still on); an unknown mode is rejected, and the standalone chat, which pages its own context, has no context mode to set and no Optimized context button in its composer.
+    # case-contract: test_optimized_context_steer_and_queued_follow_ups | With optimized context on, a steer joins the running turn in that turn's own session instead of starting a new one, and follow-ups queued while the turn runs are each delivered afterwards in a fresh seeded session of their own, including the second one, which was queued against a session the first follow-up replaced, so no queued follow-up is stranded. The queued follow-ups are listed while they wait. The context mode is one setting shared by every board task, reported by task get and conversation context-mode: turning it on in one task turns it on in another task, including one created afterwards, turning it off there turns it off in the first task too, and it survives a restart (of the daemon from the CLI, of the app in the window, where the button is still on in both tasks); an unknown mode is rejected, and the standalone chat, which pages its own context, has no context mode to set and no Optimized context button in its composer.
     def test_optimized_context_steer_and_queued_follow_ups(self):
         executable, environment = self.optimized_claude_fixture("claude-fixture-optimized-steer-queue", report_outcome=True)
         task_id = self.create_task(title="Optimized steer and queue", provider="claude")["id"]
@@ -452,6 +452,11 @@ class BridgeTestCases28:
         )[0])
         self.assert_success(self.call_cli("conversation", "context-mode", task_id, "set", "optimized")[0])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["conversationContextMode"], "optimized")
+        # One setting shared by every board task: a task created afterwards starts optimized too.
+        other_id = self.create_task(title="Optimized shared by another task", provider="claude")["id"]
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", other_id)[0])["conversationContextMode"], "optimized",
+                         "Optimized context is on for another task once turned on in one.")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", other_id)[0])["mode"], "optimized")
 
         held_message = "Hold for a steer while optimized."
         Path(str(executable) + ".steer-answer-pause").write_text("Hold the steered answer.\n", encoding="utf-8")
@@ -516,6 +521,13 @@ class BridgeTestCases28:
         self.kill_daemon(private)
         self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id, extra_environment=private)[0])["mode"], "optimized",
                          "Optimized context survives a daemon restart.")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", other_id, extra_environment=private)[0])["mode"], "optimized",
+                         "The shared setting survives a daemon restart for every task.")
+        # Turning it off in the other task turns it off in the first one as well.
+        self.assert_success(self.call_cli("conversation", "context-mode", other_id, "set", "full", extra_environment=private)[0])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "context-mode", task_id, extra_environment=private)[0])["mode"], "full",
+                         "Turning optimized context off in one task turns it off in every task.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id, extra_environment=private)[0])["conversationContextMode"], "full")
 
     # case-contract: test_conversation_open_reads_reconciled_history_and_shows_loading | Opening a task reads its newest history page and the task as that read reconciled it in one request: conversation history --include-task returns the task record beside the messages, which a plain read leaves out, so a submitted prompt whose turn never started comes back from that read as Waiting Response with the prompt in its saved draft, while a task that doesn't exist fails as not found with no record. While the opening read hasn't answered (held by PLAYHOUSE_E2E_HISTORY_READ_DELAY_SECONDS), the transcript shows Loading conversation… and never the empty conversation prompt; once it answers the stored messages replace the loading state, and a task with no messages shows its empty conversation prompt only then. A brand-new task shows its empty state at once, never the loading state, and the standalone chat opens through the same read: its opening read returns the chat beside its messages, and the chat shows the loading state until they arrive. Opening is shared presentation over one daemon read, so one representative provider (Codex) covers it.
     def test_conversation_open_reads_reconciled_history_and_shows_loading(self):

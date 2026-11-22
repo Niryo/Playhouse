@@ -47,8 +47,7 @@ extension PlayhouseUITests {
             let composer = element("message-composer")
             XCTAssertTrue(composer.waitToExist(timeout: 10))
             let receivedBefore = fixtureTurnCount(executable, containing: prompt)
-            composer.click()
-            composer.typeText(prompt)
+            typeIntoField(composer, text: prompt)
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({
                 self.fixtureTurnCount(executable, containing: prompt) > receivedBefore && self.noTurnIsRunning()
@@ -248,8 +247,7 @@ extension PlayhouseUITests {
 
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitToExist(timeout: 10))
-        composer.click()
-        composer.typeText(prompt)
+        typeIntoField(composer, text: prompt)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({
             self.fixtureTurnCount(executable, containing: prompt) > 0 && self.noTurnIsRunning()
@@ -415,8 +413,7 @@ extension PlayhouseUITests {
         func send(_ text: String) {
             let composer = element("message-composer")
             XCTAssertTrue(composer.waitToExist(timeout: 10))
-            composer.click()
-            composer.typeText(text)
+            typeIntoField(composer, text: text)
             element("send-message-button").click()
         }
 
@@ -604,8 +601,7 @@ extension PlayhouseUITests {
             let active = URL(fileURLWithPath: executable.path + ".classifier-active")
             let release = URL(fileURLWithPath: executable.path + ".classifier-release")
             if prompt == "Tell me about volcanoes" { try Data().write(to: hold) }
-            composer.click()
-            composer.typeText(prompt)
+            typeIntoField(composer, text: prompt)
             XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should remain sendable without a repository parent.")
             element("send-message-button").click()
             if prompt == "Tell me about volcanoes" {
@@ -687,8 +683,7 @@ extension PlayhouseUITests {
         try? FileManager.default.removeItem(at: release)
         try Data().write(to: hold)
         let composer = element("message-composer")
-        composer.click()
-        composer.typeText("Tell me about Neptune")
+        typeIntoField(composer, text: "Tell me about Neptune")
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 15))
         let explicitPage = try XCTUnwrap((try runCLI(["chat", "page", "new", "--title", "Explicit topic"])["result"] as? [String: Any])?["page"] as? [String: Any])
@@ -710,16 +705,14 @@ extension PlayhouseUITests {
 
         let classifierFailure = URL(fileURLWithPath: executable.path + ".fail-classifier")
         try Data().write(to: classifierFailure)
-        composer.click()
-        composer.typeText("Tell me about Mars")
+        typeIntoField(composer, text: "Tell me about Mars")
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({
             (try? self.runCLI(["chat", "status"])["result"] as? [String: Any])?["missedPreviousPageSignal"] as? Bool == true
         }, timeout: 30))
         XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10), "The explicit page's title should appear with its first message.")
         XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The Mars turn should finish before the next send.")
-        composer.click()
-        composer.typeText("Do not overtake Mars")
+        typeIntoField(composer, text: "Do not overtake Mars")
         element("send-message-button").click()
         XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 15), "Claude chat should explain when a prior page decision is still unresolved.")
         let failedHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
@@ -733,7 +726,7 @@ extension PlayhouseUITests {
         refreshStandaloneChatSidebar()
         XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Mars") }, timeout: 10))
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
-        composer.click()
+        focusField(composer)
         composer.typeKey("a", modifierFlags: .command)
         composer.typeText("Another thought about Mars")
         element("send-message-button").click()

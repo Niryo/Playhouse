@@ -41,7 +41,7 @@ Options: `--notes-file <path>`, `--skip-tests`, `--dry-run`.
    - the checkout is on `master`, the tree is clean, and it is in sync with `origin/master`;
    - the version is newer than the latest release, and its tag is unused;
    - `ReleaseSigningKey.swift` has a key that matches the keychain's manifest key, and the certificate exists.
-2. **Notes.** The commit subjects since the previous release tag, opened in `$VISUAL` or `$EDITOR` when run from a terminal, unless `--notes-file` is given. If the SwiftData model files changed since the previous release, the script warns that the previous version must still read the new data, because a rollback restores only the app (see Data compatibility).
+2. **Notes.** Unless `--notes-file` is given, `scripts/release-notes.sh` sends every commit since the previous release tag (message, changed files and pull request description) to the latest Claude Opus through the installed Claude Code CLI (`claude -p --model opus`), which writes a short list of only the major user-facing changes, split into "New features:" and "Bug fixes:". The script shows the draft and asks to accept it, edit it in `$VISUAL` or `$EDITOR`, regenerate it, or abort. If Claude is unavailable, the draft is the commit subjects. Without `--notes-file` the script must run from a terminal. If the SwiftData model files changed since the previous release, the script warns that the previous version must still read the new data, because a rollback restores only the app (see Data compatibility).
 3. **Tests.** `scripts/test-e2e.sh` runs unless `--skip-tests` is given.
 4. **Build.**
    - Release configuration, `arm64`, into `/tmp/playhouse-release/<version>/`.
