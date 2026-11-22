@@ -849,8 +849,6 @@ private struct NativeComposerDemo: View {
         let goal = mode == "goal"
         let plan = mode == "plan"
         let title = provider == "codex" ? "Codex" : "Claude"
-        let picked = model.model.models.first { $0.id == modelID }
-        let effortChoice = model.model.effortChoices.first { $0.value == effort }
         model.prefix = "native-"
         model.draft = draft
         if goal { model.placeholder = "Set a goal to keep pursuing" }
@@ -862,12 +860,17 @@ private struct NativeComposerDemo: View {
         model.provider.value = provider
         model.provider.label = "Provider: \(title)"
         model.provider.items = model.provider.items.map { var item = $0; item.checked = item.id == provider; return item }
-        model.model.name = picked?.title ?? ""
-        model.model.effort = effortChoice?.label ?? ""
-        model.model.label = "Model: \(picked?.title ?? ""), effort: \(effortChoice?.label ?? "")"
-        model.model.open = pickerOpen
-        model.model.selectedEffort = effort
-        model.model.models = model.model.models.map { var item = $0; item.checked = item.id == modelID; return item }
+        if var picker = model.model {
+            let picked = picker.models.first { $0.id == modelID }
+            let effortChoice = picker.effortChoices.first { $0.value == effort }
+            picker.name = picked?.title ?? ""
+            picker.effort = effortChoice?.label ?? ""
+            picker.label = "Model: \(picked?.title ?? ""), effort: \(effortChoice?.label ?? "")"
+            picker.open = pickerOpen
+            picker.selectedEffort = effort
+            picker.models = picker.models.map { var item = $0; item.checked = item.id == modelID; return item }
+            model.model = picker
+        }
         model.schedule?.open = scheduleOpen
         model.primary.disabled = draft.trimmingCharacters(in: .whitespaces).isEmpty && !goal
         return model

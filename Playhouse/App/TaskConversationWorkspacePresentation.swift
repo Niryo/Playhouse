@@ -463,9 +463,13 @@ extension TaskConversationView {
     func loadSuggestedRepositories() {
         guard let parent = WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) else { return }
         Task {
-            suggestedRepositories = (try? await WorkspaceManager().suggestedRepositories(parentPath: parent.path).map {
+            let repositories = (try? await WorkspaceManager().suggestedRepositories(parentPath: parent.path).map {
                 URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
             }) ?? []
+            // Loads can finish out of order; a slower one for a folder since replaced must not
+            // overwrite the current folder's list.
+            guard WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)?.path == parent.path else { return }
+            suggestedRepositories = repositories
         }
     }
 

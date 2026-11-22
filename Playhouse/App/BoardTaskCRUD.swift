@@ -70,6 +70,7 @@ extension BoardTaskManager {
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let normalizedRoots = try Self.normalizeRoots(workspaceRoots)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots, conversationProvider: provider)
+        task.conversationContextModeRawValue = preferences.string(forKey: WorkspaceSettings.conversationContextModeKey)
         modelContext.insert(task)
         try await saveTaskContext(taskID: task.id)
         PlayhouseDiagnostics.record("task.create.succeeded", fields: [
@@ -105,6 +106,7 @@ extension BoardTaskManager {
         }
         let roots = try Self.normalizeOptionalRoots(worktrees.map(\.repositoryPath) + folders)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)
+        task.conversationContextModeRawValue = preferences.string(forKey: WorkspaceSettings.conversationContextModeKey)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
         // A prompt given at creation has not been sent, so it is the composer's draft.

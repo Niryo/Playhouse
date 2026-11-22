@@ -63,7 +63,7 @@ class BridgeTestCases13:
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
-    # case-contract: test_conversation_models_cache_and_refresh | Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and retains an offline cached option when the provider executable is unavailable.
+    # case-contract: test_conversation_models_cache_and_refresh | Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and, when the installed provider executable fails to launch, stays on Claude and retains the cached option.
     def test_conversation_models_cache_and_refresh(self):
         codex_fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         codex_executable = self.data_directory / "codex-fixture-model-cache"

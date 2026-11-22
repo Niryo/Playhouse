@@ -9,12 +9,20 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
+    /// The prompt can't be dismissed, so a case launched without a folder chooses one there and
+    /// then clears it again through the CLI, leaving the app with no folder and no prompt.
     func dismissSuggestionsFolderPromptIfNeeded() {
         guard launchDefaultParent == nil, !keepsSuggestionsFolderPrompt else { return }
-        let later = element("suggestions-folder-prompt-later-button")
-        guard later.waitToExist(timeout: 3) else { return }
-        later.click()
-        XCTAssertTrue(waitUntil({ !later.exists }, timeout: 5), "Not Now should close the Suggestions from prompt.")
+        let choose = element("suggestions-folder-prompt-choose-button")
+        guard choose.waitToExist(timeout: 3) else { return }
+        choose.click()
+        do {
+            try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
+        } catch {
+            XCTFail("Choosing a folder in the Suggestions from prompt failed: \(error)")
+        }
+        XCTAssertTrue(waitUntil({ !choose.exists && !self.openFolderPanel.exists }, timeout: 10), "Choosing a folder should close the Suggestions from prompt.")
+        XCTAssertNoThrow(try runCLI(["settings", "clear-parent"]))
     }
 
     func waitForBoardOrAbortSuite() {

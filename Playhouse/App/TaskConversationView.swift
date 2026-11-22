@@ -797,6 +797,7 @@ struct TaskConversationView: View {
                 // Stay within the window's own 980x640 content minimum so the sheet
                 // can never outgrow its host window and push Close out of reach.
                 .frame(minWidth: 900, minHeight: 600)
+                .background(SheetOutsideClickDismissal { self.selectedChatImage = nil })
             }
         }
         .overlay(alignment: .topLeading) { skillsPage }
@@ -1142,4 +1143,34 @@ extension View {
 struct WorkspaceWatchKey: Hashable {
     let roots: [String]
     let isWatched: Bool
+}
+
+/// Closes a sheet when its parent window is clicked outside the sheet. The parent refuses clicks
+/// while a sheet is attached, but they still pass through the app's local event monitors first.
+struct SheetOutsideClickDismissal: NSViewRepresentable {
+    let onDismiss: () -> Void
+
+    func makeNSView(context: Context) -> MonitorView { MonitorView() }
+    func updateNSView(_ view: MonitorView, context: Context) { view.onDismiss = onDismiss }
+
+    final class MonitorView: NSView {
+        var onDismiss: (() -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                // The sheet is attached after its content joins its window, so look up the parent per click.
+                guard let self, let parent = self.window?.sheetParent, event.window === parent else { return event }
+                self.onDismiss?()
+                return nil
+            }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+    }
 }

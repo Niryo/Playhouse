@@ -47,8 +47,7 @@ extension PlayhouseUITests {
             let composer = element("message-composer")
             XCTAssertTrue(composer.waitToExist(timeout: 10))
             let receivedBefore = fixtureTurnCount(executable, containing: prompt)
-            composer.click()
-            composer.typeText(prompt)
+            typeIntoField(composer, text: prompt)
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({
                 self.fixtureTurnCount(executable, containing: prompt) > receivedBefore && self.noTurnIsRunning()
@@ -248,8 +247,7 @@ extension PlayhouseUITests {
 
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitToExist(timeout: 10))
-        composer.click()
-        composer.typeText(prompt)
+        typeIntoField(composer, text: prompt)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({
             self.fixtureTurnCount(executable, containing: prompt) > 0 && self.noTurnIsRunning()
@@ -415,8 +413,7 @@ extension PlayhouseUITests {
         func send(_ text: String) {
             let composer = element("message-composer")
             XCTAssertTrue(composer.waitToExist(timeout: 10))
-            composer.click()
-            composer.typeText(text)
+            typeIntoField(composer, text: text)
             element("send-message-button").click()
         }
 
@@ -604,7 +601,6 @@ extension PlayhouseUITests {
             let active = URL(fileURLWithPath: executable.path + ".classifier-active")
             let release = URL(fileURLWithPath: executable.path + ".classifier-release")
             if prompt == "Tell me about volcanoes" { try Data().write(to: hold) }
-            // Waits for the chat to settle and the click to focus the composer before typing.
             typeIntoField(composer, text: prompt)
             XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should remain sendable without a repository parent.")
             element("send-message-button").click()
