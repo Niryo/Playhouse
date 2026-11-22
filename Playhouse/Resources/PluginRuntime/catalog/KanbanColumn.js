@@ -29,7 +29,7 @@ function emptyMessage(model) {
 }
 
 // With an action (the empty Backlog), one container holding the message,
-// which reads as the panel's label, and the pulsing Add button beside it.
+// which reads as the panel's label, and the prominent Add button beside it.
 function EmptyState(props) {
   var model = props.model, empty = model.empty, testID = model.idPrefix + "empty-state-" + model.key;
   if (empty.action && model.addHelp) {
@@ -39,7 +39,7 @@ function EmptyState(props) {
     },
       h(Stack, { axis: "v", spacing: 9, align: "center" }, emptyMessage(model)),
       h(Button, {
-        style: "prominent", controlSize: "small", pulse: true, testID: model.idPrefix + "add-backlog-task-button",
+        style: "prominent", controlSize: "small", testID: model.idPrefix + "add-backlog-task-button",
         label: model.addHelp, help: model.addHelp, onPress: props.onAdd
       }, h(Label, { text: empty.action, icon: "plus", size: 11, weight: "semibold" })));
   }

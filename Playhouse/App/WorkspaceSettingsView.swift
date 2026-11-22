@@ -294,7 +294,8 @@ struct WorkspaceSettingsView: View {
 }
 
 /// The folder Playhouse suggests repositories from, asked for in a modal: at launch while none
-/// is set, and when a send needs one (a task with no repository runs in that folder).
+/// is set, and when a send needs one (a task with no repository runs in that folder). The
+/// modal can't be dismissed; it stays until a folder is chosen.
 enum SuggestionsFolderPrompt {
     static let notification = Notification.Name("playhouseShowSuggestionsFolderPrompt")
 
@@ -330,7 +331,7 @@ struct SuggestionsFolderPromptModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .atomModal(
-                ModalProps(isPresented: isPresented, width: 440, title: "Where do your repositories live?", icon: "folder.badge.gearshape"),
+                ModalProps(isPresented: isPresented, width: 440, title: "Where do your repositories live?", icon: "folder.badge.gearshape", dismissible: false),
                 common: AtomCommon(testID: "suggestions-folder-prompt"),
                 onDismiss: { isPresented = false }
             ) {
@@ -343,13 +344,6 @@ struct SuggestionsFolderPromptModifier: ViewModifier {
                 }
                 AtomStack(props: StackProps(axis: "h")) {
                     AtomSpacer()
-                    AtomButton(
-                        props: ButtonProps(style: "automatic", shortcut: "cancel"),
-                        common: AtomCommon(testID: "suggestions-folder-prompt-later-button", help: "Choose a folder later"),
-                        action: { isPresented = false }
-                    ) {
-                        AtomText(props: TextProps(text: "Not Now"))
-                    }
                     AtomButton(
                         props: ButtonProps(style: "prominent", shortcut: "default"),
                         common: AtomCommon(testID: "suggestions-folder-prompt-choose-button", help: "Choose the folder that holds your repositories"),

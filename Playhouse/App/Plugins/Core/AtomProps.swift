@@ -438,9 +438,6 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 /// hover hint (`help`) then ends by naming the shortcut, as in "Save (⌘S)". `destructive` gives it the destructive
 /// role (a push button draws its title red). `selected` marks it selected to
 /// accessibility, the current choice of a row of buttons (a ChoiceBar's).
-/// `pulse` draws the eye to it: an accent ring keeps swelling out from its
-/// edge and fading (held still when the system reduces motion; none while
-/// it is disabled).
 struct ButtonProps: AtomPropsDecodable, Equatable {
     var style: String?
     var emphasis: Double?
@@ -450,9 +447,8 @@ struct ButtonProps: AtomPropsDecodable, Equatable {
     var shortcut: String?
     var destructive: Bool?
     var selected: Bool?
-    var pulse: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive, selected, pulse }
+    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive, selected }
 }
 
 /// Opens `url` in the browser; its label is its children.
@@ -833,8 +829,10 @@ struct StepSliderProps: AtomPropsDecodable, Equatable {
 /// calls `onDismiss`. The header and content are padded by `inset`
 /// (`defaultInset` unless set, as the app's own sheets are) and `spacing`
 /// apart, as are a plugin's children (`defaultSpacing` unless set); a native
-/// owner whose content pads itself passes an `inset` of 0. Its `testID` names
-/// the sheet's content column.
+/// owner whose content pads itself passes an `inset` of 0. With `dismissible`
+/// false the user can't close it: the header has no close button and Escape
+/// does nothing, so only the owner's own control (a required choice) closes
+/// it. Its `testID` names the sheet's content column.
 struct ModalProps: AtomPropsDecodable, Equatable {
     static let defaultInset: Double = 24
     static let defaultSpacing: Double = 16
@@ -847,8 +845,9 @@ struct ModalProps: AtomPropsDecodable, Equatable {
     var icon: String?
     var inset: Double?
     var spacing: Double?
+    var dismissible: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, width, height, title, subtitle, icon, inset, spacing }
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, width, height, title, subtitle, icon, inset, spacing, dismissible }
 }
 
 /// A page that slides in from the trailing edge over its first child and

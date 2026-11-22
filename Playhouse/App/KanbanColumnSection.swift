@@ -148,7 +148,7 @@ struct KanbanColumnSection<Cards: View>: View {
                     emptyMessage(empty)
                 }
                 AtomButton(
-                    props: ButtonProps(style: "prominent", controlSize: "small", pulse: true),
+                    props: ButtonProps(style: "prominent", controlSize: "small"),
                     common: AtomCommon(testID: "\(prefix)add-backlog-task-button", label: help, help: help),
                     action: onAdd
                 ) {

@@ -120,7 +120,8 @@ private extension AtomCommon {
 
 /// A modal sheet presented from `base`, open while `props.isPresented`.
 /// Escape, which the sheet handles itself, or a native owner's content
-/// closing it (an `@Environment(\.dismiss)`), calls `onDismiss`. Native owners give any SwiftUI
+/// closing it (an `@Environment(\.dismiss)`), calls `onDismiss`; a modal that
+/// isn't `dismissible` ignores Escape and has no close button. Native owners give any SwiftUI
 /// content; a plugin's is every child after the first.
 struct AtomModal<Base: View, Content: View>: View {
     var props: ModalProps
@@ -136,11 +137,12 @@ struct AtomModal<Base: View, Content: View>: View {
                     if let title = props.title {
                         AtomModalHeader(
                             title: title, subtitle: props.subtitle, icon: props.icon,
-                            idPrefix: common.testID ?? "modal", onClose: onDismiss
+                            idPrefix: common.testID ?? "modal", onClose: isDismissible ? onDismiss : nil
                         )
                     }
                     content()
                 }
+                .interactiveDismissDisabled(!isDismissible)
                 .padding(CGFloat(props.inset ?? ModalProps.defaultInset))
                 .modifier(Applied(when: props.width != nil || props.height != nil) {
                     $0.frame(width: props.width.map { CGFloat($0) }, height: props.height.map { CGFloat($0) }, alignment: .topLeading)
@@ -149,12 +151,14 @@ struct AtomModal<Base: View, Content: View>: View {
             }
             .atomCommon(common.presentationLayout(owningHeight: true), atom: .modal)
     }
+
+    private var isDismissible: Bool { props.dismissible != false }
 }
 
 /// The app's standard modal header, composed of atoms: an optional accent
 /// symbol, the title (19-point semibold rounded, as the Token Stats and
 /// Rename Task sheets' are) over an optional secondary subtitle, and a close
-/// button at the trailing edge. A Modal with a `title` and an installed
+/// button at the trailing edge when there is an `onClose`. A Modal with a `title` and an installed
 /// plugin's surface both start with it. The title is `<idPrefix>-title` and
 /// the close button `<idPrefix>-close`.
 struct AtomModalHeader: View {
@@ -163,7 +167,7 @@ struct AtomModalHeader: View {
     var icon: String?
     var titleSize: Double = 19
     let idPrefix: String
-    let onClose: () -> Void
+    let onClose: (() -> Void)?
 
     var body: some View {
         AtomStack(props: StackProps(axis: "h", spacing: 10, align: "top"), common: AtomCommon(fillWidth: true)) {
@@ -177,8 +181,10 @@ struct AtomModalHeader: View {
                 }
             }
             AtomSpacer(props: SpacerProps(minLength: 8))
-            AtomButton(props: ButtonProps(emphasis: 5), common: AtomCommon(testID: "\(idPrefix)-close", label: "Close \(title)", help: "Close"), action: onClose) {
-                AtomIcon(props: IconProps(name: "xmark", size: 11, weight: "semibold", color: "secondary"), common: AtomCommon(width: 20, height: titleSize + 5))
+            if let onClose {
+                AtomButton(props: ButtonProps(emphasis: 5), common: AtomCommon(testID: "\(idPrefix)-close", label: "Close \(title)", help: "Close"), action: onClose) {
+                    AtomIcon(props: IconProps(name: "xmark", size: 11, weight: "semibold", color: "secondary"), common: AtomCommon(width: 20, height: titleSize + 5))
+                }
             }
         }
     }
