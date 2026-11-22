@@ -8,8 +8,9 @@
 # Run it from the primary checkout, on master, with a clean tree, after
 # scripts/release-setup.sh. --dry-run builds, signs, verifies and packages
 # into /tmp/playhouse-release/<version> without tagging or publishing.
-# Without --notes-file the notes are the commit subjects since the last release,
-# opened in $EDITOR first when run from a terminal.
+# Without --notes-file, Claude Opus drafts the notes from the changes since the
+# last release (scripts/release-notes.sh); you then accept, edit in $EDITOR,
+# regenerate or abort before anything is built.
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -36,7 +37,7 @@ while [[ $# -gt 0 ]]; do
     --notes-file) notes_file="${2:?--notes-file needs a path}"; shift 2 ;;
     --skip-tests) skip_tests=true; shift ;;
     --dry-run) dry_run=true; shift ;;
-    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [[ -z "${version}" ]] || die "only one version"; version="${1#v}"; shift ;;
   esac
@@ -94,17 +95,36 @@ export PLAYHOUSE_RELEASE_PRIVATE_KEY
 [[ "$("${repository_root}/scripts/release-tool.sh" public-key)" == "${public_key}" ]] \
   || die "the keychain's manifest key doesn't match ReleaseSigningKey.swift."
 
-if [[ -z "${notes_file}" ]]; then
-  notes_file="$(mktemp)"
+draft_notes() { # draft_notes <file>: Opus-written notes, else the commit subjects
   if [[ -n "${latest}" ]] && git -C "${repository_root}" rev-parse -q --verify "refs/tags/v${latest}" >/dev/null; then
-    git -C "${repository_root}" log --no-merges --format='- %s' "v${latest}..HEAD" > "${notes_file}"
+    printf 'Drafting release notes with Claude Opus from the changes since v%s...\n' "${latest}"
+    if ! "${repository_root}/scripts/release-notes.sh" "v${latest}" "${repository}" > "$1"; then
+      printf 'warning: could not draft notes with Claude; using the commit subjects instead.\n' >&2
+      git -C "${repository_root}" log --no-merges --format='- %s' "v${latest}..HEAD" > "$1"
+    fi
   else
-    printf -- '- First release of Playhouse.\n' > "${notes_file}"
+    printf -- '- First release of Playhouse.\n' > "$1"
   fi
-  # Edit the generated notes before they are signed into the release.
-  if [[ -t 0 && -t 1 ]]; then
-    "${VISUAL:-${EDITOR:-vi}}" "${notes_file}" || die "the notes editor exited with an error."
-  fi
+}
+
+if [[ -z "${notes_file}" ]]; then
+  [[ -t 0 && -t 1 ]] || die "run from a terminal to review the drafted notes, or pass --notes-file."
+  notes_file="$(mktemp)"
+  draft_notes "${notes_file}"
+  # Review the notes before they are signed into the release.
+  while true; do
+    printf '\n----- Release notes for %s -----\n' "${version}"
+    cat "${notes_file}"
+    printf -- '---------------------------------\n'
+    read -r -p "Use these notes? [y]es, [e]dit, [r]egenerate, [a]bort: " answer
+    case "${answer}" in
+      y|Y|yes) [[ -s "${notes_file}" ]] && break; printf 'The notes are empty.\n' ;;
+      e|E|edit) "${VISUAL:-${EDITOR:-vi}}" "${notes_file}" || die "the notes editor exited with an error." ;;
+      r|R|regenerate) draft_notes "${notes_file}" ;;
+      a|A|abort) die "aborted; nothing was built or published." ;;
+      *) printf 'Answer y, e, r or a.\n' ;;
+    esac
+  done
 fi
 [[ -s "${notes_file}" ]] || die "the release notes are empty."
 
