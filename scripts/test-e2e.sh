@@ -37,15 +37,34 @@ test_output_dir="$(mktemp -d /tmp/playhouse-bridge.XXXXXX)"
 cleanup() {
   local status=$?
   report_phase finished
-  printf 'E2E total_seconds=%s exit_status=%s\nBridge test artifacts: %s\n' "${SECONDS}" "${status}" "${test_output_dir}" >&2
+  printf 'E2E total_seconds=%s exit_status=%s\n' "${SECONDS}" "${status}" >&2
+  # A passing run has nothing to inspect, and each run's app data holds full
+  # app copies from the update cases, so only failures keep their artifacts.
+  if (( status == 0 )) && [[ "${PLAYHOUSE_E2E_KEEP_ARTIFACTS:-0}" != "1" ]]; then
+    # A daemon idling out may still write under data/; a later run's prune
+    # clears what is left rather than failing this passing run.
+    if rm -rf -- "${test_output_dir}" 2>/dev/null; then
+      printf 'Bridge test artifacts removed after a passing run (set PLAYHOUSE_E2E_KEEP_ARTIFACTS=1 to keep them).\n' >&2
+    else
+      printf 'Could not fully remove bridge test artifacts: %s\n' "${test_output_dir}" >&2
+    fi
+  else
+    printf 'Bridge test artifacts: %s\n' "${test_output_dir}" >&2
+  fi
 }
 trap cleanup EXIT
+# A failed run's artifacts stay for inspection; earlier runs past the
+# retention window are dropped so they do not pile up in /tmp.
+python3 "${repository_root}/scripts/prune-test-artifacts.py" \
+  --root "$(dirname "${test_output_dir}")" --prefix playhouse-bridge. --age-from mtime \
+  --keep "$(basename "${test_output_dir}")"
 architecture="$(uname -m)"
 python3 "${repository_root}/scripts/check-test-parity.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
 python3 "${repository_root}/scripts/check-hover-scrollers.py"
 python3 "${repository_root}/scripts/check-polling-loops.py"
 python3 "${repository_root}/scripts/check-e2e-locking.py"
+python3 "${repository_root}/scripts/check-artifact-pruning.py"
 python3 "${repository_root}/scripts/check-e2e-build-cache.py"
 report_phase build
 build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
