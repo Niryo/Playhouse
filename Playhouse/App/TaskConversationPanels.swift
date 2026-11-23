@@ -123,9 +123,13 @@ extension TaskConversationView {
                     Spacer(minLength: 0)
                 }
 
+                // With the plus on it, the overlay draws this line itself, broken around the plus.
                 Rectangle()
-                    .fill(Color.primary.opacity(0.07))
+                    .fill(Color.primary.opacity(showsNewChatPageButton ? 0 : Self.conversationDividerOpacity))
                     .frame(height: 1)
+                    .overlay { newChatPageRuleButton }
+                    // Above the composer, so the plus's lower half still takes clicks.
+                    .zIndex(1)
 
                 if isReadOnly {
                     Label("Archived conversation · read only", systemImage: "lock.fill")
