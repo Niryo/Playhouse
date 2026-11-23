@@ -94,6 +94,7 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
             commands.append({"command": close_turn,
                              "output": runtime.run_tool("toolu_close_first", "Bash", {"command": close_turn}, close_turn)})
         runtime.text("msg_chat_close_first_answer", runtime.CHAT_CLOSE_FIRST_ANSWER)
+        runtime.write_chat_turn_requests("close_first", user_text, [close_turn or "true"], runtime.CHAT_CLOSE_FIRST_ANSWER)
     elif any(user_text.rstrip().endswith(prompt) for prompt in runtime.CHAT_PARALLEL_PROMPTS):
         # A parallel bubble's question. `.hold-parallel-<slug>` keeps its turn running, with
         # `.parallel-<slug>-active` present, until `.parallel-<slug>-release` appears, so a test can
@@ -161,6 +162,7 @@ def respond(runtime, user_text, instructions, preserve_no_outcome=False, previou
         runtime.write({"type": "user", "parent_tool_use_id": None, "isSynthetic": True, "uuid": "fixture-no-visible-output-notice",
                "message": {"role": "user", "content": [{"type": "text", "text": runtime.NO_VISIBLE_OUTPUT_NOTICE}]}})
         runtime.text("msg_chat_notice_reply", runtime.CHAT_NOTICE_REPLY)
+        runtime.write_chat_turn_requests("notice", user_text, [close_turn or "true", runtime.NO_VISIBLE_OUTPUT_NOTICE], runtime.CHAT_NOTICE_REPLY)
     elif user_text.rstrip().endswith((runtime.LONG_NOTICE_PROMPT, runtime.SHORT_NOTICE_PROMPT)):
         # The turn reports its outcome, then Claude Code adds its own synthetic message and
         # Claude answers it, as a real handoff notice arrives inside a turn.

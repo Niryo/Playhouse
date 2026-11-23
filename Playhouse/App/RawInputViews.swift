@@ -34,11 +34,13 @@ private struct ChoiceBar<Choice: RawRepresentable & Hashable>: View where Choice
 
 /// The board's Token Stats modal: a task's token accounting, re-read every
 /// two seconds while it is open, around the atom-built `TokenStatsView`. It
-/// holds the selected section and opens the raw input sheet.
+/// holds the selected section and opens the raw input sheet. With a `turnID`
+/// it shows only that finished turn, read once: nothing it covers changes.
 struct TokenStatsSheet: View {
     @Environment(\.dismiss) private var dismiss
     let taskID: UUID
     let taskTitle: String
+    var turnID: String?
     let modelContext: ModelContext
     @State private var summary: TaskTokenUsageSummary?
     @State private var waste: TaskTokenWasteReport?
@@ -60,8 +62,14 @@ struct TokenStatsSheet: View {
         // show up live. The map extends its parsed logs from where they
         // stopped, so a poll only reads what the session files gained.
         .task {
+            let manager = BoardTaskManager(modelContext: modelContext)
+            if let turnID {
+                summary = try? await manager.tokenUsageSummary(taskID, turnID: turnID, homes: .forThisApp)
+                waste = try? await manager.tokenWasteReport(taskID, turnID: turnID, homes: .forThisApp)
+                didLoad = true
+                return
+            }
             while !Task.isCancelled {
-                let manager = BoardTaskManager(modelContext: modelContext)
                 summary = try? manager.tokenUsageSummary(taskID)
                 waste = try? await manager.tokenWasteReport(taskID, homes: .forThisApp)
                 didLoad = true
@@ -69,7 +77,7 @@ struct TokenStatsSheet: View {
             }
         }
         .sheet(item: $rawInputFocus) { focus in
-            RawInputSheet(taskID: taskID, taskTitle: taskTitle, modelContext: modelContext, focus: focus)
+            RawInputSheet(taskID: taskID, taskTitle: taskTitle, turnID: turnID, modelContext: modelContext, focus: focus)
         }
     }
 }
@@ -88,6 +96,8 @@ struct RawInputSheet: View {
     @Environment(\.dismiss) private var dismiss
     let taskID: UUID
     let taskTitle: String
+    /// The one turn whose requests the sheet lists; `nil` lists the whole conversation's.
+    let turnID: String?
     let modelContext: ModelContext
     let focus: RawInputFocus
     @State private var agent: String?
@@ -117,9 +127,10 @@ struct RawInputSheet: View {
         return CGSize(width: min(1120, max(800, visible.width - 60)), height: min(720, max(480, visible.height - 80)))
     }
 
-    init(taskID: UUID, taskTitle: String, modelContext: ModelContext, focus: RawInputFocus) {
+    init(taskID: UUID, taskTitle: String, turnID: String? = nil, modelContext: ModelContext, focus: RawInputFocus) {
         self.taskID = taskID
         self.taskTitle = taskTitle
+        self.turnID = turnID
         self.modelContext = modelContext
         self.focus = focus
         _agent = State(initialValue: focus.agent)
@@ -167,7 +178,7 @@ struct RawInputSheet: View {
                 Divider()
                 Group {
                     if let selected {
-                        RawInputTextPane(taskID: taskID, modelContext: modelContext, agent: page?.agent ?? agent, item: selected)
+                        RawInputTextPane(taskID: taskID, turnID: turnID, modelContext: modelContext, agent: page?.agent ?? agent, item: selected)
                             .id("\(page?.agent ?? agent ?? "")#\(selected)")
                     } else {
                         Text("Select an item to read the full text the model received.")
@@ -283,7 +294,7 @@ struct RawInputSheet: View {
 
     private func fetch(offset: Int, focusing item: Int?) async -> TaskRawInputPage? {
         try? await BoardTaskManager(modelContext: modelContext).rawInputPage(
-            taskID, homes: .forThisApp, agent: agent, scope: scope, order: order, query: submittedQuery,
+            taskID, turnID: turnID, homes: .forThisApp, agent: agent, scope: scope, order: order, query: submittedQuery,
             offset: offset, limit: Self.pageSize, focus: item, request: scope == .request ? requestNumber : nil
         )
     }
@@ -414,7 +425,7 @@ struct RawInputSheet: View {
         let format = exportFormat
         do {
             let export = try await BoardTaskManager(modelContext: modelContext).rawInputExport(
-                taskID, homes: .forThisApp, agent: page?.agent ?? agent, request: request.number, format: format
+                taskID, turnID: turnID, homes: .forThisApp, agent: page?.agent ?? agent, request: request.number, format: format
             )
             let name = format == .json ? "JSON" : "text"
             if open {
@@ -546,6 +557,7 @@ private struct RawInputTextPane: View {
     }
 
     let taskID: UUID
+    let turnID: String?
     let modelContext: ModelContext
     let agent: String?
     let item: Int
@@ -643,7 +655,7 @@ private struct RawInputTextPane: View {
         defer { isLoading = false }
         do {
             let chunk = try await BoardTaskManager(modelContext: modelContext).rawInputText(
-                taskID, homes: .forThisApp, agent: agent, item: item, offset: offset, length: ProviderTokenMap.defaultTextChunk
+                taskID, turnID: turnID, homes: .forThisApp, agent: agent, item: item, offset: offset, length: ProviderTokenMap.defaultTextChunk
             )
             header = chunk
             append(chunk.text, isLast: chunk.nextOffset == nil)
@@ -678,7 +690,7 @@ private struct RawInputTextPane: View {
 
     private func fullText() async -> String? {
         try? await BoardTaskManager(modelContext: modelContext).rawInputText(
-            taskID, homes: .forThisApp, agent: agent, item: item, offset: 0, length: Int.max
+            taskID, turnID: turnID, homes: .forThisApp, agent: agent, item: item, offset: 0, length: Int.max
         ).text
     }
 

@@ -432,7 +432,7 @@ extension TaskConversationView {
         return message.turnTokenUsage
     }
 
-    /// A reply's small token counter, the task item's counter button, opening the chat's Token Stats.
+    /// A reply's small token counter, the task item's counter button, opening Token Stats for that turn alone.
     func turnTokenUsageRow(_ message: ConversationMessage, usage: ConversationTokenUsage) -> some View {
         let number = IntegerFormatStyle<Int>().grouping(.automatic)
         let description = "This turn used \(usage.totalTokens.formatted(number)) tokens: "
@@ -444,7 +444,7 @@ extension TaskConversationView {
                     compact: "\(TokenUsageHeatmap.compact(usage.totalTokens)) tokens", color: "secondary", description: description
                 ),
                 testID: "message-token-usage-\(message.id)",
-                action: { showTokenStats?(TokenStatsTarget(id: task.id, title: task.title)) }
+                action: { showTokenStats?(TokenStatsTarget(id: task.id, title: task.title, turnID: message.turnID)) }
             )
             AtomSpacer(props: SpacerProps(minLength: 0))
         }

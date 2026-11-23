@@ -2197,13 +2197,18 @@ extension PlayhouseUITests {
         let entries = (try runCLI(["slash-commands", "list", "--task", taskID])["result"] as? [String: Any])?["commands"] as? [[String: Any]] ?? []
         XCTAssertEqual(entries.first { $0["name"] as? String == "plan" }?["pluginID"] as? String, "built-in-commands", "/plan stays the built-in one.")
     }
-    // case-contract: test_standalone_chat_reply_shows_turn_token_usage | A standalone chat shows what each turn cost under the turn's last reply. Providers report usage once per turn, so a history read marks only the last assistant reply of each turn with that turn's recorded usage (input, output, cache read and cache write exactly as the turn's Token Stats row), leaving the user's message and earlier commentary unmarked, and an empty chat has nothing marked. A second turn that replies twice (Claude Code's no-visible-output notice between its answer and a later reply) marks only its last reply, with its own row, while the first reply keeps the first turn's. A history page that ends inside a turn marks none of that turn's messages, because its last reply is on a later page, while an earlier turn whose reply is in the page stays marked, including a reply that ends the page when the next page starts another turn. In the chat, the marked reply shows a small token counter (1.6K tokens) directly beneath it, whose tooltip names the turn's total and its four buckets, while prompts and a turn's earlier replies show none, and clicking it opens the window's usual Token Stats modal for the chat with the turn rows, which Done closes. Usage is attributed to Playhouse's local turn on the shared recording path for both Claude and Codex, so one representative provider (Claude) covers the case.
+    // case-contract: test_standalone_chat_reply_shows_turn_token_usage | A standalone chat shows what each turn cost under the turn's last reply. Providers report usage once per turn, so a history read marks only the last assistant reply of each turn with that turn's recorded usage (input, output, cache read and cache write exactly as the turn's Token Stats row), leaving the user's message and earlier commentary unmarked, and an empty chat has nothing marked. A second turn that replies twice (Claude Code's no-visible-output notice between its answer and a later reply) marks only its last reply, with its own row, while the first reply keeps the first turn's. A history page that ends inside a turn marks none of that turn's messages, because its last reply is on a later page, while an earlier turn whose reply is in the page stays marked, including a reply that ends the page when the next page starts another turn. In the chat, the marked reply shows a small token counter (1.6K tokens) directly beneath it, whose tooltip names the turn's total and its four buckets, while prompts and a turn's earlier replies show none, and clicking it opens the window's usual Token Stats modal for that turn alone, which Done closes. A turn's Token Stats read only the session the turn ran in, its page's own session rather than the page the chat is on now, and only the requests sent from the turn's first message until the next turn's: after a third turn (Saturn again) on a new page, the chat's own map reads the new page's session (3 requests) and its own summary still covers every turn (4,800 tokens), while with --turn the first turn's map reads its 2 requests and each Saturn turn's its 3, each holding the prompt that turn sent and listing, by what it says, the injected reminder that turn was sent and no other turn's, every listed item's preview is the start of the text Show reads for it, the second turn's summary lists only its row (1,600 tokens) with its 3 model calls, Raw Input numbers its requests from 1 to 3 and exports its first request with its prompt, a request past its last is not_found, and an unknown turn is not_found. In the window, after that third turn the second turn's counter opens Token Stats with its total (1,600), only its own turn row and 3 model calls, and the first turn's counter opens Token Stats with its 2 model calls, whose Raw Input single-request scope shows Request 2 of 2 and where Show reads that turn's injected reminder and not the other turn's, and its prompt row the Jupiter prompt and not the Saturn one (on the CLI, the first turn's summary has 2 model calls and its latest request's third and fourth items are that reminder and that Jupiter prompt). Usage is attributed to Playhouse's local turn on the shared recording path for both Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_reply_shows_turn_token_usage() throws {
-        let environment = try installClaudeFixture(named: "claude-fixture-chat-token-usage")
+        var environment = try installClaudeFixture(named: "claude-fixture-chat-token-usage")
         let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        // The fixture writes each page's session file here, which a turn's Token Stats read; the
+        // window's own bridge requests take the same directory from PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR.
+        let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
+        environment["CLAUDE_CONFIG_DIR"] = claudeConfig
+        environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"] = claudeConfig
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
-        launchApp(defaultParent: nil)
+        launchApp(defaultParent: nil, environmentOverrides: environment)
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
         let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
@@ -2215,10 +2220,11 @@ extension PlayhouseUITests {
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitToExist(timeout: 10))
         func send(_ prompt: String) {
+            let earlier = fixtureTurnCount(URL(fileURLWithPath: executable), containing: prompt)
             typeIntoField(composer, text: prompt)
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({
-                self.fixtureTurnCount(URL(fileURLWithPath: executable), containing: prompt) > 0 && self.noTurnIsRunning()
+                self.fixtureTurnCount(URL(fileURLWithPath: executable), containing: prompt) > earlier && self.noTurnIsRunning()
             }, timeout: 30), "The chat turn \(prompt) should finish.")
         }
         func assistantMessageID(_ text: String) throws -> String {
@@ -2270,13 +2276,75 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Standalone chat replies show their turn's tokens")
         attachRegionScreenshot([element("assistant-message-\(marked[1].id)"), secondCounter], named: "A reply's small token counter beneath it")
 
+        // A third turn (Saturn again) on a new page runs in a session of its own, which becomes the
+        // chat's current one. The fixture logs 2 requests for the Jupiter turn and 3 for each Saturn turn.
+        _ = try runCLI(["chat", "page", "new", "--title", "Another topic"], extraEnvironment: environment)
+        send("Name the largest moon of Saturn.")
+        XCTAssertTrue(waitUntil({ counters.count == 3 }, timeout: 15), "The new page's turn shows its own counter.")
+        // The chat keeps its newest reply in view, and XCTest calls a counter scrolled out of the
+        // transcript hittable, so scroll until the counter sits between the chat's top and its composer.
+        func reveal(_ counter: XCUIElement) {
+            let sidebar = element("chat-sidebar")
+            func visible() -> Bool {
+                counter.frame.minY >= sidebar.frame.minY + 40 && counter.frame.maxY <= composer.frame.minY - 20
+            }
+            for _ in 0..<20 {
+                guard !visible() else { break }
+                sidebar.scroll(byDeltaX: 0, deltaY: counter.frame.maxY > composer.frame.minY - 20 ? -80 : 80)
+            }
+            XCTAssertTrue(visible(), "The earlier turn's counter is in view: \(counter.frame), composer \(composer.frame)")
+        }
+        reveal(secondCounter)
+
         secondCounter.click()
         XCTAssertTrue(element("token-stats").waitToExist(timeout: 10), "Clicking the counter opens Token Stats.")
-        assertText("token-stats-total", equals: "3,200")
-        for turnID in marked.map(\.turnID) {
-            XCTAssertTrue(element("token-stats-turn-\(turnID)").waitToExist(timeout: 5), "Token Stats lists the chat's turn \(turnID).")
+        assertText("token-stats-total", equals: "1,600")
+        XCTAssertTrue(element("token-stats-turn-\(marked[1].turnID)").waitToExist(timeout: 5), "Token Stats lists the clicked turn.")
+        XCTAssertFalse(element("token-stats-turn-\(marked[0].turnID)").exists, "Token Stats lists no other turn of the chat.")
+        // Its model calls are the turn's own requests in its page's session, not the current page's.
+        let calls = element("token-stats-total-calls")
+        XCTAssertTrue(calls.waitToExist(timeout: 10), "The turn's model calls are read from its session.")
+        XCTAssertEqual(accessibleLabelOrValue(of: calls), "3 model calls · 3 main, 0 across 0 subagents")
+        attachScreenshot(named: "The reply's counter opens Token Stats for that turn alone")
+        element("close-token-stats-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("token-stats").exists }, timeout: 5), "Done closes Token Stats.")
+
+        // The first turn shares the second's page session, so only its own 2 requests count, and
+        // Raw Input and Show opened from its Token Stats read that turn too: its latest request is
+        // its second, and the prompt that request sent is the Jupiter one.
+        reveal(firstCounter)
+        firstCounter.click()
+        XCTAssertTrue(calls.waitToExist(timeout: 10), "The first turn's Token Stats open.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: calls) == "2 model calls · 2 main, 0 across 0 subagents" }, timeout: 10),
+                      "The first turn counts only its own requests: \(accessibleLabelOrValue(of: calls))")
+        let rawInputButton = element("token-stats-raw-input-button")
+        XCTAssertTrue(waitUntil({ rawInputButton.exists && rawInputButton.isEnabled }, timeout: 10), "The raw input opens once the map has loaded.")
+        rawInputButton.click()
+        let requestScope = element("raw-input-scope-request")
+        XCTAssertTrue(requestScope.waitToExist(timeout: 10), "The raw input offers a single-request scope.")
+        requestScope.click()
+        assertText("raw-input-request-number", equals: "Request 2 of 2")
+        // The system prompt and the Bash tool definition lead the request; the turn's injected
+        // reminder follows, then its prompt. Show reads each as this turn sent it.
+        func textLines(containing text: String) -> XCUIElementQuery {
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "raw-input-text-line-", text))
         }
-        attachScreenshot(named: "The reply's counter opens the chat's Token Stats")
+        // Over the chat's modal, XCTest reports the sheet's visible rows as not hittable, so a row is clicked at its centre.
+        func selectRow(_ identifier: String) {
+            revealRawInputRow(identifier)
+            element(identifier).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        }
+        selectRow("raw-input-request-row-2")
+        XCTAssertTrue(waitUntil({ textLines(containing: "Chat fixture reminder sent with the close_first turn.").count > 0 }, timeout: 10),
+                      "Show reads the reminder the first turn was sent.")
+        XCTAssertEqual(textLines(containing: "sent with the notice turn").count, 0, "Show reads no other turn's reminder.")
+        attachScreenshot(named: "Show reads the injected reminder this turn sent")
+        selectRow("raw-input-request-row-3")
+        XCTAssertTrue(waitUntil({ textLines(containing: "Name the largest moon of Jupiter.").count > 0 }, timeout: 10),
+                      "Show reads the prompt the first turn sent.")
+        XCTAssertEqual(textLines(containing: "Name the largest moon of Saturn.").count, 0, "Show reads no other turn's prompt.")
+        attachScreenshot(named: "Raw Input from a turn's Token Stats shows only that turn's requests")
+        element("close-raw-input-button").click()
         element("close-token-stats-button").click()
         XCTAssertTrue(waitUntil({ !self.element("token-stats").exists }, timeout: 5), "Done closes Token Stats.")
     }

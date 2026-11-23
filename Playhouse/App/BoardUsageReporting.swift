@@ -118,27 +118,93 @@ extension BoardTaskManager {
         )
     }
 
+    /// The turn's own row of a conversation's token accounting: its usage and tools, the
+    /// compactions and resume cache misses inside it, and the model calls its requests made.
+    func tokenUsageSummary(_ id: UUID, turnID: String, homes: ProviderSessionHomes) async throws -> TaskTokenUsageSummary {
+        let scope = try tokenMapScope(id, turnID: turnID)
+        let transcript = (try? conversationTranscriptStore().readState(id)) ?? ConversationTranscript()
+        let rows = (transcript.tokenUsage ?? []).filter { $0.id == turnID }
+        let agents = await Task.detached(priority: .userInitiated) {
+            ProviderTokenMap.load(sessions: scope.sessions, homes: homes, window: scope.window)
+        }.value
+        let usage = rows.reduce(ConversationTokenUsage()) { $0 + $1.usage }
+        let tools = Set(rows.flatMap(\.toolLabels)).sorted()
+        return TaskTokenUsageSummary(
+            taskID: id,
+            usage: usage,
+            turns: rows.map {
+                TaskTokenUsageSummary.Turn(id: $0.id, provider: $0.provider, recordedAt: $0.recordedAt, usage: $0.usage, tools: $0.toolLabels)
+            },
+            tools: tools.map { TaskTokenUsageSummary.Tool(id: $0, turnCount: 1, totalTokens: usage.totalTokens) },
+            callUsage: TaskTokenUsageSummary.CallUsage(snapshots: ProviderTokenMap.callUsageSnapshots(agents)),
+            contextCompactions: (transcript.contextCompactions ?? []).filter { scope.window?.contains($0.recordedAt) == true },
+            promptCacheMisses: (transcript.promptCacheMisses ?? []).filter { $0.turnID == turnID }
+        )
+    }
+
     /// The provider sessions whose files hold what this task's requests were
     /// sent, the current provider's first so it is the default agent.
     func tokenMapSessions(_ id: UUID) throws -> [ProviderSessionReference] {
         let subject = try requireSubject(id)
-        let snapshots = subject.callUsageSnapshots
         let providers = [subject.conversationProvider] + ConversationProvider.allCases.filter { $0 != subject.conversationProvider }
         return providers.compactMap { provider in
-            guard let sessionID = subject.conversationID(for: provider) else { return nil }
-            let subagents = snapshots["\(provider.rawValue):\(sessionID)"]?.subagents.keys.sorted() ?? []
-            return ProviderSessionReference(
-                provider: provider, sessionID: sessionID, subagentThreadIDs: provider == .codex ? subagents : []
-            )
+            subject.conversationID(for: provider).map { sessionReference(subject, provider: provider, sessionID: $0) }
         }
+    }
+
+    private func sessionReference(_ subject: any ConversationSubject, provider: ConversationProvider, sessionID: String) -> ProviderSessionReference {
+        let subagents = subject.callUsageSnapshots["\(provider.rawValue):\(sessionID)"]?.subagents.keys.sorted() ?? []
+        return ProviderSessionReference(provider: provider, sessionID: sessionID, subagentThreadIDs: provider == .codex ? subagents : [])
+    }
+
+    /// What a token map reads: the whole conversation (no `turnID`), or one turn. A turn reads
+    /// only the session it ran in, which for a standalone chat is its page's own session rather
+    /// than whichever page the chat is on now, and only the requests sent between its first
+    /// message and the next turn's.
+    func tokenMapScope(_ id: UUID, turnID: String?) throws -> TokenMapScope {
+        guard let turnID else { return TokenMapScope(sessions: try tokenMapSessions(id), window: nil) }
+        let subject = try requireSubject(id)
+        let store = try conversationTranscriptStore()
+        let order = try store.outline(id).turns
+        guard let position = order.firstIndex(where: { $0.id == turnID }) else {
+            throw BridgeCommandError(code: "not_found", message: "That turn is not in this conversation.")
+        }
+        let next = order.indices.contains(position + 1) ? order[position + 1].id : nil
+        let transcript = try store.read(id, turns: .init(turnIDs: Set([turnID] + (next.map { [$0] } ?? []))), includeImages: false)
+        func startedAt(_ id: String?) -> Date? {
+            transcript.turns.first { $0.id == id }?.messages.compactMap(\.createdAt).min()
+        }
+        // A turn's scope always narrows: without its start time no request can be placed in it.
+        guard let start = startedAt(turnID) else {
+            throw BridgeCommandError(code: "not_found", message: "That turn has no recorded start time, so its requests can't be told apart.")
+        }
+        let turn = transcript.turns.first { $0.id == turnID }
+        let row = transcript.tokenUsage?.first { $0.id == turnID }
+        let provider = row?.provider
+            ?? transcript.segments.first { $0.id == turn?.segmentID }?.provider
+            ?? subject.conversationProvider
+        // A later turn with no start time of its own ends this one when its usage was recorded.
+        let end = next.map { startedAt($0) ?? row?.recordedAt ?? start }
+        // A chat turn filed on a page reads that page's session, or none when the page's session is
+        // another provider's; only a turn not yet filed reads the chat's own session, narrowed by the window.
+        let sessionID: String?
+        if subject.isStandaloneChat, let page = try standaloneChatManager(for: id).pageAssignmentsByTurnID()[turnID] {
+            sessionID = page.conversationID(forProvider: provider.rawValue)
+        } else {
+            sessionID = subject.conversationID(for: provider)
+        }
+        return TokenMapScope(
+            sessions: sessionID.map { [sessionReference(subject, provider: provider, sessionID: $0)] } ?? [],
+            window: ProviderRequestWindow(start: start, end: end)
+        )
     }
 
     /// What filled this task's context, ranked by the tokens each item, tool
     /// and MCP server added, read from the providers' own session files.
-    func tokenWasteReport(_ id: UUID, homes: ProviderSessionHomes) async throws -> TaskTokenWasteReport {
-        let sessions = try tokenMapSessions(id)
+    func tokenWasteReport(_ id: UUID, turnID: String? = nil, homes: ProviderSessionHomes) async throws -> TaskTokenWasteReport {
+        let scope = try tokenMapScope(id, turnID: turnID)
         return await Task.detached(priority: .userInitiated) {
-            ProviderTokenMap.wasteReport(taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes))
+            ProviderTokenMap.wasteReport(taskID: id, agents: ProviderTokenMap.load(sessions: scope.sessions, homes: homes, window: scope.window))
         }.value
     }
 
@@ -146,13 +212,13 @@ extension BoardTaskManager {
     /// sent, or one request's items in the order it sent them (`request` is
     /// from 1; `nil` is the request the final transcript was read from).
     func rawInputPage(
-        _ id: UUID, homes: ProviderSessionHomes, agent: String?, scope: TaskRawInputScope, order: TaskRawInputOrder,
+        _ id: UUID, turnID: String? = nil, homes: ProviderSessionHomes, agent: String?, scope: TaskRawInputScope, order: TaskRawInputOrder,
         query: String, offset: Int, limit: Int, focus: Int?, request: Int? = nil
     ) async throws -> TaskRawInputPage {
-        let sessions = try tokenMapSessions(id)
+        let map = try tokenMapScope(id, turnID: turnID)
         return try await Task.detached(priority: .userInitiated) {
             try ProviderTokenMap.page(
-                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                taskID: id, agents: ProviderTokenMap.load(sessions: map.sessions, homes: homes, window: map.window), agent: agent,
                 scope: scope, order: order, query: query, offset: offset, limit: limit, focus: focus, request: request
             )
         }.value
@@ -160,12 +226,12 @@ extension BoardTaskManager {
 
     /// One whole request of an agent, as readable text or as its request body JSON.
     func rawInputExport(
-        _ id: UUID, homes: ProviderSessionHomes, agent: String?, request: Int?, format: TaskRawInputExportFormat
+        _ id: UUID, turnID: String? = nil, homes: ProviderSessionHomes, agent: String?, request: Int?, format: TaskRawInputExportFormat
     ) async throws -> TaskRawInputExport {
-        let sessions = try tokenMapSessions(id)
+        let scope = try tokenMapScope(id, turnID: turnID)
         return try await Task.detached(priority: .userInitiated) {
             try ProviderTokenMap.export(
-                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                taskID: id, agents: ProviderTokenMap.load(sessions: scope.sessions, homes: homes, window: scope.window), agent: agent,
                 request: request, format: format
             )
         }.value
@@ -173,12 +239,12 @@ extension BoardTaskManager {
 
     /// One chunk of an item's full text, exactly as the model received it.
     func rawInputText(
-        _ id: UUID, homes: ProviderSessionHomes, agent: String?, item: Int, offset: Int, length: Int
+        _ id: UUID, turnID: String? = nil, homes: ProviderSessionHomes, agent: String?, item: Int, offset: Int, length: Int
     ) async throws -> TaskRawInputText {
-        let sessions = try tokenMapSessions(id)
+        let scope = try tokenMapScope(id, turnID: turnID)
         return try await Task.detached(priority: .userInitiated) {
             try ProviderTokenMap.text(
-                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                taskID: id, agents: ProviderTokenMap.load(sessions: scope.sessions, homes: homes, window: scope.window), agent: agent,
                 item: item, offset: offset, length: length
             )
         }.value

@@ -314,16 +314,21 @@ final class PlayhouseBridgeRuntime {
                 result = try Self.value(taskManager.get(taskID))
             case "task.token-usage":
                 let taskID = try request.requiredUUID("taskID")
-                result = try Self.value(taskManager.tokenUsageSummary(taskID))
+                if let turnID = request.arguments["turn"]?.string {
+                    let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                    result = try Self.value(await taskManager.tokenUsageSummary(taskID, turnID: turnID, homes: homes))
+                } else {
+                    result = try Self.value(taskManager.tokenUsageSummary(taskID))
+                }
             case "task.token-waste":
                 let taskID = try request.requiredUUID("taskID")
                 let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
-                result = try Self.value(await taskManager.tokenWasteReport(taskID, homes: homes))
+                result = try Self.value(await taskManager.tokenWasteReport(taskID, turnID: request.arguments["turn"]?.string, homes: homes))
             case "task.raw-input":
                 let taskID = try request.requiredUUID("taskID")
                 let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
                 result = try Self.value(await taskManager.rawInputPage(
-                    taskID, homes: homes,
+                    taskID, turnID: request.arguments["turn"]?.string, homes: homes,
                     agent: request.arguments["agent"]?.string,
                     scope: request.optionalChoice("scope", default: TaskRawInputScope.finalTranscript),
                     order: request.optionalChoice("order", default: TaskRawInputOrder.transcript),
@@ -337,7 +342,7 @@ final class PlayhouseBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
                 result = try Self.value(await taskManager.rawInputExport(
-                    taskID, homes: homes,
+                    taskID, turnID: request.arguments["turn"]?.string, homes: homes,
                     agent: request.arguments["agent"]?.string,
                     request: request.optionalInteger("request", in: 1...Int.max),
                     format: request.optionalChoice("format", default: TaskRawInputExportFormat.text)
@@ -349,7 +354,7 @@ final class PlayhouseBridgeRuntime {
                     throw BridgeCommandError(code: "invalid_argument", message: "Argument item must name an item of the raw input.")
                 }
                 result = try Self.value(await taskManager.rawInputText(
-                    taskID, homes: homes,
+                    taskID, turnID: request.arguments["turn"]?.string, homes: homes,
                     agent: request.arguments["agent"]?.string,
                     item: item,
                     offset: request.optionalInteger("offset", in: 0...Int.max) ?? 0,

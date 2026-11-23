@@ -126,10 +126,14 @@ def write_waste_rollouts(runtime, thread_id):
         record(300, 0),
         message("assistant", "Found it."),
     ]
+    # Stamped with the turn's own time, as Codex stamps each line, so a turn's Token Stats can
+    # tell which requests the turn made.
+    now = runtime.time.time()
+    timestamp = runtime.time.strftime("%Y-%m-%dT%H:%M:%S", runtime.time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
     for name, lines in ((thread_id, main), (f"{thread_id}-subagent", subagent)):
         with open(directory / f"rollout-2026-11-03T10-00-00-{name}.jsonl", "w", encoding="utf-8") as handle:
             for line in lines:
-                handle.write(runtime.json.dumps({"timestamp": "2026-11-03T10:00:00.000Z", **line}) + "\n")
+                handle.write(runtime.json.dumps({"timestamp": timestamp, **line}) + "\n")
 
 
 def side_chat_selection(runtime, text):

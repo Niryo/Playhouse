@@ -107,7 +107,7 @@ class BridgeTestCases17:
             [(miss["agent"], miss["request"]) for miss in report["cacheMisses"]], [("claude", 34)],
             "Only the request that skipped the cache re-sent its context; adding the log is new content, not a miss.",
         )
-    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The single-request scope rebuilds each Codex request from the rollout and labels it reconstructed: the latest request is the final transcript in order, request 4 flags both README reads and both of their outputs as exact duplicates, each request's items add up to the input Codex reported with its cached share as cache read and no cache write, and the JSON export holds the base instructions and the input items exactly as saved. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, showing the log opens its full text, and the raw input's single request reads as reconstructed, with request 4's duplicates flagged.
+    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. With --turn, the turn's map places each request in the turn by the rollout's own timestamps: its five main requests with the compaction, its subagent's one request, the log still the largest item, and a summary listing only that turn with its 6 model calls. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The single-request scope rebuilds each Codex request from the rollout and labels it reconstructed: the latest request is the final transcript in order, request 4 flags both README reads and both of their outputs as exact duplicates, each request's items add up to the input Codex reported with its cached share as cache read and no cache write, and the JSON export holds the base instructions and the input items exactly as saved. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, showing the log opens its full text, and the raw input's single request reads as reconstructed, with request 4's duplicates flagged.
     def test_task_token_waste_ranks_codex_items_by_size(self):
         task_id = self.create_task(title="Codex token waste", roots=[self.primary])["id"]
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-token-waste", message="Show token waste.")
@@ -122,6 +122,20 @@ class BridgeTestCases17:
             "The final transcript is what the last request was sent, after the compaction.",
         )
         self.assertEqual(agents[f"codex/{thread_id}-subagent"]["finalTranscriptTokens"], 300)
+        # The turn's own Token Stats place each Codex request in it by the rollout's own timestamps:
+        # the turn made all five main requests, the compaction and the subagent's request.
+        history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])["messages"]
+        turn_id = next(message["turnID"] for message in history if message["role"] == "user" and message["text"] == "Show token waste.")
+        scoped = self.assert_success(self.call_cli("task", "token-waste", task_id, "--turn", turn_id)[0])
+        self.assertEqual(
+            [(agent["id"], agent["requests"], agent["compactions"]) for agent in scoped["agents"]],
+            [("codex", 5, 1), (f"codex/{thread_id}-subagent", 1, 0)],
+            "A Codex turn's map holds the requests its rollouts stamped inside the turn.",
+        )
+        self.assertEqual(scoped["wasters"][0]["label"], "fixturelogs/query_logs")
+        turn_usage = self.assert_success(self.call_cli("task", "token-usage", task_id, "--turn", turn_id)[0])
+        self.assertEqual([turn["id"] for turn in turn_usage["turns"]], [turn_id])
+        self.assertEqual(turn_usage["callUsage"]["totalCalls"], 6, "The turn's calls are its five main requests and its subagent's one.")
 
         top = report["wasters"][0]
         self.assertEqual(

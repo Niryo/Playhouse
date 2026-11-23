@@ -264,11 +264,13 @@ class BridgeTestCases26:
         self.assertEqual(self.assert_success(self.call_cli("task", "move", task["id"], "Done", extra_environment=gh_environment)[0])["status"], "Done")
         done, _ = self.call_cli(*link, "https://github.com/playhouse-test/fixture/pull/621", expected_status=1, extra_environment=gh_environment)
         self.assert_failure(done, "invalid_transition")
-    # case-contract: test_standalone_chat_reply_shows_turn_token_usage | A standalone chat shows what each turn cost under the turn's last reply. Providers report usage once per turn, so a history read marks only the last assistant reply of each turn with that turn's recorded usage (input, output, cache read and cache write exactly as the turn's Token Stats row), leaving the user's message and earlier commentary unmarked, and an empty chat has nothing marked. A second turn that replies twice (Claude Code's no-visible-output notice between its answer and a later reply) marks only its last reply, with its own row, while the first reply keeps the first turn's. A history page that ends inside a turn marks none of that turn's messages, because its last reply is on a later page, while an earlier turn whose reply is in the page stays marked, including a reply that ends the page when the next page starts another turn. In the chat, the marked reply shows a small token counter (1.6K tokens) directly beneath it, whose tooltip names the turn's total and its four buckets, while prompts and a turn's earlier replies show none, and clicking it opens the window's usual Token Stats modal for the chat with the turn rows, which Done closes. Usage is attributed to Playhouse's local turn on the shared recording path for both Claude and Codex, so one representative provider (Claude) covers the case.
+    # case-contract: test_standalone_chat_reply_shows_turn_token_usage | A standalone chat shows what each turn cost under the turn's last reply. Providers report usage once per turn, so a history read marks only the last assistant reply of each turn with that turn's recorded usage (input, output, cache read and cache write exactly as the turn's Token Stats row), leaving the user's message and earlier commentary unmarked, and an empty chat has nothing marked. A second turn that replies twice (Claude Code's no-visible-output notice between its answer and a later reply) marks only its last reply, with its own row, while the first reply keeps the first turn's. A history page that ends inside a turn marks none of that turn's messages, because its last reply is on a later page, while an earlier turn whose reply is in the page stays marked, including a reply that ends the page when the next page starts another turn. In the chat, the marked reply shows a small token counter (1.6K tokens) directly beneath it, whose tooltip names the turn's total and its four buckets, while prompts and a turn's earlier replies show none, and clicking it opens the window's usual Token Stats modal for that turn alone, which Done closes. A turn's Token Stats read only the session the turn ran in, its page's own session rather than the page the chat is on now, and only the requests sent from the turn's first message until the next turn's: after a third turn (Saturn again) on a new page, the chat's own map reads the new page's session (3 requests) and its own summary still covers every turn (4,800 tokens), while with --turn the first turn's map reads its 2 requests and each Saturn turn's its 3, each holding the prompt that turn sent and listing, by what it says, the injected reminder that turn was sent and no other turn's, every listed item's preview is the start of the text Show reads for it, the second turn's summary lists only its row (1,600 tokens) with its 3 model calls, Raw Input numbers its requests from 1 to 3 and exports its first request with its prompt, a request past its last is not_found, and an unknown turn is not_found. In the window, after that third turn the second turn's counter opens Token Stats with its total (1,600), only its own turn row and 3 model calls, and the first turn's counter opens Token Stats with its 2 model calls, whose Raw Input single-request scope shows Request 2 of 2 and where Show reads that turn's injected reminder and not the other turn's, and its prompt row the Jupiter prompt and not the Saturn one (on the CLI, the first turn's summary has 2 model calls and its latest request's third and fourth items are that reminder and that Jupiter prompt). Usage is attributed to Playhouse's local turn on the shared recording path for both Claude and Codex, so one representative provider (Claude) covers the case.
     def test_standalone_chat_reply_shows_turn_token_usage(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         environment = self.install_claude_fixture("claude-fixture-chat-token-usage")
+        # Where the fixture writes each page's session file, which a turn's Token Stats read.
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
         chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
         turn_usage = {"inputTokens": 1000, "outputTokens": 200, "cacheReadTokens": 300, "cacheCreationTokens": 100}
@@ -319,6 +321,96 @@ class BridgeTestCases26:
         self.assertEqual(page["messages"][-1]["id"], second_prompt_id)
         self.assertEqual([message.get("turnID") for message in marked(page["messages"])], [turn_ids[0]],
                          "A turn that runs past the page marks nothing; the earlier turn's reply stays marked.")
+
+        # A turn's Token Stats read only that turn. The fixture logs each chat turn's requests in
+        # its page's session: the Jupiter turn sends 2, the Saturn turn 3. A third turn (Saturn
+        # again) on a new page runs in a session of its own, which becomes the chat's current one.
+        self.assert_success(self.call_cli("chat", "page", "new", "--title", "Another topic", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", chat_id, "--message", prompts[1], extra_environment=environment)[0])
+        later = history()["messages"]
+        third_turn = [message["turnID"] for message in later if message["role"] == "user" and message["text"] == prompts[1]][-1]
+        self.assertNotIn(third_turn, turn_ids)
+        page_list = self.assert_success(self.call_cli("chat", "page", "list", extra_environment=environment)[0])
+        sessions = {page["providerSessionID"] for page in page_list["pages"] if page.get("providerSessionID")}
+        self.assertEqual(len(sessions), 2, f"The new page's turn runs in its own session: {page_list}")
+
+        def waste(*options):
+            return self.assert_success(self.call_cli("task", "token-waste", chat_id, *options, extra_environment=environment)[0])
+
+        def flattened(text):
+            return " ".join(part for part in re.split(r"[\n\r\v\f\x85\u2028\u2029]", text[:400]) if part)
+
+        self.assertEqual([agent["requests"] for agent in waste()["agents"]], [3],
+                         "Unscoped, the chat's map reads the session of the page it is on now.")
+        for turn_id, requests in [(turn_ids[0], 2), (turn_ids[1], 3), (third_turn, 3)]:
+            report = waste("--turn", turn_id)
+            self.assertEqual([agent["requests"] for agent in report["agents"]], [requests],
+                             f"Turn {turn_id} reads only its page's session and only its own requests.")
+            self.assertTrue(report["wasters"], "The turn's items are listed.")
+            for item in report["wasters"]:
+                shown = self.assert_success(self.call_cli(
+                    "task", "raw-input-text", chat_id, "--turn", turn_id, "--agent", item["agent"], "--item", str(item["item"]),
+                    "--length", "100000", extra_environment=environment,
+                )[0])
+                preview, text = item["preview"], flattened(shown["text"])
+                if preview.endswith("…"):
+                    self.assertTrue(text.startswith(preview[:-1]), f"The preview is the start of the text Show reads: {preview!r}")
+                else:
+                    self.assertEqual(text, preview, "The preview is the text Show reads.")
+            reminders = [item for item in report["wasters"] if item["kind"] == "systemReminder"]
+            expected_reminder = "Chat fixture reminder sent with the " + ("close_first" if turn_id == turn_ids[0] else "notice") + " turn."
+            self.assertEqual([item["label"] for item in reminders], [expected_reminder],
+                             "The turn lists the injected text it sent, by what it says, and no other turn's.")
+            self.assertIn(expected_reminder, reminders[0]["preview"], "The injected item's preview is its sent text.")
+            prompts_sent = [item for item in report["wasters"] if item["kind"] == "userText"]
+            expected_prompt = prompts[0] if turn_id == turn_ids[0] else prompts[1]
+            self.assertEqual(len(prompts_sent), 1, "Each turn sent one prompt.")
+            prompt_text = self.assert_success(self.call_cli(
+                "task", "raw-input-text", chat_id, "--turn", turn_id, "--agent", prompts_sent[0]["agent"],
+                "--item", str(prompts_sent[0]["item"]), "--length", "100000", extra_environment=environment,
+            )[0])["text"]
+            self.assertTrue(prompt_text.rstrip().endswith(expected_prompt), "The turn's map holds the prompt the turn sent.")
+
+        second = self.assert_success(self.call_cli("task", "token-usage", chat_id, "--turn", turn_ids[1], extra_environment=environment)[0])
+        self.assertEqual([turn["id"] for turn in second["turns"]], [turn_ids[1]], "A turn's summary lists only that turn.")
+        self.assertEqual(second["totalTokens"], 1600)
+        self.assertEqual(second["callUsage"]["totalCalls"], 3, "The turn's model calls are its own requests.")
+        first = self.assert_success(self.call_cli("task", "token-usage", chat_id, "--turn", turn_ids[0], extra_environment=environment)[0])
+        self.assertEqual(first["callUsage"]["totalCalls"], 2, "The first turn shares its page's session but counts only its own requests.")
+        # Raw Input and Show for the first turn read that turn: its latest request is its second, and
+        # after the system prompt and the Bash tool it sent the turn's reminder, then the Jupiter prompt.
+        latest = self.assert_success(self.call_cli(
+            "task", "raw-input", chat_id, "--turn", turn_ids[0], "--scope", "request", extra_environment=environment,
+        )[0])
+        self.assertEqual((latest["request"]["number"], latest["request"]["count"]), (2, 2))
+        reminder_row = next(row for row in latest["rows"] if row["position"] == 2)
+        self.assertEqual((reminder_row["kind"], reminder_row["label"]), ("systemReminder", "Chat fixture reminder sent with the close_first turn."))
+        prompt_row = next(row for row in latest["rows"] if row["position"] == 3)
+        self.assertEqual(prompt_row["kind"], "userText")
+        shown = self.assert_success(self.call_cli(
+            "task", "raw-input-text", chat_id, "--turn", turn_ids[0], "--agent", latest["agent"], "--item", str(prompt_row["id"]),
+            "--length", "100000", extra_environment=environment,
+        )[0])["text"]
+        self.assertIn(prompts[0], shown)
+        self.assertNotIn(prompts[1], shown, "Show reads no other turn's prompt.")
+        whole = self.assert_success(self.call_cli("task", "token-usage", chat_id)[0])
+        self.assertEqual(whole["totalTokens"], 4800, "The chat's own summary still covers every turn.")
+
+        request = self.assert_success(self.call_cli(
+            "task", "raw-input", chat_id, "--turn", turn_ids[1], "--scope", "request", "--request", "3", extra_environment=environment,
+        )[0])["request"]
+        self.assertEqual((request["number"], request["count"]), (3, 3), "Raw Input numbers the turn's requests from 1.")
+        exported = self.assert_success(self.call_cli(
+            "task", "raw-input-export", chat_id, "--turn", turn_ids[1], "--request", "1", extra_environment=environment,
+        )[0])
+        self.assertIn(prompts[1], exported["text"], "Exporting the turn's first request shows the prompt it sent.")
+        past, _ = self.call_cli("task", "raw-input", chat_id, "--turn", turn_ids[1], "--scope", "request", "--request", "4",
+                                expected_status=3, extra_environment=environment)
+        self.assert_failure(past, "not_found")
+        self.assertIn("made 3 requests", past["error"]["message"])
+        unknown, _ = self.call_cli("task", "token-waste", chat_id, "--turn", "no-such-turn", expected_status=3, extra_environment=environment)
+        self.assert_failure(unknown, "not_found")
+        self.assertIn("That turn is not in this conversation.", unknown["error"]["message"])
     # case-contract: test_transcript_rows_stay_with_older_messages | A provider divider and a goal achievement stay right after the message they were recorded after. A long Claude history whose switch from Codex sits on its older page, with a switch to Claude and back that sent nothing stored on the same message, has one Codex-to-Claude divider after the last Codex message in complete and paged CLI/XPC history, the empty switch pair dropped, and the newest page leaves that message out; another turn leaves the divider where it was. Opened on its newest page, the visible transcript draws neither that divider nor a goal achievement recorded after the last Codex message, at the bottom or anywhere after a newer message, and they stay hidden after a new message is sent from the composer; a goal achievement recorded after the latest turn's folded commentary follows that turn's question, above its answer, not the newest message. Scrolling up loads the older page and shows the one divider, then that goal achievement, right after the last Codex message and before the next question, with no Switched to Codex divider. The placement is Playhouse-owned and the same for both providers, so one switch from Codex to Claude covers the case.
     def test_transcript_rows_stay_with_older_messages(self):
         claude = self.install_provider_fixture("claude", "claude-fixture-row-anchors")
