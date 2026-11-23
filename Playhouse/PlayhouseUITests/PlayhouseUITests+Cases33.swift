@@ -541,6 +541,51 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Board header without a notice a day after the install")
     }
 
+    // case-contract: test_update_notice_keeps_notes_from_older_installer | An update started by a version that didn't keep the release it was installing still shows its notes: when the new version reports its launch before the installer has recorded a result, it keeps the offered release, so after its launch check finds nothing newer and clears the offer and the installer then records the install, the Updated notice carries the release's notes and What's new shows them.
+    func test_update_notice_keeps_notes_from_older_installer() throws {
+        let update = try makeUpdateFixture()
+        XCTAssertEqual((try runCLI(["update", "check"], extraEnvironment: update.environment)["result"] as? [String: Any])?["phase"] as? String, "available")
+        XCTAssertEqual((try runCLI(["update", "download"], extraEnvironment: update.environment)["result"] as? [String: Any])?["phase"] as? String, "ready")
+        XCTAssertEqual((try runCLI(["update", "install"], extraEnvironment: update.environment)["result"] as? [String: Any])?["started"] as? Bool, true)
+        // The installer stops the daemon, which this sandboxed runner can't restart, so
+        // its record is read from disk until the window starts the next one.
+        let updates = dataDirectory.appendingPathComponent("Updates")
+        let recordFile = updates.appendingPathComponent("last-install.json")
+        var heldRecord = Data()
+        XCTAssertTrue(waitUntil({
+            heldRecord = (try? Data(contentsOf: recordFile)) ?? Data()
+            return ((try? JSONSerialization.jsonObject(with: heldRecord)) as? [String: Any])?["status"] as? String == "installed"
+        }, timeout: 90), "The installer should record the install.")
+        // Recreate a relaunch after an install that an older version started: the installer
+        // hasn't recorded a result yet, and the state doesn't name the release being installed.
+        try FileManager.default.removeItem(at: recordFile)
+        let stateFile = updates.appendingPathComponent("state.json")
+        var state = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: stateFile)) as? [String: Any])
+        XCTAssertEqual((state.removeValue(forKey: "installing") as? [String: Any])?["version"] as? String, "0.2.0",
+                       "The installing version keeps the release it installs.")
+        try JSONSerialization.data(withJSONObject: state).write(to: stateFile)
+
+        // The window reports its launch, then its launch check clears the offer.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: update.environment)
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 20))
+        XCTAssertTrue(waitUntil({
+            guard let status = self.runningUpdateStatus(update.environment), status["lastCheckedAt"] != nil else { return false }
+            return status["available"] == nil
+        }, timeout: 30), "The launch check finds nothing newer than 0.2.0 and clears the offer.")
+        XCTAssertFalse(element("update-notice").exists, "Nothing is recorded before the installer finishes.")
+        try heldRecord.write(to: recordFile)
+        let notice = element("update-notice")
+        XCTAssertTrue(notice.waitToExist(timeout: 30), "The window should say the update installed once it is recorded.")
+        XCTAssertEqual(notice.label, "Updated to 0.2.0")
+        notice.click()
+        let notesBody = app.descendants(matching: .any).matching(identifier: "update-notes-body").firstMatch
+        XCTAssertTrue(notesBody.waitToExist(timeout: 10), "Clicking the notice shows what's new.")
+        XCTAssertEqual(pluginText(notesBody), "Faster boards and a new update button.", "The notice keeps the release's notes.")
+        attachScreenshot(named: "What's new after an install an older version started")
+        attachElementScreenshot(notesBody, named: "What's new notes close-up after an older version's install")
+        XCTAssertTrue(terminateAppAndWait(app))
+    }
+
     // case-contract: test_update_install_rolls_back_broken_release | A release whose bridge daemon doesn't run passes download verification but fails the installer's health check after the swap, so the installer puts the previous version back: the installed app, command-line tool and daemon are the old version again, nothing is left staged, and the app is told that the update didn't install and why until that is dismissed, while the release stays offered. A release whose command-line tool doesn't run can't start its own installer, so the install is reported as failed until dismissed and the installed app is untouched.
     func test_update_install_rolls_back_broken_release() throws {
         let update = try makeUpdateFixture(tamper: "broken")
@@ -695,7 +740,7 @@ extension PlayhouseUITests {
         XCTAssertNil(after["activeTurns"])
     }
 
-    // case-contract: test_update_installs_over_its_own_app_and_daemon | The installed app's own command-line tool accepts its bundle with verify-bundle and refuses a copy changed after signing. Updating the app a request comes from, with no test target, stops that app's own bridge daemon on its private service and installs over it, so the app, its command-line tool and the next daemon on that service report the new version; a daemon another service started from the old bundle reports that it was replaced on disk and is retired by the next request, which starts one from the new bundle (the visible suite's sandboxed runner can't start a daemon itself, so only the headless suite starts one on another service). With the app's window running, the installer asks it to quit, the app quits by itself rather than being stopped, and the installer reopens the new version in the same data folder and bridge service, where it says it was updated; the headless suite runs no window, so nothing is reopened.
+    // case-contract: test_update_installs_over_its_own_app_and_daemon | The installed app's own command-line tool accepts its bundle with verify-bundle and refuses a copy changed after signing. Updating the app a request comes from, with no test target, stops that app's own bridge daemon on its private service and installs over it, so the app, its command-line tool and the next daemon on that service report the new version; a daemon another service started from the old bundle reports that it was replaced on disk and is retired by the next request, which starts one from the new bundle (the visible suite's sandboxed runner can't start a daemon itself, so only the headless suite starts one on another service). With the app's window running, the installer asks it to quit, the app quits by itself rather than being stopped, and the installer reopens the new version in the same data folder and bridge service, where it says it was updated and its What's new shows the release's notes, although its launch check found nothing newer and cleared the offer before the installer recorded the result; the headless suite runs no window, so nothing is reopened, and it makes that launch check from the command line before reading the notice.
     func test_update_installs_over_its_own_app_and_daemon() throws {
         let update = try makeUpdateFixture()
         let ownCLI = update.installedApp.appendingPathComponent("Contents/MacOS/playhouse-cli")
@@ -742,6 +787,30 @@ extension PlayhouseUITests {
         XCTAssertEqual(notice.value as? String, "installed")
         XCTAssertTrue(element("board-title").exists, "The reopened app shows the same board.")
         attachScreenshot(named: "Reopened as 0.2.0 after updating itself")
+        // The reopened window's launch check ran before the installer recorded the result
+        // and cleared the offer; the notice still opens the release's notes.
+        XCTAssertNil((try XCTUnwrap(runningUpdateStatus(environment)))["available"], "The reopened version's launch check cleared the offer.")
+        if !notice.isHittable {
+            // The installer opens the new version without the test's launch arguments, so macOS
+            // may place its window partly past the VM's screen; zoom it to fit before clicking.
+            app.menuBars.menuBarItems["Window"].click()
+            let zoom = app.menuItems["Zoom"]
+            if zoom.waitToExist(timeout: 2) {
+                zoom.click()
+            } else {
+                app.typeKey("z", modifierFlags: [.command, .option])
+            }
+            app.activate()
+            XCTAssertTrue(waitUntil({ notice.isHittable }, timeout: 5), "The reopened window fits the screen after zooming.")
+        }
+        notice.click()
+        let notesBody = app.descendants(matching: .any).matching(identifier: "update-notes-body").firstMatch
+        XCTAssertTrue(notesBody.waitToExist(timeout: 10), "Clicking the notice shows what's new.")
+        XCTAssertEqual(pluginText(app.descendants(matching: .any).matching(identifier: "update-notes-title").firstMatch), "What's new in Playhouse 0.2.0")
+        XCTAssertEqual(pluginText(notesBody), "Faster boards and a new update button.", "The reopened app shows the release's notes.")
+        attachScreenshot(named: "Reopened 0.2.0 shows what's new")
+        attachElementScreenshot(notesBody, named: "What's new notes close-up")
+        app.typeKey(.escape, modifierFlags: [])
         XCTAssertEqual(try installedCLIVersion(of: update.installedApp), "0.2.0")
         XCTAssertNotEqual(kill(pid_t(daemonBefore), 0), 0, "The installer stops the daemon of the app it replaces.")
         let after = try XCTUnwrap(try runCLI(["daemon", "info"], extraEnvironment: environment, cli: ownCLI)["result"] as? [String: Any])
