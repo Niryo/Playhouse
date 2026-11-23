@@ -83,6 +83,7 @@
 		B10000000000000000000007 /* PlayhouseWorktreeServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000007 /* PlayhouseWorktreeServices.swift */; };
 		B10000000000000000000008 /* PlayhouseDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000008 /* PlayhouseDiagnostics.swift */; };
 		B10000000000000000000009 /* TaskConversationRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000009 /* TaskConversationRendering.swift */; };
+		B1000000000000000000BE01 /* TranscriptBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BE01 /* TranscriptBenchmark.swift */; };
 		B10000000000000000000010 /* ConversationTranscriptLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000010 /* ConversationTranscriptLayout.swift */; };
 		B10000000000000000007A51 /* TranscriptLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A51 /* TranscriptLayout.swift */; };
 		B10000000000000000007A52 /* TranscriptScrollController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A52 /* TranscriptScrollController.swift */; };
@@ -287,6 +288,7 @@
 		B20000000000000000000007 /* PlayhouseWorktreeServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseWorktreeServices.swift; sourceTree = "<group>"; };
 		B20000000000000000000008 /* PlayhouseDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseDiagnostics.swift; sourceTree = "<group>"; };
 		B20000000000000000000009 /* TaskConversationRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationRendering.swift; sourceTree = "<group>"; };
+		B2000000000000000000BE01 /* TranscriptBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptBenchmark.swift; sourceTree = "<group>"; };
 		B20000000000000000000010 /* ConversationTranscriptLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptLayout.swift; sourceTree = "<group>"; };
 		B20000000000000000007A51 /* TranscriptLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptLayout.swift; sourceTree = "<group>"; };
 		B20000000000000000007A52 /* TranscriptScrollController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScrollController.swift; sourceTree = "<group>"; };
@@ -559,6 +561,7 @@
 				B20000000000000000007A51 /* TranscriptLayout.swift */,
 				B20000000000000000007A52 /* TranscriptScrollController.swift */,
 				B20000000000000000000009 /* TaskConversationRendering.swift */,
+				B2000000000000000000BE01 /* TranscriptBenchmark.swift */,
 				A20000000000000000000009 /* CodexAppServerClient.swift */,
 				B20000000000000000000021 /* CodexTaskInstructions.swift */,
 				A2000000000000000000F404 /* CodexSocketConnection.swift */,
@@ -1169,6 +1172,7 @@
 				B10000000000000000000011 /* RulesPageView.swift in Sources */,
 				B10000000000000000000012 /* ProviderTokenMap.swift in Sources */,
 				B10000000000000000000009 /* TaskConversationRendering.swift in Sources */,
+				B1000000000000000000BE01 /* TranscriptBenchmark.swift in Sources */,
 				B10000000000000000000010 /* ConversationTranscriptLayout.swift in Sources */,
 				B10000000000000000007A51 /* TranscriptLayout.swift in Sources */,
 				B10000000000000000007A52 /* TranscriptScrollController.swift in Sources */,

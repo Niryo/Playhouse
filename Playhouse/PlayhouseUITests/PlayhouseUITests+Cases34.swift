@@ -785,7 +785,7 @@ extension PlayhouseUITests {
         element("send-message-button").click()
     }
 
-    // case-contract: test_markdown_atom_renders_formatted_markdown | The Plugin Catalog lists the Markdown atom, whose page renders Markdown atoms into formatted native text with no plugin error: its skill sample shows its frontmatter as a table of its entries (release-notes) with no raw --- fences, a heading without its # marks that is taller than the body text, a paragraph whose bold, italic and inline code show without their markers, bullet and numbered list items, a quote, a Swift code block card, a table with its cells and the text after a rule; a Markdown whose frontmatter is hide shows only its body, and a Markdown given raw string children renders them as Markdown (a heading without its ## marks). `plugin render` reports a Markdown atom from its text prop or from its string children with no errors and its props as given, while a frontmatter other than table or hide, a mistyped size or selectable, an atom child, or an event the atom doesn't raise is reported in errors with exit 1.
+    // case-contract: test_markdown_atom_renders_formatted_markdown | The Plugin Catalog lists the Markdown atom, whose page renders Markdown atoms into formatted native text with no plugin error: its skill sample shows its frontmatter as a table of its entries (release-notes) with no raw --- fences, a heading without its # marks that is taller than the body text, a paragraph whose bold, italic and inline code show without their markers, bullet and numbered list items, a quote with a leading bar, all in one selectable text view whose select-all copy takes the heading, list and quote together as shown text (no Markdown marks, frontmatter or code), while a Markdown without selectable lets nothing be selected or copied; a Swift code block card, a table with its cells and the text after a rule; a Markdown whose frontmatter is hide shows only its body, and a Markdown given raw string children renders them as Markdown (a heading without its ## marks). `plugin render` reports a Markdown atom from its text prop or from its string children with no errors and its props as given, including the raw quote marker in the catalog source, while a frontmatter other than table or hide, a mistyped size or selectable, an atom child, or an event the atom doesn't raise is reported in errors with exit 1.
     func test_markdown_atom_renders_formatted_markdown() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -805,12 +805,57 @@ extension PlayhouseUITests {
         let item = skill.staticTexts["Group changes by area."]
         XCTAssertTrue(item.exists, "A bullet list item renders.")
         XCTAssertGreaterThan(heading.frame.height, item.frame.height, "The heading is larger than the body text.")
-        XCTAssertTrue(skill.staticTexts["Collect the changes"].exists, "A numbered list item renders.")
-        XCTAssertTrue(skill.staticTexts["Keep it short."].exists, "A quote renders without its > mark.")
+        XCTAssertTrue(skill.staticTexts["1. Collect the changes"].exists, "A numbered list item renders with its number.")
+        // The heading, paragraph, list items and quote share one AppKit text view, so a
+        // selection runs across them, while the code block stays in its own card.
+        let prose = skill.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "markdown-skill-prose-")).firstMatch
+        XCTAssertTrue(prose.exists, "The prose renders as one text view.")
+        let proseText = prose.value as? String ?? ""
+        for text in ["Release notes", "Summarize merged changes", "Group changes by area.", "Collect the changes", "Keep it short."] {
+            XCTAssertTrue(proseText.contains(text), "The prose run holds \(text): \(proseText)")
+        }
+        XCTAssertFalse(proseText.contains("changes.map"), "The code block is not part of the prose text.")
+        let quote = skill.staticTexts["Keep it short."]
+        XCTAssertTrue(quote.exists, "A quote renders without its > mark.")
+        let screen = try XCTUnwrap(NSScreen.main)
+        let screenshot = XCUIScreen.main.screenshot()
+        let image = try XCTUnwrap(screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        let scale = CGFloat(image.width) / screen.frame.width
+        // Sample the middle of the 3-point bar and the blank gutter before the quote text.
+        let y = Int(quote.frame.midY * scale)
+        func sampleQuoteGutter(at offset: CGFloat) throws -> NSColor {
+            let x = Int((prose.frame.minX + offset) * scale)
+            return try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+        }
+        let bar = try sampleQuoteGutter(at: 1.5)
+        let gutter = try sampleQuoteGutter(at: 7)
+        XCTAssertGreaterThan(abs(bar.redComponent - gutter.redComponent), 0.08,
+                             "The quote's leading bar contrasts with its gutter.")
+        prose.click()
+        prose.typeKey("a", modifierFlags: .command)
+        attachScreenshot(named: "The Markdown atom's prose selected across heading, paragraph, lists and quote", around: [skill])
+        NSPasteboard.general.clearContents()
+        prose.typeKey("c", modifierFlags: .command)
+        let copied = NSPasteboard.general.string(forType: .string) ?? ""
+        XCTAssertTrue(copied.contains("Release notes") && copied.contains("Group changes by area.") && copied.contains("Keep it short."),
+                      "Selecting the prose and copying takes the heading, the list and the quote together: \(copied)")
+        XCTAssertFalse(copied.contains("# ") || copied.contains("name:") || copied.contains("**") || copied.contains("changes.map"),
+                       "The copy is the text as shown, without Markdown marks, frontmatter or the code card: \(copied)")
+        let hidden = element("markdown-hidden-frontmatter")
+        // A Markdown without selectable shows its text but doesn't let it be selected.
+        let unselectable = hidden.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "markdown-hidden-frontmatter-prose-")).firstMatch
+        XCTAssertTrue(unselectable.exists, "The non-selectable Markdown's prose renders as a text view.")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("unselectable-sentinel", forType: .string)
+        unselectable.doubleClick()
+        unselectable.typeKey("a", modifierFlags: .command)
+        unselectable.typeKey("c", modifierFlags: .command)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "unselectable-sentinel",
+                       "Double-clicking and selecting all in a non-selectable Markdown selects nothing to copy.")
         XCTAssertTrue(skill.staticTexts["Swift"].exists, "A fenced block shows as a code card named for its language.")
         XCTAssertTrue(skill.staticTexts["Area"].exists && skill.staticTexts["App"].exists, "A table shows its header and cells.")
         XCTAssertTrue(skill.staticTexts["The end."].exists, "The text after a rule renders.")
-        let hidden = element("markdown-hidden-frontmatter")
         XCTAssertTrue(hidden.staticTexts["Only the body shows."].exists, "A Markdown with frontmatter hide shows its body.")
         XCTAssertFalse(hidden.staticTexts["hidden"].exists || element("markdown-hidden-frontmatter-frontmatter").exists, "Hidden frontmatter doesn't show.")
         XCTAssertTrue(element("markdown-children").staticTexts["From string children"].exists, "Raw string children render as Markdown.")

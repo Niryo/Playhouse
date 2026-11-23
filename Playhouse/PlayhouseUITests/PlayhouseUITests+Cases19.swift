@@ -325,8 +325,10 @@ extension PlayhouseUITests {
         XCTAssertTrue(rule.waitToExist(timeout: 5), "A --- line between blocks should render as a rule.")
         XCTAssertFalse(transcriptContains("> A quoted note"), "The quote's raw marker should not be shown as text.")
         XCTAssertFalse(transcriptContains("---"), "The rule's raw dashes should not be shown as text.")
-        _ = scrollFullyIntoView(quote, in: element("conversation-scroll-view"))
-        attachScreenshot(named: "Markdown quote and rule in the plan")
+        XCTAssertTrue(scrollFullyIntoView(quote, in: element("conversation-scroll-view")),
+                      "The rendered quote should be visible for the screenshot.")
+        attachAppWindowScreenshot(named: "Markdown quote and rule in the plan")
+        attachScreenshot(named: "Markdown quote bar in the transcript", around: [quote, rule])
 
         // The reply's last block is the closing paragraph after the table.
         let latestListItem = app.staticTexts

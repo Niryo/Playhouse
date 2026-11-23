@@ -395,14 +395,14 @@ extension TaskConversationView {
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
                         ForEach(progressMessages) { message in
-                            assistantMarkdownContent(Self.displayableAssistantText(message.text))
-                                .font(.system(size: 12))
-                                .foregroundStyle(WorkspaceTheme.conversationText)
+                            AtomMarkdown(
+                                props: MarkdownProps(text: Self.displayableAssistantText(message.text), size: 12, color: "text", selectable: true),
+                                common: AtomCommon(testID: "codex-progress-message-\(message.id)")
+                            )
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(9)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
-                                .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
                     ForEach(expandedActivities) { activity in

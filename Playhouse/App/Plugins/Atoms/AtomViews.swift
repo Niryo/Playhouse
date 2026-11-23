@@ -10,29 +10,47 @@ import SwiftUI
 /// window backgrounds), white, red, green, orange, blue, purple, or #RRGGBB.
 enum AtomColor {
     static func style(_ name: String?) -> AnyShapeStyle? {
-        guard let name else { return nil }
         switch name {
         case "primary": return AnyShapeStyle(.primary)
         case "secondary": return AnyShapeStyle(.secondary)
         case "tertiary": return AnyShapeStyle(.tertiary)
-        case "accent": return AnyShapeStyle(Color.accentColor)
-        case "text": return AnyShapeStyle(WorkspaceTheme.conversationText)
-        case "panel": return AnyShapeStyle(WorkspaceTheme.panelBackground)
-        case "window": return AnyShapeStyle(WorkspaceTheme.windowBackground)
-        case "white": return AnyShapeStyle(Color.white)
-        case "red": return AnyShapeStyle(Color.red)
-        case "green": return AnyShapeStyle(Color.green)
-        case "orange": return AnyShapeStyle(Color.orange)
-        case "blue": return AnyShapeStyle(Color.blue)
+        default: return color(name).map { AnyShapeStyle($0) }
+        }
+    }
+
+    /// A color name as AppKit text draws it, for atoms that render through an AppKit text view;
+    /// the hierarchical styles map to the matching label colors.
+    static func nsColor(_ name: String?) -> NSColor? {
+        switch name {
+        case "primary": return .labelColor
+        case "secondary": return .secondaryLabelColor
+        case "tertiary": return .tertiaryLabelColor
+        default: return color(name).map { NSColor($0) }
+        }
+    }
+
+    /// Every named color but the hierarchical styles.
+    private static func color(_ name: String?) -> Color? {
+        guard let name else { return nil }
+        switch name {
+        case "accent": return Color.accentColor
+        case "text": return WorkspaceTheme.conversationText
+        case "panel": return WorkspaceTheme.panelBackground
+        case "window": return WorkspaceTheme.windowBackground
+        case "white": return Color.white
+        case "red": return Color.red
+        case "green": return Color.green
+        case "orange": return Color.orange
+        case "blue": return Color.blue
         // GitHub's merged purple.
-        case "purple": return AnyShapeStyle(Color(red: 0.64, green: 0.44, blue: 0.97))
+        case "purple": return Color(red: 0.64, green: 0.44, blue: 0.97)
         default:
             guard name.hasPrefix("#"), name.count == 7, let value = UInt32(name.dropFirst(), radix: 16) else { return nil }
-            return AnyShapeStyle(Color(
+            return Color(
                 red: Double((value >> 16) & 0xFF) / 255,
                 green: Double((value >> 8) & 0xFF) / 255,
                 blue: Double(value & 0xFF) / 255
-            ))
+            )
         }
     }
 

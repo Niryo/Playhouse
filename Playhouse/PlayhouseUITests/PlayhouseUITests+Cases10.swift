@@ -269,11 +269,12 @@ extension PlayhouseUITests {
         element("codex-activity-disclosure").click()
         let activityDetails = element("codex-activity-details")
         XCTAssertTrue(activityDetails.waitToExist(timeout: 5), "Worked for should expand.")
-        // A progress bubble carries its text as the element's value, not its label, so it is
-        // identified by the provider message it was built from.
+        // A progress bubble is a Markdown atom whose prose text view carries its text as the
+        // element's value, identified by the provider message it was built from.
         func progressBubbles(forMessageID messageID: String) -> XCUIElementQuery {
             activityDetails.staticTexts.matching(
-                NSPredicate(format: "identifier BEGINSWITH %@", "codex-progress-message-\(messageID)")
+                // Its ID can carry a suffix after the message ID (`msg_chat_intent-0`).
+                NSPredicate(format: "identifier BEGINSWITH %@ AND identifier CONTAINS %@", "codex-progress-message-\(messageID)", "-prose-")
             )
         }
         XCTAssertEqual(progressBubbles(forMessageID: "msg_chat_answer").count, 0,
