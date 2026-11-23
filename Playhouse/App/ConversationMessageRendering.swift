@@ -654,7 +654,9 @@ extension TaskConversationView {
             CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
                 .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
         case .table(let headers, let alignments, let rows):
+            // Each cell is its own selectable text, so its content can be copied like the prose around it.
             TableBlockView(blockID: block.id, headers: headers, alignments: alignments, rows: rows, font: block.font)
+                .textSelection(.enabled)
         case .rule:
             MarkdownRule()
                 .accessibilityIdentifier("assistant-markdown-rule-\(block.id)")
