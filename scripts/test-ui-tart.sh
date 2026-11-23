@@ -45,6 +45,7 @@ Pass --live-provider only when the guest has that provider's CLI and a login
 Environment:
   PLAYHOUSE_UI_TART_VM         VM name (default: playhouse-ui)
   PLAYHOUSE_UI_TART_ARTIFACTS  Host artifact root
+  PLAYHOUSE_TEST_ARTIFACT_RETENTION_HOURS Hours to keep earlier runs' artifacts (default: 48)
   PLAYHOUSE_UI_SCREEN_WIDTH    Guest screen width in points for the run (default: 1280)
   PLAYHOUSE_UI_SCREEN_HEIGHT   Guest screen height in points for the run (default: 960)
   PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS Per-case XCTest allowance (default: 180)
@@ -155,6 +156,10 @@ if [[ ! -O "$artifact_root" ]]; then
 	exit 74
 fi
 chmod 700 "$artifact_root"
+# Every run keeps its .xcresult for screenshot export and triage. Drop runs
+# past the retention window so the shared root does not grow without bound.
+python3 "${repository_root}/scripts/prune-test-artifacts.py" \
+	--root "$artifact_root" --age-from run-id --keep "$run_id"
 run_artifacts="${artifact_root}/${run_id}"
 mkdir -p "$run_artifacts"
 launch_log="${run_artifacts}/tart-run.log"
