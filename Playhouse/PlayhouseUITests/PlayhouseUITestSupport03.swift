@@ -265,8 +265,12 @@ extension PlayhouseUITests {
     func sendFromComposer(_ text: String) {
         let composer = element("message-composer")
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
-        composer.click()
-        composer.typeText(text)
+        // A conversation that just opened takes no typing while its history loads, and the
+        // composer can still be sliding in (the chat sidebar opening beside the board), so type
+        // only once the history has loaded and the composer has settled and holds focus. (The
+        // composer's text view always reads as disabled to accessibility, so `isEnabled` can't tell.)
+        waitForConversationLoad()
+        typeIntoField(composer, text: text)
         // A task waiting on a response offers Continue as its send action.
         let send = element("send-message-button")
         if send.waitToExist(timeout: 3) { send.click() } else { element("continue-response-button").click() }
@@ -1078,7 +1082,14 @@ extension PlayhouseUITests {
         let window = app.windows.firstMatch
         let windowFrame = window.frame
         let controlFrame = control.frame
-        let target = CGPoint(x: controlFrame.midX + horizontalShift, y: min(windowFrame.maxY - 10, controlFrame.maxY + 100))
+        // A control on the window's bottom edge (the sidebar's Skills button) has no room below:
+        // a point clamped just under it stays on the bottom bar, beside controls with hints of
+        // their own, so the runway goes above it instead. Under 20 pt of room counts as the edge:
+        // the Skills button has none, while the composer's Stop button (about 25 pt) keeps its
+        // runway below.
+        let below = min(windowFrame.maxY - 10, controlFrame.maxY + 100)
+        let y = below - controlFrame.maxY < 20 ? controlFrame.minY - 100 : below
+        let target = CGPoint(x: controlFrame.midX + horizontalShift, y: y)
         let offset = CGVector(
             dx: (target.x - windowFrame.minX) / windowFrame.width,
             dy: (target.y - windowFrame.minY) / windowFrame.height

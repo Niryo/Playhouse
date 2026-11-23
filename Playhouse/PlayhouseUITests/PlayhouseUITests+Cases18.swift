@@ -150,16 +150,21 @@ extension PlayhouseUITests {
         // their rescaled heights, if the reader's position were not restored, would carry it far
         // further than the tolerance below: the restore pins the message at the viewport's top
         // to the top again, so the message read moves by at most one message.
+        // The scroll content, padding included, is capped at 820 points; the rows are only as
+        // wide as that capped column, so it is the column whose width must change. The window
+        // opens wide enough on the test screen to leave the column capped with the task sidebar
+        // shown or hidden, so first narrow the window to its minimum width, where the shown
+        // sidebar leaves the column under the cap and hiding the sidebar widens it.
+        func columnWidth(_ scrollWidth: CGFloat) -> CGFloat { min(scrollWidth, 820) }
+        narrowWindowToMinimumWidth()
+        XCTAssertTrue(waitUntil({ columnWidth(scrollView.frame.width) < 790 }, timeout: 5),
+                      "Narrowing the window should bring the transcript's column under its cap: width=\(scrollView.frame.width).")
+        XCTAssertTrue(waitForStableFrame(scrollView), "The narrowed transcript should settle.")
         let deepMessage = element("user-message-item_long_history_user_50")
         bringNearTop(deepMessage, coarse: -900)
         XCTAssertTrue(isVisible(deepMessage), "A message deep in the history should be reachable.")
         let widthBeforeResize = scrollView.frame.width
         let readingTop = topInViewport(deepMessage)
-        // The scroll content, padding included, is capped at 820 points; the rows are only as
-        // wide as that capped column, so it is the column whose width must change. Hiding the
-        // task sidebar widens the transcript whatever the screen's size, where a window drag is
-        // clamped by the screen's edge and the window's minimum width.
-        func columnWidth(_ scrollWidth: CGFloat) -> CGFloat { min(scrollWidth, 820) }
         let hideSidebar = element("hide-task-sidebar-button")
         XCTAssertTrue(waitUntil({ hideSidebar.exists && hideSidebar.isHittable }, timeout: 5), "The task sidebar should offer its hide button.")
         hideSidebar.click()

@@ -81,10 +81,13 @@ private struct AtomHighlightModifier: ViewModifier {
 /// reads apart from a native view holding a single atom. The outline also
 /// names the atom and its role to accessibility (Accessibility Inspector, UI
 /// tests). Toggling the flag resets atom view state below it, since the
-/// modifier only wraps the content while on.
+/// modifier only wraps the content while on. A background window doesn't name
+/// the atom under the pointer: hover tracking also reports a pointer over another
+/// window in front, so an atom behind it would otherwise show its label.
 private struct AtomHighlightOverlay: ViewModifier {
     let atom: AtomType
     @State private var hovering = false
+    @Environment(\.controlActiveState) private var controlActiveState
 
     func body(content: Content) -> some View {
         let color: Color = atom.isContainer ? .orange : .green
@@ -98,7 +101,7 @@ private struct AtomHighlightOverlay: ViewModifier {
                     .accessibilityIdentifier(atom.isContainer ? "atom-highlight-container" : "atom-highlight-leaf")
             }
             .overlay(alignment: .topLeading) {
-                if hovering {
+                if hovering, controlActiveState != .inactive {
                     Text(atom.rawValue)
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.white)

@@ -970,6 +970,14 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("skill-row-repo-shared").waitToExist(timeout: 5), "Clearing the search shows every skill again.")
 
         // Global sits near the list's end, so its anchor scrolls it as far up as the list goes.
+        // With Built-in collapsed the whole list fits a full-height window, leaving nothing to
+        // scroll, so shorten the window (and the modal with it) until the list overflows.
+        let skillsList = element("skills-list")
+        let fullListHeight = skillsList.frame.height
+        shortenWindowToMinimumHeight()
+        XCTAssertTrue(waitUntil({ skillsList.frame.height < fullListHeight - 120 }, timeout: 5),
+                      "Shortening the window should shorten the skills list: \(fullListHeight) → \(skillsList.frame.height).")
+        XCTAssertTrue(waitForStableFrame(element("skills-group-global")), "The shortened list settles.")
         jumpToSection("Global", picker: "skills-tab-picker")
         XCTAssertTrue(element("skill-row-repo-agents").exists, "Jumping keeps the other sections in the list.")
         for name in ["global-agents", "global-claude", "codex-legacy"] {

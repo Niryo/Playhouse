@@ -598,7 +598,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try tasksFromBoardList().count, 0)
         attachScreenshot(named: "Failed task deletion can be retried after repository recovery")
     }
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Launching with no folder set opens the Suggestions from prompt, which asks for the folder that holds the user's Git repositories and can't be dismissed: it has no Not Now or close button and Escape leaves it open. Cancelling its folder panel returns to the prompt, and choosing a folder there saves it as the default parent and closes it. With the folder cleared again, no root notice sits above the composer, and a send or a schedule without a folder reopens the prompt, keeping the message as the draft and saving no schedule.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task. Launching with no folder set opens the Suggestions from prompt, which asks for the folder that holds the user's Git repositories and can't be dismissed: it has no Not Now or close button and Escape leaves it open. Cancelling its folder panel returns to the prompt, and choosing a folder there saves it as the default parent and closes it. With the folder cleared again, no root notice sits above the composer, and a send or a schedule without a folder reopens the prompt, keeping the message as the draft and saving no schedule. Changing the suggestion folder from a conversation's repository picker reopens the picker on the new folder, and it never lists the previous folder's repositories, not even while the new list loads.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         keepsSuggestionsFolderPrompt = true
         launchApp(defaultParent: nil)
@@ -683,11 +683,20 @@ extension PlayhouseUITests {
         XCTAssertTrue(changeSuggestionParent.label.localizedCaseInsensitiveContains("Change"))
         changeSuggestionParent.click()
         try chooseFolder(in: openFolderPanel, folder: fixture.alternateParent, confirmationButton: "Use This Folder")
-        // The alternate parent sits inside the first parent, so `alternate` is already listed before
-        // the change; the refresh is settled only once the first parent's `primary` is gone. The
-        // reloaded list can be empty for a moment before it lists `alternate` again.
-        XCTAssertTrue(waitUntil({ !self.element("conversation-repository-suggestion-primary").exists }, timeout: 10), "Suggestions from the previous parent should be replaced.")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 5), "Changing the parent should refresh the repository suggestions.")
+        // Change… closes the picker for the folder panel and reopens it on the new folder, so wait
+        // for the reopened picker first: the closed picker lists nothing, which proves nothing. The
+        // alternate parent sits inside the first parent, so `alternate` is listed for both; the
+        // reopened list must never show the first parent's `primary`, not even while it loads.
+        let suggestionParent = element("conversation-repository-suggestion-parent")
+        XCTAssertTrue(waitUntil({ suggestionParent.exists && self.pluginText(suggestionParent).contains(self.fixture.alternateParent.lastPathComponent) }, timeout: 10),
+                      "The picker should reopen on the new suggestion folder.")
+        // Watch the whole reload, until the new folder's list arrives, not just one moment of it.
+        var stalePrimaryShown = false
+        XCTAssertTrue(waitUntil({
+            if self.element("conversation-repository-suggestion-primary").exists { stalePrimaryShown = true }
+            return self.element("conversation-repository-suggestion-alternate").exists
+        }, timeout: 5), "Changing the parent should refresh the repository suggestions.")
+        XCTAssertFalse(stalePrimaryShown, "Suggestions from the previous parent should be replaced, never listed under the new folder while it loads.")
         XCTAssertFalse(element("conversation-repository-suggestion-primary").exists, "The previous parent's suggestions stay gone once the list reloads.")
         XCTAssertTrue(waitUntil({
             guard let response = try? self.runCLI(["settings", "get"]),

@@ -871,6 +871,12 @@ struct TaskConversationView: View {
             // History reloads bring back the hidden text for replies this window streamed.
             if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
+        // The suggestion folder can change from the repository picker or from Settings; the
+        // picker must never list the previous folder's repositories under the new one.
+        .onChange(of: defaultParentFolderPath) { _, _ in
+            suggestedRepositories = []
+            loadSuggestedRepositories()
+        }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
             if isTurnActive { watchRunningTurnIfNeeded() }
             if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }

@@ -30,6 +30,19 @@ extension PlayhouseUITests {
         let sidebarFrame = sidebar.frame
         let backlogColumn = element("column-backlog")
         XCTAssertLessThan(sidebarFrame.maxX, backlogColumn.frame.minX, "The sidebar should stay left of the board columns.")
+        // The window opens wider than the columns on the test screen, so they center across it.
+        let boardViewport = element("board-columns-scroll-view")
+        let reviewColumn = element("column-review")
+        XCTAssertTrue(reviewColumn.waitToExist(timeout: 5))
+        XCTAssertEqual(backlogColumn.frame.minX - boardViewport.frame.minX, boardViewport.frame.maxX - reviewColumn.frame.maxX, accuracy: 4,
+                       "In a board wider than its columns, they should center: board=\(boardViewport.frame), backlog=\(backlogColumn.frame), review=\(reviewColumn.frame).")
+        attachAppWindowScreenshot(named: "Board columns center across a board wider than they are")
+        // At the window's minimum width the board is narrower than its columns, which then scroll.
+        narrowWindowToMinimumWidth()
+        XCTAssertTrue(waitUntil({ abs(backlogColumn.frame.minX - sidebarFrame.maxX - 31) <= 4 }, timeout: 5),
+                      "In a board narrower than its columns, they should start just right of the sidebar: backlog=\(backlogColumn.frame), sidebar=\(sidebarFrame).")
+        XCTAssertTrue(waitForStableFrame(backlogColumn), "The narrowed board settles.")
+        XCTAssertEqual(sidebar.frame, sidebarFrame, "Narrowing the window should not move or resize the sidebar.")
         let backlogColumnStartX = backlogColumn.frame.minX
         element("board-columns-scroll-view").swipeLeft()
         XCTAssertLessThan(backlogColumn.frame.minX, backlogColumnStartX, "The board columns should scroll horizontally.")
@@ -38,7 +51,6 @@ extension PlayhouseUITests {
         element("board-columns-scroll-view").swipeRight()
         XCTAssertTrue(waitUntil({ abs(backlogColumn.frame.minX - backlogColumnStartX) <= 2 }, timeout: 3), "Scrolling back should return the columns to their start.")
         // The empty columns are shorter than the board, which used to center them vertically.
-        let boardViewport = element("board-columns-scroll-view")
         XCTAssertGreaterThan(boardViewport.frame.height, backlogColumn.frame.height + 22 + 28 + 8, "The board should be taller than its empty columns, so centering them would show: board=\(boardViewport.frame), backlog=\(backlogColumn.frame).")
         XCTAssertEqual(backlogColumn.frame.minY - sidebarFrame.minY, 22, accuracy: 4, "The columns should start just below the header, not centered in the board's height: backlog=\(backlogColumn.frame), sidebar=\(sidebarFrame).")
         XCTAssertEqual(backlogColumn.frame.minX - sidebarFrame.maxX, 31, accuracy: 4, "In a board narrower than its columns, they should start just right of the sidebar: backlog=\(backlogColumn.frame), sidebar=\(sidebarFrame).")

@@ -376,7 +376,10 @@ extension PlayhouseUITests {
         XCTAssertTrue(latestActiveRow.waitToExist(timeout: 10), "The reopened window should still show the latest active process outside Working for.")
         XCTAssertFalse(commandRow.exists, "The active command should stay outside expanded Working for after reopening.")
         // The open section is a default, not a lock: a reader can fold it mid-turn,
-        // and it must stay folded across the activity updates that follow.
+        // and it must stay folded across the activity updates that follow. The reopened window
+        // follows the live turn to its bottom, which can leave the disclosure above the viewport.
+        bringIntoTranscriptViewport(activityDisclosure, scrollView: element("conversation-scroll-view"))
+        XCTAssertTrue(waitForStableFrame(activityDisclosure) && activityDisclosure.isHittable, "The open section's disclosure should be in view before folding it.")
         activityDisclosure.click()
         XCTAssertTrue(waitUntil({ !activityDetails.exists }, timeout: 5), "Collapsing mid-turn should hide this turn's activity rows.")
         XCTAssertFalse(element("codex-activity-row-item_fixture_mcp_call").exists)

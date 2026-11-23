@@ -467,7 +467,12 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("raw-input-request-row-13-repeat").exists, "The resumed prompt itself is not a repeat.")
         attachScreenshot(named: "The latest request lists both AGENTS.md copies in order and flags the date reminder sent twice")
 
-        element("raw-input-request-row-11").click()
+        // The Raw input sheet stands over the Token Stats sheet, whose frame takes the
+        // accessibility hit test at the row's centre, so XCUITest reads the row as unhittable
+        // although it is drawn on top. Click its point instead; the full text opening below
+        // proves the click reached the row.
+        revealRawInputRow("raw-input-request-row-11")
+        element("raw-input-request-row-11").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         let secondLine = element("raw-input-text-line-2")
         XCTAssertTrue(secondLine.waitToExist(timeout: 10), "Selecting the second copy opens its full text.")
         XCTAssertTrue(
