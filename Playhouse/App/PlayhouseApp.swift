@@ -145,6 +145,10 @@ private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegat
         MonacoDiffWebViewHost.shared.prewarm()
         // The first open of a conversation otherwise builds its view's type metadata on the main thread.
         Task.detached(priority: .utility) { _ = TaskConversationView.prepareBodyTypeMetadata() }
+        #if PLAYHOUSE_TRANSCRIPT_BENCHMARK
+        // Only in scripts/benchmark-transcript.sh's builds.
+        TranscriptBenchmark.runIfRequested()
+        #endif
     }
 
     /// The reply comes from a main-actor task, so a programmatic quit must not start

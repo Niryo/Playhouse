@@ -283,12 +283,11 @@ extension TaskConversationView {
                             .accessibilityIdentifier("ai-question-header-\(question.id)")
                     }
                     // Providers write questions in Markdown, as they do replies, so they share the reply
-                    // renderer and size. The renderer sizes only bold, italic and code runs; plain text takes this font.
-                    assistantMarkdownContent(question.question)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(WorkspaceTheme.conversationText)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("ai-question-text-\(question.id)")
+                    // renderer and size.
+                    AtomMarkdown(
+                        props: MarkdownProps(text: question.question, size: Double(Self.transcriptTextSize), color: "text", selectable: true),
+                        common: AtomCommon(testID: "ai-question-text-\(question.id)")
+                    )
                     if question.options.isEmpty {
                         Group {
                             if question.isSecret {

@@ -3,8 +3,8 @@ import Foundation
 /// The one Markdown parser in the app. It splits Markdown into blocks (headings, bullet and
 /// ordered list items, quotes, fenced code, pipe tables, rules and paragraphs) and, when asked,
 /// reads a leading YAML frontmatter block into its entries. Inline syntax (bold, italic, code,
-/// links) stays in each block's text for `MarkdownInlineText` to style. The transcript, the
-/// `Markdown` atom (and so the skill and rule previews) and the side chat all render from it.
+/// links) stays in each block's text for `MarkdownInlineText` to style. The `Markdown` atom, and
+/// so the transcript, the skill and rule previews and the side chat, renders from it.
 /// Foundation only, so the pure-logic unit checks compile it on its own.
 struct MarkdownDocument: Equatable {
     struct FrontmatterEntry: Equatable {

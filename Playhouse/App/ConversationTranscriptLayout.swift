@@ -35,6 +35,15 @@ struct SelectableAnnotationText: NSViewRepresentable {
     var font = NSFont.systemFont(ofSize: 16)
     var wholeMessageText: String? = nil
     var accessibilityBlocks: [CommentTrackingTextView.AccessibilityBlock] = []
+    /// False keeps the text from being selected; its links still open.
+    var allowsSelection = true
+    /// Opens only web and mail links, as plugin text may; any other link does nothing.
+    var restrictsLinks = false
+    /// Reports `accessibilityBlocks` as static texts, read by their labels, instead of groups
+    /// that only locate their part of the text.
+    var blocksAreText = false
+    /// Set on the text view itself, which a SwiftUI identifier around it may not reach.
+    var accessibilityIdentifier: String? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -48,7 +57,7 @@ struct SelectableAnnotationText: NSViewRepresentable {
         // which it misjudges inside a SwiftUI scroll view, leaving a reply taller than the
         // viewport blank. Its layout manager is also needed for selection and hover hit-testing.
         let view = CommentTrackingTextView(usingTextLayoutManager: false)
-        view.textContainer?.replaceLayoutManager(InlineCodeLayoutManager())
+        view.textContainer?.replaceLayoutManager(MarkdownLayoutManager())
         view.isEditable = false
         view.isSelectable = true
         if isAssistantText {
@@ -67,6 +76,8 @@ struct SelectableAnnotationText: NSViewRepresentable {
         view.delegate = context.coordinator
         context.coordinator.anchorView = view
         view.hoverTrackingOwner = context.coordinator
+        view.blocksAreText = blocksAreText
+        if let accessibilityIdentifier { view.setAccessibilityIdentifier(accessibilityIdentifier) }
         view.accessibilityBlocks = accessibilityBlocks
         view.onClickWithoutSelection = { [weak coordinator = context.coordinator, weak view] index in
             guard let coordinator, let view else { return }
@@ -76,6 +87,7 @@ struct SelectableAnnotationText: NSViewRepresentable {
         view.updateTrackingAreas()
         update(view, coordinator: context.coordinator)
         context.coordinator.renderedKey = renderKey
+        context.coordinator.renderedText = formattedText
         return view
     }
 
@@ -86,11 +98,13 @@ struct SelectableAnnotationText: NSViewRepresentable {
         context.coordinator.responseCommentSourcePrefix = responseCommentSourcePrefix
         context.coordinator.anchorView = view
         updateHighlightClicks(context.coordinator)
-        guard context.coordinator.renderedKey != renderKey else {
+        // The formatted text is cached per input, so another instance can restyle the same characters.
+        guard context.coordinator.renderedKey != renderKey || context.coordinator.renderedText !== formattedText else {
             return
         }
         update(view, coordinator: context.coordinator)
         context.coordinator.renderedKey = renderKey
+        context.coordinator.renderedText = formattedText
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
@@ -102,13 +116,15 @@ struct SelectableAnnotationText: NSViewRepresentable {
     }
 
     private var renderKey: String {
-        responseCommentSourcePrefix + "|" + text + highlightedRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
+        "\(font.pointSize)|\(textColor.description)|" + responseCommentSourcePrefix + "|" + text + highlightedRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
             + "|" + mentionRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
             + "|" + chatRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
             + responseAnnotations.map { "\($0.text):\($0.comment)" }.joined(separator: "|")
     }
 
     private func updateHighlightClicks(_ coordinator: Coordinator) {
+        coordinator.allowsSelection = allowsSelection
+        coordinator.restrictsLinks = restrictsLinks
         coordinator.onHighlightClick = onHighlightClick
         coordinator.highlightRanges = onHighlightClick == nil ? [] : highlightedRanges + chatRanges
     }
@@ -200,8 +216,12 @@ struct SelectableAnnotationText: NSViewRepresentable {
         /// The commented ranges, then the side-chatted ones, in the order a click checks them.
         var highlightRanges: [NSRange] = []
         var responseCommentSourcePrefix: String
+        var allowsSelection = true
+        var restrictsLinks = false
         weak var anchorView: NSTextView?
         var renderedKey = ""
+        /// The formatted text last shown, held so a new instance is told apart from it.
+        var renderedText: NSAttributedString?
         let measurer = TextHeightMeasurer()
         /// Room above a selection for the Side chat hint, centered 22pt above it and 30pt tall.
         private static let selectionHintClearance: CGFloat = 40
@@ -379,6 +399,21 @@ struct SelectableAnnotationText: NSViewRepresentable {
                   popover === responseCommentPopover else { return }
             responseCommentPopover = nil
             activeResponseCommentID = nil
+        }
+
+        func textView(
+            _ textView: NSTextView, willChangeSelectionFromCharacterRange oldSelectedCharRange: NSRange,
+            toCharacterRange newSelectedCharRange: NSRange
+        ) -> NSRange {
+            allowsSelection ? newSelectedCharRange : NSRange(location: newSelectedCharRange.location, length: 0)
+        }
+
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            guard restrictsLinks else { return false }
+            let url = link as? URL ?? (link as? String).flatMap(URL.init(string:))
+            guard let url, MarkdownDocument.opensLink(url) else { return true }
+            NSWorkspace.shared.open(url)
+            return true
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
