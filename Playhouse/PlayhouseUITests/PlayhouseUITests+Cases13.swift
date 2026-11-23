@@ -984,6 +984,9 @@ extension PlayhouseUITests {
         XCTAssertFalse(chatPageSeparatorIsVisible("Harbor"), "The newest page is not rendered below a page jumped to.")
         XCTAssertFalse(chatPageSeparatorIsVisible("Topic 02"), "The page before it is not rendered until the reader scrolls up to it.")
         XCTAssertTrue(element("chat-jump-to-latest").exists, "An earlier page offers a way back to the newest messages.")
+        let newPageButton = element("new-chat-page-button")
+        XCTAssertTrue(newPageButton.exists, "The New page plus stays on the line below the transcript.")
+        XCTAssertLessThanOrEqual(element("chat-jump-to-latest").frame.maxY, newPageButton.frame.minY, "Latest floats clear of the New page plus.")
         attachScreenshot(named: "chat-page-anchors-jumped-to-old-page")
 
         // Scrolling on from there loads what follows, and the labels follow the transcript.

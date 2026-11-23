@@ -315,26 +315,44 @@ extension TaskConversationView {
         }
     }
 
-    /// Right above the standalone chat's composer: a plus button that starts a new page, and once
-    /// pressed, that page's separator, which the user can remove before sending. The next message
-    /// then runs without the last page's context; sending or removing the page brings the button back.
+    /// The line between the conversation's transcript and its composer.
+    static let conversationDividerOpacity = 0.07
+
+    private var isStandaloneChatComposer: Bool {
+        task.isStandaloneChat && !task.isParallelChatBubble && !isReadOnly
+    }
+
+    /// Right above the standalone chat's composer, once the user pressed the plus: the new page's
+    /// separator, which the user can remove before sending. The next message then runs without the
+    /// last page's context; sending or removing the page brings the plus back.
     @ViewBuilder
     var newChatPageControl: some View {
-        if task.isStandaloneChat, !task.isParallelChatBubble, !isReadOnly {
-            if startsNewChatPage {
-                newChatPageSeparator(removable: true)
-            } else if !messages.isEmpty, !sendsNewChatPage, !isResponding {
-                // The plus sits on a page rule, so it reads as the place a new page would begin.
-                AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: "new-chat-page-rule", paddingY: 2)) {
-                    transcriptRule(opacity: 0.13)
-                    NewChatPageButton {
-                        startsNewChatPage = true
-                        returnToLatestMessages()
-                        isComposerFocused = true
-                    }
-                    transcriptRule(opacity: 0.13)
+        if isStandaloneChatComposer, startsNewChatPage {
+            newChatPageSeparator(removable: true)
+        }
+    }
+
+    /// Whether the line between the standalone chat's transcript and its composer carries the plus.
+    var showsNewChatPageButton: Bool {
+        isStandaloneChatComposer && !startsNewChatPage && !messages.isEmpty && !sendsNewChatPage && !isResponding
+    }
+
+    /// The plus that starts a new page, centered on the line between the standalone chat's
+    /// transcript and its composer, so it reads as the place a new page would begin. Laid over that
+    /// line, which it redraws on both sides of the plus, it takes no height of its own.
+    @ViewBuilder
+    var newChatPageRuleButton: some View {
+        if showsNewChatPageButton {
+            AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: "new-chat-page-rule")) {
+                transcriptRule(opacity: Self.conversationDividerOpacity)
+                NewChatPageButton {
+                    startsNewChatPage = true
+                    returnToLatestMessages()
+                    isComposerFocused = true
                 }
+                transcriptRule(opacity: Self.conversationDividerOpacity)
             }
+            .frame(height: 22)
         }
     }
 
@@ -466,12 +484,13 @@ extension TaskConversationView {
             .nativeHelp("Return to the newest messages")
             .accessibilityLabel("Jump to latest messages")
             .accessibilityIdentifier("chat-jump-to-latest")
-            .padding(.bottom, 10)
+            // Clear of the New page plus, which reaches up from the line below the transcript.
+            .padding(.bottom, showsNewChatPageButton ? 22 : 10)
         }
     }
 }
 
-/// The small plus above the standalone chat's composer that starts a new page.
+/// The small plus on the line above the standalone chat's composer that starts a new page.
 struct NewChatPageButton: View {
     let action: () -> Void
     @State private var isHovering = false
