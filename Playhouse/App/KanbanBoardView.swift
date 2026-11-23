@@ -37,10 +37,11 @@ extension EnvironmentValues {
     }
 }
 
-/// A conversation whose Token Stats the window shows.
+/// A conversation whose Token Stats the window shows: all of it, or only one of its turns.
 struct TokenStatsTarget: Equatable {
     let id: UUID
     let title: String
+    var turnID: String?
 }
 
 /// Opens the window's Token Stats modal for a conversation. The board presents it over the
@@ -376,7 +377,10 @@ struct KanbanBoardView: View {
         }
         .atomModal(ModalProps(isPresented: taskShowingTokenStats != nil, inset: 0), onDismiss: { taskShowingTokenStats = nil }) {
             if let taskShowingTokenStats {
-                TokenStatsSheet(taskID: taskShowingTokenStats.id, taskTitle: taskShowingTokenStats.title, modelContext: modelContext)
+                TokenStatsSheet(
+                    taskID: taskShowingTokenStats.id, taskTitle: taskShowingTokenStats.title,
+                    turnID: taskShowingTokenStats.turnID, modelContext: modelContext
+                )
             }
         }
         .confirmationDialog(

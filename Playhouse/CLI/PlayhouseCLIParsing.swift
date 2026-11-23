@@ -166,18 +166,13 @@ extension PlayhouseCLI {
             case "get", "show":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.get", arguments: ["taskID": .string(id)])
-            case "token-usage":
-                let id = try firstPositional(tail)
-                return BridgeRequest(command: "task.token-usage", arguments: ["taskID": .string(id)])
-            case "token-waste":
-                let id = try firstPositional(tail)
-                return BridgeRequest(command: "task.token-waste", arguments: ["taskID": .string(id)])
-            case "raw-input", "raw-input-text", "raw-input-export":
+            case "token-usage", "token-waste", "raw-input", "raw-input-text", "raw-input-export":
                 let id = try firstPositional(Array(tail.prefix(1)))
                 let names: Set<String> = switch operation {
-                case "raw-input": ["--agent", "--scope", "--order", "--query", "--offset", "--limit", "--focus", "--request"]
-                case "raw-input-export": ["--agent", "--request", "--format"]
-                default: ["--agent", "--item", "--offset", "--length"]
+                case "token-usage", "token-waste": ["--turn"]
+                case "raw-input": ["--turn", "--agent", "--scope", "--order", "--query", "--offset", "--limit", "--focus", "--request"]
+                case "raw-input-export": ["--turn", "--agent", "--request", "--format"]
+                default: ["--turn", "--agent", "--item", "--offset", "--length"]
                 }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: names)
                 var arguments: [String: BridgeValue] = ["taskID": .string(id)]
@@ -185,7 +180,7 @@ extension PlayhouseCLI {
                     if let value = flags[name]?.first { arguments[String(name.dropFirst(2))] = .string(value) }
                 }
                 if operation == "raw-input-text", arguments["item"] == nil {
-                    throw CLIError.usage("Use: playhouse task raw-input-text <task-id> --item <n> [--agent <id>] [--offset <n>] [--length <n>]")
+                    throw CLIError.usage("Use: playhouse task raw-input-text <task-id> --item <n> [--turn <turn-id>] [--agent <id>] [--offset <n>] [--length <n>]")
                 }
                 return BridgeRequest(command: "task.\(operation)", arguments: arguments)
             case "cpu-usage":

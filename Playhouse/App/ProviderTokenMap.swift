@@ -72,6 +72,12 @@ struct ProviderSessionReference: Sendable {
     let subagentThreadIDs: [String]
 }
 
+/// What a token map reads: the provider sessions, and for one turn the span its requests were sent in.
+struct TokenMapScope: Sendable {
+    let sessions: [ProviderSessionReference]
+    let window: ProviderRequestWindow?
+}
+
 /// What wasted a task's tokens: the largest items, tools and MCP servers by
 /// the tokens they added, what every request carries, repeats and cache misses.
 struct TaskTokenWasteReport: Codable, Equatable, Sendable {
@@ -289,8 +295,10 @@ enum ProviderTokenMap {
     private static let listLimit = 20
 
     /// Reads every agent of the given sessions; agents whose files hold no request log are left out.
+    /// A `window` keeps only the requests one turn made, and leaves out agents that made none in it.
     static func load(
-        sessions: [ProviderSessionReference], homes: ProviderSessionHomes, store: ProviderRequestLogStore = .shared
+        sessions: [ProviderSessionReference], homes: ProviderSessionHomes, window: ProviderRequestWindow? = nil,
+        store: ProviderRequestLogStore = .shared
     ) -> [LoadedAgent] {
         var agents: [LoadedAgent] = []
         for session in sessions {
@@ -314,11 +322,37 @@ enum ProviderTokenMap {
                 }
             }
             for file in files {
-                guard let log = store.log(provider: session.provider, file: file.file), log.isAvailable else { continue }
+                guard let whole = store.log(provider: session.provider, file: file.file) else { continue }
+                let log = window.map { whole.within($0) } ?? whole
+                guard log.isAvailable else { continue }
                 agents.append(LoadedAgent(id: file.id, label: file.label, isMain: file.isMain, log: log))
             }
         }
         return agents
+    }
+
+    /// The model calls the loaded agents' logs record, one snapshot per provider, in the shape
+    /// the task's own live-recorded call usage takes.
+    static func callUsageSnapshots(_ agents: [LoadedAgent]) -> [ConversationCallUsageSnapshot] {
+        var snapshots: [ConversationProvider: ConversationCallUsageSnapshot] = [:]
+        for agent in agents {
+            let provider = agent.log.provider
+            var snapshot = snapshots[provider] ?? ConversationCallUsageSnapshot(provider: provider.rawValue, updatedAt: .now)
+            var usage = ConversationCallUsage()
+            for request in agent.log.requests {
+                let cacheWrite = request.cacheWriteTokens ?? 0
+                usage.calls += 1
+                usage.sentTokens += request.contextTokens
+                usage.outputTokens += request.outputTokens
+                usage.cacheReadTokens += request.cacheReadTokens
+                usage.cacheWriteTokens += cacheWrite
+                usage.uncachedInputTokens += request.contextTokens - request.cacheReadTokens - cacheWrite
+                usage.lastContextTokens = request.contextTokens
+            }
+            if agent.isMain { snapshot.main = usage } else { snapshot.subagents[agent.id] = usage }
+            snapshots[provider] = snapshot
+        }
+        return ConversationProvider.allCases.compactMap { snapshots[$0] }
     }
 
     static func agentSummaries(_ agents: [LoadedAgent]) -> [TaskTokenWasteReport.Agent] {

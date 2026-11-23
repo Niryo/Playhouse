@@ -118,6 +118,30 @@ struct ProviderSentRequest: Sendable {
     let usage: ProviderRequestUsage?
     /// Claude: the `api-request` line, which holds the request's parameters.
     let line: ProviderContextLocation?
+    /// Whether a compaction dropped history the request before it was sent.
+    var compacted = false
+}
+
+/// The span of one turn: the requests sent from `start` up to, not including, `end`
+/// (`nil` when no later turn has started).
+struct ProviderRequestWindow: Equatable, Sendable {
+    let start: Date
+    let end: Date?
+
+    func contains(_ date: Date) -> Bool {
+        date >= start && end.map { date < $0 } ?? true
+    }
+
+    /// A request with no timestamp cannot be placed in any turn.
+    func contains(timestamp: String?) -> Bool {
+        timestamp.flatMap(Self.date).map(contains) ?? false
+    }
+
+    /// Both providers write ISO 8601 timestamps, with or without fractional seconds.
+    static func date(_ timestamp: String) -> Date? {
+        (try? Date(timestamp, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)))
+            ?? (try? Date(timestamp, strategy: Date.ISO8601FormatStyle()))
+    }
 }
 
 /// Everything one agent (a session's main agent or one subagent) was sent.
@@ -139,6 +163,36 @@ struct ProviderAgentLog: Sendable {
     var isAvailable: Bool { !requests.isEmpty }
     var sentTokens: Int { requests.reduce(0) { $0 + $1.contextTokens } }
     var finalTranscriptTokens: Int { finalTranscript.reduce(0) { $0 + items[$1].tokens } }
+
+    /// Only the requests one turn made, numbered from 1 within the turn. Items keep their IDs
+    /// and the sizes the whole log measured (an item's size does not depend on which request
+    /// is looked at), but count only the turn's requests, and the final transcript is the
+    /// turn's last request on the conversation's own source.
+    func within(_ window: ProviderRequestWindow) -> ProviderAgentLog {
+        let kept = sent.indices.filter { window.contains(timestamp: sent[$0].timestamp) }
+        var log = ProviderAgentLog(provider: provider, file: file)
+        log.sent = kept.map { sent[$0] }
+        log.requests = log.sent.compactMap(\.usage)
+        log.sentRequests = kept.count
+        log.compactions = log.sent.filter(\.compacted).count
+        var items = items
+        for index in items.indices {
+            items[index].requests = 0
+            items[index].inFinalTranscript = false
+        }
+        for request in log.sent {
+            for id in Set(request.items) { items[id].requests += 1 }
+        }
+        let mainSource = finalRequest.flatMap { sent[$0].querySource }
+        if let last = log.sent.indices.last(where: { log.sent[$0].querySource == mainSource }) ?? log.sent.indices.last {
+            var seen = Set<Int>()
+            log.finalRequest = last
+            log.finalTranscript = log.sent[last].items.filter { seen.insert($0).inserted }
+            for id in log.finalTranscript { items[id].inFinalTranscript = true }
+        }
+        log.items = items
+        return log
+    }
 }
 
 /// Text and labels shared by both providers' readers.
@@ -539,11 +593,15 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
 
         var indexByID: [String: Int] = [:]
         var chains: [[String]] = []
+        var compacted = Set<Int>()
         for (index, request) in requests.enumerated() {
             var chain: [String] = []
             if let base = request.base, let baseIndex = indexByID[base] {
                 chain = Array(chains[baseIndex].prefix(request.keep))
-                if request.keep < chains[baseIndex].count { log.compactions += 1 }
+                if request.keep < chains[baseIndex].count {
+                    log.compactions += 1
+                    compacted.insert(index)
+                }
             }
             chain += request.tail
             chains.append(chain)
@@ -582,7 +640,7 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
             log.sent.append(ProviderSentRequest(
                 timestamp: request.timestamp, querySource: request.querySource, items: ids,
                 messageLengths: messageLengths, missingMessages: missing, missingShape: request.shapeHash != nil && shape == nil,
-                usage: usage, line: request.line
+                usage: usage, line: request.line, compacted: compacted.contains(index)
             ))
         }
         ProviderTokenCalibration.apply(items: &items, requests: sent)
@@ -796,10 +854,11 @@ final class CodexRolloutParser: ProviderRequestLogParser {
                 timestamp: $0.timestamp, contextTokens: $0.input, cacheReadTokens: $0.cached, cacheWriteTokens: nil, outputTokens: $0.output
             )
         }
-        log.sent = zip(log.requests, sent).map { usage, request in
+        log.sent = zip(records.indices, sent).map { index, request in
             ProviderSentRequest(
-                timestamp: usage.timestamp, querySource: nil, items: request.items,
-                messageLengths: [], missingMessages: 0, missingShape: false, usage: usage, line: nil
+                timestamp: log.requests[index].timestamp, querySource: nil, items: request.items,
+                messageLengths: [], missingMessages: 0, missingShape: false, usage: log.requests[index], line: nil,
+                compacted: index > 0 && records[index].epoch != records[index - 1].epoch
             )
         }
         log.finalTranscript = sent[sent.count - 1].items

@@ -538,7 +538,8 @@ def main_session_steps():
     return steps
 
 
-def write_request_log(path, prefix, shape, steps, sidechain=False, params=None, cache_control=None):
+def write_request_log(path, prefix, shape, steps, sidechain=False, params=None, cache_control=None,
+                      timestamp="2026-11-03T10:00:00.000Z"):
     """Writes each step's request, the transcript lines it added, and the
     assistant line carrying the usage of the request before it. A `resume`
     step sends the last answer and a new prompt on top of the history."""
@@ -554,7 +555,7 @@ def write_request_log(path, prefix, shape, steps, sidechain=False, params=None, 
         nonlocal previous, previous_context
         request_id = f"{prefix}_request_{len([l for l in lines if l['type'] == 'api-request']) + 1}"
         entry = {"type": "api-request", "id": request_id, "keep": keep, "tail": tail, "shapeHash": shape_hash,
-                 "querySource": "sdk", "timestamp": "2026-11-03T10:00:00.000Z"}
+                 "querySource": "sdk", "timestamp": timestamp}
         if previous:
             entry["base"] = previous
         if params:
@@ -613,6 +614,32 @@ def write_request_log(path, prefix, shape, steps, sidechain=False, params=None, 
     with open(path, "a", encoding="utf-8") as handle:
         for line in lines:
             handle.write(json.dumps(line) + "\n")
+
+
+def write_chat_turn_requests(prefix, user_text, commands, answer):
+    """The chat token-usage fixture logs each chat turn's requests in its page's session, as
+    Claude Code does, timestamped now: the prompt Playhouse sent, then one request after each
+    command's result. Token Stats for one turn must read only these, not the page's other turns
+    or another page's session. The prompt follows a reminder naming the turn."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    session_id = argument("--session-id") or argument("--resume")
+    if "chat-token-usage" not in Path(sys.argv[0]).name or not config or not session_id:
+        return
+    project = Path(config) / "projects" / "-fixture-project"
+    project.mkdir(parents=True, exist_ok=True)
+    # Claude Code injects reminders ahead of the prompt; this one names its turn, so a turn's
+    # Token Stats can show that the injected text it lists is the text this turn sent.
+    reminder = f"<system-reminder>\nChat fixture reminder sent with the {prefix} turn.\n</system-reminder>"
+    steps = [("blob", [{"role": "user", "content": [{"type": "text", "text": reminder}, {"type": "text", "text": user_text}]}], 1000)]
+    for index, command in enumerate(commands):
+        steps.append(("turn", [(f"toolu_{prefix}_{index}", "Bash", {"command": command}, command)], 1100 + 100 * index))
+    steps.append(("end", answer))
+    now = time.time()
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
+    write_request_log(project / f"{session_id}.jsonl", f"{prefix}_{time.time_ns()}", {
+        "system": [{"type": "text", "text": "You are the Claude Code chat fixture."}],
+        "tools": [{"name": "Bash", "description": "Run a shell command.", "input_schema": {"type": "object"}}],
+    }, steps, timestamp=timestamp)
 
 
 def run_tool(tool_id, name, tool_input, command=None):
