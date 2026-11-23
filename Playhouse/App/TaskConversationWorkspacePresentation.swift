@@ -505,8 +505,8 @@ extension TaskConversationView {
                     let path = selected.standardizedFileURL.path
                     do {
                         try WorkspaceSettingsManager().setDefaultParentFolder(path)
+                        // Changing the folder clears and reloads the suggestions (`TaskConversationView`).
                         defaultParentFolderPath = path
-                        loadSuggestedRepositories()
                         isShowingRepositoryPicker = true
                     } catch {
                         errorMessage = "Couldn't set the repository suggestion folder: \(error.localizedDescription)"

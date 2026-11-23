@@ -1080,10 +1080,12 @@ extension PlayhouseUITests {
     /// density, compared at the best of a few one- or two-pixel shifts. `overlap` is shared ink
     /// over all ink; `covered` is the smaller share of either's ink that has the other's within a
     /// pixel. The reference is drawn in the tooltip's own polarity, since light-on-dark and
-    /// dark-on-light text antialias to different stroke weights. Measured in the VM, the right
-    /// hint scores covered 1.0 (overlap 0.90 to 0.98, lower in a light window), while one wrong
-    /// key or modifier stays at or below covered 0.992, and mostly changes the width too. Nil when the tooltip is not on screen. Inside its border
-    /// only, so the frame does not count as text.
+    /// dark-on-light text antialias to different stroke weights. Measured on a 2x screen, the
+    /// right hint scores covered 1.0 (overlap 0.90 to 0.98, lower in a light window), while one
+    /// wrong key or modifier stays at or below covered 0.992. On the 1x screen the UI VM uses
+    /// now, the light Plugin Catalog hint scores 1.0 and 1.0 while one wrong key scores covered
+    /// 0.9957, closer to the 0.998 bar; a wrong key mostly changes the width too. Nil when the
+    /// tooltip is not on screen. Inside its border only, so the frame does not count as text.
     private func tooltipInk(_ tooltip: XCUIElement, against text: String) -> (drawn: TextInk, expected: TextInk, overlap: Double, covered: Double)? {
         guard let captured = tooltipImage(tooltip, inset: 1), let drawn = TextInk(captured.0) else { return nil }
         let scale = captured.1
@@ -1127,7 +1129,8 @@ extension PlayhouseUITests {
 
 /// The text pixels of an image of text on a plain background, cropped to their bounds. Text is
 /// whichever side of mid-grey the background (the median pixel) is not, so light and dark
-/// tooltips both work.
+/// tooltips both work; the reference rendering and the captured tooltip are each cut at their
+/// own contrast.
 private struct TextInk {
     let width: Int
     let height: Int
@@ -1141,9 +1144,15 @@ private struct TextInk {
         guard let context = CGContext(data: &pixels, width: fullWidth, height: fullHeight, bitsPerComponent: 8, bytesPerRow: fullWidth,
                                       space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return nil }
         context.draw(image, in: CGRect(x: 0, y: 0, width: fullWidth, height: fullHeight))
-        let lightText = pixels.sorted()[pixels.count / 2] < 128
+        let background = Int(pixels.sorted()[pixels.count / 2])
+        let lightText = background < 128
         isLightText = lightText
-        let isInk = pixels.map { lightText ? $0 > 128 : $0 < 128 }
+        // A pixel is ink past the midpoint between the background and the text's strongest
+        // pixel. A light tooltip's text is grey, not black, and on a 1x screen most of its
+        // strokes are lighter than mid-grey, which a fixed cut would drop.
+        let strongest = Int(lightText ? pixels.max() ?? 255 : pixels.min() ?? 0)
+        let cut = (background + strongest) / 2
+        let isInk = pixels.map { lightText ? Int($0) > cut : Int($0) < cut }
         var minX = fullWidth, maxX = -1, minY = fullHeight, maxY = -1
         for y in 0..<fullHeight {
             for x in 0..<fullWidth where isInk[y * fullWidth + x] {

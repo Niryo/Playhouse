@@ -9,27 +9,19 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    /// The prompt can't be dismissed, so a case launched without a folder chooses one there and
-    /// then clears it again through the CLI, leaving the app with no folder and no prompt.
-    func dismissSuggestionsFolderPromptIfNeeded() {
-        guard launchDefaultParent == nil, !keepsSuggestionsFolderPrompt else { return }
-        let choose = element("suggestions-folder-prompt-choose-button")
-        guard choose.waitToExist(timeout: 3) else { return }
-        choose.click()
-        do {
-            try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
-        } catch {
-            XCTFail("Choosing a folder in the Suggestions from prompt failed: \(error)")
-        }
-        XCTAssertTrue(waitUntil({ !choose.exists && !self.openFolderPanel.exists }, timeout: 10), "Choosing a folder should close the Suggestions from prompt.")
+    /// A case launched without a folder starts with the fixture's parent, so the Suggestions
+    /// from prompt, which can't be dismissed, doesn't open at launch; this clears it once the
+    /// board shows. The prompt's own case keeps it.
+    var clearsParentAfterLaunch: Bool { launchDefaultParent == nil && !keepsSuggestionsFolderPrompt }
+    private func clearLaunchParentIfNeeded() {
+        guard clearsParentAfterLaunch else { return }
         XCTAssertNoThrow(try runCLI(["settings", "clear-parent"]))
     }
-
     func waitForBoardOrAbortSuite() {
         let boardTitle = element("board-title")
         if waitUntil({ self.isPlayhouseFrontmost }, timeout: 3),
            boardTitle.waitToExist(timeout: 6) {
-            dismissSuggestionsFolderPromptIfNeeded()
+            clearLaunchParentIfNeeded()
             return
         }
 
@@ -44,7 +36,7 @@ extension PlayhouseUITests {
         let expectedBundleID = Bundle(url: appBundle)?.bundleIdentifier ?? "unknown"
         let frontmostDescription = Self.frontmostApplicationDescription
         guard !relaunchedAfterMissingWindow else {
-            dismissSuggestionsFolderPromptIfNeeded()
+            clearLaunchParentIfNeeded()
             return
         }
         let reason = "Playhouse UI startup failed after a process restart recovery attempt. Expected frontmost app \(expectedBundleID); actual frontmost app: \(frontmostDescription); app state: \(app.state.rawValue); board title not found."
@@ -54,6 +46,22 @@ extension PlayhouseUITests {
         screenshot.lifetime = .keepAlways
         add(screenshot)
         XCTFail(reason)
+    }
+    /// Drags the main window's right edge as far left as it goes, to the window's minimum
+    /// width; the test screen otherwise opens it wide enough to fit every layout's content.
+    /// Setup and teardown clear the saved frame, so later cases open at the usual size.
+    func narrowWindowToMinimumWidth() {
+        shrinkWindowToMinimum(width: true, height: false)
+    }
+    /// Drags the main window's bottom edge as far up as it goes, to the window's minimum height.
+    func shortenWindowToMinimumHeight() {
+        shrinkWindowToMinimum(width: false, height: true)
+    }
+    private func shrinkWindowToMinimum(width: Bool, height: Bool) {
+        let window = app.windows.firstMatch
+        let edge = window.coordinate(withNormalizedOffset: CGVector(dx: width ? 1 : 0.5, dy: height ? 1 : 0.5))
+            .withOffset(CGVector(dx: width ? -1 : 0, dy: height ? -1 : 0))
+        edge.press(forDuration: 0.2, thenDragTo: edge.withOffset(CGVector(dx: width ? -window.frame.width : 0, dy: height ? -window.frame.height : 0)))
     }
     func clearSavedWindowFrames() {
         guard let bundleIdentifier = Bundle(url: appBundle)?.bundleIdentifier,

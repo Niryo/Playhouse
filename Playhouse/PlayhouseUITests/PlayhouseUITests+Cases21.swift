@@ -519,10 +519,11 @@ extension PlayhouseUITests {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stage("second-result-ready").path) }, timeout: 15),
                       "The fixture should pause between the first result and the woken turn's result.")
-        // The fixture reaches this pause before the window shows the turn it started, so
-        // the stop button is checked only once the first turn's answer has streamed in.
+        // The fixture reaches this pause before the window shows the turn it started. The
+        // turn's running state reaches the window on the runtime feed, separately from the
+        // streamed answer, so the answer can show a moment before Stop does.
         XCTAssertTrue(waitUntil({ self.transcriptContains("SHELL STARTED") }, timeout: 10))
-        XCTAssertTrue(element("pause-response-button").exists, "The turn must be active once its first answer streams in.")
+        XCTAssertTrue(element("pause-response-button").waitToExist(timeout: 5), "The turn must be active once its first answer streams in.")
         XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
                        "The first turn's result must not end the turn while the woken turn that started before it is unfinished.")
         XCTAssertEqual(try taskRecord(id: earlyID)?["status"] as? String, "In Progress")
@@ -678,8 +679,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable.path + ".nudged-final-ready") }, timeout: 40),
                       "The steered nudge turn keeps working before its final answer.")
         // The steer came from outside this window, which follows the running turn's stream: what the
-        // turn streams after the steer renders below it while the turn still runs.
-        XCTAssertTrue(element("pause-response-button").exists, "The steered nudge turn is still running.")
+        // turn streams after the steer renders below it while the turn still runs. The nudge turn's
+        // running state arrives on the runtime feed, separately from its stream, so wait for Stop.
+        XCTAssertTrue(element("pause-response-button").waitToExist(timeout: 5), "The steered nudge turn is still running.")
         assertWorkStaysAboveSteer("Also double check the docs.", state: "while the steered nudge turn runs")
         let liveCommentary = transcriptMessage(commentary)
         XCTAssertTrue(liveCommentary.waitToExist(timeout: 10), "The work streamed after the steer shows while the turn runs.")

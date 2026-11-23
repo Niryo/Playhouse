@@ -719,10 +719,15 @@ extension PlayhouseUITests {
         picker.typeKey(XCUIKeyboardKey.upArrow.rawValue, modifierFlags: [])
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: summary) != original }, timeout: 5), "Stepping the date picker changes the hint's time.")
         let stepped = accessibleLabelOrValue(of: summary)
-        // Clicking the field opens the picker's calendar above it, which would swallow the next
-        // click. The summary sits below the field, outside the calendar, so clicking it closes
-        // the calendar without picking a day.
-        summary.click()
+        // Clicking the field opens the picker's calendar, which would swallow the next click. It
+        // opens below or above the field, whichever has room, and can cover the summary; the
+        // hint's empty area right of the field and left of its edge is outside the calendar
+        // either way, so clicking there closes it without picking a day.
+        let hint = element("schedule-hint")
+        let field = picker.frame, hintFrame = hint.frame
+        hint.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: (field.maxX + hintFrame.maxX) / 2 - hintFrame.minX, dy: field.midY - hintFrame.minY))
+            .click()
         XCTAssertTrue(waitUntil({ self.app.datePickers.count == pickerCount }, timeout: 5), "The picker's calendar closes.")
         XCTAssertTrue(element("schedule-hint").exists, "Closing the calendar keeps the hint open.")
         XCTAssertEqual(accessibleLabelOrValue(of: summary), stepped, "Closing the calendar keeps the stepped time.")
@@ -787,15 +792,21 @@ extension PlayhouseUITests {
         tab.click()
     }
     /// Rows of the raw input list are drawn lazily; scrolls the list until one is on screen.
+    /// The list also keeps rows just past its bottom edge, so a row that exists can still be
+    /// out of view; it scrolls until the row sits inside the list.
     func revealRawInputRow(_ identifier: String) {
         let row = element(identifier)
         let list = element("raw-input-list")
         XCTAssertTrue(list.waitToExist(timeout: 10))
         for _ in 0..<20 {
-            guard !row.exists else { break }
-            list.scroll(byDeltaX: 0, deltaY: -300)
+            let frame = row.exists ? (try? row.snapshot())?.frame : nil
+            if let frame, list.frame.contains(frame) { break }
+            // A row drawn above the list's top scrolls back up; a missing or lower one, down.
+            list.scroll(byDeltaX: 0, deltaY: frame.map { $0.minY < list.frame.minY } == true ? 300 : -300)
         }
         XCTAssertTrue(row.waitToExist(timeout: 5), "\(identifier) should be on screen after scrolling the list.")
+        // A row joins the list while the wheel scroll still glides; callers click rows next.
+        XCTAssertTrue(waitForStableFrame(row) && list.frame.contains(row.frame), "\(identifier) should settle in view after scrolling the list.")
     }
     func duplicateTokens(taskID: String, environment: [String: String]) throws -> String {
         let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID], extraEnvironment: environment)["result"] as? [String: Any])
@@ -1428,7 +1439,11 @@ extension PlayhouseUITests {
         environment["CODEX_HOME"] = codexHome
         environment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
-        environment["PLAYHOUSE_E2E_DEFAULT_PARENT_FOLDER"] = launchDefaultParent ?? "__unset__"
+        // The Suggestions from prompt can't be dismissed, so a case launched without a folder
+        // starts with the fixture's parent, which keeps the prompt from opening at launch, and
+        // `waitForBoardOrAbortSuite` clears it once the board shows. The prompt's own case
+        // launches with no folder; a send or schedule without a folder still opens the prompt.
+        environment["PLAYHOUSE_E2E_DEFAULT_PARENT_FOLDER"] = launchDefaultParent ?? (clearsParentAfterLaunch ? fixture.parent.path : "__unset__")
         if usesLiveCodex {
             environment["PLAYHOUSE_RUN_CODEX_INTEGRATION"] = "1"
         }
