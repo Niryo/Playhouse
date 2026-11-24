@@ -148,6 +148,12 @@ extension TaskConversationView {
             .onChange(of: isResponding) { _, isResponding in
                 if isResponding { scroll.followIfAtBottom() }
             }
+            .task(id: latestActiveProcess?.id) {
+                // An operation earns its own row only once it has run for a moment.
+                try? await Task.sleep(for: .seconds(Self.activeProcessSettleDelay))
+                guard !Task.isCancelled else { return }
+                settledActiveProcessID = latestActiveProcess?.id
+            }
             .onChange(of: userInputRequest?.id) { _, requestID in
                 // The question form sits below the latest message; bring it into view
                 // whether it arrives with the history or later from the daemon.
@@ -333,9 +339,26 @@ extension TaskConversationView {
         return activities.filter { $0.recalledChatPageID != nil && !inlineIDs.contains($0.id) }
     }
 
+    /// How long a live operation runs, in seconds, before it leaves the activity list for its own row.
+    /// The row counts elapsed time in whole seconds, so an operation shorter than one has nothing
+    /// for it to show that the list doesn't.
+    static let activeProcessSettleDelay: TimeInterval = 1
+
+    /// The latest live operation, once it has run for `activeProcessSettleDelay`: since its start
+    /// when that is known, as for a reopened task's long command, else since this window saw it.
+    /// A provider can report an operation's start and end together (Codex reports the commands
+    /// of a code cell once they ran, and a backlog of events arrives at once), and a row for each
+    /// would flash Running and vanish before it could be read. Until then it waits in the list.
+    var activeProcess: ConversationActivity? {
+        guard let process = latestActiveProcess else { return nil }
+        if process.id == settledActiveProcessID { return process }
+        guard let startedAt = process.startedAt, Date().timeIntervalSince(startedAt) >= Self.activeProcessSettleDelay else { return nil }
+        return process
+    }
+
     /// Keep the latest live non-agent operation in the conversation timeline.
     /// Earlier live operations remain available in the expanded activity list.
-    var activeProcess: ConversationActivity? {
+    var latestActiveProcess: ConversationActivity? {
         activities
             .filter { !$0.isSubagent && !$0.isContextCompaction && $0.isActive && $0.recalledChatPageID == nil }
             .enumerated()

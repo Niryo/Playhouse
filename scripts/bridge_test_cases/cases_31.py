@@ -256,6 +256,8 @@ Playhouse.service.on("agent.finished", async function (e) {
         self.assertIn("Also check the tests.", texts)
         self.assertEqual(texts[-1], "OpenCode fixture took the steer: Also check the tests.")
         self.assertIn("Holding the OpenCode turn.", texts, "What OpenCode wrote before the steer stays above it.")
+        self.assertLess(texts.index("Holding the OpenCode turn."), texts.index("Also check the tests."),
+                        f"What OpenCode wrote before the steer is recorded above it: {texts}")
 
         # Stop interrupts the running execution; the task waits for the user without a failure.
         ready.unlink()

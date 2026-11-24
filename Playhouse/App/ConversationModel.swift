@@ -732,6 +732,8 @@ private struct ConversationSteerMailboxRequest: Codable {
     var imageDataURLs: [String]? = []
     /// "interrupt" asks the owner to stop its turn; absent means steer.
     var kind: String? = nil
+    /// When the user sent the steer, which the owner records it as of.
+    var sentAt: Date? = nil
 }
 
 private struct ConversationSteerMailboxActiveTurn: Codable {
@@ -786,7 +788,8 @@ enum ConversationSteerMailbox {
         let requestID = UUID().uuidString
         let requestURL = directory.appendingPathComponent("\(requestID).request.json")
         let responseURL = directory.appendingPathComponent("\(requestID).response.json")
-        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text, imageDataURLs: imageDataURLs, kind: kind)
+        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text, imageDataURLs: imageDataURLs, kind: kind,
+                                                      sentAt: ConversationManager.steerSentAt)
         try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
         _ = Darwin.chmod(requestURL.path, mode_t(0o600))
         defer {
@@ -833,7 +836,9 @@ enum ConversationSteerMailbox {
                 do {
                     let accepted = request.kind == "interrupt"
                         ? try await interrupt()
-                        : try await steer(request.text, request.imageDataURLs ?? [])
+                        : try await ConversationManager.$steerSentAt.withValue(request.sentAt) {
+                            try await steer(request.text, request.imageDataURLs ?? [])
+                        }
                     response = ConversationSteerMailboxResponse(accepted: accepted, error: nil)
                 } catch {
                     response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)

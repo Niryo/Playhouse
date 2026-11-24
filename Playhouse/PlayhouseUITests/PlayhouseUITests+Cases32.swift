@@ -1201,7 +1201,7 @@ extension PlayhouseUITests {
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user's stop leaves no failure reason.")
     }
 
-    // case-contract: test_codex_steer_during_turn_launch_reaches_started_turn | A steer sent while Codex is still starting the thread waits for the turn instead of missing it: once the turn has its ID the steer reaches that turn through turn/steer and is not queued for a turn of its own. A follow-up can be queued during the same launch, before Codex has named the conversation; steered, it reaches that turn the same way and leaves the queue. One left in the queue runs once as a turn of its own after that turn ends. In the window the steer's bubble joins the transcript and the composer clears at once, a follow-up typed with Return joins the queue at once without an error, and its row gives way to its bubble at once when steered, while Codex is still held and has not received either.
+    // case-contract: test_codex_steer_during_turn_launch_reaches_started_turn | A steer sent while Codex is still starting the thread waits for the turn instead of missing it: once the turn has its ID the steer reaches that turn through turn/steer and is not queued for a turn of its own. A follow-up can be queued during the same launch, before Codex has named the conversation; steered, it reaches that turn the same way and leaves the queue. One left in the queue runs once as a turn of its own after that turn ends. In the window the steer's bubble joins the transcript and the composer clears at once, a follow-up typed with Return joins the queue at once without an error, and its row gives way to its bubble at once when steered, while Codex is still held and has not received either. When Codex sends the turn's first commentary ahead of its turn/start answer, and so takes both steers only after Playhouse recorded that commentary, both steers still stay above it: in recorded history, and in the window as the turn streams and after the task is reopened while the turn still runs.
     func test_codex_steer_during_turn_launch_reaches_started_turn() throws {
         let title = "Codex steer during launch"
         let steerText = "Steer the turn that is still starting."
@@ -1210,6 +1210,10 @@ extension PlayhouseUITests {
         let executable = try prepareLaunchFixture(provider: "codex", name: "codex-fixture-steer-queue-serial-success-wait")
         let taskID = try createLaunchTask(title: title, provider: "codex")
         try writeLaunchMarker(executable, "thread-start-pause")
+        // Codex sends the turn's first item ahead of its turn/start answer, so it reaches
+        // Playhouse before either steer can reach Codex.
+        try writeLaunchMarker(executable, "commentary-before-turn-response")
+        let commentary = "Codex wrote this before Playhouse saw its turn start."
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)
         let composer = element("message-composer")
@@ -1270,6 +1274,24 @@ extension PlayhouseUITests {
             (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.compactMap { $0["id"] as? String } == [laterID]
         }, timeout: 10), "Only the follow-up that was not steered stays queued.")
         XCTAssertTrue(element("queued-message-text-\(laterID)").exists)
+        // Both steers were sent before the window saw anything of the turn, so what Codex wrote
+        // ahead of its turn/start answer renders below them, though Codex took them after it:
+        // as streamed, and as recorded once the task is reopened while the turn still runs.
+        assertSteersPrecede(commentary, steers: [steerText, rowText], state: "as the turn streams")
+        attachScreenshot(named: "Codex launch: the turn's first commentary renders below both steers")
+        returnToBoard()
+        openTask(named: title)
+        assertSteersPrecede(commentary, steers: [steerText, rowText], state: "after reopening the running task")
+        attachScreenshot(named: "Codex launch: reopened, the recorded commentary stays below both steers")
+        let running = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let runningTexts = (running["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        XCTAssertEqual(runningTexts.filter { $0 == commentary }.count, 1, "The commentary is recorded once.")
+        if let commentaryIndex = runningTexts.firstIndex(of: commentary),
+           let steerIndex = runningTexts.firstIndex(of: steerText), let rowIndex = runningTexts.firstIndex(of: rowText) {
+            XCTAssertLessThan(max(steerIndex, rowIndex), commentaryIndex, "Both steers are recorded above the commentary: \(runningTexts)")
+        } else {
+            XCTFail("History should hold both steers and the commentary: \(runningTexts)")
+        }
         try writeLaunchMarker(executable, "resolve-continue")
         XCTAssertTrue(waitUntil({ ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.count ?? 1) == 0 }, timeout: 30), "The follow-up left in the queue should be delivered after the steered turn.")
         XCTAssertTrue(transcriptMessage(laterText).waitToExist(timeout: 10), "The delivered follow-up should join the transcript.")
@@ -1290,6 +1312,19 @@ extension PlayhouseUITests {
         }
         XCTAssertFalse(element("queued-message-text-\(rowID)").exists)
         attachScreenshot(named: "Codex launch: both steers stayed in the finished turn")
+    }
+
+    /// Each steer's bubble renders above `commentary`'s.
+    private func assertSteersPrecede(_ commentary: String, steers: [String], state: String,
+                                     file: StaticString = #filePath, line: UInt = #line) {
+        let written = transcriptMessage(commentary)
+        XCTAssertTrue(written.waitToExist(timeout: 10), "The turn's commentary is shown \(state).", file: file, line: line)
+        for steer in steers {
+            let bubble = transcriptMessage(steer)
+            XCTAssertTrue(bubble.waitToExist(timeout: 10), "The steer \(steer.debugDescription) is shown \(state).", file: file, line: line)
+            XCTAssertLessThanOrEqual(bubble.frame.maxY, written.frame.minY,
+                                     "The steer \(steer.debugDescription) renders above the commentary \(state).", file: file, line: line)
+        }
     }
 
     // case-contract: test_codex_stop_reaches_message_waiting_behind_stopping_turn | A message sent while the task's earlier turn is still being stopped waits for that turn, and a Stop that arrives while it waits stops it too. That Stop answers at once without asking Codex to interrupt a second time; once the earlier turn is over the waiting send ends with turn_stopped, no second turn starts, and the task stays in Waiting Response with no failure reason. In the window Continue replaces Stop at once, the stopped Continue's message leaves the transcript without an error, and Continue stays available for the turn that was stopped first. The stopped message is saved neither as a draft nor as a prompt still being sent.

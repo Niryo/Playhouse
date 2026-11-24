@@ -5,10 +5,12 @@ import Darwin
 import SQLite3
 
 extension ConversationManager {
-    /// Records a message of a local turn as its provider streamed it.
+    /// Records a message of a local turn as its provider streamed it. A new message takes its
+    /// place by its `createdAt`, after the turn's prompt: one created now, as live messages are,
+    /// goes last, and one created earlier, such as a steer, goes back to where it was written.
     func recordTurnMessage(
         taskID: UUID, turnID: String, provider: ConversationProvider = .claude,
-        modelID: String? = nil, replacingID: String? = nil, _ message: ConversationMessage
+        modelID: String? = nil, replacingID: String? = nil, followsRecorded: Bool = false, _ message: ConversationMessage
     ) {
         do {
             try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
@@ -37,8 +39,21 @@ extension ConversationManager {
                     message.createdAt = message.createdAt ?? transcript.turns[index].messages[existing].createdAt
                     transcript.turns[index].messages[existing] = message
                 } else {
-                    message.createdAt = message.createdAt ?? .now
-                    transcript.turns[index].messages.append(message)
+                    var createdAt = message.createdAt ?? .now
+                    // `followsRecorded` keeps a message moved back in time below what the turn
+                    // already recorded, so it only goes above what is recorded after it.
+                    if followsRecorded, let latest = transcript.turns[index].messages.compactMap(\.createdAt).max() {
+                        createdAt = max(createdAt, latest)
+                    }
+                    message.createdAt = createdAt
+                    // A message written before ones the turn recorded since, such as a steer its
+                    // provider took only after them, goes back to where it was written. The turn's
+                    // own prompt stays first: it is recorded once the turn launches, so a steer sent
+                    // while it launched can predate it.
+                    let messages = transcript.turns[index].messages
+                    let position = messages.isEmpty ? 0
+                        : (messages.lastIndex { ($0.createdAt ?? .distantPast) <= createdAt } ?? messages.startIndex) + 1
+                    transcript.turns[index].messages.insert(message, at: position)
                 }
             }
         } catch {
@@ -427,8 +442,11 @@ extension ConversationManager {
                 await onUserInput(request)
             },
             onSteerMessage: { message, images in
+                // Recorded as of when the user sent it: what the turn wrote while the provider
+                // was still to take it stays below it, as the window showed it.
                 self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, ConversationMessage(
-                    id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
+                    id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images,
+                    createdAt: Self.steerSentAt ?? .now
                 ))
                 onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
             },
@@ -443,7 +461,14 @@ extension ConversationManager {
                     // Progress that was only the echo leaves nothing to show.
                     if message.text.isEmpty, message.asyncQuestions == nil { return }
                 }
-                self.recordTurnMessage(taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, message)
+                // What a provider closes because a steer reached it, such as an answer it held
+                // open, was written before that steer, so it stays above the steer.
+                // It never goes above what the turn recorded before it.
+                let closedBySteer = Self.steerSentAt.map { (message.createdAt ?? .now) > $0 } ?? false
+                if closedBySteer { message.createdAt = Self.steerSentAt }
+                self.recordTurnMessage(
+                    taskID: taskID, turnID: localTurnID, provider: provider, modelID: modelID, followsRecorded: closedBySteer, message
+                )
                 // A notice the provider's runtime added to the turn streams as the user-side
                 // message it is recorded as, not as the assistant's progress.
                 if message.role == .user {

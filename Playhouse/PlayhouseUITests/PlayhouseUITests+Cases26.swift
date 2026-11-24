@@ -565,6 +565,8 @@ extension PlayhouseUITests {
         sendFromComposer(prompt)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: hold + "-ready") }, timeout: 20), "The fixture holds the turn while the heredoc runs.")
         XCTAssertTrue(longTitle.waitToExist(timeout: 10), "The running heredoc shows as the live command row.")
+        // It takes the live row once it has run for a moment; Working for lists it until then.
+        XCTAssertTrue(waitUntil({ !toggle.exists && longRow.label.contains(lastLine) }, timeout: 5), "The running heredoc moves to the live command row.")
         XCTAssertTrue(text(of: longTitle).contains(heredocPreview), "The live row shows the command's first line with an ellipsis: \(text(of: longTitle))")
         XCTAssertFalse(text(of: longTitle).contains("Release note line"), "The live row shows none of the heredoc's body.")
         XCTAssertFalse(toggle.exists, "The live command row has no expand control.")

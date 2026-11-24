@@ -208,6 +208,17 @@ def subagents(runtime, _session_state, message):
             "cwd": "/tmp/playhouse-fixture", "status": "inProgress",
         }
         for _session_state.tool_item in [_session_state.mcp_item, _session_state.dynamic_item, _session_state.legacy_dynamic_item, _session_state.active_command_item]:
+            if _session_state.tool_item is _session_state.active_command_item:
+                # Lets a test watch the window before the command starts, to see where it first lands.
+                base = str(runtime.sys.argv[0])
+                if runtime.Path(base + ".tool-command-start-pause").exists():
+                    runtime.Path(base + ".tool-command-start-ready").write_text("The other tool calls started.\n", encoding="utf-8")
+                    _session_state.deadline = runtime.time.monotonic() + 30
+                    while not runtime.Path(base + ".tool-command-start-release").exists() and runtime.time.monotonic() < _session_state.deadline:
+                        _session_state.drain_pending_stdin()
+                        runtime.time.sleep(0.02)
+                    if not runtime.Path(base + ".tool-command-start-release").exists():
+                        runtime.os._exit(3)
             runtime.write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": runtime.THREAD_ID, "item": _session_state.tool_item}})
         _session_state.ready = runtime.Path(str(runtime.sys.argv[0]) + ".tool-ready")
         _session_state.release = runtime.Path(str(runtime.sys.argv[0]) + ".tool-release")

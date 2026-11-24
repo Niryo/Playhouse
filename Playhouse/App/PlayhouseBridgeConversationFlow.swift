@@ -33,7 +33,9 @@ extension PlayhouseBridgeRuntime {
             try conversations.removeQueuedMessage(taskID: request.requiredUUID("taskID"), messageID: request.requiredUUID("messageID"))
             return .object(["removed": .boolean(true)])
         case "conversation.queue.steer":
-            let steered = try await conversations.steerQueuedMessage(taskID: request.requiredUUID("taskID"), messageID: request.requiredUUID("messageID"))
+            let steered = try await conversations.steerQueuedMessage(
+                taskID: request.requiredUUID("taskID"), messageID: request.requiredUUID("messageID"), sentAt: Self.steerSentAt(request)
+            )
             return .object([
                 "text": .string(steered.message), "images": .array(steered.imageDataURLs.map(BridgeValue.string)),
                 "accepted": .boolean(true), "queued": .boolean(!steered.accepted)
@@ -42,7 +44,7 @@ extension PlayhouseBridgeRuntime {
             let taskID = try request.requiredUUID("taskID")
             let accepted = try await conversations.steer(
                 taskID: taskID, text: request.arguments["message"]?.string ?? "",
-                imageDataURLs: request.arguments["images"]?.strings ?? []
+                imageDataURLs: request.arguments["images"]?.strings ?? [], sentAt: Self.steerSentAt(request)
             )
             if request.arguments["queueIfMissed"]?.bool == false || accepted {
                 return .object(["accepted": .boolean(accepted), "queued": .boolean(false)])
@@ -99,5 +101,10 @@ extension PlayhouseBridgeRuntime {
         default:
             throw BridgeCommandError(code: "unsupported_command", message: "Unsupported conversation flow command: \(request.command).")
         }
+    }
+
+    /// When a window says its user sent a steer, in seconds since 1970; absent for the CLI.
+    static func steerSentAt(_ request: BridgeRequest) -> Date? {
+        request.arguments["sentAt"]?.double.map(Date.init(timeIntervalSince1970:))
     }
 }

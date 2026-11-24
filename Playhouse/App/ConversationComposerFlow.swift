@@ -1049,10 +1049,13 @@ extension TaskConversationView {
         let steer = PendingLocalSteer(text: message.text, imageDataURLs: message.imageDataURLs ?? [])
         showLocalSteer(steer)
         errorMessage = nil
+        // The transcript records the steer as of now, where it shows, though it reaches the daemon
+        // only after the steers sent before it.
+        let sentAt = Date()
         deliverSteerInOrder {
             defer { steeringQueuedMessageIDs.remove(message.id) }
             do {
-                let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
+                let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id, sentAt: sentAt)
                 settleLocalSteer(steer, delivered: outcome.accepted)
                 refreshQueuedMessages()
                 guard !outcome.accepted else { return }
@@ -1082,9 +1085,10 @@ extension TaskConversationView {
         showLocalSteer(steer)
         clearHandedOffDraft()
         errorMessage = nil
+        let sentAt = Date()
         deliverSteerInOrder {
             do {
-                let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
+                let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs, sentAt: sentAt)
                 settleLocalSteer(steer, delivered: accepted)
                 guard !accepted else { return }
                 // The turn ended first, so the message runs as a turn of its own.

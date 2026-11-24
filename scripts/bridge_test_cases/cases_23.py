@@ -87,13 +87,16 @@ class BridgeTestCases23:
         self.assertEqual(stopped["status"], "Waiting Response")
         self.assertIsNone(stopped.get("statusMessage"), "A user's stop leaves no failure reason.")
 
-    # case-contract: test_codex_steer_during_turn_launch_reaches_started_turn | A steer sent while Codex is still starting the thread waits for the turn instead of missing it: once the turn has its ID the steer reaches that turn through turn/steer and is not queued for a turn of its own. A follow-up can be queued during the same launch, before Codex has named the conversation; steered, it reaches that turn the same way and leaves the queue. One left in the queue runs once as a turn of its own after that turn ends. In the window the steer's bubble joins the transcript and the composer clears at once, a follow-up typed with Return joins the queue at once without an error, and its row gives way to its bubble at once when steered, while Codex is still held and has not received either.
+    # case-contract: test_codex_steer_during_turn_launch_reaches_started_turn | A steer sent while Codex is still starting the thread waits for the turn instead of missing it: once the turn has its ID the steer reaches that turn through turn/steer and is not queued for a turn of its own. A follow-up can be queued during the same launch, before Codex has named the conversation; steered, it reaches that turn the same way and leaves the queue. One left in the queue runs once as a turn of its own after that turn ends. In the window the steer's bubble joins the transcript and the composer clears at once, a follow-up typed with Return joins the queue at once without an error, and its row gives way to its bubble at once when steered, while Codex is still held and has not received either. When Codex sends the turn's first commentary ahead of its turn/start answer, and so takes both steers only after Playhouse recorded that commentary, both steers still stay above it: in recorded history, and in the window as the turn streams and after the task is reopened while the turn still runs.
     def test_codex_steer_during_turn_launch_reaches_started_turn(self):
         task = self.create_repo_task("Codex steer during launch", [self.primary])
         executable = self.install_provider_fixture("codex", "codex-fixture-launch-steer-serial-success-wait")
         environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         steer_text = "Steer the turn that is still starting."
         self.launch_marker(executable, "thread-start-pause").write_text("hold\n", encoding="utf-8")
+        # Codex sends the turn's first item ahead of its turn/start answer, so it reaches
+        # Playhouse before either steer can reach Codex.
+        self.launch_marker(executable, "commentary-before-turn-response").write_text("emit\n", encoding="utf-8")
         send = self.start_background_cli("conversation", "send", task["id"], "--message", "Start a turn slowly.", environment=environment)
         self.wait_for(self.launch_marker(executable, "thread-start-ready").is_file, "Codex should be held while starting the thread.")
         steer = self.start_background_cli("conversation", "steer", task["id"], "--message", steer_text, environment=environment)
@@ -134,6 +137,20 @@ class BridgeTestCases23:
         self.assertEqual(turn_prompts.count(later_text), 1, "The follow-up left in the queue runs once as a turn of its own.")
         self.assertEqual(turn_prompts.index(later_text), 1, "It runs right after the turn that was starting.")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "queue-list", task["id"])[0]), [], "A delivered follow-up leaves the queue.")
+        # Both steers were sent before Playhouse saw anything of the turn, so they stay above
+        # what Codex wrote ahead of its turn/start answer, though Codex took them only after it.
+        messages = self.assert_success(self.call_cli("conversation", "history", task["id"])[0])["messages"]
+        texts = [message["text"] for message in messages]
+        commentary = "Codex wrote this before Playhouse saw its turn start."
+        for text in ("Start a turn slowly.", steer_text, row_text, commentary):
+            self.assertEqual(texts.count(text), 1, f"{text!r} should be recorded once: {texts}")
+        turn_id = messages[texts.index("Start a turn slowly.")]["turnID"]
+        for text in (steer_text, row_text, commentary):
+            self.assertEqual(messages[texts.index(text)]["turnID"], turn_id, f"{text!r} belongs to the turn that was starting.")
+        self.assertLess(
+            max(texts.index(steer_text), texts.index(row_text)), texts.index(commentary),
+            f"The steers sent while the turn launched stay above what the turn wrote meanwhile: {texts}",
+        )
 
     # case-contract: test_codex_stop_reaches_message_waiting_behind_stopping_turn | A message sent while the task's earlier turn is still being stopped waits for that turn, and a Stop that arrives while it waits stops it too. That Stop answers at once without asking Codex to interrupt a second time; once the earlier turn is over the waiting send ends with turn_stopped, no second turn starts, and the task stays in Waiting Response with no failure reason. In the window Continue replaces Stop at once, the stopped Continue's message leaves the transcript without an error, and Continue stays available for the turn that was stopped first. The stopped message is saved neither as a draft nor as a prompt still being sent.
     def test_codex_stop_reaches_message_waiting_behind_stopping_turn(self):
