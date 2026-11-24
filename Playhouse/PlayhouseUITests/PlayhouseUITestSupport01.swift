@@ -363,10 +363,23 @@ extension PlayhouseUITests {
         // Counted from before the reopened view's first load, which is already a mid-turn read.
         let resumesBeforeReopen = providerResumeCount()
 
+        // The window's reads of the newest page, which the test's own unlimited reads don't match.
+        let followedTaskID = try taskID(named: title).uppercased()
+        func windowPageReads() -> Int {
+            ((try? diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == "conversation.history.read" && $0["taskID"] as? String == followedTaskID
+                    && $0["messageLimit"] as? String == "80"
+            }.count
+        }
+        let pageReadsBeforeReopen = windowPageReads()
+
         // A reopened conversation is a new view that no longer reads the send's stream.
         element("back-to-board-button").click()
         openTask(named: title)
         XCTAssertTrue(transcriptMessage(prompt).waitToExist(timeout: 10), "The reopened conversation should load the running turn's prompt.")
+        XCTAssertTrue(waitUntil({ windowPageReads() > pageReadsBeforeReopen }, timeout: 10), "Reopening should read the newest page.")
+        XCTAssertFalse(waitUntil({ windowPageReads() > pageReadsBeforeReopen + 1 }, timeout: 3),
+                       "Following the held turn should not read the page the reopen just loaded again.")
         XCTAssertFalse(visibleText(progressText).exists, "No progress exists before the fixture continues.")
         let taskID = try taskID(named: title)
         func revision() throws -> Int {
