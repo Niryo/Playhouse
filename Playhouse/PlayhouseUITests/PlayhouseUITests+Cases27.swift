@@ -17,7 +17,7 @@ extension PlayhouseUITests {
         try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "global-agents", "Global agents skill")
         try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "blocked", "Its link path is taken")
         // The Skills page reads Claude Code's built-ins from a provider session.
-        let claudeExecutable = try installSkillsClaudeFixture("claude-fixture-skills-link")
+        let claudeExecutable = try installClaudeFixtureExecutable(named: "claude-fixture-skills-link")
         let sessionsURL = URL(fileURLWithPath: claudeExecutable.path + ".sessions")
         func claudeSessions() -> Int { ((try? String(contentsOf: sessionsURL, encoding: .utf8)) ?? "").split(separator: "\n").count }
         let claudeSkills = skillsHome.appendingPathComponent(".claude/skills")
@@ -119,7 +119,7 @@ extension PlayhouseUITests {
         let globalFolder = skillsHome.appendingPathComponent(".agents/skills")
         for name in ["global-one", "global-two"] { try writeSkill(in: globalFolder, name, "Global skill \(name)") }
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-select")
+        try installClaudeFixtureExecutable(named: "claude-fixture-skills-select")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Skills select", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -210,7 +210,7 @@ extension PlayhouseUITests {
         try FileManager.default.createDirectory(at: broken, withIntermediateDirectories: true)
         try "No frontmatter here.\n".write(to: broken.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
-        let executable = try installSkillsClaudeFixture("claude-fixture-skills-fix")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-skills-fix")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         func turns() -> [[String: Any]] {
             guard let data = try? Data(contentsOf: historyURL),
@@ -307,7 +307,7 @@ extension PlayhouseUITests {
             ".claude/skills/repo-off/SKILL.md": skillManifest("repo-off", "Turned off in Playhouse"),
         ])
         try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "global-agents", "Global skill bridged to Claude")
-        let executable = try installSkillsClaudeFixture("claude-fixture-skills-bridge")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-skills-bridge")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Claude skills", repositories: [repository], provider: "claude")
@@ -390,7 +390,7 @@ extension PlayhouseUITests {
         ])
         try writeSkill(in: skillsHome.appendingPathComponent(".claude/skills"), "global-claude", "Global skill bridged to Codex")
         // The Skills page reads Claude Code's built-ins from a provider session.
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-codex")
+        try installClaudeFixtureExecutable(named: "claude-fixture-skills-codex")
         // Its own daemon, so restarting it below leaves the UI runner's shared one alone.
         let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).skills-codex-\(UUID().uuidString.prefix(8))"]
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
@@ -474,7 +474,7 @@ extension PlayhouseUITests {
         let other = try makeSkillRepository("skills-private-other", skills: [:])
         try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "global-taken", "A global skill")
         // The Skills page reads Claude Code's built-ins from a provider session.
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-private")
+        try installClaudeFixtureExecutable(named: "claude-fixture-skills-private")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Private skills", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -673,7 +673,7 @@ extension PlayhouseUITests {
         ])
         let second = try makeSkillRepository("skills-private-second", skills: [:])
         let plain = try makeSkillRepository("skills-private-plain", skills: [:])
-        let executable = try installSkillsClaudeFixture("claude-fixture-private-bridge")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-private-bridge")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Private Claude skills", repositories: [repository], provider: "claude")

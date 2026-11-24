@@ -35,7 +35,7 @@ extension PlayhouseUITests {
             "[mcp_servers.off-tool]", "command = \"off-tool\"", "enabled = false", "",
         ].joined(separator: "\n"))
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-catalog")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-catalog")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("MCP catalog", repositories: [working, other, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -180,7 +180,7 @@ extension PlayhouseUITests {
             "[profiles.fast]", "model = \"gpt-6-mini\"", "",
         ].joined(separator: "\n"))
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-manage")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-manage")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("MCP manage", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -316,7 +316,7 @@ extension PlayhouseUITests {
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
         let beforeClaude = try String(contentsOf: mcpClaudeState, encoding: .utf8)
         let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-link")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-link")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("MCP links", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -395,7 +395,7 @@ extension PlayhouseUITests {
         try writeMcpJSON(mcpClaudeState, ["mcpServers": ["clash": ["type": "stdio", "command": "clash-a", "args": [], "env": [:]]]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.clash]\ncommand = \"clash-b\"\n")
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
-        let executable = try installSkillsClaudeFixture("claude-fixture-mcp-fix")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-fix")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let source = try createSkillsTask("MCP fix source", repositories: [repository], provider: "claude")
@@ -469,7 +469,7 @@ extension PlayhouseUITests {
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\nenv_vars = [\"CODEX_KEY\"]\n\n[mcp_servers.codex-off]\ncommand = \"codex-off\"\n")
         let beforeClaude = try String(contentsOf: mcpClaudeState, encoding: .utf8)
         let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
-        let executable = try installSkillsClaudeFixture("claude-fixture-mcp-bridge")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-bridge")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Claude MCP", repositories: [repository, extra], provider: "claude")
@@ -544,7 +544,7 @@ extension PlayhouseUITests {
         ]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\n\n[mcp_servers.codex-off]\ncommand = \"codex-off\"\n")
         let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-codex")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-codex")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Codex MCP", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -634,7 +634,7 @@ extension PlayhouseUITests {
         let repository = try makeSkillRepository("mcp-status-repo", skills: [:])
         try writeMcpJSON(mcpClaudeState, ["mcpServers": ["claude-remote": ["type": "http", "url": "https://remote.example.com/mcp"]]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-remote]\nurl = \"https://codex.example.com/mcp\"\n\n[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\n")
-        let claude = try installSkillsClaudeFixture("claude-fixture-mcp-status")
+        let claude = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-status")
         try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [
             ["name": "claude-remote", "status": "needs-auth"],
             ["name": "claude.ai Notes", "status": "needs-auth"],
@@ -740,7 +740,7 @@ extension PlayhouseUITests {
             "claude-other": ["type": "http", "url": "https://other.example.com/mcp"],
         ]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.shared-remote]\nurl = \"https://remote.example.com/mcp\"\n\n[mcp_servers.codex-remote]\nurl = \"https://codex.example.com/mcp\"\n\n[mcp_servers.codex-other]\nurl = \"https://codex-other.example.com/mcp\"\n")
-        let claude = try installSkillsClaudeFixture("claude-fixture-mcp-auth")
+        let claude = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-auth")
         try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [
             ["name": "shared-remote", "status": "needs-auth"], ["name": "claude-other", "status": "needs-auth"],
         ])

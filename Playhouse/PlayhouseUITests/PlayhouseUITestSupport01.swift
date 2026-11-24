@@ -864,9 +864,15 @@ extension PlayhouseUITests {
         XCTAssertTrue(records.allSatisfy { $0["isPending"] as? Bool == false })
         return added
     }
-    func installSkillsClaudeFixture(_ name: String) throws -> URL {
+    /// Copies the Claude Code protocol fixture into this case's data directory under `name`,
+    /// marks the directory as the fixture's owner, and makes the app's turns use it. Must run
+    /// before `launchApp`. Returns the copied executable.
+    @discardableResult
+    func installClaudeFixtureExecutable(named name: String) throws -> URL {
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path), "The prepared Claude Code fixture is missing or not executable.")
         let executable = dataDirectory.appendingPathComponent(name)
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: executable)
+        try copyFixtureFile(at: source, to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
             to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")

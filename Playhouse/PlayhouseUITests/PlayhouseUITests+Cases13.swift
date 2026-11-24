@@ -13,18 +13,7 @@ extension PlayhouseUITests {
     func test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary() throws {
         let executablePath = try makeCodexFixture(emptyQuestions: false).path
         codexFixtureExecutable = executablePath
-        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-provider-switch")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: claudeExecutable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = claudeExecutable.path
+        let claudeExecutable = try installClaudeFixtureExecutable(named: "claude-fixture-provider-switch")
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Provider switch UI", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Provider switch UI")
@@ -184,13 +173,7 @@ extension PlayhouseUITests {
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question-queued").path
         // Claude is installed, so the menu offers it as a provider rather than as Add Claude.
-        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-rejected-switch")
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
-        )
-        claudeFixtureExecutable = claudeExecutable.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-rejected-switch")
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Rejected provider switch")
         element("message-composer").click()
@@ -227,13 +210,7 @@ extension PlayhouseUITests {
     func test_conversation_transcript_reopens_from_local_store() throws {
         let executablePath = try makeCodexFixture(emptyQuestions: false).path
         codexFixtureExecutable = executablePath
-        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-local-store")
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
-        )
-        claudeFixtureExecutable = claudeExecutable.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-local-store")
         // Its own daemon, so killing it before reopening leaves the UI runner's shared one alone.
         let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).local-store-\(UUID().uuidString.prefix(8))"]
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
@@ -429,19 +406,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_resume_recovers_visible_history | A Claude turn that fails after Claude Code created its session leaves that session in place, and the next turn resumes it instead of claiming the same session ID again. After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
     func test_claude_resume_recovers_visible_history() throws {
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-resume-recovery")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path), "The prepared Claude Code fixture is missing or not executable.")
-        try copyFixtureFile(at: source, to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let owner = dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        let ownerContents = "Playhouse test owns this Claude Code protocol fixture (v1).\n"
-        if FileManager.default.fileExists(atPath: owner.path) {
-            XCTAssertEqual(try String(contentsOf: owner, encoding: .utf8), ownerContents)
-        } else {
-            try Data(ownerContents.utf8).write(to: owner)
-        }
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-resume-recovery")
         launchApp(defaultParent: fixture.parent.path)
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude resume recovery UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
@@ -703,16 +668,7 @@ extension PlayhouseUITests {
     // case-contract: test_standalone_chat_page_anchors_jump_and_recall | The standalone chat's pages can be read one at a time: `conversation history --page <page-id> --limit N` returns the window that starts at that page's first message, with earlierMessageCount and laterMessageCount telling how much of the chat lies before and after it, and `--after <message-id>` continues the window forward, so jumping to an old page reads only that page's window rather than every page around it. The windows match the same slices of the full history; an unknown page or message is not_found, combining --before, --after and --page is invalid_argument, and --page on a board task is invalid_argument. In the chat, a compact column of page labels left of the transcript, centered on its height, lists the pages by title (long titles truncated), newest at the bottom, well apart, at most 10 in view at a time with no scroll bar, reading only the 10 newest labels at first and older ones, 10 at a time, only as the column is scrolled up, and shown as soon as the chat opens without waiting for the provider's model list, with the store's pages indexed by chat and age so reading the newest few never sorts the whole chat; clicking a label shows that page from its first message with only its window loaded (the transcript reports Showing earlier), scrolling down loads the following messages, the label of the page at the top of the transcript is marked current, and Latest returns to the newest messages, as does the Jump to bottom arrow centered below the labels, from an earlier page or after scrolling up the newest messages, at once and without the labels moving off the transcript's middle. Unlocked, which is the default, the labels are folded into a long thin handle at the transcript's leading edge halfway down it, and the messages keep their width: hovering the handle slides the labels out and pushes the messages right without narrowing them, widening the chat sidebar by the labels' room, which pushes the board's columns right, instead of reflowing the messages' text, the handle's target reaches the chat's leading edge, so with the chat against the main board sidebar's border, a pointer pushed against that border beside the handle slides them out too, they stay out as the pointer moves from the handle onto them, and moving the pointer off them folds them back in, once, even when the pointer rests beside them where the folding labels pass. The handle stays beside the open labels, thicker, under a small open lock icon that is absent while they are folded, and clicking it locks them open after the pointer leaves, closing the lock while the handle keeps its color, which persists across a relaunch; clicking it again unlocks them, opening the lock, so they fold back into the handle when the pointer leaves; agent replies end at the same right edge as the user's messages. A page separator's Recall button, with a hint that it references that conversation, returns to the bottom of the chat and shows Recalling <title> in the composer; the next message carries that page into the turn through the provider-neutral context-page seeding (the CLI's --context-page), and the indication can be removed and clears after sending. Page windows, labels and recall are Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_anchors_jump_and_recall() throws {
         executionTimeAllowance = 360 // It walks 45 pages: jumps, Latest, Jump to bottom, recall, a turn and a relaunch.
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-anchors")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-chat-page-anchors")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
         let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
@@ -1118,16 +1074,7 @@ extension PlayhouseUITests {
     // case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest ten labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_labels_search() throws {
         executionTimeAllowance = 240
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-search")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        )
-        claudeFixtureExecutable = executable.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-chat-page-search")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
         let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
@@ -1227,13 +1174,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_transcript_rows_stay_with_older_messages | A provider divider and a goal achievement stay right after the message they were recorded after. A long Claude history whose switch from Codex sits on its older page, with a switch to Claude and back that sent nothing stored on the same message, has one Codex-to-Claude divider after the last Codex message in complete and paged CLI/XPC history, the empty switch pair dropped, and the newest page leaves that message out; another turn leaves the divider where it was. Opened on its newest page, the visible transcript draws neither that divider nor a goal achievement recorded after the last Codex message, at the bottom or anywhere after a newer message, and they stay hidden after a new message is sent from the composer; a goal achievement recorded after the latest turn's folded commentary follows that turn's question, above its answer, not the newest message. Scrolling up loads the older page and shows the one divider, then that goal achievement, right after the last Codex message and before the next question, with no Switched to Codex divider. The placement is Playhouse-owned and the same for both providers, so one switch from Codex to Claude covers the case.
     func test_transcript_rows_stay_with_older_messages() throws {
-        let claude = dataDirectory.appendingPathComponent("claude-fixture-row-anchors")
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claude)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
-        )
-        claudeFixtureExecutable = claude.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-row-anchors")
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         launchApp(defaultParent: fixture.parent.path)
         let title = "Rows with older messages"

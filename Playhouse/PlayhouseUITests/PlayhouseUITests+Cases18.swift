@@ -242,19 +242,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store ahead of the reader, while loaded messages still remain above the rendered ones, until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again. A Claude conversation that never chose a model resolves it from its stored turns, in CLI/XPC reads and in the reopened composer’s picker: the newest assistant message that names a model, not an older turn’s model or the provider-wide remembered selection.
     func test_conversation_history_pages_claude_transcript_from_store() throws {
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-long-history")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path), "The prepared Claude Code fixture is missing or not executable.")
-        try copyFixtureFile(at: source, to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let owner = dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        let ownerContents = "Playhouse test owns this Claude Code protocol fixture (v1).\n"
-        if FileManager.default.fileExists(atPath: owner.path) {
-            XCTAssertEqual(try String(contentsOf: owner, encoding: .utf8), ownerContents)
-        } else {
-            try Data(ownerContents.utf8).write(to: owner)
-        }
-        claudeFixtureExecutable = executable.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-long-history")
         launchApp(defaultParent: fixture.parent.path)
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude paged history", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",

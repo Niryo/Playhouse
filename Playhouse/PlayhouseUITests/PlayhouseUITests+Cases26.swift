@@ -867,7 +867,7 @@ extension PlayhouseUITests {
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills"), "codex-legacy", "Codex legacy user skill")
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
         try writeSkill(in: skillsHome.appendingPathComponent(".claude/skills/synced/bucket-one"), "synced-skill", "Synced from claude.ai")
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-catalog")
+        try installClaudeFixtureExecutable(named: "claude-fixture-skills-catalog")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Skills catalog", repositories: [repository, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -1106,7 +1106,7 @@ extension PlayhouseUITests {
     func test_skills_create_update_move_and_delete_on_disk() throws {
         let repository = try makeSkillRepository("skills-manage-repo", skills: [:])
         // The Skills page reads Claude Code's built-ins from a provider session.
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-manage")
+        try installClaudeFixtureExecutable(named: "claude-fixture-skills-manage")
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Skills manage", repositories: [repository])

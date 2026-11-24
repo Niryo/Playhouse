@@ -1720,7 +1720,7 @@ extension PlayhouseUITests {
         ])
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "slash-system-skill", "Bundled with Codex")
         try writeMcpJSON(mcpClaudeState, ["mcpServers": ["slash-remote": ["type": "http", "url": "https://remote.example.com/mcp"]]])
-        let claude = try installSkillsClaudeFixture("claude-fixture-slash")
+        let claude = try installClaudeFixtureExecutable(named: "claude-fixture-slash")
         let claudeAuth = URL(fileURLWithPath: claude.path + ".auth-state")
         try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [["name": "slash-remote", "status": "needs-auth"]])
         try writeMcpJSON(URL(fileURLWithPath: codexPath + ".mcp-status"), [["name": "slash-remote", "authStatus": "notLoggedIn", "tools": [:]]])

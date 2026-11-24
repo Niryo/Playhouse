@@ -130,11 +130,13 @@ final class PlayhouseBridgeRuntime {
             }
             // Watchers receive provider pushes immediately and periodically refresh both
             // accounts to catch usage incurred by other clients or missed notifications.
+            // Every 30 seconds; tests shorten it with `PLAYHOUSE_E2E_USAGE_REFRESH_SECONDS`.
             if request.command == "usage.subscribe" {
                 let clients = conversationClients()
+                let interval = PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_USAGE_REFRESH_SECONDS"].flatMap(Double.init).flatMap { $0 > 0 ? $0 : nil } ?? 30
                 let refresh = Task { @MainActor in
                     while !Task.isCancelled {
-                        do { try await Task.sleep(for: .seconds(30)) } catch { break }
+                        do { try await Task.sleep(for: .seconds(interval)) } catch { break }
                         guard !Task.isCancelled else { break }
                         _ = await AgentUsageService.report(clients: clients, refresh: true)
                     }

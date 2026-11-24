@@ -92,13 +92,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running; reopening the conversation while that turn is still running opens it at that newest line instead of at the question and keeps following, so the next stage's newest line is in view while the turn is still running and the settled turn leaves its final line in view. A short follow-up with a tool call then becomes the newest turn, and the newest history page ends with its question, tool call, and answer after the streamed turn. Scrolled as far down as it goes, the transcript has no blank overscroll: while the held reply outgrows the viewport it ends at its newest line, and the settled reply, whose streamed lines fold into Worked for, and the short follow-up, both once it settles and after the settled conversation is reopened, keep the newest question pinned near the top. Following is shared transcript presentation, so one representative provider covers it.
     func test_conversation_follows_latest_streamed_messages() throws {
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-stream-follow")
-        try copyFixtureFile(at: source, to: executable)
-        claudeFixtureExecutable = executable.path
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
-            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-stream-follow")
         func ready(_ stage: Int) -> URL { URL(fileURLWithPath: executable.path + ".stream-follow-ready-\(stage)") }
         func release(_ stage: Int) throws {
             try Data("Continue.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".stream-follow-release-\(stage)"))
