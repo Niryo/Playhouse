@@ -381,7 +381,7 @@ private struct ChatPageAnchorsSearchField: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Clear the search")
                 .accessibilityLabel("Clear chat page search")
                 .accessibilityIdentifier("chat-page-anchors-search-clear")
@@ -426,7 +426,7 @@ private struct ChatPageAnchorLabel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .onHover { isHovering = $0 }
         .nativeHelp(page.title)
         .accessibilityLabel(page.title)
@@ -450,7 +450,7 @@ private struct ChatJumpToBottomButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .onHover { isHovering = $0 }
         .nativeHelp("Jump to the bottom of the chat")
         .accessibilityLabel("Jump to bottom of chat")
@@ -490,7 +490,7 @@ struct ChatPageAnchorsHandle: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .nativeHelp(isLocked ? "Unlock the chat's pages, so they fold away when the pointer leaves" : "Lock the chat's pages open")
         .onHover {
             isHovering = $0

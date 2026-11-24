@@ -203,7 +203,7 @@ struct CodeBlockCardView: View {
                         .font(.system(size: 12, weight: .medium))
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Copy code")
                 .accessibilityLabel("Copy code")
                 .cardIdentifier(identifierPrefix.map { "\($0)-code-block-copy-\(blockID)" })

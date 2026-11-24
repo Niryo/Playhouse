@@ -306,7 +306,7 @@ struct AtomButton<Content: View>: View {
         default:
             Button(role: role, action: action) { label }
                 .buttonStyle(.plain)
-                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+                .plainButtonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
         }
     }
 }

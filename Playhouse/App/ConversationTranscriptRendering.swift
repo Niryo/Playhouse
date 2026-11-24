@@ -118,7 +118,7 @@ struct ToolCallTimelineRow: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .buttonHoverPointer()
+                        .plainButtonHoverPointer()
                         .nativeHelp(isExpanded ? "Show less" : "Show full input and output")
                         .accessibilityLabel(isExpanded ? "Show less" : "Show full input and output")
                         .accessibilityIdentifier("conversation-tool-call-toggle-\(activity.id)")

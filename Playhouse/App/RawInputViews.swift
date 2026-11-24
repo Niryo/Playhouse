@@ -222,6 +222,7 @@ struct RawInputSheet: View {
                 Picker("Agent", selection: Binding(get: { agent ?? page.agent ?? "" }, set: { agent = $0 })) {
                     ForEach(page.agents) { Text($0.label).tag($0.id) }
                 }
+                .buttonHoverPointer()
                 .frame(width: 240)
                 .accessibilityIdentifier("raw-input-agent-picker")
             }
@@ -238,6 +239,7 @@ struct RawInputSheet: View {
                 Text("Largest first").tag(TaskRawInputOrder.size)
                 Text("Most tokens carried").tag(TaskRawInputOrder.rent)
             }
+            .buttonHoverPointer()
             .frame(width: 220)
             .accessibilityIdentifier("raw-input-order-picker")
             TextField("Search the full text", text: $query)
@@ -262,6 +264,7 @@ struct RawInputSheet: View {
                             selected = row.id
                             selectedPosition = row.position
                         }
+                        // no-pointer: selecting a list row, which keeps the arrow like other macOS lists.
                         .onAppear {
                             if row.listKey == rows.last?.listKey { Task { await loadMore() } }
                         }

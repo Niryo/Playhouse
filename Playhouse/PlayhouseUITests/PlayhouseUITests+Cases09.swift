@@ -693,6 +693,12 @@ extension PlayhouseUITests {
 
         let classifierFailure = URL(fileURLWithPath: chatFixtureExecutable.path + ".fail-classifier")
         try Data().write(to: classifierFailure)
+        // The pointer's path from the board's Chat entry to the composer can cross the page labels'
+        // handle, sliding the labels out and reflowing the composer under the click; rest on the
+        // composer until the labels fold back and it stops moving.
+        element("message-composer").hover()
+        XCTAssertTrue(waitUntil({ (self.element("chat-page-anchors-handle").value as? String) != "open" }, timeout: 5), "The page labels fold once the pointer rests on the composer.")
+        waitForStableFrame(element("message-composer"))
         element("message-composer").click()
         element("message-composer").typeText("Tell me about Mars")
         element("send-message-button").click()

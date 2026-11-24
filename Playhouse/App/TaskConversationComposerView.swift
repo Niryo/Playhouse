@@ -286,6 +286,7 @@ extension TaskConversationView {
                     Text("Once").tag(TaskScheduleKind.once)
                     Text("Recurring").tag(TaskScheduleKind.recurring)
                 }
+                .buttonHoverPointer()
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .accessibilityIdentifier("schedule-kind-picker")
@@ -307,6 +308,7 @@ extension TaskConversationView {
                             Text(preset.label).tag(preset)
                         }
                     }
+                    .buttonHoverPointer()
                     .labelsHidden()
                     .fixedSize()
                     .accessibilityIdentifier("schedule-repeat-picker")
@@ -316,6 +318,7 @@ extension TaskConversationView {
                                 Text(Calendar.current.weekdaySymbols[day - 1]).tag(day)
                             }
                         }
+                        .buttonHoverPointer()
                         .labelsHidden()
                         .fixedSize()
                         .accessibilityIdentifier("schedule-weekday-picker")
@@ -327,6 +330,7 @@ extension TaskConversationView {
                                 Text(String(format: ":%02d", minute)).tag(minute)
                             }
                         }
+                        .buttonHoverPointer()
                         .labelsHidden()
                         .fixedSize()
                         .accessibilityIdentifier("schedule-minute-picker")
@@ -400,6 +404,7 @@ extension TaskConversationView {
                         Color.black.opacity(0.28)
                             .contentShape(Rectangle())
                             .onTapGesture {}
+                            // no-pointer: the backdrop only swallows clicks; it is not a control.
                             .accessibilityHidden(true)
                             .transition(.opacity)
                         SkillsPageView(

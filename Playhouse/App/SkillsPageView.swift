@@ -420,6 +420,7 @@ struct SkillDocumentTabPicker: View {
         Picker("View", selection: $tab) {
             ForEach(SkillDocumentTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
         }
+        .buttonHoverPointer()
         .pickerStyle(.segmented)
         .labelsHidden()
         .fixedSize()
@@ -539,10 +540,12 @@ private struct NewSkillPanel: View {
                         Text("Global (~/.agents/skills)").tag("global")
                         ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }
                     }
+                    .buttonHoverPointer()
                     .fixedSize()
                     .accessibilityIdentifier("new-skill-scope")
                     if destination != "global" {
                         Toggle("Private", isOn: $isPrivate)
+                            .buttonHoverPointer()
                             .toggleStyle(.switch)
                             .controlSize(.small)
                             .nativeHelp("Keep the skill out of the repository: Playhouse stores it and shares it only with this repository's sessions")

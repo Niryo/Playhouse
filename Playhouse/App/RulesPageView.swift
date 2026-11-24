@@ -289,8 +289,9 @@ struct RulesSectionView: View {
                     Spacer(minLength: 8)
                 }
                 .overlay {
-                    PressAreaView(showsPointingHand: true, onClick: { openEditor(rule) }, onLongPress: {})
+                    PressAreaView(onClick: { openEditor(rule) }, onLongPress: {})
                 }
+                .buttonHoverPointer()
                 .accessibilityHint(rule.summary)
                 if rule.issue != nil, rule.editable {
                     Button { fix(rule) } label: { Label("Fix", systemImage: "wand.and.stars") }
@@ -608,6 +609,7 @@ private struct NewRulePanel: View {
                     Picker("Kind", selection: $form) {
                         ForEach(Form.allCases) { form in Text(form.rawValue).tag(form) }
                     }
+                    .buttonHoverPointer()
                     .pickerStyle(.segmented)
                     .fixedSize()
                     .accessibilityIdentifier("new-rule-form")
@@ -615,6 +617,7 @@ private struct NewRulePanel: View {
                         Text("Global").tag("global")
                         ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }
                     }
+                    .buttonHoverPointer()
                     .fixedSize()
                     .accessibilityIdentifier("new-rule-scope")
                 }

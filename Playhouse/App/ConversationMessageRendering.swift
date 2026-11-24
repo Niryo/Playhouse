@@ -99,7 +99,7 @@ extension TaskConversationView {
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .buttonStyle(.plain)
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Choose this answer for \(question.title)")
                                 .accessibilityIdentifier("async-question-option-\(message.id)-\(index)-\(optionIndex)")
                                 .accessibilityValue(asyncQuestionAnswers[answerKey] == option ? "selected" : "not selected")
@@ -228,7 +228,7 @@ extension TaskConversationView {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open attached image")
                     .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
-                    .buttonHoverPointer()
+                    .plainButtonHoverPointer()
                     .nativeHelp("Open image at full size")
                 }
             }
@@ -326,7 +326,7 @@ extension TaskConversationView {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Open attached image")
                         .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
-                        .buttonHoverPointer()
+                        .plainButtonHoverPointer()
                         .nativeHelp("Open image at full size")
                     }
                 }
@@ -804,7 +804,7 @@ struct CollapsibleAutomaticMessageText<FullText: View>: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp(isExpanded ? "Show only the start of this automatic message" : "Show the whole automatic message")
                 .accessibilityLabel(isExpanded ? "Collapse automatic message" : "Expand automatic message to show all text")
                 .accessibilityValue(isExpanded ? "expanded" : "collapsed")

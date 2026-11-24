@@ -109,7 +109,7 @@ struct SideChatBubble: View {
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Copy selected text")
                 .accessibilityLabel("Copy selected text")
                 .accessibilityIdentifier("side-chat-copy-selection")
