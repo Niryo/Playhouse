@@ -258,6 +258,8 @@ struct TaskConversationView: View {
     /// folds back into Worked for once the turn settles. A collapse the reader
     /// performs mid-turn stays collapsed until the next turn starts.
     @State var isActivityExpanded = false
+    /// The live operation that has run long enough for its own row; see `activeProcess`.
+    @State var settledActiveProcessID: String?
     @State var responseStartedAt: Date?
     @State var completedResponseDuration: Int?
     @State var collapsedProgressTurnIDs = Set<String>()

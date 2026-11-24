@@ -248,6 +248,16 @@ def start_turn(runtime, _session_state, message):
             "turn": {"id": runtime.TURN_ID, "status": "failed", "error": {"message": "Fixture provider failed after receiving fixture-secret. Answer: Green. Continue this conversation by applying the user's answer to the pending question."}},
         }})
         return
+    # Codex can deliver a turn's first items ahead of its turn/start response, so a steer sent
+    # while the turn launched reaches Codex only after the client read them. One turn only.
+    early_commentary = runtime.Path(str(runtime.sys.argv[0]) + ".commentary-before-turn-response")
+    if early_commentary.exists():
+        early_commentary.unlink()
+        runtime.write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+            "threadId": runtime.THREAD_ID, "turnId": runtime.TURN_ID,
+            "item": {"id": "item_launch_commentary", "type": "agentMessage", "phase": "commentary",
+                     "text": "Codex wrote this before Playhouse saw its turn start."},
+        }})
     runtime.write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": runtime.TURN_ID, "status": "inProgress"}}})
     if (_session_state.turn_message or "").startswith(
         "Classify the latest user message for Playhouse's continuous chat page index."

@@ -277,10 +277,18 @@ extension PlayhouseUITests {
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows in the live turn and in history reloaded from Playhouse's store. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line once it has run for a second, and in the window it is first listed inside until then, so a process reported started and finished together never flashes outside; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows in the live turn and in history reloaded from Playhouse's store. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
+        // Codex holds the long command's start until the window is watched, to see where it first lands.
+        let commandStart = try XCTUnwrap(codexFixtureExecutable) + ".tool-command-start"
+        for suffix in ["-ready", "-release"] { try? FileManager.default.removeItem(atPath: commandStart + suffix) }
+        try "hold\n".write(toFile: commandStart + "-pause", atomically: true, encoding: .utf8)
+        defer {
+            try? "release\n".write(toFile: commandStart + "-release", atomically: true, encoding: .utf8)
+            try? FileManager.default.removeItem(atPath: commandStart + "-pause")
+        }
         launchApp(defaultParent: fixture.primary.path)
         _ = try runCLI(["task", "create", "--title", "Tool activity", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try taskID(named: "Tool activity")
@@ -299,10 +307,21 @@ extension PlayhouseUITests {
             try? "Release newest tool after assertion failure.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
             try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
         }
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
-        XCTAssertFalse(element("current-activity-indicator").exists, "The conversation header should not show a live activity line while responding.")
         let latestActiveRow = element("codex-activity-row-item_fixture_active_long_command")
-        XCTAssertTrue(latestActiveRow.waitToExist(timeout: 10), "The latest active process should appear outside Working for.")
+        let listedCommandRow = element("codex-activity-details").descendants(matching: .any)
+            .matching(identifier: "codex-activity-row-item_fixture_active_long_command").firstMatch
+        // A running command takes the live row only once it has run for a second; until then
+        // Working for lists it, so one reported started and finished at once never flashes there.
+        // The window is already watching the open list when Codex reports the start, so the
+        // command is caught where it first lands: inside Working for, never the live row first.
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: commandStart + "-ready") }, timeout: 20), "The other tool calls should have started.")
+        XCTAssertTrue(element("codex-activity-row-item_fixture_mcp_call").waitToExist(timeout: 10), "Working for should list the calls that started before the command.")
+        try "release\n".write(toFile: commandStart + "-release", atomically: true, encoding: .utf8)
+        XCTAssertTrue(listedCommandRow.waitToExist(timeout: 10), "A command that has just started is first listed inside Working for, not given the live row.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
+        XCTAssertTrue(waitUntil({ !listedCommandRow.exists && latestActiveRow.exists }, timeout: 5),
+                      "Once it has run for a second the still-running command leaves Working for for its live row.")
+        XCTAssertFalse(element("current-activity-indicator").exists, "The conversation header should not show a live activity line while responding.")
         // The open Working for list can outgrow the viewport, and then the transcript follows
         // the live activity. Either way the viewport must show the turn, never blank space.
         let sentMessage = transcriptMessage("Show tool activity.")
@@ -368,7 +387,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(legacyDynamicRow.waitToExist(timeout: 5))
         XCTAssertTrue(mcpRow.label.contains("In progress"), "A reopened in-flight call should still read as in progress.")
         XCTAssertTrue(latestActiveRow.waitToExist(timeout: 10), "The reopened window should still show the latest active process outside Working for.")
-        XCTAssertFalse(commandRow.exists, "The active command should stay outside expanded Working for after reopening.")
+        XCTAssertTrue(waitUntil({ !commandRow.exists }, timeout: 5), "The active command should stay outside expanded Working for after reopening.")
         // The open section is a default, not a lock: a reader can fold it mid-turn,
         // and it must stay folded across the activity updates that follow. The reopened window
         // follows the live turn to its bottom, which can leave the disclosure above the viewport.
