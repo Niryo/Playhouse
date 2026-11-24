@@ -164,7 +164,7 @@ class BridgeTestCases28:
             "conversation", "send", board_task["id"], "--message", "Hello", "--new-page", expected_status=2,
         )[0], "invalid_argument")
 
-    # case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, carries the latest plan in full, states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
+    # case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, leaves out the plan's text (the outline only gives its position), states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer but still not the plan, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
     def test_claude_optimized_follow_up_starts_fresh_seeded_session(self):
         executable, environment = self.optimized_claude_fixture("claude-fixture-optimized-follow-up")
         task_id = self.create_task(title="Optimized Claude follow-up", provider="claude")["id"]
@@ -206,7 +206,8 @@ class BridgeTestCases28:
         self.assertIn(f"@1: {first_message}", prompt, "The seed lists the user's messages with their positions.")
         self.assertIn("- Turn 1 (Plan mode): user @1; 1 agent message, 1 tool call; plan @3; ends @3", prompt,
                       "The outline places the plan turn's user message, its work and its plan by position.")
-        self.assertIn("The latest plan (@3):\n\nInspection done: the workspace is ready.", prompt)
+        self.assertNotIn("Inspection done: the workspace is ready.", prompt, "The plan is not seeded; the outline gives its position.")
+        self.assertNotIn("The latest plan", prompt)
         self.assertNotIn("I'll inspect the workspace first.", prompt, "The agent's commentary is not seeded; it is read on demand.")
         self.assertTrue(prompt.endswith(f"</playhouse-handoff-context>\n\n{second_message}"))
         instructions = second["arguments"][second["arguments"].index("--append-system-prompt") + 1]
@@ -235,7 +236,7 @@ class BridgeTestCases28:
                                if turn["startedBy"] == "user" and turn["turn"] > 1)
         self.assertIn(f"@1: {first_message}", third["userText"])
         self.assertIn(f"@{second_position}: {second_message}", third["userText"])
-        self.assertIn("The latest plan (@3):", third["userText"], "The latest plan keeps travelling with later follow-ups.")
+        self.assertNotIn("Inspection done: the workspace is ready.", third["userText"], "Later follow-ups never carry the plan either.")
         self.assertIn("The latest final answer (@", third["userText"])
 
         def counted(value, noun):
@@ -263,7 +264,7 @@ class BridgeTestCases28:
         self.assertFalse(any("<playhouse-handoff-context>" in text for text in texts),
                          "The transcript keeps what the user typed, not the seed.")
 
-    # case-contract: test_codex_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Codex task's follow-up starts a new Codex thread with thread/start instead of resuming the old one with thread/resume, runs its turn/start on that new thread, and the task's Codex thread ID follows it. The new thread's developer instructions carry the optimized-context guidance, and the turn's input begins with the Playhouse optimized context block listing the earlier user messages and the plan from the Plan mode turn by position, followed by the user's new message; the Plan mode turn's commentary, command and plan are numbered as for Claude, so conversation read at 2.1 returns the command. While a Codex goal is set, a follow-up keeps the goal's thread with no context block and no thread/start, and once the goal is cleared the next follow-up rotates again. A follow-up sent with the mode back on full resumes the latest thread with thread/resume and no context block. With the mode on again, switching the task to Claude gives Claude's first session the optimized seed, listing the messages Codex answered, instead of the full provider-switch handoff.
+    # case-contract: test_codex_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Codex task's follow-up starts a new Codex thread with thread/start instead of resuming the old one with thread/resume, runs its turn/start on that new thread, and the task's Codex thread ID follows it. The new thread's developer instructions carry the optimized-context guidance, and the turn's input begins with the Playhouse optimized context block listing the earlier user messages and the Plan mode turn's plan by position only, without the plan's text, followed by the user's new message; the Plan mode turn's commentary, command and plan are numbered as for Claude, so conversation read at 2.1 returns the command. While a Codex goal is set, a follow-up keeps the goal's thread with no context block and no thread/start, and once the goal is cleared the next follow-up rotates again. A follow-up sent with the mode back on full resumes the latest thread with thread/resume and no context block. With the mode on again, switching the task to Claude gives Claude's first session the optimized seed, listing the messages Codex answered, instead of the full provider-switch handoff.
     def test_codex_optimized_follow_up_starts_fresh_seeded_session(self):
         executable = self.data_directory / "codex-fixture-optimized-goal-fresh-threads-unique-turns-success"
         copy_file(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
@@ -316,7 +317,10 @@ class BridgeTestCases28:
         command = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "2.1")[0])["entries"]
         self.assertEqual(command[0]["kind"], "tool", "The Codex command follows its commentary, message 2.")
         self.assertIn("git status", command[0]["title"] + " " + command[0]["text"])
-        self.assertIn("The latest plan (@", prompt)
+        self.assertNotIn("The latest plan", prompt, "The plan is not seeded; the outline gives its position.")
+        plan = self.assert_success(self.call_cli("conversation", "read", task_id, "--at", "3")[0])["entries"][0]
+        self.assertEqual(plan["kind"], "plan")
+        self.assertNotIn(plan["text"], prompt, "The Codex plan's text is not seeded either.")
         self.assertTrue(prompt.endswith(f"</playhouse-handoff-context>\n\n{second_message}"))
 
         # A Codex goal belongs to its thread, so while one is set a follow-up keeps that thread.

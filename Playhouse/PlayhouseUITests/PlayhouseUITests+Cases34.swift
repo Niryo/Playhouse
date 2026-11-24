@@ -288,7 +288,7 @@ extension PlayhouseUITests {
         assertCLIError(try runCLI(["conversation", "send", boardTask, "--message", "Hello", "--new-page"], expectedStatus: 2), code: "invalid_argument")
     }
 
-    // case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, carries the latest plan in full, states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
+    // case-contract: test_claude_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Claude task's follow-up starts a brand-new Claude session (launched with --session-id, never --resume) that becomes the task's session, while the first message, sent in Plan mode, started the conversation's original session. The fresh session's prompt begins with a Playhouse optimized context block, not part of the user's message, that maps the whole conversation by position (each turn's user message, agent message and tool-call counts, plan or final answer position), lists every message the user wrote in order with its position, leaves out the plan's text (the outline only gives its position), states the conversation's total messages, tool calls and turns, and ends with the user's new message; a later follow-up rotates again, lists both earlier user messages and the latest final answer but still not the plan, and never repeats the agent's commentary. Its system prompt says the task uses optimized context, that the block is a summary, and points the agent at conversation read and conversation outline. Playhouse's own outcome nudges keep the session they nudge. With the mode back on full, the next follow-up resumes the latest session without a context block. Every turn stays in the visible transcript, and the plan turn is still recorded as a plan in conversation outline.
     func test_claude_optimized_follow_up_starts_fresh_seeded_session() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-optimized-follow-up")
         let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
@@ -339,7 +339,8 @@ extension PlayhouseUITests {
                       "The seed points at help for the command's options instead of copying them.")
         XCTAssertTrue(prompt.contains("@1: \(firstMessage)"), "The seed lists the user's messages with their positions.")
         XCTAssertTrue(prompt.contains("- Turn 1 (Plan mode): user @1; 1 agent message, 1 tool call; plan @3; ends @3"), prompt)
-        XCTAssertTrue(prompt.contains("The latest plan (@3):\n\nInspection done: the workspace is ready."))
+        XCTAssertFalse(prompt.contains("Inspection done: the workspace is ready."), "The plan is not seeded; the outline gives its position.")
+        XCTAssertFalse(prompt.contains("The latest plan"))
         XCTAssertFalse(prompt.contains("I'll inspect the workspace first."), "The agent's commentary is read on demand, not seeded.")
         XCTAssertTrue(prompt.hasSuffix("</playhouse-handoff-context>\n\n\(secondMessage)"))
         let instructions = optimizedInstructions(second)
@@ -371,7 +372,7 @@ extension PlayhouseUITests {
         let thirdPrompt = try XCTUnwrap(third["userText"] as? String)
         XCTAssertTrue(thirdPrompt.contains("@1: \(firstMessage)"))
         XCTAssertTrue(thirdPrompt.contains("@\(secondPosition ?? ""): \(secondMessage)"))
-        XCTAssertTrue(thirdPrompt.contains("The latest plan (@3):"))
+        XCTAssertFalse(thirdPrompt.contains("Inspection done: the workspace is ready."), "Later follow-ups never carry the plan either.")
         XCTAssertTrue(thirdPrompt.contains("The latest final answer (@"))
         func counted(_ value: Any?, _ noun: String) -> String {
             let number = value as? Int ?? -1
@@ -403,7 +404,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Claude optimized context: every follow-up stays in the transcript")
     }
 
-    // case-contract: test_codex_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Codex task's follow-up starts a new Codex thread with thread/start instead of resuming the old one with thread/resume, runs its turn/start on that new thread, and the task's Codex thread ID follows it. The new thread's developer instructions carry the optimized-context guidance, and the turn's input begins with the Playhouse optimized context block listing the earlier user messages and the plan from the Plan mode turn by position, followed by the user's new message; the Plan mode turn's commentary, command and plan are numbered as for Claude, so conversation read at 2.1 returns the command. While a Codex goal is set, a follow-up keeps the goal's thread with no context block and no thread/start, and once the goal is cleared the next follow-up rotates again. A follow-up sent with the mode back on full resumes the latest thread with thread/resume and no context block. With the mode on again, switching the task to Claude gives Claude's first session the optimized seed, listing the messages Codex answered, instead of the full provider-switch handoff.
+    // case-contract: test_codex_optimized_follow_up_starts_fresh_seeded_session | With optimized context on, a Codex task's follow-up starts a new Codex thread with thread/start instead of resuming the old one with thread/resume, runs its turn/start on that new thread, and the task's Codex thread ID follows it. The new thread's developer instructions carry the optimized-context guidance, and the turn's input begins with the Playhouse optimized context block listing the earlier user messages and the Plan mode turn's plan by position only, without the plan's text, followed by the user's new message; the Plan mode turn's commentary, command and plan are numbered as for Claude, so conversation read at 2.1 returns the command. While a Codex goal is set, a follow-up keeps the goal's thread with no context block and no thread/start, and once the goal is cleared the next follow-up rotates again. A follow-up sent with the mode back on full resumes the latest thread with thread/resume and no context block. With the mode on again, switching the task to Claude gives Claude's first session the optimized seed, listing the messages Codex answered, instead of the full provider-switch handoff.
     func test_codex_optimized_follow_up_starts_fresh_seeded_session() throws {
         executionTimeAllowance = 360 // Seven turns across a goal, both context modes and a switch to Claude, each with its outcome nudge.
         let executable = dataDirectory.appendingPathComponent("codex-fixture-optimized-goal-fresh-threads-unique-turns-success")
@@ -477,7 +478,10 @@ extension PlayhouseUITests {
         let command = try XCTUnwrap((try runCLI(["conversation", "read", taskID, "--at", "2.1"])["result"] as? [String: Any])?["entries"] as? [[String: Any]])
         XCTAssertEqual(command.first?["kind"] as? String, "tool", "The Codex command follows its commentary, message 2.")
         XCTAssertTrue("\(command.first?["title"] ?? "") \(command.first?["text"] ?? "")".contains("git status"))
-        XCTAssertTrue(prompt.contains("The latest plan (@"))
+        XCTAssertFalse(prompt.contains("The latest plan"), "The plan is not seeded; the outline gives its position.")
+        let plan = try XCTUnwrap((try runCLI(["conversation", "read", taskID, "--at", "3"])["result"] as? [String: Any])?["entries"] as? [[String: Any]]).first
+        XCTAssertEqual(plan?["kind"] as? String, "plan")
+        XCTAssertFalse(prompt.contains(try XCTUnwrap(plan?["text"] as? String)), "The Codex plan's text is not seeded either.")
         XCTAssertTrue(prompt.hasSuffix("</playhouse-handoff-context>\n\n\(secondMessage)"))
         XCTAssertTrue(transcriptMessage(secondMessage).waitToExist(timeout: 10), "The transcript shows the typed message.")
 
