@@ -46,7 +46,7 @@ extension TaskConversationView {
                 on: conversationContextMode == .optimized,
                 help: conversationContextMode == .optimized
                     ? "Turn off optimized context: follow-ups resume the whole conversation"
-                    : "Optimized context: each follow-up starts a fresh session with your messages, the last plan and the last answer, and the agent reads more on demand"
+                    : "Optimized context: each follow-up starts a fresh session with your messages and the last answer, and the agent reads more on demand"
             ),
             goal: provider.supportsGoals
                 ? .init(on: isEnteringGoal, help: isEnteringGoal ? "Stop entering a goal" : "Set a goal to keep pursuing")
