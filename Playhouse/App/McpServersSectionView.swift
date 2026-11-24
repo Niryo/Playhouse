@@ -339,7 +339,7 @@ struct McpServersSectionView: View {
         }
         .buttonStyle(.plain)
         .disabled(signingIn.contains(key))
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .nativeHelp(isConnector ? "Connect \(server.name) in claude.ai's connector settings" : "Open your browser to sign in to \(server.name) for Claude")
         .accessibilityIdentifier("mcp-connector-signin-\(server.name)")
     }
@@ -428,8 +428,9 @@ struct McpServersSectionView: View {
                     Spacer(minLength: 8)
                 }
                 .overlay {
-                    PressAreaView(showsPointingHand: true, onClick: { openEditor(server) }, onLongPress: {})
+                    PressAreaView(onClick: { openEditor(server) }, onLongPress: {})
                 }
+                .buttonHoverPointer()
                 .accessibilityHint(server.summary)
                 // Outside the click-to-open area above, so the buttons get their own clicks.
                 signInButtons(server, key: key)
@@ -539,7 +540,7 @@ struct McpServersSectionView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(waiting)
-                    .buttonHoverPointer()
+                    .plainButtonHoverPointer()
                     .nativeHelp("Open your browser to sign in to \(server.name) for \(provider.displayName)")
                     .accessibilityIdentifier("mcp-signin-\(key)-\(provider.rawValue)")
                 }
@@ -795,12 +796,14 @@ private struct McpServerEditorPanel: View {
                             Text("Global").tag("global")
                             ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }
                         }
+                        .buttonHoverPointer()
                         .fixedSize()
                         .accessibilityIdentifier("mcp-editor-scope")
                     }
                     Picker("Kind", selection: $kind) {
                         ForEach(Kind.allCases) { kind in Text(kind.rawValue).tag(kind) }
                     }
+                    .buttonHoverPointer()
                     .pickerStyle(.segmented)
                     .fixedSize()
                     .disabled(!editable)

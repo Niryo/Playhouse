@@ -27,6 +27,7 @@ struct PluginCreationSetup: View {
                         Text(option.title).tag(option)
                     }
                 }
+                .buttonHoverPointer()
                 .pickerStyle(.radioGroup)
                 .accessibilityIdentifier("plugin-creation-presentation")
                 HStack {

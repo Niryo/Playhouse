@@ -317,7 +317,7 @@ extension TaskConversationView {
                                     Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
                                         .font(.system(size: 15))
                                 }
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Select answer: \(option.label)")
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
@@ -341,7 +341,7 @@ extension TaskConversationView {
                                 Label("Other", systemImage: userInputOtherSelected.contains(question.id) ? "largecircle.fill.circle" : "circle")
                                     .font(.system(size: 15))
                             }
-                            .buttonHoverPointer()
+                            .plainButtonHoverPointer()
                             .nativeHelp("Select a free-text answer")
                             .buttonStyle(.plain)
                             .accessibilityValue(userInputOtherSelected.contains(question.id) ? "selected" : "not selected")

@@ -169,7 +169,7 @@ extension TaskConversationView {
                                 .background(Color.accentColor, in: Circle())
                                 .contentShape(Circle())
                         }
-                        .buttonHoverPointer()
+                        .plainButtonHoverPointer()
                         .buttonStyle(.plain)
                         .nativeHelp("Save \(title)")
                         .accessibilityLabel("Save \(title)")
@@ -196,7 +196,7 @@ extension TaskConversationView {
                                 .frame(width: 22, height: 24)
                                 .contentShape(Rectangle())
                         }
-                        .buttonHoverPointer()
+                        .plainButtonHoverPointer()
                         .buttonStyle(.plain).nativeHelp("Edit \(title)").accessibilityLabel("Edit \(title)")
                         .accessibilityIdentifier("\(identifier)-edit")
                     }

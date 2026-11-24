@@ -397,7 +397,7 @@ extension TaskConversationView {
             } label: {
                 activityDisclosureButtonLabel
             }
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp("Show or hide Codex activity details")
             .buttonStyle(.plain)
             .accessibilityValue(isActivityExpanded ? "Expanded, down chevron" : "Collapsed, right chevron")
@@ -609,7 +609,7 @@ extension TaskConversationView {
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Open attached image")
                                 .accessibilityIdentifier("pending-chat-image-\(attachment.id)")
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Open image at full size")
 
                                 Button {
@@ -618,7 +618,7 @@ extension TaskConversationView {
                                 } label: {
                                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
                                 }
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Remove image")
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Remove image")
@@ -657,7 +657,7 @@ extension TaskConversationView {
                         .foregroundStyle(.white, .black.opacity(0.7))
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Discard comments")
                 .accessibilityLabel("Discard comments")
                 .accessibilityIdentifier("discard-pending-comments-button")
@@ -748,7 +748,7 @@ private struct EmptyConversationAddRepositoryPrompt: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp("Add a repository")
             .onHover { isHovering = $0 }
             .animation(.easeOut(duration: 0.12), value: isHovering)

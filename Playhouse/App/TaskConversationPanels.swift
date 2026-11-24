@@ -12,7 +12,7 @@ extension TaskConversationView {
                     .font(.system(size: 12, weight: .medium))
                     .frame(width: 26, height: 24)
             }
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .buttonStyle(.plain)
             .shortcutHelp("Show sidebar", shortcut: AppShortcut.sidebar)
             .accessibilityLabel("Show sidebar")
@@ -43,7 +43,7 @@ extension TaskConversationView {
                         .font(.system(size: 12, weight: .medium))
                         .frame(width: 22, height: 24)
                 }
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .buttonStyle(.plain)
                 .shortcutHelp("Hide sidebar", shortcut: AppShortcut.sidebar)
                 .accessibilityLabel("Hide sidebar")
@@ -91,7 +91,7 @@ extension TaskConversationView {
                                 .frame(width: 28, height: 28)
                         }
                         .buttonStyle(.plain)
-                        .buttonHoverPointer()
+                        .plainButtonHoverPointer()
                         .shortcutHelp("Back to Kanban", shortcut: AppShortcut.back)
                         .accessibilityLabel("Back to Kanban board")
                         .accessibilityIdentifier("back-to-board-button")
@@ -209,7 +209,7 @@ extension TaskConversationView {
                         .frame(width: 26, height: 26)
                         .contentShape(Rectangle())
                 }
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .buttonStyle(.plain)
                 .nativeHelp("Close diff")
                 .accessibilityLabel("Close diff")
@@ -359,7 +359,7 @@ extension TaskConversationView {
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .buttonStyle(.plain)
             .shortcutHelp(task.isParallelChatBubble ? backLabel : "Back to Kanban", shortcut: AppShortcut.back)
             .accessibilityLabel(backLabel)

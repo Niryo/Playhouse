@@ -41,7 +41,7 @@ struct SelectionActionsPill: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .nativeHelp(help)
         .accessibilityLabel(title)
         .accessibilityIdentifier(identifier)
@@ -110,7 +110,7 @@ struct CommentPopover: View {
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .buttonHoverPointer()
+                    .plainButtonHoverPointer()
                     .nativeHelp("Discard comment")
                     .accessibilityLabel("Discard comment")
                     .accessibilityIdentifier("discard-comment-button")
@@ -123,7 +123,7 @@ struct CommentPopover: View {
                         .background(Color.white.opacity(0.78), in: Circle())
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .disabled(isEditing && text == editingComment)
                 .nativeHelp(isEditing ? "Save comment" : "Add comment")
                 .accessibilityLabel(isEditing ? "Save comment" : "Add comment")

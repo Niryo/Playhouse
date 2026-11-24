@@ -22,7 +22,7 @@ struct AtomChoiceBar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp(option.label)
                 .modifier(Applied(when: option.testID != nil) { $0.accessibilityIdentifier(option.testID ?? "") })
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -140,6 +140,7 @@ struct AtomSegmented: View {
                 Text(verbatim: option.label).tag(option.value)
             }
         }
+        .buttonHoverPointer()
         .pickerStyle(.segmented)
         .labelsHidden()
         .modifier(Applied(when: common.width == nil) { $0.fixedSize() })
@@ -578,8 +579,9 @@ struct AtomPressArea<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
             .overlay {
-                PressAreaView(showsPointingHand: props.pointer == true, onClick: onPress, onLongPress: onLongPress)
+                PressAreaView(onClick: onPress, onLongPress: onLongPress)
             }
+            .hoverCursor(props.pointer == true ? .pointingHand : nil, overAppKitControl: true)
             .atomCommon(common, atom: .pressArea, group: true)
     }
 }
@@ -589,7 +591,6 @@ struct AtomPressArea<Content: View>: View {
 /// opened the editor, and the window then ignored every click until it was
 /// minimized.
 struct PressAreaView: NSViewRepresentable {
-    let showsPointingHand: Bool
     let onClick: () -> Void
     let onLongPress: () -> Void
 
@@ -598,24 +599,15 @@ struct PressAreaView: NSViewRepresentable {
     func updateNSView(_ view: PressView, context: Context) {
         view.onClick = onClick
         view.onLongPress = onLongPress
-        if view.showsPointingHand != showsPointingHand {
-            view.showsPointingHand = showsPointingHand
-            view.window?.invalidateCursorRects(for: view)
-        }
     }
 
     final class PressView: NSView {
         static let holdDuration: TimeInterval = 0.45
         var onClick: () -> Void = {}
         var onLongPress: () -> Void = {}
-        var showsPointingHand = false
 
         override func isAccessibilityElement() -> Bool { false }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-        override func resetCursorRects() {
-            if showsPointingHand { addCursorRect(bounds, cursor: .pointingHand) }
-        }
 
         /// Tracks the press to its mouse-up here, so no gesture state outlives it.
         override func mouseDown(with event: NSEvent) {
