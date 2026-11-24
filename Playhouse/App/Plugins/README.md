@@ -617,6 +617,15 @@ popover or the window doesn't stop it, for at most 15 minutes:
   counts it as work so it isn't stopped as idle. Codex has no per-turn tool
   list, so `allowedTools` applies to Claude Code only. Cancelling or timing out
   interrupts the turn (`turn/interrupt`).
+- With `provider: "opencode"`: one turn in a read-only session of its own on
+  OpenCode's shared `opencode serve` (`PluginAgentRuns.startOpenCode`), removed
+  when it ends; `result` is the final answer's text. OpenCode's server has no
+  structured output, so with a `jsonSchema` the prompt carries the schema and
+  asks for an answer of only matching JSON (`PluginJSONSchema`); the JSON in the
+  answer, taken out of a Markdown code block if it has one, is checked against
+  the schema and is the `result`. An answer that doesn't match is asked for once
+  more in the same session, naming what was wrong, and a second mismatch fails
+  the run. Cancelling or timing out interrupts the session.
 
 Model names are the provider's own (`opus`, `gpt-5.5`). When it ends, the
 plugin's background half hears `agent.finished`, targeted at the plugin:

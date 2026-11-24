@@ -41,6 +41,8 @@ extension ConversationManager {
                 attached = await reattachTurn(taskID: taskID, client: client, threadID: threadID)
             } else if task.conversationProvider == .claude, let sessionID = task.claudeSessionID {
                 attached = await reattachTurn(taskID: taskID, client: clients.claude, threadID: sessionID)
+            } else if task.conversationProvider == .opencode, let sessionID = task.openCodeSessionID {
+                attached = await reattachTurn(taskID: taskID, client: clients.opencode, threadID: sessionID)
             }
             if attached { followed.insert(taskID) } else { await settleTurnLostInRestart(taskID: taskID) }
         }
@@ -53,6 +55,20 @@ extension ConversationManager {
         for run in ClaudeRunFiles.runs(in: claudeRuns) where !ClaudeCodeClient.hasActiveRunner(sessionID: run.manifest.sessionID) {
             await ClaudeAgentRun.attach(directory: run.directory)?.terminateAndRemove()
         }
+        // Every live OpenCode server is adopted, so its idle stop runs in this daemon. A turn it
+        // still lists that no task followed has settled; the server stays until it is idle, for
+        // the tasks that use it next.
+        let openCodeRuns = OpenCodeSharedServer.runsDirectory(dataDirectory: storeDirectory)
+        for entry in OpenCodeSharedServer.manifests(in: openCodeRuns, serviceName: AgentRunService.name) {
+            guard entry.manifest.process?.isAlive == true else {
+                if entry.manifest.state != "spawning" || Date().timeIntervalSince(entry.manifest.createdAt) > 30 { entry.server.removeFiles() }
+                continue
+            }
+            guard let connection = OpenCodeServerConnection.adopt(entry.server, manifest: entry.manifest) else { continue }
+            for sessionID in connection.manifest.turns.keys where !OpenCodeClient.hasActiveTurn(sessionID: sessionID) {
+                connection.recordTurn(sessionID, nil)
+            }
+        }
     }
 
     /// Stops agent processes of this data folder that no run or server manifest accounts for:
@@ -60,6 +76,7 @@ extension ConversationManager {
     static func stopUntrackedAgents(storeDirectory: URL) async {
         let codexRuns = CodexSharedServer.runsDirectory(dataDirectory: storeDirectory)
         let claudeRuns = ClaudeRunFiles.runsDirectory(dataDirectory: storeDirectory)
+        let openCodeRuns = OpenCodeSharedServer.runsDirectory(dataDirectory: storeDirectory)
         var known = Set<AgentProcessIdentity>()
         // A spawn still being recorded has no identity yet; what writes into its files is its own.
         var spawning: [String] = []
@@ -76,8 +93,14 @@ extension ConversationManager {
                 spawning.append(run.directory.resolvingSymlinksInPath().path + "/")
             }
         }
+        for entry in OpenCodeSharedServer.manifests(in: openCodeRuns, serviceName: nil) {
+            if let process = entry.manifest.process { known.insert(process) }
+            if entry.manifest.process == nil, Date().timeIntervalSince(entry.manifest.createdAt) < 30 {
+                spawning.append(entry.server.logURL.resolvingSymlinksInPath().path)
+            }
+        }
         let found = await Task.detached {
-            AgentProcessSweep.processes(withStandardStreamsUnder: [codexRuns.path, claudeRuns.path])
+            AgentProcessSweep.processes(withStandardStreamsUnder: [codexRuns.path, claudeRuns.path, openCodeRuns.path])
         }.value.filter { process in
             !spawning.contains { process.path == $0 || process.path.hasPrefix($0) }
         }

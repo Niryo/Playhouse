@@ -425,7 +425,7 @@ struct TokenStatsView: View {
             }
         } else if model.loaded {
             AtomText(
-                props: TextProps(text: "No request log for this task yet. Claude Code and Codex write one to their session files as the conversation runs.", size: 12, color: "secondary"),
+                props: TextProps(text: "No request log for this task yet. Claude Code and Codex write one to their session files, and OpenCode's turns save their session's messages, as the conversation runs.", size: 12, color: "secondary"),
                 common: AtomCommon(testID: "\(id)-map-unavailable")
             )
         }

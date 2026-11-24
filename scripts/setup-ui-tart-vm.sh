@@ -7,13 +7,17 @@ vm_name="${PLAYHOUSE_UI_TART_VM:-playhouse-ui}"
 image="${PLAYHOUSE_UI_TART_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 tart_home="${TART_HOME:-${HOME}/.tart}"
 minimum_free_kib=$((110 * 1024 * 1024))
+# The OpenCode 2 release the scripted real-binary suite (scripts/test-opencode-scripted.sh) runs
+# in the guest, installed with OpenCode's official v2 installer.
+opencode_version="${PLAYHOUSE_UI_TART_OPENCODE_VERSION:-2.4.0}"
 
 usage() {
 	cat <<'USAGE'
 Usage: scripts/setup-ui-tart-vm.sh [--slim]
 
-Creates the shared Tart UI test VM when it does not exist, slims it, and applies
-its CPU, memory, and display settings.
+Creates the shared Tart UI test VM when it does not exist, slims it, applies its
+CPU, memory, and display settings, and installs the pinned OpenCode 2 release in
+the guest (~/.opencode/bin/opencode) when it is missing or another version.
 
   --slim   Also slim an existing VM. A freshly cloned VM is always slimmed.
 
@@ -93,42 +97,44 @@ else
 	printf 'Tart VM %s is running; leaving its CPU, memory, and display settings unchanged.\n' "$vm_name"
 fi
 
-if (( slim == 1 )); then
-	vm_pid=""
-	started_vm=0
-	stop_started_vm() {
-		if (( started_vm == 1 )); then
-			tart stop "$vm_name" >/dev/null 2>&1 || true
-			[[ -n "$vm_pid" ]] && wait "$vm_pid" 2>/dev/null || true
-		fi
-	}
-	trap stop_started_vm EXIT
-	trap 'exit 130' INT TERM
-	slim_failed() {
-		printf '%s Rerun `scripts/setup-ui-tart-vm.sh --slim` to slim the VM.\n' "$1" >&2
-		exit 1
-	}
+vm_pid=""
+started_vm=0
+stop_started_vm() {
+	if (( started_vm == 1 )); then
+		tart stop "$vm_name" >/dev/null 2>&1 || true
+		[[ -n "$vm_pid" ]] && wait "$vm_pid" 2>/dev/null || true
+	fi
+}
+trap stop_started_vm EXIT
+trap 'exit 130' INT TERM
 
+# Starts the VM when it isn't running (stopping it again on exit) and waits for its guest agent.
+start_guest() {
+	local failed="$1"
 	if ! vm_is_running; then
-		printf 'Starting Tart VM %s to slim it...\n' "$vm_name"
+		printf 'Starting Tart VM %s...\n' "$vm_name"
 		tart run --no-graphics --no-audio "$vm_name" </dev/null >/dev/null 2>&1 &
 		vm_pid=$!
 		started_vm=1
 	fi
-	guest_ready=0
 	for _ in $(seq 1 180); do
 		if tart exec "$vm_name" /usr/bin/true >/dev/null 2>&1; then
-			guest_ready=1
-			break
+			return 0
 		fi
 		if (( started_vm == 1 )) && ! kill -0 "$vm_pid" 2>/dev/null; then
-			slim_failed "Tart VM ${vm_name} exited before its guest agent became available."
+			"$failed" "Tart VM ${vm_name} exited before its guest agent became available."
 		fi
 		sleep 2
 	done
-	if (( guest_ready == 0 )); then
-		slim_failed "Timed out waiting for the Tart guest agent in VM ${vm_name}."
-	fi
+	"$failed" "Timed out waiting for the Tart guest agent in VM ${vm_name}."
+}
+
+if (( slim == 1 )); then
+	slim_failed() {
+		printf '%s Rerun `scripts/setup-ui-tart-vm.sh --slim` to slim the VM.\n' "$1" >&2
+		exit 1
+	}
+	start_guest slim_failed
 
 	printf 'Removing guest components the macOS UI suite does not use...\n'
 	tart exec -i "$vm_name" /bin/bash -s <<'GUEST_SCRIPT' || slim_failed "Slimming the guest of Tart VM ${vm_name} failed."
@@ -162,6 +168,24 @@ printf 'Guest data volume used after slimming: %s\n' "$(used)"
 exit "$status"
 GUEST_SCRIPT
 fi
+
+opencode_failed() {
+	printf '%s Rerun `scripts/setup-ui-tart-vm.sh` to install OpenCode %s in the VM.\n' "$1" "$opencode_version" >&2
+	exit 1
+}
+start_guest opencode_failed
+tart exec -i "$vm_name" /bin/bash -s "$opencode_version" <<'GUEST_SCRIPT' || opencode_failed "Installing OpenCode in Tart VM ${vm_name} failed."
+set -euo pipefail
+version="$1"
+installed="$("$HOME/.opencode/bin/opencode" --version 2>/dev/null || true)"
+if [[ "$installed" == "opencode v${version}" ]]; then
+	printf 'OpenCode %s is already installed in the guest.\n' "$version"
+	exit 0
+fi
+printf 'Installing OpenCode %s in the guest...\n' "$version"
+curl -fsSL https://opencode.ai/v2/install | bash -s -- --version "$version" --no-modify-path
+"$HOME/.opencode/bin/opencode" --version
+GUEST_SCRIPT
 
 printf 'Tart UI test VM ready: %s\n' "$vm_name"
 printf 'Run a focused case with: scripts/test-ui-tart.sh --case <case-id>\n'

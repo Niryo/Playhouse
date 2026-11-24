@@ -353,7 +353,7 @@ private struct ClaudeReplay {
     func run(_ parsed: DebugImportSteps) async throws -> Stats {
         let conversations = ConversationManager(
             tasks: tasks,
-            clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient())
+            clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient(), opencode: OpenCodeClient())
         )
         let store = try tasks.conversationTranscriptStore()
         guard let segmentID = try await conversations.debugImportPrepareSegmentID(taskID: taskID) else {

@@ -90,6 +90,16 @@ final class SkillCatalogManager {
                 skills: (section.skills + privateSkills).sorted { ($0.name, $0.scope == .privateRepo ? 1 : 0) < ($1.name, $1.scope == .privateRepo ? 1 : 0) }
             )
         }
+        // OpenCode's one server serves every task, so Playhouse adds no skills to it: it uses
+        // the skills it finds itself, in the working folder and the home folder, on or off.
+        for index in sections.indices {
+            let section = sections[index]
+            sections[index] = SkillRepositorySection(
+                repositoryPath: section.repositoryPath, rootPath: section.rootPath, name: section.name,
+                skills: section.skills.map { openCodeMarked($0, workingFolder: index == 0 ? section.name : sections[0].name, isWorking: index == 0) }
+            )
+        }
+        let openCodeGlobal = global.map { openCodeMarked($0, workingFolder: nil, isWorking: false) }
         var builtin = records(builtinSkills(), scope: .builtin, root: nil, disabled: disabled)
         let fileBacked = Set(builtin.map(\.name))
         for bundled in bundledClaudeSkills where !fileBacked.contains(bundled.name) {
@@ -103,13 +113,39 @@ final class SkillCatalogManager {
             ))
         }
         builtin.sort { ($0.name, $0.id) < ($1.name, $1.id) }
-        return SkillCatalog(repositories: sections, global: global, builtin: builtin)
+        return SkillCatalog(repositories: sections, global: openCodeGlobal, builtin: builtin)
     }
 
     private func globalSkills() -> [ScannedSkill] {
         scan(environment.homeDirectory + "/.agents/skills", layout: .agents)
             + scan(environment.claudeConfigDirectory + "/skills", layout: .claude, excluding: ["synced"])
             + scan(environment.codexHome + "/skills", layout: .codexLegacy)
+    }
+
+    /// Adds OpenCode to a skill it finds itself: the working folder's `.agents` and `.claude`
+    /// skills, and the home folder's `.agents` skills and Claude Code's own `~/.claude/skills`.
+    /// `providerNote` says why OpenCode doesn't use another, or that it still uses one turned off.
+    private func openCodeMarked(_ record: SkillRecord, workingFolder: String?, isWorking: Bool) -> SkillRecord {
+        guard !record.providers.isEmpty else { return record }
+        let layouts = Set(record.locations.map(\.layout))
+        let note: String
+        switch record.scope {
+        case .repo where isWorking && !layouts.isDisjoint(with: [.agents, .claude]),
+             .global where layouts.contains(.agents) || (layouts.contains(.claude) && environment.openCodeReadsClaudeHome):
+            return record.adjusted(
+                providers: record.providers + [.opencode],
+                providerNote: record.enabled ? nil : .some("OpenCode still uses it: it finds this skill itself, and Playhouse can't turn it off there.")
+            )
+        case .repo:
+            note = "Not on OpenCode: it reads skills only from the task's working folder, \(workingFolder ?? "the first repository")."
+        case .privateRepo:
+            note = "Not on OpenCode: it reads only skills in the repository and your home folder."
+        case .global where layouts.contains(.claude):
+            note = "Not on OpenCode: it reads ~/.claude/skills, not CLAUDE_CONFIG_DIR's skills."
+        default:
+            note = "Not on OpenCode: it doesn't read Codex's skill folder."
+        }
+        return record.adjusted(providerNote: .some(note))
     }
 
     private func builtinSkills() -> [ScannedSkill] {

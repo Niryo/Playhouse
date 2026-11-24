@@ -218,22 +218,30 @@ extension SkillsPageModel {
         switch provider {
         case .claude: "ClaudeLogo"
         case .codex: "CodexLogo"
+        case .opencode: "OpenCodeLogo"
         }
     }
 
-    /// Who can use a skill, rule or MCP server: one provider's logo, or a green
-    /// check for both. `testID` is `<base>-claude`, `<base>-codex` or `<base>-both`.
-    static func providerMark(_ providers: Set<ConversationProvider>, testID base: String) -> ProviderMark? {
-        switch (providers.contains(.claude), providers.contains(.codex)) {
-        case (true, true):
-            ProviderMark(label: "Claude and Codex", icon: "checkmark.circle.fill", color: "green", testID: "\(base)-both")
-        case (true, false):
-            ProviderMark(label: "Claude only", asset: logoAsset(.claude), color: "#D97757", testID: "\(base)-claude")
-        case (false, true):
-            ProviderMark(label: "Codex only", asset: logoAsset(.codex), color: "primary", testID: "\(base)-codex")
-        case (false, false):
-            nil
+    static func logoColor(_ provider: ConversationProvider) -> String {
+        switch provider {
+        case .claude: "#D97757"
+        case .codex, .opencode: "primary"
         }
+    }
+
+    /// Who can use a skill, rule or MCP server: one provider's logo, a green check for every
+    /// provider, or an outlined check for some. `testID` is `<base>-<provider>` for one,
+    /// `<base>-both` for every provider, else `<base>-` and the providers joined by `-`.
+    static func providerMark(_ providers: Set<ConversationProvider>, testID base: String) -> ProviderMark? {
+        let ordered = [ConversationProvider.claude, .codex, .opencode].filter(providers.contains)
+        guard let first = ordered.first else { return nil }
+        guard ordered.count > 1 else {
+            return ProviderMark(label: "\(first.displayName) only", asset: logoAsset(first), color: logoColor(first), testID: "\(base)-\(first.rawValue)")
+        }
+        let label = ConversationProvider.names(ordered)
+        return ordered.count == ConversationProvider.allCases.count
+            ? ProviderMark(label: label, icon: "checkmark.circle.fill", color: "green", testID: "\(base)-both")
+            : ProviderMark(label: label, icon: "checkmark.circle", color: "green", testID: "\(base)-" + ordered.map(\.rawValue).joined(separator: "-"))
     }
 
     /// The menu's first group, composed from the row's current state so a
@@ -277,9 +285,9 @@ extension SkillsPageModel {
             id: skill.id, name: name, provider: providerMark(Set(skill.providers), testID: "skill-provider-\(name)"), badges: badges, flag: flag, command: command,
             description: skill.description.isEmpty ? nil : skill.description,
             issue: skill.issue,
-            location: isPrivate
+            location: (isPrivate
                 ? "Private to \(skill.repositoryPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "its repository") · stored by Playhouse, not in the repository"
-                : skill.locations.map(\.layout.displayPath).joined(separator: " · "),
+                : skill.locations.map(\.layout.displayPath).joined(separator: " · ")) + (skill.providerNote.map { " · " + $0 } ?? ""),
             editable: skill.editable,
             opensOnClick: skill.folderPath != nil,
             fixable: isFixable(skill),

@@ -1074,7 +1074,7 @@ function onCreate(userId) {
   var jobs = (Playhouse.props.state || {}).jobs || {};
   // The plugin's "provider" setting picks the agent; each has its own model names.
   var provider = (Playhouse.props.state || {}).provider;
-  Playhouse.agent.run({ prompt: "Read the DMs of " + userId + " and draft a task.", provider: provider, model: provider === "codex" ? "gpt-5.5" : "opus",
+  Playhouse.agent.run({ prompt: "Read the DMs of " + userId + " and draft a task.", provider: provider, model: provider === "codex" ? "gpt-5.5" : provider === "opencode" ? "fixture/fast" : "opus",
     allowedTools: ["mcp__claude_ai_Slack__slack_read_channel", "mcp__claude_ai_Slack__slack_read_thread"],
     jsonSchema: TASK_SCHEMA, context: { kind: "slack-task", userId: userId } })
     .then(function (r) { var next = Object.assign({}, jobs); next[userId] = r.runID; return Playhouse.setState("jobs", next); });
@@ -1664,7 +1664,7 @@ extension PlayhouseUITests {
                                        extraEnvironment: daemon.merging(["PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"]) { _, new in new })), "unavailable")
     }
 
-    // case-contract: test_provider_install_from_composer | With neither CLI installed, providers list reports Claude Code and Codex CLI missing with their official curl installers, and the composer shows an Install AI provider button whose menu lists Claude and Codex instead of the provider picker, with no model and effort picker beside it. Installing Codex runs its installer once; Codex is then listed as installed and runs the task's turn without a restart, and the provider menu shows Codex with an Add Claude entry, with the model and effort picker back beside it. A new task whose default provider (Claude) is missing starts on the installed Codex instead, without changing the saved default. A failing installer reports its output and leaves Claude missing; adding Claude again installs it and switches the task to Claude. Installing a provider that is already installed doesn't rerun its installer, and an unknown provider is rejected.
+    // case-contract: test_provider_install_from_composer | With no CLI installed, providers list reports Claude Code, Codex CLI and OpenCode missing with their official curl installers, and the composer shows an Install AI provider button whose menu lists Claude, Codex and OpenCode instead of the provider picker, with no model and effort picker beside it. Installing Codex runs its installer once; Codex is then listed as installed and runs the task's turn without a restart, and the provider menu shows Codex with an Add Claude entry, with the model and effort picker back beside it. A new task whose default provider (Claude) is missing starts on the installed Codex instead, without changing the saved default. A failing installer reports its output and leaves Claude missing; adding Claude again installs it and switches the task to Claude, and adding OpenCode then installs it the same way and switches the task to OpenCode, leaving nothing to add. Installing a provider that is already installed doesn't rerun its installer, and an unknown provider is rejected.
     func test_provider_install_from_composer() throws {
         // The installer fixture installs each provider's CLI fixture into this folder, where the
         // provider executables point; until it runs, both providers read as not installed.
@@ -1676,8 +1676,10 @@ extension PlayhouseUITests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installer.path)
         try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: directory.appendingPathComponent("codex.payload"))
         try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: directory.appendingPathComponent("claude.payload"))
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("opencode-fixture-ui"), to: directory.appendingPathComponent("opencode.payload"))
         codexFixtureExecutable = directory.appendingPathComponent("codex").path
         claudeFixtureExecutable = directory.appendingPathComponent("claude").path
+        openCodeFixtureExecutable = directory.appendingPathComponent("opencode").path
         let installerEnvironment = ["PLAYHOUSE_E2E_PROVIDER_INSTALLER": installer.path]
         let installs = directory.appendingPathComponent("installs.log")
         func installLog() -> [String] {
@@ -1693,6 +1695,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(missing["codex"]?["isInstalled"] as? Bool, false)
         XCTAssertEqual(missing["claude"]?["installCommand"] as? String, "curl -fsSL https://claude.ai/install.sh | bash")
         XCTAssertEqual(missing["codex"]?["installCommand"] as? String, "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh")
+        XCTAssertEqual(missing["opencode"]?["isInstalled"] as? Bool, false)
+        XCTAssertEqual(missing["opencode"]?["installCommand"] as? String, "curl -fsSL https://opencode.ai/v2/install | bash")
 
         openNewTaskConversation()
         var installTaskID = try taskID(named: "Untitled task")
@@ -1706,12 +1710,14 @@ extension PlayhouseUITests {
         providerMenu.click()
         let installClaude = app.menuItems["conversation-provider-install-claude"]
         let installCodex = app.menuItems["conversation-provider-install-codex"]
-        XCTAssertTrue(installClaude.waitToExist(timeout: 5) && installCodex.exists, "Install AI provider lists Claude and Codex.")
+        let installOpenCode = app.menuItems["conversation-provider-install-opencode"]
+        XCTAssertTrue(installClaude.waitToExist(timeout: 5) && installCodex.exists && installOpenCode.exists, "Install AI provider lists Claude, Codex and OpenCode.")
         XCTAssertEqual(installClaude.title, "Claude")
         XCTAssertEqual(installCodex.title, "Codex")
+        XCTAssertEqual(installOpenCode.title, "OpenCode")
         XCTAssertFalse(app.menuItems["conversation-provider-codex"].exists, "Nothing to switch to before an install.")
         attachScreenshot(named: "Install AI provider lists the providers to install")
-        attachRegionScreenshot([installClaude, installCodex], named: "Install AI provider menu: Claude and Codex")
+        attachRegionScreenshot([installClaude, installCodex, installOpenCode], named: "Install AI provider menu: Claude, Codex and OpenCode")
         installCodex.click()
         XCTAssertTrue(waitUntil({ providerMenu.label == "Provider: Codex" && providerMenu.isEnabled }, timeout: 30),
                       "Installing Codex makes it the task's provider: \(providerMenu.label)")
@@ -1775,14 +1781,21 @@ extension PlayhouseUITests {
         let chosenDefault = try XCTUnwrap(try runCLI(["settings", "get"])["result"] as? [String: Any])
         XCTAssertEqual(chosenDefault["defaultProvider"] as? String, "claude")
         providerMenu.click()
-        XCTAssertTrue(app.menuItems["conversation-provider-claude"].waitToExist(timeout: 5) && app.menuItems["conversation-provider-codex"].exists)
-        XCTAssertFalse(installClaude.exists || installCodex.exists, "With both installed there is nothing to add.")
-        attachScreenshot(named: "Both providers installed and Claude selected")
-        attachRegionScreenshot([app.menuItems["conversation-provider-claude"], app.menuItems["conversation-provider-codex"]], named: "Provider menu with both providers installed")
+        XCTAssertTrue(installOpenCode.waitToExist(timeout: 5), "OpenCode is still offered to add.")
+        XCTAssertEqual(installOpenCode.title, "Add OpenCode")
+        installOpenCode.click()
+        XCTAssertTrue(waitUntil({ providerMenu.label == "Provider: OpenCode" }, timeout: 30), "Adding OpenCode installs it and switches to it: \(providerMenu.label)")
+        XCTAssertEqual(installLog(), ["codex", "claude", "claude", "opencode"])
+        providerMenu.click()
+        XCTAssertTrue(app.menuItems["conversation-provider-claude"].waitToExist(timeout: 5) && app.menuItems["conversation-provider-codex"].exists
+                      && app.menuItems["conversation-provider-opencode"].exists)
+        XCTAssertFalse(installClaude.exists || installCodex.exists || installOpenCode.exists, "With every provider installed there is nothing to add.")
+        attachScreenshot(named: "Every provider installed and OpenCode selected")
+        attachRegionScreenshot([app.menuItems["conversation-provider-claude"], app.menuItems["conversation-provider-codex"], app.menuItems["conversation-provider-opencode"]], named: "Provider menu with every provider installed")
         app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
 
         _ = try runCLI(["providers", "install", "codex"], extraEnvironment: installerEnvironment)
-        XCTAssertEqual(installLog(), ["codex", "claude", "claude"], "An installed provider isn't installed again.")
+        XCTAssertEqual(installLog(), ["codex", "claude", "claude", "opencode"], "An installed provider isn't installed again.")
         let unknown = try runCLI(["providers", "install", "gemini"], expectedStatus: 2, extraEnvironment: installerEnvironment)
         XCTAssertEqual((unknown["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
     }

@@ -135,6 +135,9 @@ extension BridgeRequest {
         if let fixtureExecutable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] {
             configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
         }
+        if let fixtureExecutable = environment["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE"] {
+            configuredRequest.arguments["__opencodeExecutable"] = .string(fixtureExecutable)
+        }
         if let installer = environment["PLAYHOUSE_E2E_PROVIDER_INSTALLER"], !installer.isEmpty {
             configuredRequest.arguments["__providerInstaller"] = .string(installer)
         }

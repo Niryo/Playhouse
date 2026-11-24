@@ -593,6 +593,14 @@ extension ConversationManager {
         let isClaudeSubagent = transcript.turns.contains { turn in
             claudeSegmentIDs.contains(turn.segmentID) && turn.activities.contains { $0.childThreadID == childID }
         }
+        let openCodeSegmentIDs = Set(transcript.segments.filter { $0.provider == .opencode }.map(\.id))
+        if transcript.turns.contains(where: { turn in
+            openCodeSegmentIDs.contains(turn.segmentID) && turn.activities.contains { $0.childThreadID == childID }
+        }) {
+            // An OpenCode subagent runs in a child session of the task's own.
+            let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
+            return try await clients.opencode.subagentHistory(childSessionID: childID, workspace: workspace)
+        }
         guard isClaudeSubagent else {
             let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
             return try await clients.codex.inspectThreadReadOnly(id: childID, workspace: workspace)

@@ -3,13 +3,15 @@ from test_bridge_support import __file__
 
 class BridgeTestHelpers01:
     def agent_manifests(self):
-        """The shared Codex servers and Claude runs this case's data folder recorded. They outlive
+        """The shared Codex and OpenCode servers and Claude runs this case's data folder recorded. They outlive
         the bridge daemon on purpose, so a case stops its own when it ends."""
         manifests = []
         for path in sorted((self.data_directory / "codex-runs").glob("*.json")):
             manifests.append(("codex", path, json.loads(path.read_text(encoding="utf-8"))))
         for path in sorted((self.data_directory / "provider-runs").glob("*/run.json")):
             manifests.append(("claude", path, json.loads(path.read_text(encoding="utf-8"))))
+        for path in sorted((self.data_directory / "opencode-runs").glob("*.json")):
+            manifests.append(("opencode", path, json.loads(path.read_text(encoding="utf-8"))))
         return manifests
     def agent_process_alive(self, process):
         """Whether a manifest's process still runs as the process it recorded (by start time)."""
@@ -341,15 +343,14 @@ class BridgeTestHelpers01:
         return not self.process_is_running(pid)
     def install_provider_fixture(self, provider, name):
         """A copy of the provider fixture under this case's data folder, owned by this case."""
-        fixture_name = "codex-app-server-fixture.py" if provider == "codex" else "claude-code-fixture.py"
+        fixture_name = {"codex": "codex-app-server-fixture.py", "opencode": "opencode-serve-fixture.py"}.get(provider, "claude-code-fixture.py")
         executable = self.data_directory / name
         copy_file(Path(__file__).resolve().parent / "fixtures" / fixture_name, executable)
         executable.chmod(0o755)
-        marker_name, marker_value = (
-            (".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n")
-            if provider == "codex" else
-            (".playhouse-claude-fixture-owner", "Playhouse test owns this Claude Code protocol fixture (v1).\n")
-        )
+        marker_name, marker_value = {
+            "codex": (".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n"),
+            "opencode": (".playhouse-opencode-fixture-owner", "Playhouse test owns this OpenCode protocol fixture (v1).\n"),
+        }.get(provider, (".playhouse-claude-fixture-owner", "Playhouse test owns this Claude Code protocol fixture (v1).\n"))
         (self.data_directory / marker_name).write_text(marker_value, encoding="utf-8")
         return executable
     def wait_for(self, condition, message, timeout=20):

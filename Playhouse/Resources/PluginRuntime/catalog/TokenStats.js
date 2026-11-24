@@ -226,7 +226,7 @@ function mapSection(model, content) {
     return [h(Scroll, { key: "map", spacing: 18, testID: id + "-map", height: 420 }, content(model.map))];
   }
   return model.loaded ? [h(Text, { key: "unavailable", size: 12, color: "secondary", testID: id + "-map-unavailable" },
-    "No request log for this task yet. Claude Code and Codex write one to their session files as the conversation runs.")] : [];
+    "No request log for this task yet. Claude Code and Codex write one to their session files, and OpenCode's turns save their session's messages, as the conversation runs.")] : [];
 }
 
 function TokenStats(props) {

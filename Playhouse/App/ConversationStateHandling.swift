@@ -268,12 +268,12 @@ extension TaskConversationView {
         }
     }
 
-    /// The prompt names only models the provider lists; Claude's "Default" is a
+    /// The prompt names only models the provider lists; Claude's and OpenCode's "Default" is a
     /// placeholder, not a model, and an unlisted ID isn't a name.
     var promptModelName: String? {
         if !selectedModelID.isEmpty, !modelOptions.contains(where: { $0.id == selectedModelID }) { return nil }
         let name = selectedModelName
-        return provider == .claude && name == provider.defaultModelName ? nil : name
+        return provider.defaultModelIsPlaceholder && name == provider.defaultModelName ? nil : name
     }
 
     var selectedModelName: String {
@@ -938,12 +938,17 @@ extension TaskConversationView {
     }
 
     var installedProviders: [ConversationProvider] {
-        providerInstallStatuses.filter(\.isInstalled).map(\.provider)
+        providerInstallStatuses.filter(\.isInstalled).map(\.provider).filter(isProviderOffered)
     }
 
     /// The providers the menu offers to install. None until the daemon reports what's installed.
     var missingProviders: [ConversationProvider] {
-        providerInstallStatuses.filter { !$0.isInstalled }.map(\.provider)
+        providerInstallStatuses.filter { !$0.isInstalled }.map(\.provider).filter(isProviderOffered)
+    }
+
+    /// A plugin editor isn't offered OpenCode, which doesn't get Playhouse's plugin skill.
+    func isProviderOffered(_ option: ConversationProvider) -> Bool {
+        ConversationManager.canRun(task, on: option)
     }
 
     /// Reads which providers are installed. A conversation that hasn't started, whose provider
@@ -1075,6 +1080,8 @@ extension TaskConversationView {
             parts.append("Claude uses its own settings: \(current.skills.count) skills and commands, \(current.mcpServers.count) MCP servers.")
         case .codex:
             parts.append("Codex runs without apps or hooks, with the MCP servers turned on in Skills, Rules & MCP.")
+        case .opencode:
+            parts.append("OpenCode uses the model providers you connected to it and finds its own skills, rules and MCP servers; the switches in Skills, Rules & MCP don't apply to it.")
         }
         parts.append(provider.supportsGoals ? "Goals are available." : "Goals are available only with Codex.")
         parts.append("Earlier turns are shared as text context on the next message.")

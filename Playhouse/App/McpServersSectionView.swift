@@ -393,15 +393,14 @@ struct McpServersSectionView: View {
 
     private static func sharedNote(_ server: McpServerRecord) -> String? {
         guard !server.sharedWith.isEmpty else { return nil }
-        return "Playhouse passes it to " + server.sharedWith.map(\.displayName).joined(separator: " and ") + "."
+        return "Playhouse passes it to " + ConversationProvider.names(server.sharedWith) + "."
     }
 
     /// The providers that reported the server needs a sign-in.
     private func signInNeeded(_ server: McpServerRecord) -> [ConversationProvider] {
         guard let status else { return [] }
-        return [ConversationProvider.claude, .codex].filter { provider in
-            let reports = provider == .claude ? status.claude : status.codex
-            return reports.contains { $0.name == server.name && $0.needsSignIn }
+        return ConversationProvider.allCases.filter { provider in
+            status.statuses(for: provider).contains { $0.name == server.name && $0.needsSignIn }
         }
     }
 
@@ -508,7 +507,7 @@ struct McpServersSectionView: View {
                 Text(limitation).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("mcp-limitation-\(key)")
             }
             if !isEnabled(server), !server.alwaysOnFor.isEmpty {
-                Text("\(server.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still starts it from its own configuration, so turning it off applies to the other agent only. Delete it to stop both.")
+                Text("\(ConversationProvider.names(server.alwaysOnFor)) still \(server.alwaysOnFor.count == 1 ? "starts" : "start") it from its own configuration, so turning it off applies to the other agents only. Delete it to stop it everywhere.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)

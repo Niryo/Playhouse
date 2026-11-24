@@ -76,11 +76,16 @@ struct SkillRecord: Codable, Equatable, Identifiable, Sendable {
     /// For a private skill no provider uses: where the skill with the same
     /// name that takes precedence lives.
     var shadowedBy: String? = nil
+    /// What differs on OpenCode: why it doesn't use the skill, or that it still uses one turned off.
+    var providerNote: String? = nil
 
     /// `/name`, or `/<repository>:<name>` for a namespaced private skill.
     var invocationToken: String { "/" + (invocationName ?? name) }
 
-    func adjusted(providers: [ConversationProvider]? = nil, issue: String?? = nil, invocationName: String?? = nil, shadowedBy: String?? = nil) -> SkillRecord {
+    func adjusted(
+        providers: [ConversationProvider]? = nil, issue: String?? = nil, invocationName: String?? = nil, shadowedBy: String?? = nil,
+        providerNote: String?? = nil
+    ) -> SkillRecord {
         var copy = SkillRecord(
             id: id, name: name, description: description, scope: scope, repositoryPath: repositoryPath, rootPath: rootPath,
             folderPath: folderPath, locations: locations, providers: providers ?? self.providers, enabled: enabled, editable: editable,
@@ -88,6 +93,7 @@ struct SkillRecord: Codable, Equatable, Identifiable, Sendable {
         )
         copy.invocationName = invocationName ?? self.invocationName
         copy.shadowedBy = shadowedBy ?? self.shadowedBy
+        copy.providerNote = providerNote ?? self.providerNote
         return copy
     }
 }
@@ -180,6 +186,16 @@ struct SkillEnvironment: Equatable, Sendable {
     /// or `.claude.json` inside a configured `CLAUDE_CONFIG_DIR`.
     var claudeStateFile: String
     var codexHome: String
+    /// OpenCode's global configuration folder (`$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`),
+    /// which holds its own agents and global AGENTS.md.
+    var openCodeConfigDirectory: String = NSHomeDirectory() + "/.config/opencode"
+
+    /// OpenCode's Claude Code compatibility reads `~/.claude` of the home it runs with, which is
+    /// Claude Code's own folder unless `CLAUDE_CONFIG_DIR` moved it.
+    var openCodeReadsClaudeHome: Bool {
+        URL(fileURLWithPath: claudeConfigDirectory).standardizedFileURL.path
+            == URL(fileURLWithPath: homeDirectory + "/.claude").standardizedFileURL.path
+    }
     /// Where an organization deploys Claude Code's managed CLAUDE.md and managed-mcp.json.
     var managedClaudeDirectory: String
     /// Playhouse-owned folder for bridge wrappers.
@@ -212,6 +228,8 @@ struct SkillEnvironment: Equatable, Sendable {
             claudeConfigDirectory: claude,
             claudeStateFile: configuredClaude.map { $0 + "/.claude.json" } ?? home + "/.claude.json",
             codexHome: codex,
+            openCodeConfigDirectory: homeOverride.map { $0 + "/.config/opencode" }
+                ?? (environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? home + "/.config") + "/opencode",
             managedClaudeDirectory: homeOverride.map { $0 + "/managed/ClaudeCode" } ?? "/Library/Application Support/ClaudeCode",
             bridgeDirectory: URL(fileURLWithPath: data).appendingPathComponent("skill-bridge").path,
             privateSkillsDirectory: URL(fileURLWithPath: data).appendingPathComponent("private-skills").path

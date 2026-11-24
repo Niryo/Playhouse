@@ -678,12 +678,12 @@ extension PlayhouseUITests {
         XCTAssertTrue(commands(schedule).allSatisfy { $0.hasPrefix("playhouse schedule ") }, schedule)
         XCTAssertTrue(commands(schedule).contains("playhouse schedule set <task-id> --prompt <text> --once <ISO8601> [--title <title>] [--image <path>...] [--mode default|plan] [--model <id>]"))
         XCTAssertTrue(schedule.contains("      Schedule a task to start once with this prompt"))
-        XCTAssertTrue(commands(try helpText(["task", "--help"])).contains("playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]"))
+        XCTAssertTrue(commands(try helpText(["task", "--help"])).contains("playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude|opencode>]"))
         XCTAssertEqual(try helpText(["task", "pr", "--help"]), try helpText(["help", "task", "pr"]))
         XCTAssertTrue(commands(try helpText(["help", "task", "pr"])).allSatisfy { $0.hasPrefix("playhouse task pr ") })
 
         let chat = try helpText(["help", "--for", "chat"])
-        for line in ["playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]",
+        for line in ["playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude|opencode>]",
                      "playhouse schedule list", "playhouse schedule clear|pause|resume|run-now <task-id>",
                      "playhouse workspace repos list", "playhouse plugin mode [--on|--off]"] {
             XCTAssertTrue(commands(chat).contains(line), "The chat's help should list \(line).")

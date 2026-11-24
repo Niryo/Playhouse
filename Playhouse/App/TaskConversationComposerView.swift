@@ -469,7 +469,7 @@ extension TaskConversationView {
         }
         // Before the daemon answers every provider is listed, as is the task's own if it was uninstalled.
         let switchable = providerInstallStatuses.isEmpty
-            ? ConversationProvider.allCases
+            ? ConversationProvider.allCases.filter(isProviderOffered)
             : ConversationProvider.allCases.filter { installedProviders.contains($0) || $0 == provider }
         return .init(
             title: installing ?? provider.displayName,

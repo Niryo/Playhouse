@@ -7,6 +7,7 @@ extension ConversationProvider {
         switch self {
         case .codex: CodexAppServerClient.modelID
         case .claude: ClaudeCodeClient.preferredDefaultModelID
+        case .opencode: OpenCodeClient.defaultModelID
         }
     }
 
@@ -15,6 +16,8 @@ extension ConversationProvider {
         switch self {
         case .codex: CodexAppServerClient.modelID
         case .claude: ClaudeCodeClient.titleModelID
+        // OpenCode's own small model already names its sessions; helper turns use its default.
+        case .opencode: OpenCodeClient.defaultModelID
         }
     }
 
@@ -22,6 +25,7 @@ extension ConversationProvider {
         switch self {
         case .codex: "GPT-6 Luna"
         case .claude: "Default"
+        case .opencode: "Default"
         }
     }
 
@@ -35,11 +39,39 @@ extension ConversationProvider {
             return "Codex · \(shortName)"
         case .claude:
             return modelName.map { "Claude · \($0)" } ?? "Claude"
+        case .opencode:
+            // A model ID names its provider too (`anthropic/claude-sonnet-4`); the label keeps the model.
+            guard let modelName, modelName != "Default" else { return "OpenCode" }
+            return "OpenCode · \(modelName.split(separator: "/").last.map(String.init) ?? modelName)"
         }
     }
 
     /// Goals are a Codex app-server feature with no Claude Code equivalent.
     var supportsGoals: Bool { self == .codex }
+
+    /// Whether the provider's turns run in a long-lived server it shares between conversations
+    /// (Codex's app-server, OpenCode's `opencode serve`) rather than a process of their own
+    /// (Claude Code). Such a server publishes its running turns and keeps background work of its
+    /// own, which a stop can end without ending the server.
+    var runsTurnsOnSharedServer: Bool {
+        switch self {
+        case .codex, .opencode: true
+        case .claude: false
+        }
+    }
+
+    /// Whether the picker's Default stands for no model at all, the provider choosing its own,
+    /// rather than a model the provider lists by that name.
+    var defaultModelIsPlaceholder: Bool {
+        switch self {
+        case .claude, .opencode: true
+        case .codex: false
+        }
+    }
+
+    static var validValuesMessage: String {
+        "Provider must be one of \(allCases.map { "'\($0.rawValue)'" }.joined(separator: ", "))."
+    }
 
     static func parse(_ value: String) throws -> ConversationProvider {
         guard let provider = ConversationProvider(rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
@@ -555,6 +587,12 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
             interrupted.formUnion(client.interruptedThreadIDsSnapshot)
             snapshot.pendingUserInput.merge(client.pendingUserInputsSnapshot) { current, _ in current }
         }
+        for client in OpenCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
+            active.formUnion(client.activeThreadIDsSnapshot)
+            interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
+            interrupted.formUnion(client.interruptedThreadIDsSnapshot)
+            snapshot.pendingUserInput.merge(client.pendingUserInputsSnapshot) { current, _ in current }
+        }
         snapshot.conversationRevisions = Dictionary(uniqueKeysWithValues: ConversationManager.visibleRevisions.map { ($0.key.uuidString, $0.value) })
         snapshot.activeThreadIDs = active.sorted()
         snapshot.activeTaskIDs = ConversationTurnEvents.activeTaskIDs.map(\.uuidString).sorted()
@@ -601,6 +639,10 @@ struct TaskCPUUsageSnapshot: Codable, Equatable {
         let scope = dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         var pidsByThreadID: [String: pid_t] = [:]
         for client in ClaudeCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
+            pidsByThreadID.merge(client.activeProcessIdentifiersByThreadID) { current, _ in current }
+        }
+        // An OpenCode task alone on its shared `opencode serve` is that server's load.
+        for client in OpenCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
             pidsByThreadID.merge(client.activeProcessIdentifiersByThreadID) { current, _ in current }
         }
         var snapshot = TaskCPUUsageSnapshot()
@@ -650,6 +692,7 @@ struct TaskCPUUsageSnapshot: Codable, Equatable {
 struct ConversationClients {
     let codex: CodexAppServerClient
     let claude: ClaudeCodeClient
+    let opencode: OpenCodeClient
     /// The shared skill gallery, which a turn's launch bridges to its provider.
     var skills: SkillCatalogManager? = nil
     /// The shared agent rules, which a turn's launch bridges to its provider.
@@ -667,13 +710,14 @@ struct ConversationClients {
         switch provider {
         case .codex: codex
         case .claude: claude
+        case .opencode: opencode
         }
     }
 
-    var all: [ConversationProviderClient] { [codex, claude] }
+    var all: [ConversationProviderClient] { [codex, claude, opencode] }
 
     /// Separate clients for one-shot helper turns: the task's provider first,
-    /// then the other provider for when the preferred one is unavailable.
+    /// then the other providers for when the preferred one is unavailable.
     func helperClients(preferring provider: ConversationProvider) -> [ConversationProviderClient] {
         let preferred = client(for: provider)
         return [preferred.makeAuxiliaryClient()] + all.filter { $0.provider != provider }.map { $0.makeAuxiliaryClient() }

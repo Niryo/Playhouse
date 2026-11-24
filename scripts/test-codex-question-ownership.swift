@@ -32,7 +32,7 @@ struct CodexQuestionOwnershipProbe {
         defer { codex.shutdown() }
         let suite = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"]!
         let preferences = UserDefaults(suiteName: suite)!
-        let manager = ConversationManager(tasks: tasks, clients: ConversationClients(codex: codex, claude: ClaudeCodeClient(), observesGoalTurns: true), preferences: preferences)
+        let manager = ConversationManager(tasks: tasks, clients: ConversationClients(codex: codex, claude: ClaudeCodeClient(), opencode: OpenCodeClient(), observesGoalTurns: true), preferences: preferences)
         var requests: [UUID: [ConversationUserInputRequest]] = [:]
         func receive(_ taskID: UUID, _ update: ConversationUpdate) {
             if update.type == "user_input", let request = update.userInputRequest { requests[taskID, default: []].append(request) }

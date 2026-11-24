@@ -149,6 +149,20 @@ extension ConversationManager {
     }
     // MARK: - Providers
 
+    /// OpenCode finds only the skills in its own folders, so it doesn't get Playhouse's plugin
+    /// skill, and a plugin editor can't run on it.
+    static func canRun(_ task: any ConversationSubject, on provider: ConversationProvider) -> Bool {
+        task.authoringPluginPlacement == nil || canAuthorPlugins(on: provider)
+    }
+
+    static func canAuthorPlugins(on provider: ConversationProvider) -> Bool {
+        provider != .opencode
+    }
+
+    static var pluginAuthoringUnavailable: PlayhouseManagerError {
+        .invalidTransition("Plugin editors can't use OpenCode: it doesn't get Playhouse's plugin skill. Use Claude or Codex.")
+    }
+
     /// Detected native capabilities, so switching can show what differs. Playhouse
     /// starts Codex without apps or hooks and with the MCP servers turned on in
     /// the MCP page; Claude Code uses its own configuration.
@@ -161,7 +175,15 @@ extension ConversationManager {
             supportsGoals: true,
             notes: ["Playhouse runs Codex without apps or hooks, with the MCP servers turned on in Skills, Rules & MCP.", "Goals are available."]
         )
-        return [codex, await clients.claude.capabilities(workspace: workspace)]
+        let opencode = ConversationProviderCapabilities(
+            provider: .opencode,
+            isAvailable: clients.opencode.isInstalled,
+            supportsGoals: false,
+            notes: [
+                "Playhouse runs OpenCode with its own model providers, skills, rules and MCP servers: the on/off switches in Skills, Rules & MCP don't apply to it.",
+            ]
+        )
+        return [codex, await clients.claude.capabilities(workspace: workspace), opencode]
     }
 
     /// What each provider reports about the MCP servers it would start for the
@@ -184,10 +206,10 @@ extension ConversationManager {
     func mcpStatus(taskID: UUID?, provider: ConversationProvider? = nil) async -> McpStatusReport {
         var report = McpStatusReport()
         guard let workspace = mcpWorkspace(taskID: taskID) else {
-            report.errors = ["claude": "The task's folders are missing.", "codex": "The task's folders are missing."]
+            report.errors = Dictionary(uniqueKeysWithValues: ConversationProvider.allCases.map { ($0.rawValue, "The task's folders are missing.") })
             return report
         }
-        if provider != .codex {
+        if provider == nil || provider == .claude {
             let claude = await clients.claude.capabilities(workspace: workspace)
             if claude.isAvailable {
                 report.claude = claude.mcpServers.map { McpProviderStatus(name: $0.name, status: $0.status, needsSignIn: $0.status == "needs-auth") }
@@ -195,7 +217,18 @@ extension ConversationManager {
                 report.errors["claude"] = claude.error ?? "Claude Code is not installed."
             }
         }
-        if provider != .claude {
+        if provider == nil || provider == .opencode {
+            if clients.opencode.isInstalled {
+                do {
+                    report.opencode = try await clients.opencode.mcpServerStatuses(workspace: workspace)
+                } catch {
+                    report.errors["opencode"] = error.localizedDescription
+                }
+            } else if provider == .opencode {
+                report.errors["opencode"] = "OpenCode is not installed."
+            }
+        }
+        if provider == nil || provider == .codex {
             if clients.codex.isInstalled {
                 do {
                     report.codex = try await clients.codex.mcpServerStatuses(workspace: workspace)
@@ -208,6 +241,7 @@ extension ConversationManager {
         }
         PlayhouseDiagnostics.record("mcp.status.read", fields: [
             "claudeCount": String(report.claude.count), "codexCount": String(report.codex.count),
+            "opencodeCount": String(report.opencode.count),
         ])
         return report
     }
@@ -228,6 +262,9 @@ extension ConversationManager {
         case .codex:
             guard clients.codex.isInstalled else { throw BridgeCommandError(code: "unavailable", message: "Codex is not installed.") }
             link = try await clients.codex.startMcpLogin(name: name, workspace: workspace)
+        case .opencode:
+            guard clients.opencode.isInstalled else { throw BridgeCommandError(code: "unavailable", message: "OpenCode is not installed.") }
+            link = try await clients.opencode.startMcpLogin(name: name, workspace: workspace)
         }
         return McpLoginStart(provider: provider, name: name, authorizationUrl: link)
     }
@@ -239,6 +276,9 @@ extension ConversationManager {
         case .codex:
             guard let workspace = mcpWorkspace(taskID: taskID) else { return McpLogin.notStarted(provider: .codex, name: name) }
             return await clients.codex.waitForMcpLogin(name: name, workspace: workspace)
+        case .opencode:
+            guard let workspace = mcpWorkspace(taskID: taskID) else { return McpLogin.notStarted(provider: .opencode, name: name) }
+            return await clients.opencode.waitForMcpLogin(name: name, workspace: workspace)
         }
     }
 
@@ -256,6 +296,7 @@ extension ConversationManager {
         guard task.status != .done else {
             throw PlayhouseManagerError.invalidTransition("Done tasks are closed. Create a new task to use another provider.")
         }
+        guard Self.canRun(task, on: provider) else { throw Self.pluginAuthoringUnavailable }
         // The user's explicit choice becomes the default for the next task or
         // chat, so a provider switch doesn't keep reverting to Codex.
         if remembersDefault { try? settingsManager.setDefaultConversationProvider(provider.rawValue) }
@@ -355,15 +396,17 @@ enum ConversationProviderInstaller {
         switch provider {
         case .claude: "Claude Code"
         case .codex: "Codex CLI"
+        case .opencode: "OpenCode"
         }
     }
 
-    /// Each provider's own documented installer: a script that installs the CLI into
-    /// `~/.local/bin`, where Playhouse looks for it, with no prompts.
+    /// Each provider's own documented installer: a script that installs the CLI where
+    /// Playhouse looks for it (`~/.local/bin`, or `~/.opencode/bin` for OpenCode), with no prompts.
     nonisolated static func officialInstallCommand(_ provider: ConversationProvider) -> String {
         switch provider {
         case .claude: "curl -fsSL https://claude.ai/install.sh | bash"
         case .codex: "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"
+        case .opencode: "curl -fsSL https://opencode.ai/v2/install | bash"
         }
     }
 
@@ -371,6 +414,7 @@ enum ConversationProviderInstaller {
         switch provider {
         case .claude: clients.claude.isInstalled
         case .codex: clients.codex.isInstalled
+        case .opencode: clients.opencode.isInstalled
         }
     }
 
@@ -404,7 +448,7 @@ enum ConversationProviderInstaller {
             PlayhouseDiagnostics.record("provider.install.not_found", fields: ["provider": provider.rawValue])
             throw BridgeCommandError(
                 code: "operation_failed",
-                message: "The \(productName(provider)) installer finished, but Playhouse couldn't find `\(provider.executableName)` in ~/.local/bin or on PATH."
+                message: "The \(productName(provider)) installer finished, but Playhouse couldn't find `\(provider.executableName)` where it installs or on PATH."
             )
         }
         AgentUsageStore.shared(scope: clients.codex.runtimeScope).setInstalled(provider, true)
@@ -485,15 +529,55 @@ enum ConversationProviderInstaller {
         output.fileHandleForReading.readabilityHandler = nil
         guard status == 0 else {
             let tail = collected.tail
+            // The installers' own messages are terse ("Failed to fetch package information"),
+            // so say which of the hosts they download from this Mac can't reach.
+            let unreachable = fixtureInstaller == nil ? await unreachableHosts(installHosts(provider), environment: environment) : []
             PlayhouseDiagnostics.record("provider.install.failed", fields: [
                 "provider": provider.rawValue, "exitStatus": String(status), "output": tail,
+                "unreachableHosts": unreachable.joined(separator: ","),
             ])
-            throw BridgeCommandError(
-                code: "operation_failed",
-                message: "Installing \(productName(provider)) failed (exit \(status))." + (tail.isEmpty ? "" : " \(tail)")
-            )
+            var message = "Installing \(productName(provider)) failed (exit \(status))."
+            if !tail.isEmpty { message += " The installer said: \"\(tail)\"." }
+            if !unreachable.isEmpty {
+                message += " This Mac can't reach \(unreachable.joined(separator: " or ")), which the installer downloads from."
+                    + " A firewall, VPN or proxy may be blocking it; allow access, or install from another network."
+            }
+            if fixtureInstaller == nil {
+                message += " To see the full output, run `\(officialInstallCommand(provider))` in Terminal."
+            }
+            throw BridgeCommandError(code: "operation_failed", message: message)
         }
         PlayhouseDiagnostics.record("provider.install.succeeded", fields: ["provider": provider.rawValue])
+    }
+
+    /// The hosts each official installer downloads from: the script's own host, plus npm for
+    /// OpenCode 2, whose installer fetches the binary package from the npm registry.
+    private static func installHosts(_ provider: ConversationProvider) -> [String] {
+        switch provider {
+        case .claude: ["claude.ai"]
+        case .codex: ["chatgpt.com"]
+        case .opencode: ["opencode.ai", "registry.npmjs.org"]
+        }
+    }
+
+    /// The hosts curl can't connect to within a few seconds. It uses curl, with the installer's
+    /// environment, so proxies and certificates are the ones the installer saw.
+    private static func unreachableHosts(_ hosts: [String], environment: [String: String]) async -> [String] {
+        await Task.detached {
+            hosts.filter { host in
+                let curl = Process()
+                curl.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+                curl.arguments = ["-s", "-o", "/dev/null", "--connect-timeout", "5", "--max-time", "8", "https://\(host)/"]
+                curl.environment = environment
+                curl.standardInput = FileHandle.nullDevice
+                curl.standardOutput = FileHandle.nullDevice
+                curl.standardError = FileHandle.nullDevice
+                guard (try? curl.run()) != nil else { return false }
+                curl.waitUntilExit()
+                // Any HTTP response, even an error status, means the host is reachable.
+                return curl.terminationStatus != 0
+            }
+        }.value
     }
 
     /// The installer's combined output, collected off the main thread.
@@ -534,6 +618,7 @@ extension ConversationProvider {
         switch self {
         case .claude: "claude"
         case .codex: "codex"
+        case .opencode: "opencode"
         }
     }
 }

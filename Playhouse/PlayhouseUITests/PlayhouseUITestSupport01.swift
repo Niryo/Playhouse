@@ -1050,7 +1050,8 @@ extension PlayhouseUITests {
     func rowBadge(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         for kind in ["skill", "rule", "mcp"] where identifier.hasPrefix("\(kind)-provider-") {
             var key = String(identifier.dropFirst("\(kind)-provider-".count))
-            if let dash = key.lastIndex(of: "-") { key = String(key[..<dash]) }
+            // The badge's suffix is `-both` or the providers it names, such as `-codex-opencode`.
+            if let suffix = key.firstMatch(of: /(-both|(-(claude|codex|opencode))+)$/) { key = String(key[..<suffix.range.lowerBound]) }
             let row = element("\(kind)-row-\(key)")
             XCTAssertTrue(row.waitToExist(timeout: 10), "\(kind)-row-\(key) should be listed.", file: file, line: line)
             return row.descendants(matching: .any).matching(identifier: identifier).firstMatch
@@ -1058,12 +1059,16 @@ extension PlayhouseUITests {
         XCTFail("\(identifier) is not a provider badge.", file: file, line: line)
         return element(identifier)
     }
-    /// The agents a rule's or MCP server's single provider icon names (`<base>-both`,
-    /// `-claude` or `-codex` on its row): both, one, or none when the row shows no icon.
+    /// The agents a rule's or MCP server's single provider icon names (`<base>-both` for every
+    /// agent, or the agents it names, such as `-codex-opencode`), or none when the row shows no icon.
     func rowProviders(_ base: String, file: StaticString = #filePath, line: UInt = #line) -> Set<String> {
-        if rowBadge("\(base)-both", file: file, line: line).exists { return ["claude", "codex"] }
-        if rowBadge("\(base)-claude", file: file, line: line).exists { return ["claude"] }
-        if rowBadge("\(base)-codex", file: file, line: line).exists { return ["codex"] }
+        let providers = ["claude", "codex", "opencode"]
+        if rowBadge("\(base)-both", file: file, line: line).exists { return Set(providers) }
+        for mask in 1..<(1 << providers.count) {
+            let named = providers.enumerated().filter { mask & (1 << $0.offset) != 0 }.map(\.element)
+            guard named.count < providers.count else { continue }
+            if rowBadge("\(base)-" + named.joined(separator: "-"), file: file, line: line).exists { return Set(named) }
+        }
         return []
     }
     /// Whether a section shows in a list: its heading at the list's top, or the
