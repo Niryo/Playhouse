@@ -776,18 +776,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_empty_question_request_is_rejected | Claude AskUserQuestion requests with no questions are rejected through the control protocol, fail the turn, and mark the task Blocked; the UI shows the blocked task and its intervention indicator.
     func test_claude_empty_question_request_is_rejected() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-empty-question")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = executable.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-empty-question")
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Empty Claude question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])

@@ -23,7 +23,7 @@ extension PlayhouseUITests {
             ".codex/agents/reviewer.toml": "name = \"reviewer\"\ndescription = \"Reviews changes\"\n",
             ".codex/agents/helper.toml": "name = \"helper\"\ndescription = \"Codex-only helper\"\n",
         ])
-        let executable = try installSkillsClaudeFixture("claude-fixture-mentions")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-mentions")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         // A held Codex turn for the steer at the end; the fixture's name selects its hold mode.
         let codex = dataDirectory.appendingPathComponent("codex-fixture-mention-steer-serial-success-wait")
@@ -300,7 +300,7 @@ extension PlayhouseUITests {
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("CLAUDE.md"), "# Claude home rules\n")
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("rules/global-style.md"), "Prefer small functions.\n")
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-catalog")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-catalog")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Rules catalog", repositories: [working, linked, override, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -433,7 +433,7 @@ extension PlayhouseUITests {
     func test_rules_create_update_and_delete_on_disk() throws {
         let repository = try makeSkillRepository("rules-manage-repo", skills: [:])
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-manage")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-manage")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Rules manage", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -579,7 +579,7 @@ extension PlayhouseUITests {
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
         let claudeFile = rulesClaudeConfig.appendingPathComponent("CLAUDE.md")
         try writeRuleFile(claudeFile, "Mine, in the way.\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-link")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-link")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Rules links", repositories: [working, other])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -674,7 +674,7 @@ extension PlayhouseUITests {
         let broken = rulesClaudeConfig.appendingPathComponent("rules/broken.md")
         try writeRuleFile(broken, "---\npaths:\n  - src/**\nThe frontmatter never closes.\n")
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
-        let executable = try installSkillsClaudeFixture("claude-fixture-rules-fix")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-rules-fix")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let source = try createSkillsTask("Rules fix source", repositories: [repository], provider: "claude")
@@ -751,7 +751,7 @@ extension PlayhouseUITests {
         try writeRuleFile(skillsHome.appendingPathComponent("notes/imported.md"), "Imported text.\n")
         try writeRuleFile(skillsCodexHome.appendingPathComponent("AGENTS.md"), "Codex global text.\n")
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("CLAUDE.md"), "Claude global text.\n")
-        let executable = try installSkillsClaudeFixture("claude-fixture-rules-bridge")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-rules-bridge")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Claude rules", repositories: [repository, extra], provider: "claude")
@@ -827,7 +827,7 @@ extension PlayhouseUITests {
         try writeRuleFile(skillsHome.appendingPathComponent(".agents/AGENTS.md"), "Shared global text for Codex.\n")
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("CLAUDE.md"), "Claude global text for Codex.\n")
         try writeRuleFile(skillsCodexHome.appendingPathComponent("AGENTS.md"), "Codex global native text.\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-codex")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-codex")
         // Its own daemon, so restarting it below leaves the UI runner's shared one alone.
         let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).rules-codex-\(UUID().uuidString.prefix(8))"]
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)

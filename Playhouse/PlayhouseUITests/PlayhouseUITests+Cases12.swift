@@ -751,18 +751,7 @@ extension PlayhouseUITests {
     // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model becomes the default for conversations without an override; conversation-specific selections persist across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-provider-selection")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: claudeExecutable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = claudeExecutable.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-provider-selection")
         launchApp(defaultParent: fixture.parent.path)
         let settings = try XCTUnwrap(try runCLI(["settings", "get"])["result"] as? [String: Any])
         XCTAssertEqual(settings["defaultProvider"] as? String, "codex", "Existing installs keep Codex as the default provider.")

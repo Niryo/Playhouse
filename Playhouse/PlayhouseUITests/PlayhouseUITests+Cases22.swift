@@ -11,18 +11,7 @@ import Vision
 extension PlayhouseUITests {
     // case-contract: test_claude_settles_turn_after_consumed_wake_notification | When Claude Code starts the provider turn that would deliver a finished background task's notification and then says nothing at all, Playhouse settles that turn on its own instead of leaving it open and the task In Progress forever: a follow-up queued while the turn was still parked stays queued through the silent wake, the send finishes and the task reaches Review, and that follow-up is then delivered in its own turn rather than stranded in the queue. A woken turn that is alive and merely slow to speak is not cut off by that backstop: it stays quiet past the grace a consumed notification gets and still ends the turn on its own answer.
     func test_claude_settles_turn_after_consumed_wake_notification() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-consumed-wake")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-consumed-wake")
         let pause = URL(fileURLWithPath: executable.path + ".consumed-wake-pause")
         let parked = URL(fileURLWithPath: executable.path + ".consumed-wake-ready")
         let release = URL(fileURLWithPath: executable.path + ".consumed-wake-release")
@@ -122,18 +111,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_stopping_outcome_decides_over_background_work | A Claude turn that reports completed and then leaves a background shell running, a dev server, settles in Review as soon as Claude's result arrives, without waiting for a notification that never comes and without a recovery prompt. A completed outcome reported while a background agent is still running does not settle the turn: the task stays In Progress while the agent runs, and when the woken parent turn then does more work and ends without a new report, the earlier outcome is treated as stale, so the task does not reach Review; Playhouse sends exactly one recovery prompt and the outcome reported in it places the task in Waiting Response. When Claude Code starts the woken turn for a finished background shell and then stays silent, with no outcome reported and no queued follow-up, Playhouse's backstop ends the wait and the same single recovery prompt decides the task's column instead of leaving it In Progress. The UI shows each task in the matching column and the recovery prompt in the transcript.
     func test_claude_stopping_outcome_decides_over_background_work() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-stopping-outcome")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-stopping-outcome")
         let pause = URL(fileURLWithPath: executable.path + ".early-report-pause")
         let ready = URL(fileURLWithPath: executable.path + ".early-report-ready")
         let release = URL(fileURLWithPath: executable.path + ".early-report-release")
@@ -227,18 +205,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, stores and shows the prompt that carried the answer as sent, and keeps it out of saved task state and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-recovery-failure")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-recovery-failure")
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude private recovery failure", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
@@ -546,18 +513,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, including a long paragraph, header, and option descriptions reach the client unchanged, and the UI renders the question inline with its Markdown formatted at the reply text size and its long paragraph wrapped in full across several lines without truncation, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     func test_claude_questions_can_be_answered_after_switching_conversations() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-question")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = executable.path
+        try installClaudeFixtureExecutable(named: "claude-fixture-question")
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
@@ -635,18 +591,7 @@ extension PlayhouseUITests {
     // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, waiting-response, and keep-working instructions, which fails the private turn; the rejected question and the private rejection instructions stay out of the transcript, while a prompt that applied the user's answer is stored and shown as sent. Playhouse then stops driving the work and marks the task Blocked naming that reason.
 
     func test_claude_outcome_reminder_rejects_user_questions() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-outcome-reminder-question")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
-            atomically: true,
-            encoding: .utf8
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-outcome-reminder-question")
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude reminder question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])

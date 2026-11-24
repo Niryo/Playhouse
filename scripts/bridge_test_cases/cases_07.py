@@ -1117,7 +1117,9 @@ class BridgeTestCases07:
         clean_record = self.assert_success(clean_active)["repositoryWorktrees"][0]
         clean_worktree = Path(clean_record["worktreePath"])
         clean_lock = ConversationTurnLockBarrier(self.data_directory, clean_active_id)
-        clean_removed, _ = self.call_cli("task", "repository", "remove", clean_active_id, "--repo", self.alternate)
+        # Its own daemon, so killing it below leaves the suite's shared one alone.
+        private_service = {"PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.repo-removal-{uuid.uuid4().hex[:8]}"}
+        clean_removed, _ = self.call_cli("task", "repository", "remove", clean_active_id, "--repo", self.alternate, extra_environment=private_service)
         self.assertEqual(self.assert_success(clean_removed)["repositoryWorktrees"], [])
         self.assertTrue(clean_worktree.exists())
         scheduled = next(
@@ -1126,6 +1128,10 @@ class BridgeTestCases07:
             and event.get("taskID") == clean_active_id
         )
         bridge_pid = int(scheduled["processID"])
+        self.assertEqual(self.assert_success(self.call_cli("status", extra_environment=private_service)[0])["processID"], bridge_pid,
+                         "The case's own daemon should have scheduled the cleanup.")
+        self.assertNotEqual(self.assert_success(self.call_cli("status")[0])["processID"], bridge_pid,
+                            "The daemon killed here must not be the suite's shared one.")
         try:
             os.kill(bridge_pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -1140,7 +1146,8 @@ class BridgeTestCases07:
         else:
             self.fail("The isolated bridge service should exit before testing durable cleanup recovery.")
         clean_lock.release()
-        self.call_cli("task", "get", clean_active_id)
+        # A fresh daemon on the same service recovers the cleanup the killed one scheduled.
+        self.call_cli("task", "get", clean_active_id, extra_environment=private_service)
         clean_deadline = time.monotonic() + 30
         while clean_worktree.exists() and time.monotonic() < clean_deadline:
             time.sleep(0.02)

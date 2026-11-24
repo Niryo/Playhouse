@@ -428,7 +428,11 @@ class BridgeTestCases09:
         (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        # Its own daemon, so killing it below leaves the suite's shared one alone.
+        fixtures = {
+            "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude),
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.claude-resume-{uuid.uuid4().hex[:8]}",
+        }
         task = self.create_task("Claude session recovery", roots=[self.primary])
         self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude")[0])
         fixture_history_path = Path(str(claude) + ".history")
@@ -468,6 +472,10 @@ class BridgeTestCases09:
             if event.get("event") == "conversation.send.started" and event.get("taskID") == task["id"]
         ][-1]
         bridge_pid = int(send_started["clientPID"])
+        self.assertEqual(self.assert_success(self.call_cli("status", extra_environment=fixtures)[0])["processID"], bridge_pid,
+                         "The case's own daemon should have run the sends.")
+        self.assertNotEqual(self.assert_success(self.call_cli("status")[0])["processID"], bridge_pid,
+                            "The daemon killed here must not be the suite's shared one.")
         try:
             os.kill(bridge_pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -481,7 +489,7 @@ class BridgeTestCases09:
             time.sleep(0.02)
         else:
             self.fail("The isolated bridge service should exit before recovery after restart.")
-        restarted_task, _ = self.call_cli("task", "get", task["id"])
+        restarted_task, _ = self.call_cli("task", "get", task["id"], extra_environment=fixtures)
         self.assertEqual(self.assert_success(restarted_task)["conversationProvider"], "claude")
 
         # The test owns this fixture executable and its sidecar before arming the failure.
