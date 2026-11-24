@@ -184,6 +184,7 @@ protocol ConversationSubject: AnyObject, Observable {
 
     var codexThreadID: String? { get set }
     var claudeSessionID: String? { get set }
+    var openCodeSessionID: String? { get set }
     var conversationProviderRawValue: String? { get set }
     var conversationEffortRawValue: String? { get set }
     var conversationModelIDsData: Data? { get set }
@@ -291,6 +292,15 @@ extension ConversationSubject {
         switch provider {
         case .codex: codexThreadID
         case .claude: claudeSessionID
+        case .opencode: openCodeSessionID
+        }
+    }
+
+    func setConversationID(_ conversationID: String?, for provider: ConversationProvider) {
+        switch provider {
+        case .codex: codexThreadID = conversationID
+        case .claude: claudeSessionID = conversationID
+        case .opencode: openCodeSessionID = conversationID
         }
     }
 
@@ -298,7 +308,10 @@ extension ConversationSubject {
     var activeConversationID: String? { conversationID(for: conversationProvider) }
 
     /// Whether any provider has started a conversation here.
-    var hasConversation: Bool { codexThreadID != nil || claudeSessionID != nil }
+    var hasConversation: Bool { ConversationProvider.allCases.contains { conversationID(for: $0) != nil } }
+
+    /// Every provider conversation started here.
+    var allConversationIDs: Set<String> { Set(ConversationProvider.allCases.compactMap { conversationID(for: $0) }) }
 
     var status: TaskStatus {
         get { TaskStatus(rawValue: statusRawValue) ?? .backlog }
@@ -412,6 +425,7 @@ final class StandaloneChat {
     var totalInProgressSeconds: Double = 0
     var codexThreadID: String?
     var claudeSessionID: String?
+    var openCodeSessionID: String?
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
     var conversationModelIDsData: Data?

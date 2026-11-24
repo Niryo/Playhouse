@@ -719,6 +719,7 @@ class BridgeTestCases13:
             'BoardTaskManager', 'BoardUsageReporting', 'ClaudeAccountUsage', 'ClaudeClientMapping',
             'ClaudeOutputHandling', 'ClaudeProcessLifecycle', 'ClaudeProcessProtocol', 'ClaudeSessionRunner',
             'ClaudeSessionSupport', 'ClaudeTurnControl', 'ClaudeTurnReporting', 'CodexAccountUsage',
+            'OpenCodeAccountUsage', 'OpenCodeClient', 'OpenCodeMcp', 'OpenCodeRequestLog', 'OpenCodeServer', 'OpenCodeTurn',
             'CodexMessageConversion', 'CodexServerEvents', 'CodexServerTransport', 'CodexSharedServer',
             'CodexTaskInstructions', 'CodexThreadLifecycle', 'CodexTurnRecovery', 'CodexTurnSending',
             'ConversationCompaction', 'ConversationHistory', 'ConversationManager', 'ConversationMessages', 'ParallelChatBubbles',

@@ -132,6 +132,13 @@ extension PlayhouseUITests {
                 manifests.append(("claude", url, object))
             }
         }
+        let openCodeRuns = dataDirectory.appendingPathComponent("opencode-runs", isDirectory: true)
+        for url in ((try? FileManager.default.contentsOfDirectory(at: openCodeRuns, includingPropertiesForKeys: nil)) ?? [])
+        where url.pathExtension == "json" && !url.lastPathComponent.hasPrefix(".") {
+            if let object = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any] {
+                manifests.append(("opencode", url, object))
+            }
+        }
         return manifests
     }
     /// The process a manifest recorded, while it still runs as that process (same start time).
@@ -371,7 +378,7 @@ extension PlayhouseUITests {
         guard let runtime = try? runCLI(["conversation", "runtime"])["result"] as? [String: Any] else { return false }
         return (runtime["activeThreadIDs"] as? [String] ?? []).isEmpty && !element("pause-response-button").exists
     }
-    /// The suite must never reach an installed Codex, Claude or GitHub CLI: every provider or
+    /// The suite must never reach an installed Codex, Claude, OpenCode or GitHub CLI: every provider or
     /// `gh` process a case starts, from the app or from the daemon on its behalf, is one of its
     /// own fixtures. A task left in PR mode reaches `gh` on its way to Review.
     func providerFixtureViolations() -> [String] {
@@ -382,7 +389,7 @@ extension PlayhouseUITests {
         let fixtureRoots = [WorkspaceFixture.root.path, runDirectory.path]
         return events.compactMap { event in
             guard let name = event["event"] as? String,
-                  ["codex.app_server.started", "claude.process.started", "github.cli.started"].contains(name) else { return nil }
+                  ["codex.app_server.started", "claude.process.started", "opencode.server.started", "github.cli.started"].contains(name) else { return nil }
             let executable = event["executable"] as? String ?? ""
             guard !fixtureRoots.contains(where: { executable.hasPrefix($0 + "/") }) else { return nil }
             if name == "github.cli.started" {

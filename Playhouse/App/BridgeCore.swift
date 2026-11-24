@@ -451,6 +451,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let createdAt: Date
     let codexThreadID: String?
     let claudeSessionID: String?
+    var openCodeSessionID: String? = nil
     let conversationProvider: String
     let conversationEffort: String
     /// full or optimized; absent from records older than the setting.
@@ -497,6 +498,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         createdAt = task.createdAt
         codexThreadID = task.codexThreadID
         claudeSessionID = task.claudeSessionID
+        openCodeSessionID = task.openCodeSessionID
         conversationProvider = task.conversationProvider.rawValue
         conversationEffort = task.conversationEffort
         conversationContextMode = task.conversationContextMode.rawValue

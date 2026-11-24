@@ -254,12 +254,16 @@ final class RuleCatalogManager {
             file(environment.claudeConfigDirectory + "/CLAUDE.md", layout: .claudeGlobal),
         ].compactMap { $0 } + ruleFolder(environment.claudeConfigDirectory + "/rules", layout: .claudeGlobalRule)
         let codexOverrideInUse = globalFiles.contains { $0.layout == .codexGlobalOverride && !isEmpty($0.realPath) }
+        // OpenCode reads its own global AGENTS.md, else Claude Code's CLAUDE.md in the home it runs with.
+        let openCodeReadsClaudeGlobal = environment.openCodeReadsClaudeHome
+            && !fileManager.fileExists(atPath: environment.openCodeConfigDirectory + "/AGENTS.md")
         for group in grouped(globalFiles) {
-            result.append(entry(group, scope: .global, root: nil, rootIndex: nil, disabled: disabled) { layout in
+            result.append(entry(group, scope: .global, root: nil, rootIndex: nil, disabled: disabled) { layout, _ in
                 switch layout {
                 case .codexGlobalOverride: return ([.codex], [.codex], [])
                 case .codexGlobal: return codexOverrideInUse ? ([], [], [.claude, .codex]) : ([.codex], [.codex], [])
-                case .claudeGlobal, .claudeGlobalRule: return ([.claude], [.claude], [])
+                case .claudeGlobal: return openCodeReadsClaudeGlobal ? ([.claude, .opencode], [.claude, .opencode], []) : ([.claude], [.claude], [])
+                case .claudeGlobalRule: return ([.claude], [.claude], [])
                 default: return ([], [], [])
                 }
             })
@@ -278,18 +282,24 @@ final class RuleCatalogManager {
             // Claude Code reads AGENTS.md on its own only when no CLAUDE.md is beside it.
             let hasClaudeFile = layouts.contains(.claude) || layouts.contains(.claudeLocal)
             // Claude Code loads the working repository's files; an --add-dir root's
-            // are not loaded, and Codex reads only the working repository's.
+            // are not loaded, and Codex and OpenCode read only the working repository's.
+            // OpenCode reads AGENTS.md whether or not a CLAUDE.md is beside it, the root
+            // CLAUDE.md only when there is no AGENTS.md, and never Codex's AGENTS.override.md.
             let isWorking = index == 0
+            let openCodeClaudeFile = layouts.contains(.agents) ? nil : root.path + "/CLAUDE.md"
             for group in grouped(files) {
-                result.append(entry(group, scope: .repo, root: root, rootIndex: index, disabled: disabled) { layout in
+                result.append(entry(group, scope: .repo, root: root, rootIndex: index, disabled: disabled) { layout, path in
                     switch layout {
                     case .agentsOverride:
                         return ([.codex], isWorking ? [.codex] : [], [.claude])
                     case .agents:
                         // Playhouse has Claude Code read AGENTS.md alongside a CLAUDE.md.
-                        let native: Set<ConversationProvider> = hasOverride ? (hasClaudeFile ? [] : [.claude]) : (hasClaudeFile ? [.codex] : [.claude, .codex])
-                        let inLaunch: Set<ConversationProvider> = isWorking ? (hasOverride ? [.claude] : [.claude, .codex]) : []
+                        var native: Set<ConversationProvider> = hasOverride ? (hasClaudeFile ? [] : [.claude]) : (hasClaudeFile ? [.codex] : [.claude, .codex])
+                        native.insert(.opencode)
+                        let inLaunch: Set<ConversationProvider> = isWorking ? (hasOverride ? [.claude, .opencode] : [.claude, .codex, .opencode]) : []
                         return (native, inLaunch, hasOverride ? [.codex] : [])
+                    case .claude where path == openCodeClaudeFile:
+                        return ([.claude, .opencode], isWorking ? [.claude, .opencode] : [], [])
                     case .claude, .claudeLocal, .claudeRule:
                         return ([.claude], isWorking ? [.claude] : [], [])
                     default:
@@ -301,7 +311,7 @@ final class RuleCatalogManager {
 
         let managed = [file(environment.managedClaudeDirectory + "/CLAUDE.md", layout: .claudeManaged)].compactMap { $0 }
         for group in grouped(managed) {
-            result.append(entry(group, scope: .managed, root: nil, rootIndex: nil, disabled: disabled) { _ in ([.claude], [.claude], [.codex]) })
+            result.append(entry(group, scope: .managed, root: nil, rootIndex: nil, disabled: disabled) { _, _ in ([.claude], [.claude], [.codex]) })
         }
         return result
     }
@@ -353,12 +363,13 @@ final class RuleCatalogManager {
         ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// `readers` gives, for one location's layout, the providers that read it
+    /// `readers` gives, for one location's layout and path, the providers that read it
     /// outside Playhouse, the ones that load it themselves in this launch, and
-    /// the ones withheld from it.
+    /// the ones withheld from it. OpenCode gets only what it loads itself: its one server
+    /// serves every task, so Playhouse adds no rules to it.
     private func entry(
         _ group: [ScannedFile], scope: RuleScope, root: SkillRoot?, rootIndex: Int?, disabled: Set<String>,
-        readers: (RuleLayout) -> (native: Set<ConversationProvider>, inLaunch: Set<ConversationProvider>, withheld: Set<ConversationProvider>)
+        readers: (RuleLayout, String) -> (native: Set<ConversationProvider>, inLaunch: Set<ConversationProvider>, withheld: Set<ConversationProvider>)
     ) -> Entry {
         let primary = group.first { !$0.isSymlink } ?? group[0]
         let contents = (try? String(contentsOfFile: primary.realPath, encoding: .utf8)) ?? ""
@@ -366,11 +377,12 @@ final class RuleCatalogManager {
         var inLaunch = Set<ConversationProvider>()
         var withheld = Set(ConversationProvider.allCases)
         for location in group {
-            let readers = readers(location.layout)
+            let readers = readers(location.layout, location.path)
             native.formUnion(readers.native)
             inLaunch.formUnion(readers.inLaunch)
             withheld.formIntersection(readers.withheld)
         }
+        if !inLaunch.contains(.opencode) { withheld.insert(.opencode) }
         withheld.subtract(inLaunch)
         let id: String
         let name: String
@@ -387,7 +399,8 @@ final class RuleCatalogManager {
             name = primary.path
         }
         let enabled = scope == .managed || !disabled.contains(id)
-        let alwaysOn = scope == .managed ? inLaunch : inLaunch.intersection([.codex])
+        // Codex and OpenCode have no setting to skip an AGENTS.md they read themselves.
+        let alwaysOn = scope == .managed ? inLaunch : inLaunch.intersection([.codex, .opencode])
         let reaching = Set(ConversationProvider.allCases).subtracting(withheld)
         let paths = primary.layout.isRuleFolder ? Self.pathGlobs(contents) : []
         let record = RuleRecord(
@@ -401,8 +414,8 @@ final class RuleCatalogManager {
             alwaysOnFor: Self.ordered(alwaysOn),
             enabled: enabled,
             editable: scope != .managed,
-            availableOutsidePlayhouse: native.isSuperset(of: ConversationProvider.allCases),
-            linkable: scope != .managed && !native.isSuperset(of: ConversationProvider.allCases)
+            availableOutsidePlayhouse: native.isSuperset(of: [.claude, .codex]),
+            linkable: scope != .managed && !native.isSuperset(of: [.claude, .codex])
                 && linkTargets(layouts: Set(group.map(\.layout)), native: native, rootPath: root?.path) != nil,
             byteCount: contents.utf8.count,
             issue: issue(for: primary, contents: contents, nativeToCodex: native.contains(.codex) && scope == .repo)
@@ -440,7 +453,7 @@ final class RuleCatalogManager {
     }
 
     static func ordered(_ providers: Set<ConversationProvider>) -> [ConversationProvider] {
-        [.claude, .codex].filter(providers.contains)
+        [.claude, .codex, .opencode].filter(providers.contains)
     }
 
     static func repoID(repositoryPath: String, path: String) -> String { "repo:\(repositoryPath)#\(path)" }
@@ -647,7 +660,8 @@ final class RuleCatalogManager {
            layouts.contains(.codexGlobal) || layouts.contains(.codexGlobalOverride) || layouts.contains(.sharedGlobal) {
             targets.append(environment.claudeConfigDirectory + "/CLAUDE.md")
         }
-        let missing = Set(ConversationProvider.allCases).subtracting(native)
+        // Links join Claude Code's and Codex's own files; OpenCode reads AGENTS.md like Codex.
+        let missing = Set<ConversationProvider>([.claude, .codex]).subtracting(native)
         return targets.count == missing.count && !targets.isEmpty ? targets : nil
     }
 
@@ -779,6 +793,7 @@ final class RuleCatalogManager {
             switch provider {
             case .claude: launch.claudeShared = records; launch.claudeInstructions = text
             case .codex: launch.codexShared = records; launch.codexInstructions = text
+            case .opencode: break
             }
         }
         return launch

@@ -86,7 +86,7 @@ extension ConversationManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "The conversation changed. Click Stop again to review its background work.")
             }
             let accepted: Bool
-            if confirmationID != nil, task.conversationProvider == .claude {
+            if confirmationID != nil, !task.conversationProvider.runsTurnsOnSharedServer {
                 accepted = await providerClient.forceStopActiveTurn(threadID: threadID, interruptProvider: false)
             } else if isDeleting {
                 accepted = try await providerClient.interruptActiveTurn(threadID: threadID)

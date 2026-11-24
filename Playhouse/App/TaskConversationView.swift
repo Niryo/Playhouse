@@ -731,7 +731,7 @@ struct TaskConversationView: View {
         .pluginPresentation($openConversationPlugin, props: pluginProps, actions: pluginActions)
         .onChange(of: task.id, initial: true) {
             runtimeSlice.observe(conversationRuntime, taskID: task.id.uuidString) { [task] in
-                Set([task.codexThreadID, task.claudeSessionID].compactMap { $0 })
+                task.allConversationIDs
             }
         }
         .onAppear {

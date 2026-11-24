@@ -196,10 +196,12 @@ enum AgentUsageService {
         // A file check, so every read reflects whether each CLI can be found now.
         store.setInstalled(.codex, clients.codex.isInstalled)
         store.setInstalled(.claude, clients.claude.isInstalled)
+        store.setInstalled(.opencode, clients.opencode.isInstalled)
         if refresh {
             async let codex: Void = clients.codex.refreshAgentUsage()
             async let claude: Void = clients.claude.refreshAgentUsage()
-            _ = await (codex, claude)
+            async let opencode: Void = clients.opencode.refreshAgentUsage()
+            _ = await (codex, claude, opencode)
         }
         return store.report()
     }
@@ -211,6 +213,9 @@ enum AgentUsageService {
         case .claude:
             try clients.claude.startAccountLogin()
             return nil
+        case .opencode:
+            try clients.opencode.startAccountLogin()
+            return nil
         }
     }
 
@@ -220,6 +225,7 @@ enum AgentUsageService {
         switch provider {
         case .codex: try await clients.codex.logoutAccount()
         case .claude: try await clients.claude.logoutAccount()
+        case .opencode: try await clients.opencode.logoutAccount()
         }
         store.clearUsage(provider)
         return try await login(provider, clients: clients)

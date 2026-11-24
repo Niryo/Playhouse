@@ -341,8 +341,17 @@ struct McpProviderStatus: Codable, Equatable, Sendable {
 struct McpStatusReport: Codable, Equatable, Sendable {
     var claude: [McpProviderStatus] = []
     var codex: [McpProviderStatus] = []
+    var opencode: [McpProviderStatus] = []
     /// A provider that could not be asked, with why.
     var errors: [String: String] = [:]
+
+    func statuses(for provider: ConversationProvider) -> [McpProviderStatus] {
+        switch provider {
+        case .claude: claude
+        case .codex: codex
+        case .opencode: opencode
+        }
+    }
 }
 
 /// A sign-in one provider started for an MCP server: the page opens the link

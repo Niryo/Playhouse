@@ -27,17 +27,11 @@ extension BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task is already linked to a different \(provider.displayName) conversation.")
             }
             guard existing != conversationID else { return BoardTaskRecord(task: task) }
-            switch provider {
-            case .codex: task.codexThreadID = conversationID
-            case .claude: task.claudeSessionID = conversationID
-            }
+            task.setConversationID(conversationID, for: provider)
             do {
                 try await saveTaskContext(taskID: id)
             } catch {
-                switch provider {
-                case .codex: task.codexThreadID = existing
-                case .claude: task.claudeSessionID = existing
-                }
+                task.setConversationID(existing, for: provider)
                 throw error
             }
             // Follow-ups queued on the replaced conversation belong to its successor.

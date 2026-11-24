@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Live integration suite against real installed providers.
-#   PLAYHOUSE_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh [--provider claude|codex|all] [--skip-ui]
+#   PLAYHOUSE_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh [--provider claude|codex|opencode|all] [--skip-ui]
 # PLAYHOUSE_LIVE_PROVIDER selects the provider when --provider is omitted (default: claude).
 set -euo pipefail
 
@@ -11,7 +11,7 @@ provider="${PLAYHOUSE_LIVE_PROVIDER:-claude}"
 skip_ui=0
 while (( $# > 0 )); do
   case "$1" in
-    --provider) provider="${2:?Expected claude, codex, or all after --provider}"; shift 2 ;;
+    --provider) provider="${2:?Expected claude, codex, opencode, or all after --provider}"; shift 2 ;;
     --skip-ui) skip_ui=1; shift ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -20,8 +20,8 @@ if [[ "${PLAYHOUSE_RUN_LIVE_INTEGRATION:-}" != "1" && "${PLAYHOUSE_RUN_CODEX_INT
   printf 'Set PLAYHOUSE_RUN_LIVE_INTEGRATION=1 to run live provider turns.\n' >&2
   exit 2
 fi
-if [[ "$provider" != claude && "$provider" != codex && "$provider" != all ]]; then
-  printf 'Unknown provider: %s (use claude, codex, or all)\n' "$provider" >&2
+if [[ "$provider" != claude && "$provider" != codex && "$provider" != opencode && "$provider" != all ]]; then
+  printf 'Unknown provider: %s (use claude, codex, opencode, or all)\n' "$provider" >&2
   exit 2
 fi
 if (( skip_ui == 0 )) && [[ "${PLAYHOUSE_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then

@@ -682,6 +682,18 @@ extension PlayhouseUITests {
     func installClaudeFixture(named name: String) throws -> [String: String] {
         ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": try installClaudeFixtureExecutable(named: name).path]
     }
+    /// Installs the OpenCode server fixture for this case and returns the environment a CLI-driven
+    /// turn needs. Must run before `launchApp` so the app's own turns use it too.
+    func installOpenCodeFixture(named name: String) throws -> [String: String] {
+        let executable = dataDirectory.appendingPathComponent(name)
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("opencode-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this OpenCode protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-opencode-fixture-owner")
+        )
+        openCodeFixtureExecutable = executable.path
+        return ["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE": executable.path]
+    }
     /// The usage dot is one flat hue, so the dominant channel says where on the
     /// green-to-red heatmap it currently sits. `leftEdgeFraction` restricts the
     /// sample to a left-hand slice of `element`'s screenshot — used to read the

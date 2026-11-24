@@ -103,9 +103,9 @@ class BridgeTestCases25:
         self.assert_failure(run("skill", "--item", "skill-slash-system-skill", "--button", "gear", task_id=codex_task["id"], expected_status=1), "unavailable")
 
         logins = menu("login")["list"]["items"]
-        self.assertEqual([item["id"] for item in logins], ["login-claude", "login-codex"], "The task's own agent comes first.")
+        self.assertEqual([item["id"] for item in logins], ["login-claude", "login-codex", "login-opencode"], "The task's own agent comes first.")
         self.assertEqual((logins[0]["title"], logins[0]["detail"]), ("Sign in to Claude", "This task's agent"))
-        self.assertEqual([item["id"] for item in menu("login", codex_task["id"])["list"]["items"]], ["login-codex", "login-claude"])
+        self.assertEqual([item["id"] for item in menu("login", codex_task["id"])["list"]["items"]], ["login-codex", "login-claude", "login-opencode"])
         # Choosing an agent runs the same sign-in as `usage login`.
         claude_auth = Path(claude["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".auth-state")
         claude_auth.write_text(json.dumps({"loggedIn": False}), encoding="utf-8")
@@ -306,12 +306,12 @@ class BridgeTestCases25:
         self.assertTrue(commands(schedule) and all(line.startswith("playhouse schedule ") for line in commands(schedule)), schedule)
         self.assertIn("playhouse schedule set <task-id> --prompt <text> --once <ISO8601> [--title <title>] [--image <path>...] [--mode default|plan] [--model <id>]", commands(schedule))
         self.assertIn("      Schedule a task to start once with this prompt", schedule)
-        self.assertIn("playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]", commands(help_text("task", "--help")))
+        self.assertIn("playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude|opencode>]", commands(help_text("task", "--help")))
         self.assertEqual(help_text("task", "pr", "--help"), help_text("help", "task", "pr"))
         self.assertTrue(all(line.startswith("playhouse task pr ") for line in commands(help_text("help", "task", "pr"))))
 
         chat = help_text("help", "--for", "chat")
-        for line in ["playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude>]",
+        for line in ["playhouse task create --title <title> --prompt <text> [--root <path>...] [--provider <codex|claude|opencode>]",
                      "playhouse schedule list", "playhouse schedule clear|pause|resume|run-now <task-id>",
                      "playhouse workspace repos list", "playhouse plugin mode [--on|--off]"]:
             self.assertIn(line, commands(chat))

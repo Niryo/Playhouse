@@ -20,7 +20,7 @@ struct RemoteConversationManager {
         // These clients are never started: the store operations below don't use them.
         store = ConversationManager(
             tasks: BoardTaskManager(modelContext: modelContext),
-            clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient())
+            clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient(), opencode: OpenCodeClient())
         )
     }
 

@@ -259,7 +259,7 @@ struct RulesSectionView: View {
     /// Who Playhouse hands the rule to, because they don't read it themselves.
     private static func sharedNote(_ rule: RuleRecord) -> String? {
         guard !rule.sharedWith.isEmpty else { return nil }
-        return "Playhouse shares it with " + rule.sharedWith.map(\.displayName).joined(separator: " and ") + "."
+        return "Playhouse shares it with " + ConversationProvider.names(rule.sharedWith) + "."
     }
 
     /// A rule on one line: its name, a mark when it has a problem, its Fix,
@@ -356,7 +356,7 @@ struct RulesSectionView: View {
                     .accessibilityIdentifier("rule-issue-\(key)")
             }
             if !isEnabled(rule), !rule.alwaysOnFor.isEmpty {
-                Text("\(rule.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still reads this file itself, so turning it off applies to the other agent only.")
+                Text("\(ConversationProvider.names(rule.alwaysOnFor)) still \(rule.alwaysOnFor.count == 1 ? "reads" : "read") this file itself, so turning it off applies to the other agents only.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)

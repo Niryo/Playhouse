@@ -547,7 +547,7 @@ extension PlayhouseCLI {
             ])
         case "plugin":
             let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>] | @<app-event>[:<json>] | +<seconds>...] [--advance <seconds>]"
-            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | sessions | edit --id <plugin-id> | delete --id <plugin-id> | enable --id <plugin-id> | disable --id <plugin-id> | state --id <plugin-id> [--key <key> --value <json>] | event <name> [--payload <json>] | author --placement <\(pluginPlacements)> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page|inline>] | render …"
+            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | sessions | edit --id <plugin-id> | delete --id <plugin-id> | enable --id <plugin-id> | disable --id <plugin-id> | state --id <plugin-id> [--key <key> --value <json>] | event <name> [--payload <json>] | author --placement <\(pluginPlacements)> [--provider <codex|claude|opencode>] [--name <name> --presentation <popover|modal|sidebar|page|inline>] | render …"
             switch rest.first {
             case "mode":
                 let options = Array(rest.dropFirst())
@@ -680,7 +680,7 @@ extension PlayhouseCLI {
                 if flags.contains("--watch") { return BridgeRequest(command: "usage.subscribe") }
                 return BridgeRequest(command: "usage.get", arguments: ["refresh": .boolean(flags.contains("--refresh"))])
             case "login", "switch-account":
-                guard rest.count == 2 else { throw CLIError.usage("Use: playhouse usage \(rest[0]) <codex|claude>") }
+                guard rest.count == 2 else { throw CLIError.usage("Use: playhouse usage \(rest[0]) <codex|claude|opencode>") }
                 return BridgeRequest(command: "usage.\(rest[0])", arguments: ["provider": .string(rest[1])])
             default:
                 throw CLIError.unknownCommand(args)
@@ -1008,7 +1008,7 @@ extension PlayhouseCLI {
                 throw CLIError.unknownCommand(args)
             }
         case "providers":
-            let usage = "Use: playhouse providers list|install <codex|claude>"
+            let usage = "Use: playhouse providers list|install <codex|claude|opencode>"
             switch rest.first {
             case "list":
                 guard rest.count == 1 else { throw CLIError.usage(usage) }
@@ -1028,7 +1028,7 @@ extension PlayhouseCLI {
                 guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings set-appearance <dark|light>") }
                 return BridgeRequest(command: "settings.set-appearance", arguments: ["appearance": .string(rest[1])])
             case "set-default-provider":
-                guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings set-default-provider <codex|claude>") }
+                guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings set-default-provider <codex|claude|opencode>") }
                 return BridgeRequest(command: "settings.set-default-provider", arguments: ["provider": .string(rest[1])])
             case "set-token-usage-color-max":
                 guard rest.count == 2, let max = Int(rest[1]) else {
@@ -1214,7 +1214,7 @@ extension PlayhouseCLI {
                         "taskID": .string(id), "provider": .string(values[1]), "remembersDefault": .boolean(values.count == 2),
                     ])
                 default:
-                    throw CLIError.usage("Use: playhouse conversation provider <task-id> [set <codex|claude> [--keep-default]|capabilities]")
+                    throw CLIError.usage("Use: playhouse conversation provider <task-id> [set <codex|claude|opencode> [--keep-default]|capabilities]")
                 }
             case "goal":
                 guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]") }

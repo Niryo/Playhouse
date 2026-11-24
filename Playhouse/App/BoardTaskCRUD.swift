@@ -164,6 +164,7 @@ extension BoardTaskManager {
                 chat.totalInProgressSeconds = task.totalInProgressSeconds
                 chat.codexThreadID = task.codexThreadID
                 chat.claudeSessionID = task.claudeSessionID
+                chat.openCodeSessionID = task.openCodeSessionID
                 chat.conversationEffortRawValue = task.conversationEffortRawValue
                 chat.conversationModelIDsData = task.conversationModelIDsData
                 chat.savedPrompt = task.savedPrompt
@@ -212,8 +213,9 @@ extension BoardTaskManager {
     }
 
     /// Creates an editor conversation without adding a card to the task board.
+    /// A default provider of OpenCode, which can't author plugins, starts it on Codex instead.
     func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, authoringName: String? = nil, presentation: String? = nil, prompt: String? = nil) async throws -> BoardTaskRecord {
-        let chat = StandaloneChat(provider: provider)
+        let chat = StandaloneChat(provider: ConversationManager.canAuthorPlugins(on: provider) ? provider : .codex)
         chat.title = name
         chat.authoredPluginID = pluginID
         chat.pluginPlacement = placement

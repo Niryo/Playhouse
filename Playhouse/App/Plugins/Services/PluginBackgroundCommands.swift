@@ -47,7 +47,7 @@ extension PlayhouseBridgeRuntime {
             guard !prompt.isEmpty else { throw BridgeCommandError(code: "invalid_argument", message: "agent.run needs a prompt.") }
             let model = request.arguments["model"]?.string
             if let model, !ConversationManager.isValidModelID(model) {
-                throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, numbers, periods, underscores, or hyphens.")
+                throw BridgeCommandError(code: "invalid_argument", message: ConversationManager.invalidModelIDMessage)
             }
             var allowedTools: [String] = []
             if let tools = request.arguments["allowedTools"], tools != .null {
@@ -81,9 +81,11 @@ extension PlayhouseBridgeRuntime {
             }
             let run = PluginAgentRuns.Request(pluginID: plugin.id, prompt: prompt, model: model, allowedTools: allowedTools, jsonSchema: schema, context: context, cwd: cwd)
             let store = try requiredAgentRunStore(storeDirectory)
-            let runID = provider == .codex
-                ? try await PluginAgentRuns.startCodex(run, codex: conversationClients().codex, store: store, origin: request)
-                : try PluginAgentRuns.start(run, claude: conversationClients().claude, store: store, origin: request)
+            let runID = switch provider {
+            case .codex: try await PluginAgentRuns.startCodex(run, codex: conversationClients().codex, store: store, origin: request)
+            case .opencode: try await PluginAgentRuns.startOpenCode(run, opencode: conversationClients().opencode, store: store, origin: request)
+            case .claude: try PluginAgentRuns.start(run, claude: conversationClients().claude, store: store, origin: request)
+            }
             return .object(["runID": .string(runID)])
         case "agent.cancel":
             let pluginID = try request.requiredString("pluginID")
@@ -248,6 +250,9 @@ extension PlayhouseBridgeRuntime {
             switch provider {
             case .claude: reply = try await conversationClients().claude.callMcpTool(tool, arguments: arguments, workspace: workspace, timeout: .seconds(seconds))
             case .codex: reply = try await conversationClients().codex.callMcpTool(tool, arguments: arguments, workspace: workspace, timeout: .seconds(seconds))
+            case .opencode:
+                // OpenCode's server has no API to call an MCP tool outside a model turn.
+                throw McpToolCallError.unsupported("OpenCode can't call MCP tools outside a turn; call them through Claude Code or Codex.")
             }
         } catch ClaudeCodeClient.ClientError.cliNotFound {
             throw BridgeCommandError(code: "unavailable", message: "Claude Code isn't installed, so MCP tools can't be called.")
@@ -274,7 +279,7 @@ extension PlayhouseBridgeRuntime {
     private func pluginProvider(_ request: BridgeRequest) throws -> ConversationProvider {
         guard let value = request.arguments["provider"]?.string, !value.isEmpty else { return .claude }
         guard let provider = ConversationProvider(rawValue: value) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.")
+            throw BridgeCommandError(code: "invalid_argument", message: "Provider must be one of \(ConversationProvider.allCases.map { "'\($0.rawValue)'" }.joined(separator: ", ")).")
         }
         return provider
     }

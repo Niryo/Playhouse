@@ -364,7 +364,7 @@ extension PlayhouseUITests {
         waitForBoardOrAbortSuite()
         let bare = try XCTUnwrap(try runCLI(["usage", "get"])["result"] as? [String: Any])
         let installed = (bare["providers"] as? [[String: Any]] ?? []).map { $0["installed"] as? Bool }
-        XCTAssertEqual(installed, [false, false], "Neither CLI is installed without the fixtures.")
+        XCTAssertEqual(installed, [false, false, false], "No CLI is installed without the fixtures.")
         XCTAssertFalse(waitUntil({ self.element("plugin-section-agents-info").exists }, timeout: 15), "With neither CLI installed the section should not show.")
         XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").exists)
         attachScreenshot(named: "Sidebar without Agents info when no agent CLI is installed")

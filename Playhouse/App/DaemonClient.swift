@@ -14,6 +14,7 @@ final class DaemonClient: @unchecked Sendable {
         var worktreeDirectory: String?
         var codexExecutable: String?
         var claudeExecutable: String?
+        var openCodeExecutable: String?
         var codexHome: String?
         var claudeConfigDirectory: String?
         var serviceName: String
@@ -28,6 +29,7 @@ final class DaemonClient: @unchecked Sendable {
                 worktreeDirectory: environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"],
                 codexExecutable: environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"],
                 claudeExecutable: environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"],
+                openCodeExecutable: environment["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE"],
                 codexHome: environment["CODEX_HOME"],
                 claudeConfigDirectory: environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"],
                 serviceName: serviceName,
@@ -88,6 +90,7 @@ final class DaemonClient: @unchecked Sendable {
         request.arguments["__guiRuntime"] = .boolean(true)
         if let codex = configuration.codexExecutable { request.arguments["__codexExecutable"] = .string(codex) }
         if let claude = configuration.claudeExecutable { request.arguments["__claudeExecutable"] = .string(claude) }
+        if let opencode = configuration.openCodeExecutable { request.arguments["__opencodeExecutable"] = .string(opencode) }
         if let installer = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_PROVIDER_INSTALLER"], !installer.isEmpty {
             request.arguments["__providerInstaller"] = .string(installer)
         }

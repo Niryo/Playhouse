@@ -314,11 +314,13 @@ enum ContextCompactionPolicy {
     ) -> ContextCompactionTrigger? {
         guard settings.enabled, let state, let lastCallAt = state.lastCallAt,
               !state.compactedSinceLastCall else { return nil }
-        if provider == "codex" {
-            // Codex app-server provides context usage and a manual compact RPC,
-            // but no cache TTL signal, so the idle and cold-cache rules are
-            // Claude-specific. A large context is left to Codex's own
-            // auto-compaction, which can also compact mid-turn.
+        // Only Claude Code reports when its prompt cache expires (this file is also built where
+        // the provider type isn't, so it compares the provider's name).
+        if provider != "claude" {
+            // Codex's app-server and OpenCode's server provide context usage and a
+            // manual compact request, but no cache TTL signal, so the idle and
+            // cold-cache rules are Claude-specific. A large context is left to the
+            // provider's own auto-compaction, which can also compact mid-turn.
             if state.contextTokens >= settings.minimumTokens,
                let model = state.model, isModelSwitch(from: model, to: requestedModel) { return .modelSwitch }
             return nil

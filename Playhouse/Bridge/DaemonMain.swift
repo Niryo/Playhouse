@@ -252,6 +252,7 @@ enum PlayhouseBridgeDaemonMain {
             Task { @MainActor in
                 await CodexAppServerClient.stopIdleSharedServersBeforeExit()
                 await ClaudeCodeClient.stopRunsBeforeExit()
+                await OpenCodeClient.stopRunsBeforeExit()
                 finished.signal()
             }
             _ = finished.wait(timeout: .now() + 15)

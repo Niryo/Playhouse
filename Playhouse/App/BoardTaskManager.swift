@@ -415,9 +415,15 @@ final class BoardTaskManager {
             }
             phase = "swiftdata-save"
             let taskID = task.id
+            let openCodeSessionID = task.openCodeSessionID
+            let storeDirectory = modelContext.container.configurations.first?.url.deletingLastPathComponent()
             modelContext.delete(task)
             try await saveTaskContext(taskID: taskID)
             try? conversationTranscriptStore().remove(taskID)
+            // The messages OpenCode's turns saved for the token map go with the task.
+            if let openCodeSessionID, let storeDirectory {
+                OpenCodeRequestLog.remove(sessionID: openCodeSessionID, in: OpenCodeRequestLog.directory(storeDirectory: storeDirectory))
+            }
             // Follow-ups queued for the task would otherwise stay behind in the shared queue file.
             try? removeQueuedMessages(taskID: taskID)
             removeOrphanedTaskPreferences()
@@ -596,6 +602,7 @@ final class BoardTaskManager {
             fields["workspaceRootCount"] = String(task.workspaceRootPaths.count)
             fields["hasCodexThread"] = String(task.codexThreadID != nil)
             fields["hasClaudeSession"] = String(task.claudeSessionID != nil)
+            fields["hasOpenCodeSession"] = String(task.openCodeSessionID != nil)
             fields["hasSavedPrompt"] = String(task.savedPrompt != nil)
             fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
             PlayhouseDiagnostics.record("persistence.read.succeeded", fields: fields)

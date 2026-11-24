@@ -60,14 +60,20 @@ enum McpJSONFile {
         let lock = path + ".lock"
         let fileManager = FileManager.default
         let deadline = Date().addingTimeInterval(5)
+        // The file's folder may not exist yet (a first server in a new home), and the lock can't be
+        // made without it.
+        try fileManager.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         while true {
             do {
                 try fileManager.createDirectory(atPath: lock, withIntermediateDirectories: false)
                 break
             } catch {
-                let modified = (try? fileManager.attributesOfItem(atPath: lock)[.modificationDate] as? Date) ?? .distantPast
                 // A lock nobody refreshed for 10 seconds was left by a process that died.
-                if Date().timeIntervalSince(modified) > 10 { try? fileManager.removeItem(atPath: lock); continue }
+                if let modified = (try? fileManager.attributesOfItem(atPath: lock))?[.modificationDate] as? Date,
+                   Date().timeIntervalSince(modified) > 10 {
+                    try? fileManager.removeItem(atPath: lock)
+                    continue
+                }
                 guard Date() < deadline else {
                     throw BridgeCommandError(code: "busy", message: "\(path) is locked by another program. Try again in a moment.")
                 }
@@ -263,7 +269,8 @@ final class McpCatalogManager {
         let enabled = scope == .managed || !disabled.contains(id)
         // A server written inline in a config.toml is left to the user, like a managed one.
         let editable = scope != .managed && group.allSatisfy(\.location.editable)
-        let bothNative = native.isSuperset(of: ConversationProvider.allCases)
+        // Playhouse reads and writes only Claude Code's and Codex's own MCP files.
+        let bothNative = native.isSuperset(of: [.claude, .codex])
         let record = McpServerRecord(
             id: id, name: name, scope: scope, repositoryPath: root?.repositoryPath, rootPath: root?.path,
             transport: primary.config.transport, summary: primary.config.summary,

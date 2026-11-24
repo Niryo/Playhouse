@@ -101,8 +101,16 @@ from bridge_test_cases.cases_27 import BridgeTestCases27
 from bridge_test_cases.cases_28 import BridgeTestCases28
 from bridge_test_cases.cases_29 import BridgeTestCases29
 from bridge_test_cases.cases_30 import BridgeTestCases30
+from bridge_test_cases.cases_31 import BridgeTestCases31
 
-class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestCases23, BridgeTestCases24, BridgeTestCases25, BridgeTestCases26, BridgeTestCases27, BridgeTestCases28, BridgeTestCases29, BridgeTestCases30, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
+# The variable each provider's fixture executable is passed in.
+PROVIDER_EXECUTABLE_VARIABLES = {
+    "codex": "PLAYHOUSE_E2E_CODEX_EXECUTABLE",
+    "claude": "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE",
+    "opencode": "PLAYHOUSE_E2E_OPENCODE_EXECUTABLE",
+}
+
+class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestCases23, BridgeTestCases24, BridgeTestCases25, BridgeTestCases26, BridgeTestCases27, BridgeTestCases28, BridgeTestCases29, BridgeTestCases30, BridgeTestCases31, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cli = arguments.cli.absolute()
@@ -167,6 +175,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         # A provider without the case's fixture reads as not installed, never as the host's own CLI.
         environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = "none"
         environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
+        environment["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         completed = subprocess.run(
             [str(cli or self.cli), *map(str, command)],
@@ -202,6 +211,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         # A provider without the case's fixture reads as not installed, never as the host's own CLI.
         environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = "none"
         environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
+        environment["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         return subprocess.Popen(
             [str(cli or self.cli), *map(str, command)],
@@ -236,7 +246,7 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         """A private bridge service, so a case can kill its daemon without touching the suite's."""
         environment = {
             "PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.restart-{uuid.uuid4().hex[:8]}",
-            "PLAYHOUSE_E2E_CODEX_EXECUTABLE" if provider == "codex" else "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable),
+            PROVIDER_EXECUTABLE_VARIABLES[provider]: str(executable),
         }
         environment.update(extra)
         return environment

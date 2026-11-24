@@ -361,7 +361,7 @@ struct PluginAgentsContext: Sendable, Equatable {
     var usage: PluginValue?
     var runningTasks: [String: Int] = [:]
     /// The providers `runningTasks` always lists.
-    static let providers = ["claude", "codex"]
+    static let providers = ["claude", "codex", "opencode"]
 
     var value: PluginValue {
         var counts: [String: PluginValue] = [:]

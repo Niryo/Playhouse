@@ -545,8 +545,9 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("skill-private-committed").exists, "A committed skill's hint has no Private badge.")
         revealSkillHint("deploy-notes")
         XCTAssertTrue(element("skill-private-deploy-notes").waitToExist(timeout: 5), "The private skill's hint has a Private badge.")
-        XCTAssertTrue(rowBadge("skill-provider-deploy-notes-both").exists)
+        XCTAssertEqual(rowBadge("skill-provider-deploy-notes-claude-codex").label, "Claude and Codex", "OpenCode reads only skills in the repository and the home folder.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-deploy-notes")).hasPrefix("Private to skills-private-repo"), "The hint names the repository it belongs to.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-deploy-notes")).contains("Not on OpenCode"), "The hint says OpenCode doesn't use it.")
         attachScreenshot(named: "A private skill's hint with its Private badge")
         XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8),
                        "---\nname: deploy-notes\ndescription: \"Write deploy notes\"\n---\n\nList the deploy steps.\n")
