@@ -148,6 +148,10 @@ private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegat
         // Only in scripts/benchmark-transcript.sh's builds.
         TranscriptBenchmark.runIfRequested()
         #endif
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        // Only in scripts/benchmark-atom-tree.sh's builds.
+        AtomTreeBenchmark.runIfRequested()
+        #endif
     }
 
     /// The reply comes from a main-actor task, so a programmatic quit must not start

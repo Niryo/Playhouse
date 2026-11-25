@@ -1,8 +1,8 @@
 import Foundation
 
 /// Decodes a `Decodable` type straight from a `PluginValue` without encoding
-/// it to JSON first. Atom props are decoded with it on every create/update and
-/// every render. For the types props use (String, Bool, Double, Int,
+/// it to JSON first. Atom props are decoded with it once per create/update op
+/// (the node stores the result; rendering never decodes). For the types props use (String, Bool, Double, Int,
 /// optionals, arrays, nested structs, and URL from its string) it behaves like
 /// JSONDecoder; JSONDecoder's special handling of Data, Decimal and Date is
 /// not reproduced.

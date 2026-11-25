@@ -3,9 +3,10 @@ import Foundation
 /// The atoms plugins compose UI from: exactly the pieces the native
 /// composites (the task item, the Agents info section, the Token Stats
 /// modal, the Skills page and the repository chips and picker) are built of. Each
-/// atom's props are a plain Decodable struct, decoded from a create/update
-/// op's payload here and built directly by native SwiftUI code, so both reach
-/// the same view (see `AtomRegistry` in Plugins/Atoms).
+/// atom's props are a plain Codable struct (`AtomProps`), decoded once from a
+/// create/update op's payload here and stored on the node, or built directly by
+/// native Swift code as typed props, so both reach the same view (see
+/// `AtomRegistry` in Plugins/Atoms).
 enum AtomType: String, CaseIterable, Sendable {
     case stack = "Stack"
     case text = "Text"
@@ -132,8 +133,9 @@ enum AtomType: String, CaseIterable, Sendable {
     }
 
     /// Checks a create/update op: a known atom, only its own events, only its
-    /// own and the common props, each of the right type.
-    static func validate(type: String, props: [String: PluginValue], events: [String]) throws {
+    /// own and the common props, each of the right type. Returns the decoded
+    /// props, so the op's node stores them and the check is the only decode.
+    static func validate(type: String, props: [String: PluginValue], events: [String]) throws -> ResolvedAtomProps {
         guard let atom = AtomType(rawValue: type) else {
             throw PluginTreeError(message: "Unknown atom <\(type)>.")
         }
@@ -144,50 +146,76 @@ enum AtomType: String, CaseIterable, Sendable {
         if let unknown = props.keys.sorted().first(where: { !allowed.contains($0) }) {
             throw PluginTreeError(message: "<\(type)> has no prop \"\(unknown)\".")
         }
-        do {
-            _ = try AtomCommon.decode(props)
-            switch atom {
-            case .stack: _ = try StackProps.decode(props)
-            case .text: _ = try TextProps.decode(props)
-            case .markdown: _ = try MarkdownProps.decode(props).validateFrontmatter()
-            case .icon: _ = try IconProps.decode(props)
-            case .image: _ = try ImageProps.decode(props).validateURL()
-            case .label: _ = try LabelProps.decode(props)
-            case .button:
-                if let shortcut = try ButtonProps.decode(props).shortcut {
-                    guard let parsed = AtomShortcut(shortcut) else {
-                        throw PluginTreeError(message: "<Button> has an invalid shortcut \"\(shortcut)\": use default, cancel, or cmd, ctrl or option with any other modifiers and a key, such as cmd+shift+n.")
-                    }
-                    if AppShortcut.reserved.contains(parsed) {
-                        throw PluginTreeError(message: "<Button> can't take the shortcut \"\(shortcut)\" (\(parsed.display)): Playhouse uses it.")
-                    }
+        let resolved = try decode(atom, props: props)
+        switch resolved.atom {
+        case let markdown as MarkdownProps: try markdown.validateFrontmatter()
+        case let image as ImageProps: try image.validateURL()
+        case let button as ButtonProps:
+            if let shortcut = button.shortcut {
+                guard let parsed = AtomShortcut(shortcut) else {
+                    throw PluginTreeError(message: "<Button> has an invalid shortcut \"\(shortcut)\": use default, cancel, or cmd, ctrl or option with any other modifiers and a key, such as cmd+shift+n.")
                 }
-            case .link: _ = try LinkProps.decode(props)
-            case .spinner: _ = try SpinnerProps.decode(props)
-            case .spacer: _ = try SpacerProps.decode(props)
-            case .pillPicker: _ = try PillPickerProps.decode(props)
-            case .card: _ = try CardProps.decode(props)
-            case .disclosure: _ = try DisclosureProps.decode(props)
-            case .panel: _ = try PanelProps.decode(props)
-            case .meter: _ = try MeterProps.decode(props)
-            case .scroll: _ = try ScrollProps.decode(props)
-            case .divider: _ = try DividerProps.decode(props)
-            case .choiceBar: _ = try ChoiceBarProps.decode(props)
-            case .toggle: _ = try ToggleProps.decode(props)
-            case .textField: _ = try TextFieldProps.decode(props)
-            case .segmented: _ = try SegmentedProps.decode(props)
-            case .menu: _ = try MenuProps.decode(props)
-            case .pressArea: _ = try PressAreaProps.decode(props)
-            case .overlay: _ = try OverlayProps.decode(props)
-            case .editor: _ = try EditorProps.decode(props)
-            case .popover: _ = try PopoverProps.decode(props)
-            case .stepSlider: _ = try StepSliderProps.decode(props)
-            case .modal: _ = try ModalProps.decode(props)
-            case .page: _ = try PageProps.decode(props)
-            case .sidePanel: _ = try SidePanelProps.decode(props)
+                if AppShortcut.reserved.contains(parsed) {
+                    throw PluginTreeError(message: "<Button> can't take the shortcut \"\(shortcut)\" (\(parsed.display)): Playhouse uses it.")
+                }
             }
+        default: break
+        }
+        return resolved
+    }
+
+    /// Decodes a node's props, its atom's own and the common ones, with no
+    /// other checks: what an op's node stores, so rendering never decodes.
+    static func decode(type: String, props: [String: PluginValue]) throws -> ResolvedAtomProps {
+        guard let atom = AtomType(rawValue: type) else {
+            throw PluginTreeError(message: "Unknown atom <\(type)>.")
+        }
+        return try decode(atom, props: props)
+    }
+
+    private static func decode(_ atom: AtomType, props: [String: PluginValue]) throws -> ResolvedAtomProps {
+        func decode<Props: AtomProps>(_: Props.Type) throws -> any AtomProps { try Props.decode(props) }
+        do {
+            let common = try AtomCommon.decode(props)
+            return ResolvedAtomProps(atom: try decode(atom.propsType), common: common)
         } catch let error as DecodingError {
-            throw PluginTreeError(message: "<\(type)> has an invalid prop: \(Self.describe(error))")
+            throw PluginTreeError(message: "<\(atom.rawValue)> has an invalid prop: \(Self.describe(error))")
+        }
+    }
+
+    /// The struct holding the atom's own props.
+    var propsType: any AtomProps.Type {
+        switch self {
+        case .stack: StackProps.self
+        case .text: TextProps.self
+        case .markdown: MarkdownProps.self
+        case .icon: IconProps.self
+        case .image: ImageProps.self
+        case .label: LabelProps.self
+        case .button: ButtonProps.self
+        case .link: LinkProps.self
+        case .spinner: SpinnerProps.self
+        case .spacer: SpacerProps.self
+        case .pillPicker: PillPickerProps.self
+        case .card: CardProps.self
+        case .disclosure: DisclosureProps.self
+        case .panel: PanelProps.self
+        case .meter: MeterProps.self
+        case .scroll: ScrollProps.self
+        case .divider: DividerProps.self
+        case .choiceBar: ChoiceBarProps.self
+        case .toggle: ToggleProps.self
+        case .textField: TextFieldProps.self
+        case .segmented: SegmentedProps.self
+        case .menu: MenuProps.self
+        case .pressArea: PressAreaProps.self
+        case .overlay: OverlayProps.self
+        case .editor: EditorProps.self
+        case .popover: PopoverProps.self
+        case .stepSlider: StepSliderProps.self
+        case .modal: ModalProps.self
+        case .page: PageProps.self
+        case .sidePanel: SidePanelProps.self
         }
     }
 
@@ -202,18 +230,53 @@ enum AtomType: String, CaseIterable, Sendable {
     }
 }
 
-protocol AtomPropsDecodable: Decodable {}
+/// Props decoded from a plugin's `PluginValue`s: an atom's own (`AtomProps`)
+/// and the common ones (`AtomCommon`). They hold only plain values (strings,
+/// numbers, booleans and string names such as "accent"), never SwiftUI types,
+/// and are Codable, so a tree can be serialized for a UI written in another
+/// language.
+protocol AtomPropsCodable: Codable {}
 
-extension AtomPropsDecodable {
+extension AtomPropsCodable {
     /// Decodes the props directly from their values, with no JSON in between;
-    /// it runs on every create/update and every render of the atom.
+    /// it runs once per create/update op, never when the atom renders.
     static func decode(_ props: [String: PluginValue]) throws -> Self {
-        try PluginValueDecoder.decode(Self.self, from: .object(props))
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        AtomCounters.decodes += 1
+        #endif
+        return try PluginValueDecoder.decode(Self.self, from: .object(props))
     }
 }
 
+/// One atom's own props. A plugin's arrive as a dictionary and are decoded
+/// once per op; native Swift code builds them typed
+/// (`PluginNode(id:props:common:)`) and they are never decoded.
+protocol AtomProps: AtomPropsCodable, Equatable {
+    /// The atom these props are for.
+    static var atomType: AtomType { get }
+}
+
+extension AtomProps {
+    func isEqual(to other: any AtomProps) -> Bool { (other as? Self) == self }
+}
+
+/// A node's props as its view reads them: the atom's own and the common ones.
+struct ResolvedAtomProps {
+    let atom: any AtomProps
+    let common: AtomCommon
+}
+
+#if PLAYHOUSE_ATOM_BENCHMARK
+/// How often props were decoded and atom bodies evaluated, read by
+/// `scripts/benchmark-atom-tree.sh`; compiled only into its builds.
+enum AtomCounters {
+    nonisolated(unsafe) static var decodes = 0
+    nonisolated(unsafe) static var bodies = 0
+}
+#endif
+
 /// Props every atom takes: accessibility, tooltip and frame.
-struct AtomCommon: AtomPropsDecodable, Equatable {
+struct AtomCommon: AtomPropsCodable, Equatable {
     /// The accessibility identifier.
     var testID: String?
     /// The accessibility label, value and hint.
@@ -271,7 +334,9 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
 /// `align` center or unset (a Stack's default), centered both ways, also when
 /// `fillWidth` stretches it. A fixed `width` or `height` centers them, as it
 /// centers any atom's content. A color name it doesn't know draws primary.
-struct StackProps: AtomPropsDecodable, Equatable {
+struct StackProps: AtomProps {
+    static let atomType = AtomType.stack
+
     var axis: String?
     var spacing: Double?
     var align: String?
@@ -302,7 +367,9 @@ struct StackProps: AtomPropsDecodable, Equatable {
 
 /// A string, from `text` or the atom's raw string children. Weights: regular,
 /// medium, semibold, bold; designs: default, monospaced, rounded.
-struct TextProps: AtomPropsDecodable, Equatable {
+struct TextProps: AtomProps {
+    static let atomType = AtomType.text
+
     var text: String?
     var size: Double?
     var weight: String?
@@ -335,7 +402,9 @@ struct TextProps: AtomPropsDecodable, Equatable {
 /// it. `color` colors the prose. `selectable` lets the reader select its text.
 /// `frontmatter` decides what a leading `---` YAML block shows as: "table"
 /// (a small table of its entries) or "hide"; unset, it is plain Markdown.
-struct MarkdownProps: AtomPropsDecodable, Equatable {
+struct MarkdownProps: AtomProps {
+    static let atomType = AtomType.markdown
+
     var text: String?
     var size: Double?
     var color: String?
@@ -359,7 +428,9 @@ struct MarkdownProps: AtomPropsDecodable, Equatable {
 
 /// An SF Symbol (`name`) or a template image from the app's assets (`asset`);
 /// `original` draws the asset in its own colors (the app logo) instead.
-struct IconProps: AtomPropsDecodable, Equatable {
+struct IconProps: AtomProps {
+    static let atomType = AtomType.icon
+
     var name: String?
     var asset: String?
     var size: Double?
@@ -381,7 +452,9 @@ struct IconProps: AtomPropsDecodable, Equatable {
 /// a faint fill, never an error. The window loads and caches it natively, so a
 /// re-render or another copy of the same URL doesn't load it again. It is
 /// decorative unless it has an accessibility `label`.
-struct ImageProps: AtomPropsDecodable, Equatable {
+struct ImageProps: AtomProps {
+    static let atomType = AtomType.image
+
     var url: String
     var size: Double?
     var contentMode: String?
@@ -415,7 +488,9 @@ struct ImageProps: AtomPropsDecodable, Equatable {
 }
 
 /// An SF Symbol beside a string.
-struct LabelProps: AtomPropsDecodable, Equatable {
+struct LabelProps: AtomProps {
+    static let atomType = AtomType.label
+
     var text: String
     var icon: String
     var size: Double?
@@ -438,7 +513,9 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 /// hover hint (`help`) then ends by naming the shortcut, as in "Save (⌘S)". `destructive` gives it the destructive
 /// role (a push button draws its title red). `selected` marks it selected to
 /// accessibility, the current choice of a row of buttons (a ChoiceBar's).
-struct ButtonProps: AtomPropsDecodable, Equatable {
+struct ButtonProps: AtomProps {
+    static let atomType = AtomType.button
+
     var style: String?
     var emphasis: Double?
     var overhang: Bool?
@@ -452,7 +529,9 @@ struct ButtonProps: AtomPropsDecodable, Equatable {
 }
 
 /// Opens `url` in the browser; its label is its children.
-struct LinkProps: AtomPropsDecodable, Equatable {
+struct LinkProps: AtomProps {
+    static let atomType = AtomType.link
+
     var url: String
     var emphasis: Double?
 
@@ -461,13 +540,17 @@ struct LinkProps: AtomPropsDecodable, Equatable {
 
 /// An indeterminate progress spinner; `size` is small (default), mini or
 /// regular.
-struct SpinnerProps: AtomPropsDecodable, Equatable {
+struct SpinnerProps: AtomProps {
+    static let atomType = AtomType.spinner
+
     var size: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable { case size }
 }
 
-struct SpacerProps: AtomPropsDecodable, Equatable {
+struct SpacerProps: AtomProps {
+    static let atomType = AtomType.spacer
+
     var minLength: Double?
 
     enum CodingKeys: String, CodingKey, CaseIterable { case minLength }
@@ -475,7 +558,9 @@ struct SpacerProps: AtomPropsDecodable, Equatable {
 
 /// A capsule showing the selected option that expands into all of them when
 /// clicked. `onChange` receives the chosen option's value.
-struct PillPickerProps: AtomPropsDecodable, Equatable {
+struct PillPickerProps: AtomProps {
+    static let atomType = AtomType.pillPicker
+
     struct Option: Codable, Equatable {
         var value: String
         var label: String
@@ -492,7 +577,9 @@ struct PillPickerProps: AtomPropsDecodable, Equatable {
 /// The task item's surface: a rounded, bordered card that is one big button
 /// (`onPress`), with a right-click menu (`onMenu` receives the item's id) and
 /// an optional usage meter along its leading edge (`meter`, 0...1).
-struct CardProps: AtomPropsDecodable, Equatable {
+struct CardProps: AtomProps {
+    static let atomType = AtomType.card
+
     /// The common `padding` of a Card that sets none.
     static let defaultPadding: Double = 14
 
@@ -517,7 +604,9 @@ struct CardProps: AtomPropsDecodable, Equatable {
 /// it shows, and a click calls `onToggle` (no value; the owner flips the
 /// state it holds) inside an animation, so the owner's change animates. `toggleTestID` identifies the
 /// title button; `common.testID` the whole section.
-struct DisclosureProps: AtomPropsDecodable, Equatable {
+struct DisclosureProps: AtomProps {
+    static let atomType = AtomType.disclosure
+
     var title: String
     var collapsed: Bool
     /// Between the title and each child.
@@ -538,7 +627,9 @@ struct DisclosureProps: AtomPropsDecodable, Equatable {
 /// `strokeOpacity` (1), `strokeWidth` (1) and `dash` (solid). Unlike a Stack
 /// it is padded by default: the common `padding` is `defaultPadding` unless
 /// set (a native Panel sized by its own frame passes 0).
-struct PanelProps: AtomPropsDecodable, Equatable {
+struct PanelProps: AtomProps {
+    static let atomType = AtomType.panel
+
     /// The common `padding` of a Panel that sets none.
     static let defaultPadding: Double = 12
 
@@ -574,7 +665,9 @@ struct PanelProps: AtomPropsDecodable, Equatable {
 /// The track is primary at `trackOpacity` (0.12 by default), and the fill is
 /// never shorter than `minFill` points (0 by default). Decorative unless it
 /// has an accessibility `label`.
-struct MeterProps: AtomPropsDecodable, Equatable {
+struct MeterProps: AtomProps {
+    static let atomType = AtomType.meter
+
     var fraction: Double
     var color: String?
     var thickness: Double?
@@ -595,7 +688,9 @@ struct MeterProps: AtomPropsDecodable, Equatable {
 /// descendant Stack whose `scrollID` is `scrollTo` sits at the top (the
 /// Skills page's section anchors); a lazy column can reach only a Stack it
 /// has built.
-struct ScrollProps: AtomPropsDecodable, Equatable {
+struct ScrollProps: AtomProps {
+    static let atomType = AtomType.scroll
+
     var spacing: Double?
     var maxHeight: Double?
     var inset: Double?
@@ -608,12 +703,16 @@ struct ScrollProps: AtomPropsDecodable, Equatable {
 
 /// A thin separator line across the stack it sits in.
 /// It has no props of its own.
-struct DividerProps: AtomPropsDecodable, Equatable {}
+struct DividerProps: AtomProps {
+    static let atomType = AtomType.divider
+}
 
 /// A row of mutually exclusive choices (the Token Stats sections), each its
 /// own button with its option's `testID`, the selected one highlighted and
 /// marked selected. It is controlled: `onChange` receives the chosen value.
-struct ChoiceBarProps: AtomPropsDecodable, Equatable {
+struct ChoiceBarProps: AtomProps {
+    static let atomType = AtomType.choiceBar
+
     struct Option: Codable, Equatable {
         var value: String
         var label: String
@@ -630,7 +729,9 @@ struct ChoiceBarProps: AtomPropsDecodable, Equatable {
 /// and a click calls `onToggle` (no value; the owner flips the state it
 /// holds). `size` is mini, small or regular (the default); it has no visible
 /// label, so give it an accessibility `label`.
-struct ToggleProps: AtomPropsDecodable, Equatable {
+struct ToggleProps: AtomProps {
+    static let atomType = AtomType.toggle
+
     var isOn: Bool
     var size: String?
     var disabled: Bool?
@@ -646,7 +747,9 @@ struct ToggleProps: AtomPropsDecodable, Equatable {
 /// `onArrow` with "up" or "down" instead of moving the caret. `style`
 /// `plain` drops the rounded border, for a field inside a decorated `Stack`
 /// (the Done archive's search); `rounded` is the default.
-struct TextFieldProps: AtomPropsDecodable, Equatable {
+struct TextFieldProps: AtomProps {
+    static let atomType = AtomType.textField
+
     var text: String
     var placeholder: String?
     var autoFocus: Bool?
@@ -659,7 +762,9 @@ struct TextFieldProps: AtomPropsDecodable, Equatable {
 /// pickers). It is controlled: `selected` is what it shows, and choosing a
 /// segment calls `onChange` with its value. Without a `width` it is as wide
 /// as its segments.
-struct SegmentedProps: AtomPropsDecodable, Equatable {
+struct SegmentedProps: AtomProps {
+    static let atomType = AtomType.segmented
+
     struct Option: Codable, Equatable {
         var value: String
         var label: String
@@ -677,7 +782,9 @@ struct SegmentedProps: AtomPropsDecodable, Equatable {
 /// common `width` and `height`. `items` are its groups, each a list of
 /// items, with a separator between groups; choosing one calls `onMenu` with
 /// its id.
-struct MenuProps: AtomPropsDecodable, Equatable {
+struct MenuProps: AtomProps {
+    static let atomType = AtomType.menu
+
     struct Item: Codable, Equatable {
         var id: String
         var title: String
@@ -717,7 +824,9 @@ struct MenuProps: AtomPropsDecodable, Equatable {
 /// selecting. It takes every click on its children, so it holds only what
 /// the press is for (a row's text, not its controls); `pointer` shows the
 /// pointing hand over it. It is one accessibility container.
-struct PressAreaProps: AtomPropsDecodable, Equatable {
+struct PressAreaProps: AtomProps {
+    static let atomType = AtomType.pressArea
+
     var spacing: Double?
     var pointer: Bool?
 
@@ -731,7 +840,9 @@ struct PressAreaProps: AtomPropsDecodable, Equatable {
 /// badge on its top trailing corner. It is one accessibility container.
 /// `revealOnHover` draws the overlay only while the pointer is over the
 /// atom: a repository row's Replace and Add buttons.
-struct OverlayProps: AtomPropsDecodable, Equatable {
+struct OverlayProps: AtomProps {
+    static let atomType = AtomType.overlay
+
     var align: String?
     var offsetX: Double?
     var offsetY: Double?
@@ -751,7 +862,9 @@ struct OverlayProps: AtomPropsDecodable, Equatable {
 /// name the text view itself to accessibility (the common `testID` names its
 /// container). The common `hint` is the editor's accessibility help. A pasted image is native-only: a plugin never
 /// sees it.
-struct EditorProps: AtomPropsDecodable, Equatable {
+struct EditorProps: AtomProps {
+    static let atomType = AtomType.editor
+
     var text: String
     var placeholder: String?
     var placeholderTestID: String?
@@ -784,7 +897,9 @@ struct EditorProps: AtomPropsDecodable, Equatable {
 /// closes when the pointer leaves it. A hint takes no keyboard focus and no
 /// clicks away from the window, so it never raises `onDismiss` (the Skills
 /// page's rows show their details this way).
-struct PopoverProps: AtomPropsDecodable, Equatable {
+struct PopoverProps: AtomProps {
+    static let atomType = AtomType.popover
+
     static let defaultInset: Double = 14
     static let defaultSpacing: Double = 10
     static let defaultHoverDelay: Double = 0.4
@@ -804,7 +919,9 @@ struct PopoverProps: AtomPropsDecodable, Equatable {
 /// controlled: `selected` is what it shows, and moving it (a click, a drag or
 /// the arrow keys) calls `onChange` with the option's value. With a single
 /// option it is inert. The common `label` and `testID` name it for accessibility.
-struct StepSliderProps: AtomPropsDecodable, Equatable {
+struct StepSliderProps: AtomProps {
+    static let atomType = AtomType.stepSlider
+
     struct Option: Codable, Equatable {
         var value: String
         var label: String
@@ -833,7 +950,9 @@ struct StepSliderProps: AtomPropsDecodable, Equatable {
 /// false the user can't close it: the header has no close button and Escape
 /// does nothing, so only the owner's own control (a required choice) closes
 /// it. Its `testID` names the sheet's content column.
-struct ModalProps: AtomPropsDecodable, Equatable {
+struct ModalProps: AtomProps {
+    static let atomType = AtomType.modal
+
     static let defaultInset: Double = 24
     static let defaultSpacing: Double = 16
 
@@ -856,7 +975,9 @@ struct ModalProps: AtomPropsDecodable, Equatable {
 /// laid out as usual and sizes the atom. It is controlled: the page shows
 /// while `isPresented` is true, and the owner closes it with its own control
 /// (the page's Back button). Its `testID` names the page.
-struct PageProps: AtomPropsDecodable, Equatable {
+struct PageProps: AtomProps {
+    static let atomType = AtomType.page
+
     var isPresented: Bool
 
     enum CodingKeys: String, CodingKey, CaseIterable { case isPresented }
@@ -870,7 +991,9 @@ struct PageProps: AtomPropsDecodable, Equatable {
 /// laid out as usual and sizes the atom. It is controlled: the panel shows
 /// while `isPresented` is true, and the owner closes it with its own control
 /// (the archive's close button). Its `testID` names the panel.
-struct SidePanelProps: AtomPropsDecodable, Equatable {
+struct SidePanelProps: AtomProps {
+    static let atomType = AtomType.sidePanel
+
     var isPresented: Bool
     var edge: String?
     var width: Double?

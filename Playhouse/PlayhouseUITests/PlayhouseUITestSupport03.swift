@@ -432,7 +432,11 @@ extension PlayhouseUITests {
     }
     /// An open pill's option once its slide-in has finished, so a click lands on it.
     func settledPillOption(_ mode: String, taskID: String) -> XCUIElement {
-        let option = element("task-pr-mode-\(mode)-\(taskID)")
+        settledPillOption(identifier: "task-pr-mode-\(mode)-\(taskID)", mode: mode)
+    }
+    /// The open PillPicker option with accessibility identifier `identifier` once its slide-in has finished.
+    func settledPillOption(identifier: String, mode: String) -> XCUIElement {
+        let option = element(identifier)
         XCTAssertTrue(option.waitToExist(timeout: 5), "The open pill should offer \(mode).")
         var lastFrame = CGRect.null
         XCTAssertTrue(waitUntil({

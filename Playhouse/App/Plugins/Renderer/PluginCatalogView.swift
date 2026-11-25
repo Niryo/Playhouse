@@ -13,7 +13,7 @@ struct PluginSurface: View {
         VStack(alignment: .leading, spacing: 10) {
             if let runtime {
                 ForEach(runtime.tree.root.children) { node in
-                    PluginNodeView(node: node, runtime: runtime)
+                    PluginNodeView(node: node, events: runtime)
                 }
                 PluginErrors(errors: runtime.errors)
                 PluginCommitReadout(tree: runtime.tree)

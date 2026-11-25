@@ -86,7 +86,7 @@ struct PluginSurfaceView: View {
         VStack(alignment: .leading, spacing: 12) {
             if let runtime {
                 ForEach(runtime.tree.root.children) { node in
-                    PluginNodeView(node: node, runtime: runtime)
+                    PluginNodeView(node: node, events: runtime)
                 }
                 errors(runtime.errors)
             } else if let loadError {

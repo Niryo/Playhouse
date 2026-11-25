@@ -215,7 +215,7 @@ struct PluginRenderCommand: Sendable {
     }
 
     static func find(testID: String, in node: PluginNode) -> PluginNode? {
-        if node.props["testID"]?.string == testID { return node }
+        if node.common?.testID == testID { return node }
         for child in node.children {
             if let found = find(testID: testID, in: child) { return found }
         }

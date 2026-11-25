@@ -81,16 +81,56 @@ enum PluginOp: Equatable {
     }
 }
 
+/// A node's props as they were given.
+enum PluginNodeProps {
+    /// A plugin's JSON props, decoded once when the op that sent them applies.
+    case dynamic([String: PluginValue])
+    /// Props native Swift code built, the atom's own and the common ones; never decoded.
+    case typed(any AtomProps, AtomCommon)
+
+    /// The props as plugin values: a plugin's as it sent them, typed ones
+    /// encoded into the dictionary a plugin would send for them.
+    var values: [String: PluginValue] {
+        switch self {
+        case .dynamic(let values):
+            return values
+        case .typed(let atom, let common):
+            let (own, shared) = Self.encoded(atom, common)
+            return own.merging(shared) { atom, _ in atom }
+        }
+    }
+
+    /// The keys both the atom's own props and the common ones have (a Modal's
+    /// `width`) that typed props set differently, one of them unset included. A
+    /// plugin's one key fills both, so typed props must set them alike, or
+    /// their `values` couldn't stand for them.
+    static func conflictingKeys(_ atom: any AtomProps, _ common: AtomCommon) -> [String] {
+        let (own, shared) = encoded(atom, common)
+        return type(of: atom).atomType.propKeys.intersection(AtomCommon.keys).filter { own[$0] != shared[$0] }.sorted()
+    }
+
+    private static func encoded(_ atom: any AtomProps, _ common: AtomCommon) -> (own: [String: PluginValue], shared: [String: PluginValue]) {
+        ((try? PluginValue(encoding: atom))?.object ?? [:], (try? PluginValue(encoding: common))?.object ?? [:])
+    }
+}
+
 /// One element of the rendered tree: an atom, or a raw text node inside a Text
 /// atom. Each node is observed on its own, so an op that changes one node
 /// re-renders only the SwiftUI view showing that node (and what it contains).
+///
+/// Its props are decoded when they are set, never when it renders: `resolved`
+/// holds the decoded structs (or why they don't decode), and is all a view reads.
 @Observable
 final class PluginNode: Identifiable {
     static let textType = "#text"
 
     let id: Int
     let type: String
-    var props: [String: PluginValue]
+    /// The props as given: a plugin's dictionary, or native typed props.
+    private(set) var props: PluginNodeProps
+    /// The atom's own and common props, decoded once when `props` were set,
+    /// or the error decoding them, which the node's view shows.
+    private(set) var resolved: Result<ResolvedAtomProps, PluginTreeError>
     /// The event props the plugin set (`onPress`, …); their handlers stay in JavaScript.
     var events: Set<String>
     var text: String
@@ -98,17 +138,66 @@ final class PluginNode: Identifiable {
     /// How many update/text ops changed this node after it was created.
     @ObservationIgnored private(set) var updateCount = 0
 
-    init(id: Int, type: String, props: [String: PluginValue] = [:], events: Set<String> = [], text: String = "") {
+    /// A node from a plugin's op (or a raw text node, with `text`). `resolved`
+    /// is the op's validated props; without it, `props` are decoded here.
+    init(id: Int, type: String, props: [String: PluginValue] = [:], resolved: ResolvedAtomProps? = nil, events: Set<String> = [], text: String = "") {
         self.id = id
         self.type = type
-        self.props = props
+        self.props = .dynamic(props)
+        self.resolved = Self.resolve(type: type, props: props, resolved: resolved)
         self.events = events
         self.text = text
     }
 
+    /// A node native Swift code builds with typed props: its atom is the props'
+    /// own, and nothing is decoded.
+    init<Props: AtomProps>(id: Int, props: Props, common: AtomCommon = AtomCommon(), events: Set<String> = []) {
+        assert(PluginNodeProps.conflictingKeys(props, common).isEmpty, "<\(Props.atomType.rawValue)> sets \(PluginNodeProps.conflictingKeys(props, common)) differently in its props and common props.")
+        self.id = id
+        type = Props.atomType.rawValue
+        self.props = .typed(props, common)
+        resolved = .success(ResolvedAtomProps(atom: props, common: common))
+        self.events = events
+        text = ""
+    }
+
+    /// The common props, when they decoded.
+    var common: AtomCommon? { try? resolved.get().common }
+
     /// A Text atom's string: its raw text children joined.
     var joinedText: String {
         children.filter { $0.type == Self.textType }.map(\.text).joined()
+    }
+
+    /// Replaces a typed node's props. Equal props change nothing, so the
+    /// node's view isn't redrawn; returns whether they changed.
+    @discardableResult
+    func setProps<Props: AtomProps>(_ props: Props, common: AtomCommon = AtomCommon()) -> Bool {
+        precondition(Props.atomType.rawValue == type, "<\(type)> can't take \(Props.self).")
+        assert(PluginNodeProps.conflictingKeys(props, common).isEmpty, "<\(type)> sets \(PluginNodeProps.conflictingKeys(props, common)) differently in its props and common props.")
+        if case .typed(let atom, let oldCommon) = self.props, atom.isEqual(to: props), oldCommon == common { return false }
+        self.props = .typed(props, common)
+        resolved = .success(ResolvedAtomProps(atom: props, common: common))
+        return true
+    }
+
+    /// Replaces a plugin node's props from an update op, decoding them once.
+    fileprivate func setProps(_ values: [String: PluginValue], resolved: ResolvedAtomProps?) {
+        if case .dynamic(let old) = props, old == values { return }
+        props = .dynamic(values)
+        self.resolved = Self.resolve(type: type, props: values, resolved: resolved)
+    }
+
+    private static func resolve(type: String, props: [String: PluginValue], resolved: ResolvedAtomProps?) -> Result<ResolvedAtomProps, PluginTreeError> {
+        if let resolved { return .success(resolved) }
+        if type == textType || type == "#root" { return .failure(PluginTreeError(message: "<\(type)> is not an atom.")) }
+        do {
+            return .success(try AtomType.decode(type: type, props: props))
+        } catch let error as PluginTreeError {
+            return .failure(error)
+        } catch {
+            return .failure(PluginTreeError(message: error.localizedDescription))
+        }
     }
 
     fileprivate func noteUpdate() { updateCount += 1 }
@@ -121,7 +210,7 @@ struct PluginCommitSummary: Equatable {
     var touchedNodes: [Int]
 }
 
-struct PluginTreeError: LocalizedError {
+struct PluginTreeError: LocalizedError, Equatable {
     let message: String
     var errorDescription: String? { message }
 }
@@ -132,8 +221,10 @@ final class PluginNodeTree {
     private(set) var root = PluginNode(id: 0, type: "#root")
     private(set) var lastCommit: PluginCommitSummary?
     @ObservationIgnored private var nodes: [Int: PluginNode] = [:]
-    /// Checks an atom's type, props and events before a create or update is applied.
-    @ObservationIgnored var validate: (String, [String: PluginValue], [String]) throws -> Void = { _, _, _ in }
+    /// Checks an atom's type, props and events before a create or update is
+    /// applied, returning the decoded props the node stores. Without it, a
+    /// node decodes its props itself and keeps any error for its view.
+    @ObservationIgnored var validate: ((String, [String: PluginValue], [String]) throws -> ResolvedAtomProps)?
     /// Checks that a parent type shows a child type before an append or insert.
     @ObservationIgnored var validateChild: (String, String) throws -> Void = { _, _ in }
 
@@ -165,15 +256,15 @@ final class PluginNodeTree {
         switch op {
         case .create(let id, let type, let props, let events):
             guard nodes[id] == nil else { throw PluginTreeError(message: "Node \(id) already exists.") }
-            try validate(type, props, events)
-            nodes[id] = PluginNode(id: id, type: type, props: props, events: Set(events))
+            let resolved = try validate?(type, props, events)
+            nodes[id] = PluginNode(id: id, type: type, props: props, resolved: resolved, events: Set(events))
         case .createText(let id, let text):
             guard nodes[id] == nil else { throw PluginTreeError(message: "Node \(id) already exists.") }
             nodes[id] = PluginNode(id: id, type: PluginNode.textType, text: text)
         case .update(let id, let props, let events):
             let node = try existing(id)
-            try validate(node.type, props, events)
-            if node.props != props { node.props = props }
+            let resolved = try validate?(node.type, props, events)
+            node.setProps(props, resolved: resolved)
             if node.events != Set(events) { node.events = Set(events) }
             node.noteUpdate()
         case .text(let id, let text):
@@ -224,7 +315,8 @@ final class PluginNodeTree {
         if node.type == PluginNode.textType {
             object["text"] = .string(node.text)
         } else {
-            if !node.props.isEmpty { object["props"] = .object(node.props) }
+            let props = node.props.values
+            if !props.isEmpty { object["props"] = .object(props) }
             if !node.events.isEmpty { object["events"] = .array(node.events.sorted().map(PluginValue.string)) }
             if !node.children.isEmpty { object["children"] = .array(node.children.map { snapshot($0) }) }
         }
