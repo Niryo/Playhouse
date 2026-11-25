@@ -455,6 +455,65 @@ struct CodeBlockCardView: View {
     }
 }
 
+/// Tracks the pointer over one reply, so hovering it redraws only that reply and not the transcript.
+/// An AppKit tracking area, not `onHover`: pressing the Copy message button ended SwiftUI's hover,
+/// which hid the button before the press could complete.
+struct AssistantReplyHoverScope<Content: View>: View {
+    @ViewBuilder let content: (_ isHovering: Bool) -> Content
+    @State private var isHovering = false
+
+    var body: some View {
+        content(isHovering)
+            .background {
+                OverlayHoverTracker { hovering in
+                    if isHovering != hovering { isHovering = hovering }
+                }
+                .accessibilityHidden(true)
+            }
+    }
+}
+
+/// Copies a whole reply as the Markdown the agent wrote, tables and code fences included, which a
+/// text selection can't do because tables and code blocks are separate views from the prose.
+/// It shows while the pointer is over the reply, and stays while it confirms the copy.
+struct CopyMessageButton: View {
+    let markdown: String
+    let messageID: String
+    let isRevealed: Bool
+
+    @State private var didCopy = false
+    @State private var copyFeedbackToken = UUID()
+
+    var body: some View {
+        let isShown = isRevealed || didCopy
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(markdown, forType: .string)
+            didCopy = true
+            let token = UUID()
+            copyFeedbackToken = token
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if copyFeedbackToken == token { didCopy = false }
+            }
+        } label: {
+            Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 18, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .nativeHelp("Copy message")
+        .accessibilityLabel("Copy message")
+        .accessibilityValue(didCopy ? "Copied" : "")
+        .accessibilityIdentifier("assistant-copy-message-\(messageID)")
+        .opacity(isShown ? 1 : 0)
+        .allowsHitTesting(isShown)
+        .accessibilityHidden(!isShown)
+    }
+}
+
 struct CodeBlockTextView: NSViewRepresentable {
     let attributedText: NSAttributedString
 

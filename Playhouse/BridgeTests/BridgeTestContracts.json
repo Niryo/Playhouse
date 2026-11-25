@@ -1174,5 +1174,9 @@
   {
     "id": "test_parallel_chat_bubbles_persist_across_restart",
     "expectation": "Open parallel bubbles survive a restart: after the bridge daemon is killed while one bubble is still answering and another has answered (in the app, after a relaunch), chat bubble list still reports both with their questions and the chat turn each returns after, and the app shows both bubbles again with their placeholders. The new daemon follows the bubble turn that was running and files it on the bubble's own page, named by its close-turn, never on a page of the chat, which keeps its own messages. Both bubbles then close into place above the chat's current page, oldest first, with all their messages. The bubble is a standalone chat conversation of its own, so it recovers through the chat's provider-neutral restart path; one representative provider (Claude) covers the case."
+  },
+  {
+    "id": "test_assistant_reply_copy_message_copies_full_markdown",
+    "expectation": "A reply whose Markdown holds a heading, bold text, a list, a pipe table and a fenced code block, which render as separate views a text selection cannot span, shows a Copy message button in its header only while the pointer is over that reply, its header or its body such as the table: with the reply still on screen, moving the pointer off it hides the button and hovering it reveals the button again. Clicking it places the reply's exact Markdown source on the pasteboard, table pipes, code fence and bold markers included, replacing what was there, and the button confirms the copy as Copied before returning to its resting state; the next reply's button copies only its own text. CLI/XPC history returns the same exact Markdown text for each reply, after a fresh read. Every provider's final reply renders through the one shared assistant reply view that holds the button and copies the message's stored text, so one representative provider (Codex) covers the case."
   }
 ]
