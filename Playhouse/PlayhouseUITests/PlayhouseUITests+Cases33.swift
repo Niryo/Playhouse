@@ -1262,9 +1262,23 @@ Playhouse.render(h(DMs));
         XCTAssertNil(try pluginState("other-service")["focused"], "A plugin whose manifest doesn't list app.focus isn't woken by it.")
         XCTAssertNil(try pluginState("headless-service")["focused"])
         // Two quick activations: one run at once, one trailing run after the cooldown, no more.
+        // Each must reach the daemon as its own app.focus, or the collapse below can't be judged.
+        func focusTimeline() -> [String] {
+            ((try? diagnosticEvents()) ?? []).compactMap { event in
+                let kind = event["event"] as? String
+                guard event["name"] as? String == "app.focus",
+                      kind == "plugin.event.published" || (kind == "plugin.service.handled" && event["pluginID"] as? String == "focus-service")
+                else { return nil }
+                return "\(kind ?? "") \(event["timestamp"] ?? "")"
+            }
+        }
+        let publishedBefore = focusTimeline().filter { $0.hasPrefix("plugin.event.published") }.count
         refocusApp()
         refocusApp()
-        XCTAssertTrue(waitUntil({ self.focusCountIs(base + 2, of: "focus-service") }, timeout: 20), "Quick repeats collapse into one trailing run: \(focusCount())")
+        XCTAssertTrue(waitUntil({ focusTimeline().filter { $0.hasPrefix("plugin.event.published") }.count >= publishedBefore + 2 }, timeout: 10),
+                      "Each quick activation publishes app.focus: \(focusTimeline())")
+        XCTAssertTrue(waitUntil({ self.focusCountIs(base + 2, of: "focus-service") }, timeout: 20),
+                      "Quick repeats collapse into one trailing run: \(focusCount()) from \(base), \(focusTimeline())")
         RunLoop.current.run(until: Date().addingTimeInterval(6))
         XCTAssertEqual(focusCount(), base + 2, "Two activations in one cooldown run the service twice, not more.")
         let entry = element("plugin-entry-focus-service")

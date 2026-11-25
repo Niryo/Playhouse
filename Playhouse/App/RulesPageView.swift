@@ -388,11 +388,9 @@ struct RulesSectionView: View {
     private func actions(_ rule: RuleRecord, key: String) -> some View {
         Menu {
             Button(rule.editable ? "Edit…" : "View…") { openEditor(rule) }
-                .buttonHoverPointer()
                 .help(rule.editable ? "Edit the rule file" : "Read the rule file")
                 .accessibilityIdentifier("rule-edit-\(key)")
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: rule.filePath)]) }
-                .buttonHoverPointer()
                 .help("Show the rule file in Finder")
                 .accessibilityIdentifier("rule-reveal-\(key)")
             if rule.editable {
@@ -401,18 +399,15 @@ struct RulesSectionView: View {
                     Button("Remove Outside Link") {
                         perform { _ = try await manager.linkRule(taskID: task.id, ruleID: rule.id, linked: false) }
                     }
-                    .buttonHoverPointer()
                     .help("Remove the symlink; Playhouse sessions still share the rule")
                     .accessibilityIdentifier("rule-unlink-\(key)")
                 } else if rule.linkable {
                     Button("Make Available Outside Playhouse…") { pendingLink = rule }
-                        .buttonHoverPointer()
                         .help("Write a symlink so the claude and codex CLIs read the rule on their own")
                         .accessibilityIdentifier("rule-link-\(key)")
                 }
                 Divider()
                 Button("Delete…", role: .destructive) { pendingDelete = rule }
-                    .buttonHoverPointer()
                     .help("Delete the rule file from disk")
                     .accessibilityIdentifier("rule-delete-\(key)")
             }

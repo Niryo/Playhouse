@@ -95,9 +95,12 @@ struct PluginAuthoringPreview: View {
                 Menu("Restore version") {
                     ForEach(versions, id: \.self) { version in
                         Button("Version \(version)") { perform("plugin.restore", version: version) }
-                            .buttonHoverPointer().nativeHelp("Restore this plugin version")
+                            .help("Restore this plugin version")
                     }
-                }.disabled(versions.isEmpty)
+                }
+                .disabled(versions.isEmpty)
+                .buttonHoverPointer()
+                .nativeHelp("Restore an earlier saved version of this plugin")
                 // A plugin that was never saved is itself unpublished, so it can always be discarded.
                 if !isSaved || hasChanges {
                     Button("Discard changes") { confirmDiscard = true }

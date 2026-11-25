@@ -177,6 +177,10 @@ extension PlayhouseUITests {
             .map { ($0.path, $0.manifest) }
     }
     func killDaemon(environment: [String: String]) throws {
+        // Every case and watcher in the run shares the runner's daemon; only a case's private one may be killed.
+        let service = try XCTUnwrap(environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"], "killDaemon needs a private bridge service.")
+        XCTAssertNotEqual(service, serviceName, "killDaemon must not kill the run's shared daemon.")
+        guard service != serviceName else { return }
         let pid = try XCTUnwrap(try daemonProcessID(environment: environment), "The private daemon should be running.")
         kill(pid_t(pid), SIGKILL)
         XCTAssertTrue(waitUntil({ kill(pid_t(pid), 0) != 0 }, timeout: 10), "The killed daemon should exit.")

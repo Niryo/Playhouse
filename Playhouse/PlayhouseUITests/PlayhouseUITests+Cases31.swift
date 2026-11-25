@@ -446,6 +446,7 @@ extension PlayhouseUITests {
         app.menuButtons["Restore version"].click()
         let oldVersion = app.menuItems["Version 0"]
         XCTAssertTrue(oldVersion.waitToExist(timeout: 5))
+        assertMenuRowsUnique(under: app.menuButtons["Restore version"], separators: 0)
         let historyCapture = XCTAttachment(screenshot: oldVersion.screenshot())
         historyCapture.name = "Plugin version history item"
         historyCapture.lifetime = .keepAlways
@@ -855,10 +856,10 @@ extension PlayhouseUITests {
 
     // case-contract: test_plugin_editor_reattaches_after_daemon_restart | A plugin editor follows a running Claude turn after a daemon restart, restores its answer once alongside the preview, and settles without a task outcome nudge. Claude represents the shared reattachment settlement used by both providers.
     func test_plugin_editor_reattaches_after_daemon_restart() throws {
-        let environment = try installClaudeFixture(named: "claude-fixture-reattach-plugin")
+        let environment = restartServiceEnvironment(try installClaudeFixture(named: "claude-fixture-reattach-plugin"))
         let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
-        launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-default-provider", "claude"])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
         _ = try runCLI(["plugin", "author", "--placement", "mainSidebar", "--name", "Restart plugin", "--presentation", "modal", "--provider", "claude"], extraEnvironment: environment)
         XCTAssertTrue(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent(".drafts/plugins").path), "The working folder exists before reopening the editor or sending.")
         let menu = app.menuBars.menuBarItems["Plugins"]
