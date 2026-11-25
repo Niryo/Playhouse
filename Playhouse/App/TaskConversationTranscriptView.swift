@@ -148,6 +148,12 @@ extension TaskConversationView {
             .onChange(of: isResponding) { _, isResponding in
                 if isResponding { scroll.followIfAtBottom() }
             }
+            .task(id: latestActiveProcess?.id) {
+                // An operation earns its own row only once it has run for a moment.
+                try? await Task.sleep(for: .seconds(Self.activeProcessSettleDelay))
+                guard !Task.isCancelled else { return }
+                settledActiveProcessID = latestActiveProcess?.id
+            }
             .onChange(of: userInputRequest?.id) { _, requestID in
                 // The question form sits below the latest message; bring it into view
                 // whether it arrives with the history or later from the daemon.
@@ -333,9 +339,26 @@ extension TaskConversationView {
         return activities.filter { $0.recalledChatPageID != nil && !inlineIDs.contains($0.id) }
     }
 
+    /// How long a live operation runs, in seconds, before it leaves the activity list for its own row.
+    /// The row counts elapsed time in whole seconds, so an operation shorter than one has nothing
+    /// for it to show that the list doesn't.
+    static let activeProcessSettleDelay: TimeInterval = 1
+
+    /// The latest live operation, once it has run for `activeProcessSettleDelay`: since its start
+    /// when that is known, as for a reopened task's long command, else since this window saw it.
+    /// A provider can report an operation's start and end together (Codex reports the commands
+    /// of a code cell once they ran, and a backlog of events arrives at once), and a row for each
+    /// would flash Running and vanish before it could be read. Until then it waits in the list.
+    var activeProcess: ConversationActivity? {
+        guard let process = latestActiveProcess else { return nil }
+        if process.id == settledActiveProcessID { return process }
+        guard let startedAt = process.startedAt, Date().timeIntervalSince(startedAt) >= Self.activeProcessSettleDelay else { return nil }
+        return process
+    }
+
     /// Keep the latest live non-agent operation in the conversation timeline.
     /// Earlier live operations remain available in the expanded activity list.
-    var activeProcess: ConversationActivity? {
+    var latestActiveProcess: ConversationActivity? {
         activities
             .filter { !$0.isSubagent && !$0.isContextCompaction && $0.isActive && $0.recalledChatPageID == nil }
             .enumerated()
@@ -374,7 +397,7 @@ extension TaskConversationView {
             } label: {
                 activityDisclosureButtonLabel
             }
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp("Show or hide Codex activity details")
             .buttonStyle(.plain)
             .accessibilityValue(isActivityExpanded ? "Expanded, down chevron" : "Collapsed, right chevron")
@@ -395,14 +418,14 @@ extension TaskConversationView {
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
                         ForEach(progressMessages) { message in
-                            assistantMarkdownContent(Self.displayableAssistantText(message.text))
-                                .font(.system(size: 12))
-                                .foregroundStyle(WorkspaceTheme.conversationText)
+                            AtomMarkdown(
+                                props: MarkdownProps(text: Self.displayableAssistantText(message.text), size: 12, color: "text", selectable: true),
+                                common: AtomCommon(testID: "codex-progress-message-\(message.id)")
+                            )
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(9)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
-                                .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
                     ForEach(expandedActivities) { activity in
@@ -586,7 +609,7 @@ extension TaskConversationView {
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Open attached image")
                                 .accessibilityIdentifier("pending-chat-image-\(attachment.id)")
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Open image at full size")
 
                                 Button {
@@ -595,7 +618,7 @@ extension TaskConversationView {
                                 } label: {
                                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
                                 }
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Remove image")
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Remove image")
@@ -634,7 +657,7 @@ extension TaskConversationView {
                         .foregroundStyle(.white, .black.opacity(0.7))
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Discard comments")
                 .accessibilityLabel("Discard comments")
                 .accessibilityIdentifier("discard-pending-comments-button")
@@ -725,7 +748,7 @@ private struct EmptyConversationAddRepositoryPrompt: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp("Add a repository")
             .onHover { isHovering = $0 }
             .animation(.easeOut(duration: 0.12), value: isHovering)

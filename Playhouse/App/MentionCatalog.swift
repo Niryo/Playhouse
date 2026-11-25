@@ -276,7 +276,7 @@ final class MentionCatalogManager {
                 guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
                 let parsed: (name: String?, description: String?)
                 switch provider {
-                case .claude:
+                case .claude, .opencode:
                     guard entry.hasSuffix(".md") else { continue }
                     parsed = Self.frontmatter(contents)
                 case .codex:
@@ -290,9 +290,11 @@ final class MentionCatalogManager {
         for root in roots {
             read(root.path + "/.claude/agents", provider: .claude, scope: root.name)
             read(root.path + "/.codex/agents", provider: .codex, scope: root.name)
+            read(root.path + "/.opencode/agents", provider: .opencode, scope: root.name)
         }
         read(environment.claudeConfigDirectory + "/agents", provider: .claude, scope: "global")
         read(environment.codexHome + "/agents", provider: .codex, scope: "global")
+        read(environment.openCodeConfigDirectory + "/agents", provider: .opencode, scope: "global")
         // Codex names roles with underscores where Claude uses dashes; one agent defined for both is one item.
         func key(_ name: String) -> String { name.lowercased().replacingOccurrences(of: "_", with: "-") }
         var order: [String] = []
@@ -305,9 +307,11 @@ final class MentionCatalogManager {
         return order.map { name in
             let group = grouped[name]!.sorted { ($0.provider == provider ? 0 : 1) < ($1.provider == provider ? 0 : 1) }
             let parts = group.map { definition in
-                definition.provider == .claude
-                    ? "the Claude Code subagent `\(definition.name)` defined in `\(definition.path)`"
-                    : "the Codex agent `\(definition.name)` defined in `\(definition.path)`"
+                switch definition.provider {
+                case .claude: "the Claude Code subagent `\(definition.name)` defined in `\(definition.path)`"
+                case .codex: "the Codex agent `\(definition.name)` defined in `\(definition.path)`"
+                case .opencode: "the OpenCode agent `\(definition.name)` defined in `\(definition.path)`"
+                }
             }
             let first = group[0]
             return MentionItem(

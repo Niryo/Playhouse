@@ -840,7 +840,7 @@ struct KanbanBoardView: View {
                         .foregroundStyle(.secondary)
                 }
                     .buttonStyle(.plain)
-                    .buttonHoverPointer()
+                    .plainButtonHoverPointer()
                     .nativeHelp("Clear search")
                     .accessibilityIdentifier("clear-board-search-button")
             }
@@ -855,7 +855,7 @@ struct KanbanBoardView: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp("Close search")
             .accessibilityLabel("Close search")
             .accessibilityIdentifier("close-board-search-button")

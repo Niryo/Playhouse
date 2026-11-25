@@ -314,11 +314,16 @@ extension ConversationManager {
         text.contains(PrivatePromptPlaceholder.outcomeReminder)
     }
 
+    /// An OpenCode model ID names its model provider too (`anthropic/claude-sonnet-4-5`), and a
+    /// local model can carry a tag (`ollama/qwen3:8b`), so `/` and `:` are allowed with the rest.
     static func isValidModelID(_ value: String) -> Bool {
         !value.isEmpty && value.count <= 100 && value.unicodeScalars.allSatisfy {
-            CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-").contains($0)
+            CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/:").contains($0)
         }
     }
+
+    static let invalidModelIDMessage = "Model ID must contain only letters, numbers, periods, underscores, hyphens, slashes, or colons."
+
 
     static func isValidImageDataURL(_ value: String) -> Bool {
         guard let separator = value.firstIndex(of: ",") else { return false }

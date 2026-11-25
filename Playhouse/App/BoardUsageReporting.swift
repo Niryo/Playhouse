@@ -154,7 +154,12 @@ extension BoardTaskManager {
 
     private func sessionReference(_ subject: any ConversationSubject, provider: ConversationProvider, sessionID: String) -> ProviderSessionReference {
         let subagents = subject.callUsageSnapshots["\(provider.rawValue):\(sessionID)"]?.subagents.keys.sorted() ?? []
-        return ProviderSessionReference(provider: provider, sessionID: sessionID, subagentThreadIDs: provider == .codex ? subagents : [])
+        // OpenCode's turns write its sessions' messages beside the store.
+        let storeDirectory = modelContext.container.configurations.first?.url.deletingLastPathComponent()
+        return ProviderSessionReference(
+            provider: provider, sessionID: sessionID, subagentThreadIDs: provider == .codex ? subagents : [],
+            requestLogDirectory: provider == .opencode ? storeDirectory.map(OpenCodeRequestLog.directory(storeDirectory:)) : nil
+        )
     }
 
     /// What a token map reads: the whole conversation (no `turnID`), or one turn. A turn reads

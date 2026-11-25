@@ -48,6 +48,7 @@ struct WorkspaceSettingsView: View {
                     Text("Dark").tag("dark")
                     Text("Light").tag("light")
                 }
+                .buttonHoverPointer()
                 .accessibilityIdentifier("appearance-picker")
                 .accessibilityValue(appearance)
                 // The Form's first row carries its scroller reveal.
@@ -61,6 +62,7 @@ struct WorkspaceSettingsView: View {
                         statusSoundsEnabled = value
                     }
                 ))
+                .buttonHoverPointer()
                 .accessibilityIdentifier("status-sounds-toggle")
                 Text("Plays Glass when a task moves to Review and Ping when it moves to Waiting Response.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -119,6 +121,7 @@ struct WorkspaceSettingsView: View {
                     get: { autoCompaction.enabled },
                     set: { value in saveCompaction(enabled: value) }
                 ))
+                .buttonHoverPointer()
                 .accessibilityIdentifier("auto-compaction-enabled-toggle")
                 Text("Claude and Codex always auto-compact a full context themselves, at their own defaults. These triggers add Playhouse's compactions: Claude sessions compact near prompt-cache expiry, on a cold resume and before model switches; Codex sessions compact before model switches, as Codex does not expose the same cache-expiry signal.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)

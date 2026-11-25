@@ -60,6 +60,7 @@ struct AtomHighlightMenuItem: View {
 
     var body: some View {
         Toggle("Highlight Native Atoms", isOn: $enabled)
+            // no-pointer: a Debug menu-bar item, not a control in the window.
     }
 }
 

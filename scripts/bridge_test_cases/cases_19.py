@@ -146,7 +146,7 @@ class BridgeTestCases19:
 
         self.assert_failure(self.call_cli("mentions", "list", "--task", str(uuid.uuid4()), expected_status=3)[0], "not_found")
         self.assert_failure(self.call_cli("mentions", "list", expected_status=2)[0], "invalid_argument")
-    # case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule row shows only its name led by one icon for the agents that follow it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider icon: each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
+    # case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule row shows only its name led by one icon for the agents that follow it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for every agent, and an outlined check naming the agents for some, such as Codex and OpenCode, which Playhouse passes nothing and which uses only the skills, rules and MCP servers it finds itself in the task's working folder and home folder), without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider icon: each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
     def test_rules_catalog_lists_repo_global_and_managed_rules(self):
         working = self.make_skill_repository("rules-catalog-repo", {
             "AGENTS.md": "# Repository conventions\nUse tabs.\n",
@@ -182,15 +182,15 @@ class BridgeTestCases19:
                          "Every rule file is listed, including nested .claude/rules files.")
         agents = repo["AGENTS.md"]
         self.assertEqual(agents["id"], f"repo:{working}#AGENTS.md")
-        self.assertEqual(agents["providers"], ["claude", "codex"], "Playhouse has both agents follow AGENTS.md.")
-        self.assertEqual(agents["nativeProviders"], ["codex"], "Claude Code skips AGENTS.md beside a CLAUDE.md on its own.")
+        self.assertEqual(agents["providers"], ["claude", "codex", "opencode"], "Playhouse has both agents follow AGENTS.md.")
+        self.assertEqual(agents["nativeProviders"], ["codex", "opencode"], "Claude Code skips AGENTS.md beside a CLAUDE.md on its own.")
         self.assertEqual(agents["sharedWith"], ["claude"], "Playhouse has Claude read it alongside CLAUDE.md.")
         self.assertFalse(agents["availableOutsidePlayhouse"])
         self.assertEqual(agents["summary"], "Repository conventions")
         self.assertSamePath(agents["filePath"], Path(worktrees[str(working)]) / "AGENTS.md")
         claude = repo["CLAUDE.md"]
         self.assertEqual(claude["nativeProviders"], ["claude"])
-        self.assertEqual(claude["providers"], ["claude", "codex"])
+        self.assertEqual(claude["providers"], ["claude", "codex"], "OpenCode reads AGENTS.md instead, and Playhouse adds nothing to it.")
         self.assertIn("@docs/missing.md", claude["issue"], "An import of a missing file is a problem.")
         self.assertIsNone(agents.get("issue"))
         self.assertEqual(repo[".claude/rules/api.md"]["paths"], ["src/api/**"])
@@ -205,11 +205,11 @@ class BridgeTestCases19:
         self.assertEqual(list(linked_rules), ["AGENTS.md"], "A CLAUDE.md symlinked to AGENTS.md is one rule.")
         self.assertEqual(sorted(location["layout"] for location in linked_rules["AGENTS.md"]["locations"]), ["agents", "claude"])
         self.assertTrue(linked_rules["AGENTS.md"]["availableOutsidePlayhouse"])
-        self.assertEqual(linked_rules["AGENTS.md"]["nativeProviders"], ["claude", "codex"])
+        self.assertEqual(linked_rules["AGENTS.md"]["nativeProviders"], ["claude", "codex", "opencode"])
 
         override_rules = self.rule_section(catalog, "rules-override-repo")
         self.assertEqual(override_rules["AGENTS.override.md"]["providers"], ["codex"], "AGENTS.override.md is Codex's own.")
-        self.assertEqual(override_rules["AGENTS.md"]["providers"], ["claude"], "Codex reads the override instead of AGENTS.md.")
+        self.assertEqual(override_rules["AGENTS.md"]["providers"], ["claude"], "Codex reads the override instead of AGENTS.md, and OpenCode reads only the working folder's rules.")
 
         self.assertEqual([rule["id"] for rule in catalog["global"]],
                          ["global:agents/AGENTS.md", "global:codex/AGENTS.md", "global:claude/CLAUDE.md", "global:claude/rules/global-style.md"])
@@ -220,13 +220,16 @@ class BridgeTestCases19:
         shared = global_rules["~/.agents/AGENTS.md"]
         self.assertEqual(shared["id"], "global:agents/AGENTS.md")
         self.assertEqual(shared["nativeProviders"], [], "Neither CLI reads ~/.agents/AGENTS.md on its own.")
-        self.assertEqual(shared["providers"], ["claude", "codex"], "Playhouse shares it with both.")
+        self.assertEqual(shared["providers"], ["claude", "codex"], "Playhouse shares it with Claude and Codex; OpenCode gets only what it reads itself.")
         self.assertEqual(shared["sharedWith"], ["claude", "codex"])
         self.assertTrue(shared["linkable"])
         self.assertEqual(global_rules[codex_name]["nativeProviders"], ["codex"])
-        self.assertEqual(global_rules["~/.claude/CLAUDE.md"]["nativeProviders"], ["claude"])
+        self.assertEqual(global_rules["~/.claude/CLAUDE.md"]["nativeProviders"], ["claude", "opencode"], "OpenCode reads Claude Code's global CLAUDE.md itself.")
         self.assertEqual(global_rules["~/.claude/rules/global-style.md"]["id"], "global:claude/rules/global-style.md")
-        self.assertTrue(all(rule["providers"] == ["claude", "codex"] for rule in global_rules.values()))
+        self.assertEqual({name: rule["providers"] for name, rule in global_rules.items()}, {
+            "~/.agents/AGENTS.md": ["claude", "codex"], codex_name: ["claude", "codex"],
+            "~/.claude/CLAUDE.md": ["claude", "codex", "opencode"], "~/.claude/rules/global-style.md": ["claude", "codex"],
+        })
 
         managed = catalog["managed"]
         self.assertEqual([rule["id"] for rule in managed], ["managed:claude/CLAUDE.md"])
@@ -324,14 +327,14 @@ class BridgeTestCases19:
 
         agents_id = f"repo:{working}#AGENTS.md"
         lone = rule(agents_id)
-        self.assertEqual(lone["nativeProviders"], ["claude", "codex"], "Both CLIs read an AGENTS.md with no CLAUDE.md beside it.")
+        self.assertEqual(lone["nativeProviders"], ["claude", "codex", "opencode"], "Both CLIs read an AGENTS.md with no CLAUDE.md beside it.")
         self.assertTrue(lone["availableOutsidePlayhouse"])
         self.assertFalse(any(location["isSymlink"] for location in lone["locations"]), "Nothing links to it.")
         self.assertFalse(lone["linkable"], "A rule both CLIs already read has nothing to link.")
         disabled = self.assert_success(self.call_cli("rules", "disable", "--task", task["id"], "--rule", agents_id)[0])
         self.assertFalse(disabled["enabled"])
-        self.assertEqual(disabled["alwaysOnFor"], ["codex"], "Codex still reads the working repository's AGENTS.md itself.")
-        self.assertEqual(disabled["providers"], ["codex"])
+        self.assertEqual(disabled["alwaysOnFor"], ["codex", "opencode"], "Codex still reads the working repository's AGENTS.md itself.")
+        self.assertEqual(disabled["providers"], ["codex", "opencode"])
         self.assertFalse(rule(agents_id)["enabled"], "Turning a rule off survives a fresh CLI process.")
         off = self.assert_success(self.call_cli("rules", "disable", "--task", task["id"], "--rule", "global:agents/AGENTS.md")[0])
         self.assertEqual(off["providers"], [], "A rule only Playhouse shares reaches neither agent once off.")
@@ -342,7 +345,7 @@ class BridgeTestCases19:
         self.assert_failure(self.call_cli("rules", "disable", "--rule", "global:no-such-rule", expected_status=3)[0], "not_found")
         for rule_id in [agents_id, "global:agents/AGENTS.md"]:
             self.assertTrue(self.assert_success(self.call_cli("rules", "enable", "--task", task["id"], "--rule", rule_id)[0])["enabled"])
-        self.assertEqual(rule(agents_id)["providers"], ["claude", "codex"])
+        self.assertEqual(rule(agents_id)["providers"], ["claude", "codex", "opencode"])
 
         codex_link = self.skills_codex_home / "AGENTS.md"
         self.assert_failure(self.call_cli("rules", "link", "--task", task["id"], "--rule", "global:agents/AGENTS.md", expected_status=1)[0], "already_exists")
@@ -352,7 +355,9 @@ class BridgeTestCases19:
 
         linked = self.assert_success(self.call_cli("rules", "link", "--task", task["id"], "--rule", "global:agents/AGENTS.md")[0])
         self.assertTrue(linked["availableOutsidePlayhouse"])
-        self.assertEqual(linked["nativeProviders"], ["claude", "codex"])
+        self.assertEqual(linked["nativeProviders"], ["claude", "codex", "opencode"],
+                         "The links are Claude Code's and Codex's own files, and OpenCode reads Claude Code's global CLAUDE.md itself.")
+        self.assertEqual(linked["sharedWith"], [], "Every agent reads a link itself.")
         self.assertFalse(linked["linkable"], "A linked rule has nothing left to link.")
         for link in [codex_link, claude_rules]:
             self.assertTrue(link.is_symlink())
@@ -477,7 +482,7 @@ class BridgeTestCases19:
                          ["global:agents/AGENTS.md", "global:codex/AGENTS.md", f"repo:{extra}#AGENTS.md", f"repo:{extra}#.claude/rules/extra.md"])
         self.assertTrue(bridge["claudeReadsAgentsAlongsideClaude"])
         extra_agents = next(rule for section in self.rule_catalog(task["id"])["repositories"] for rule in section["rules"] if rule["id"] == f"repo:{extra}#AGENTS.md")
-        self.assertEqual(extra_agents["sharedWith"], ["claude", "codex"], "Neither agent loads another task repository's rules on its own.")
+        self.assertEqual(extra_agents["sharedWith"], ["claude", "codex"], "Neither agent loads another task repository's rules on its own, and OpenCode gets only what it reads itself.")
 
         self.assert_success(self.call_cli("rules", "enable", "--task", task["id"], "--rule", local_id)[0])
         self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Follow them again.", extra_environment=environment)[0])
@@ -525,7 +530,7 @@ class BridgeTestCases19:
         rules_section = instructions[instructions.index("# Rules Playhouse shares with you"):]
         resumed = history["threadResumeDeveloperInstructions"][-1]
         self.assertEqual(resumed[resumed.index("# Rules Playhouse shares with you"):], rules_section, "The resumed thread gets the same rules.")
-    # case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name led by one icon for the agents that start it in Playhouse sessions (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
+    # case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name led by one icon for the agents that start it in Playhouse sessions (the Claude logo for Claude only, the Codex logo for Codex only, a green check for every agent, and an outlined check naming the agents for some, such as Codex and OpenCode, which Playhouse passes nothing and which uses only the skills, rules and MCP servers it finds itself in the task's working folder and home folder), without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
     def test_mcp_catalog_lists_repo_global_and_managed_servers(self):
         working = self.make_skill_repository("mcp-catalog-repo", {
             ".mcp.json": json.dumps({"mcpServers": {
@@ -590,7 +595,7 @@ class BridgeTestCases19:
         self.assertEqual(repo["repo-codex"]["providers"], ["claude", "codex"])
         other_api = self.mcp_section(catalog, "mcp-other-repo")["other-api"]
         self.assertEqual(other_api["headerNames"], ["Authorization"])
-        self.assertEqual(other_api["sharedWith"], ["claude", "codex"], "Neither agent reads another task repository's servers on its own.")
+        self.assertEqual(other_api["sharedWith"], ["claude", "codex"], "Neither agent reads another task repository's servers on its own; OpenCode reads only its own opencode.json.")
 
         global_servers = self.mcp_by_name(catalog["global"])
         self.assertEqual(list(global_servers), ["clash", "claude-only", "codex-only", "folder-tool", "inline-tool", "off-tool", "shared"])
@@ -598,7 +603,7 @@ class BridgeTestCases19:
         self.assertEqual(shared["id"], "global:shared")
         self.assertEqual([location["layout"] for location in shared["locations"]], ["claudeUser", "codexGlobal"], "Both files define one server.")
         self.assertTrue(shared["availableOutsidePlayhouse"])
-        self.assertEqual(shared["sharedWith"], [])
+        self.assertEqual(shared["sharedWith"], [], "Claude Code and Codex each read it themselves, and Playhouse passes OpenCode nothing.")
         self.assertFalse(shared["conflict"])
         clash = global_servers["clash"]
         self.assertTrue(clash["conflict"])

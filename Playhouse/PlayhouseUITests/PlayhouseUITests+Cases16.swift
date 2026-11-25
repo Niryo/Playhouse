@@ -838,13 +838,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image. Codex records the same active-turn attribution in the shared store, covered by test_codex_agent_image_published_during_active_turn.
     func test_claude_agent_image_published_during_active_turn() throws {
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-active-image")
-        try copyFixtureFile(at: source, to: executable)
-        claudeFixtureExecutable = executable.path
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
-            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-active-image")
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
         let ready = URL(fileURLWithPath: executable.path + ".image-turn-ready")
         let release = URL(fileURLWithPath: executable.path + ".image-turn-release")
@@ -884,13 +878,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_large_image_message_reaches_idle_agent | A Claude Code agent that has answered initialize and gone idle receives a user message carrying a screenshot larger than its input FIFO's buffer: the send completes with Claude's answer, the agent receives the whole image, the user message keeps that image when history is read over a fresh CLI/XPC connection and when the conversation is reopened, and a later text turn in the same conversation still completes. Claude Code's runtime, like the kqueue-reading fixture, is never woken by one oversized blocking write, so such a message must reach it without freezing the daemon. Codex agents talk over a socket and are not affected.
     func test_claude_large_image_message_reaches_idle_agent() throws {
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-large-image")
-        try copyFixtureFile(at: source, to: executable)
-        claudeFixtureExecutable = executable.path
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
-            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-large-image")
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI([

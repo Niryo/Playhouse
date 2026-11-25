@@ -86,7 +86,7 @@ extension TaskConversationView {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .disabled(terminalUnavailableReason != nil && !isTerminalPresented)
             .shortcutHelp(terminalUnavailableReason ?? (isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's worktree"), shortcut: AppShortcut.terminal)
             .accessibilityLabel(isTerminalPresented ? "Hide terminal" : "Open terminal")
@@ -113,7 +113,7 @@ extension TaskConversationView {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .shortcutHelp("Skills, Rules & MCP", shortcut: AppShortcut.skills)
         .accessibilityLabel("Skills")
         .accessibilityIdentifier("open-skills-button")
@@ -296,6 +296,7 @@ extension TaskConversationView {
             Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture { cancelRepositoryFieldEdit(repository) }
+                // no-pointer: a click outside the field dismisses the edit; the area is not a control.
         )
     }
 

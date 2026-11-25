@@ -626,13 +626,15 @@ Playhouse.render(h(DMs));
         installer.chmod(0o755)
         copy_file(fixtures / "codex-app-server-fixture.py", directory / "codex.payload")
         copy_file(fixtures / "claude-code-fixture.py", directory / "claude.payload")
+        copy_file(fixtures / "opencode-serve-fixture.py", directory / "opencode.payload")
         return directory, {
             "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(directory / "codex"),
             "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(directory / "claude"),
+            "PLAYHOUSE_E2E_OPENCODE_EXECUTABLE": str(directory / "opencode"),
             "PLAYHOUSE_E2E_PROVIDER_INSTALLER": str(installer),
         }
 
-    # case-contract: test_provider_install_from_composer | With neither CLI installed, providers list reports Claude Code and Codex CLI missing with their official curl installers, and the composer shows an Install AI provider button whose menu lists Claude and Codex instead of the provider picker, with no model and effort picker beside it. Installing Codex runs its installer once; Codex is then listed as installed and runs the task's turn without a restart, and the provider menu shows Codex with an Add Claude entry, with the model and effort picker back beside it. A new task whose default provider (Claude) is missing starts on the installed Codex instead, without changing the saved default. A failing installer reports its output and leaves Claude missing; adding Claude again installs it and switches the task to Claude. Installing a provider that is already installed doesn't rerun its installer, and an unknown provider is rejected.
+    # case-contract: test_provider_install_from_composer | With no CLI installed, providers list reports Claude Code, Codex CLI and OpenCode missing with their official curl installers, and the composer shows an Install AI provider button whose menu lists Claude, Codex and OpenCode instead of the provider picker, with no model and effort picker beside it. Installing Codex runs its installer once; Codex is then listed as installed and runs the task's turn without a restart, and the provider menu shows Codex with an Add Claude entry, with the model and effort picker back beside it. A new task whose default provider (Claude) is missing starts on the installed Codex instead, without changing the saved default. A failing installer reports its output and leaves Claude missing; adding Claude again installs it and switches the task to Claude, and adding OpenCode then installs it the same way and switches the task to OpenCode, leaving nothing to add. Installing a provider that is already installed doesn't rerun its installer, and an unknown provider is rejected.
     def test_provider_install_from_composer(self):
         directory, environment = self.provider_install_fixture()
         installs = directory / "installs.log"
@@ -642,9 +644,12 @@ Playhouse.render(h(DMs));
             return {status["provider"]: status for status in listed}
 
         missing = statuses()
-        self.assertEqual(set(missing), {"claude", "codex"})
+        self.assertEqual(set(missing), {"claude", "codex", "opencode"})
         self.assertEqual(missing["claude"]["productName"], "Claude Code")
         self.assertEqual(missing["codex"]["productName"], "Codex CLI")
+        self.assertEqual(missing["opencode"]["productName"], "OpenCode")
+        self.assertEqual(missing["opencode"]["installCommand"], "curl -fsSL https://opencode.ai/v2/install | bash")
+        self.assertFalse(missing["opencode"]["isInstalled"])
         self.assertEqual(missing["claude"]["installCommand"], "curl -fsSL https://claude.ai/install.sh | bash")
         self.assertEqual(missing["codex"]["installCommand"], "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh")
         self.assertFalse(missing["claude"]["isInstalled"])
@@ -699,7 +704,13 @@ Playhouse.render(h(DMs));
         claude = self.assert_success(self.call_cli("providers", "install", "claude", extra_environment=environment)[0])
         self.assertTrue(claude["isInstalled"])
         self.assertEqual(installs.read_text(encoding="utf-8").splitlines(), ["codex", "claude", "claude"])
+        self.assertFalse(statuses()["opencode"]["isInstalled"])
+        opencode = self.assert_success(self.call_cli("providers", "install", "opencode", extra_environment=environment)[0])
+        self.assertTrue(opencode["isInstalled"], "OpenCode installs with its installer like the other providers.")
+        self.assertEqual(installs.read_text(encoding="utf-8").splitlines(), ["codex", "claude", "claude", "opencode"])
         self.assertTrue(all(status["isInstalled"] for status in statuses().values()))
+        on_opencode = self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "opencode", extra_environment=environment)[0])
+        self.assertEqual(on_opencode["conversationProvider"], "opencode", "The installed OpenCode can run the task.")
         switched = self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=environment)[0])
         self.assertEqual(switched["conversationProvider"], "claude")
         self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["defaultProvider"], "claude", "A chosen provider becomes the default.")
@@ -709,7 +720,7 @@ Playhouse.render(h(DMs));
         usage, _ = self.call_cli("providers", "install", expected_status=2, extra_environment=environment)
         self.assert_failure(usage, "invalid_argument")
 
-    # case-contract: test_markdown_atom_renders_formatted_markdown | The Plugin Catalog lists the Markdown atom, whose page renders Markdown atoms into formatted native text with no plugin error: its skill sample shows its frontmatter as a table of its entries (release-notes) with no raw --- fences, a heading without its # marks that is taller than the body text, a paragraph whose bold, italic and inline code show without their markers, bullet and numbered list items, a quote, a Swift code block card, a table with its cells and the text after a rule; a Markdown whose frontmatter is hide shows only its body, and a Markdown given raw string children renders them as Markdown (a heading without its ## marks). `plugin render` reports a Markdown atom from its text prop or from its string children with no errors and its props as given, while a frontmatter other than table or hide, a mistyped size or selectable, an atom child, or an event the atom doesn't raise is reported in errors with exit 1.
+    # case-contract: test_markdown_atom_renders_formatted_markdown | The Plugin Catalog lists the Markdown atom, whose page renders Markdown atoms into formatted native text with no plugin error: its skill sample shows its frontmatter as a table of its entries (release-notes) with no raw --- fences, a heading without its # marks that is taller than the body text, a paragraph whose bold, italic and inline code show without their markers, bullet and numbered list items, a quote with a leading bar, all in one selectable text view whose select-all copy takes the heading, list and quote together as shown text (no Markdown marks, frontmatter or code), while a Markdown without selectable lets nothing be selected or copied; a Swift code block card, a table with its cells and the text after a rule; a Markdown whose frontmatter is hide shows only its body, and a Markdown given raw string children renders them as Markdown (a heading without its ## marks). `plugin render` reports a Markdown atom from its text prop or from its string children with no errors and its props as given, including the raw quote marker in the catalog source, while a frontmatter other than table or hide, a mistyped size or selectable, an atom child, or an event the atom doesn't raise is reported in errors with exit 1.
     def test_markdown_atom_renders_formatted_markdown(self):
         page = self.assert_success(self.call_cli("plugin", "render", "--page", "Markdown")[0])
         self.assertEqual(page["errors"], [], "The Markdown catalog page renders without errors.")
@@ -717,6 +728,7 @@ Playhouse.render(h(DMs));
         self.assertEqual(skill["type"], "Markdown")
         self.assertEqual((skill["props"]["frontmatter"], skill["props"]["selectable"]), ("table", True))
         self.assertTrue(skill["props"]["text"].startswith("---\nname: release-notes\n"), skill["props"]["text"])
+        self.assertIn("> Keep it short.", skill["props"]["text"], "The catalog keeps the raw Markdown quote.")
         hidden = self.plugin_node(page["tree"], "markdown-hidden-frontmatter")
         self.assertEqual((hidden["props"]["frontmatter"], hidden["props"]["size"], hidden["props"]["color"]), ("hide", 11, "secondary"))
         children = self.plugin_node(page["tree"], "markdown-children")

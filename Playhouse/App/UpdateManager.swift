@@ -45,6 +45,10 @@ final class UpdateManager {
         var stagedVersion: String?
         var error: String?
         var installingSince: Date?
+        /// The release being installed, kept for the notice's notes: the new
+        /// version's launch check clears `available` before the installer
+        /// writes its record.
+        var installing: ReleaseInfo?
         /// Install as soon as no agent is running a turn and no message is being written.
         var installWhenIdle: Bool?
         /// How the app that asked to wait reopens; a later request starting the install may differ.
@@ -333,6 +337,7 @@ final class UpdateManager {
         let processID = try Self.spawnDetached(installer.path, arguments: arguments)
         Self.reapInstaller(processID, stateDirectory: stateDirectory, fromVersion: currentVersion, toVersion: release.version)
         state.installingSince = Date()
+        state.installing = release
         try saveState(state)
         return ["started": .boolean(true), "installerPID": .integer(Int(processID)), "status": try BridgeValue.encoding(status())]
     }
@@ -394,14 +399,23 @@ final class UpdateManager {
         FileManager.default.createFile(atPath: PlayhouseRelease.launchedMarker(stateDirectory: stateDirectory, build: build).path, contents: nil)
         var state = loadState()
         var result = status()
+        // The installer writes its record only after this launch, and the
+        // launch check that follows clears the offer; keep the release for its
+        // notes now. An install started by a version without `installing`
+        // still has the offer at this point.
+        if state.installingSince != nil, state.installing == nil, state.available?.version == currentVersion {
+            state.installing = state.available
+            try saveState(state)
+        }
         if var record = result.lastInstall {
             if state.installingSince != nil {
                 // The installer doesn't know the notes; keep the release's for the notice.
-                if record.notes == nil, state.available?.version == record.toVersion {
-                    record.notes = state.available?.notes
+                if record.notes == nil, let release = state.installing ?? state.available, release.version == record.toVersion {
+                    record.notes = release.notes
                     saveInstallRecord(record)
                 }
                 state.installingSince = nil
+                state.installing = nil
                 state.installWhenIdle = nil
                 if record.status == "installed" {
                     state.available = nil

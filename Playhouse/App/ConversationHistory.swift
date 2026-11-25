@@ -593,6 +593,14 @@ extension ConversationManager {
         let isClaudeSubagent = transcript.turns.contains { turn in
             claudeSegmentIDs.contains(turn.segmentID) && turn.activities.contains { $0.childThreadID == childID }
         }
+        let openCodeSegmentIDs = Set(transcript.segments.filter { $0.provider == .opencode }.map(\.id))
+        if transcript.turns.contains(where: { turn in
+            openCodeSegmentIDs.contains(turn.segmentID) && turn.activities.contains { $0.childThreadID == childID }
+        }) {
+            // An OpenCode subagent runs in a child session of the task's own.
+            let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
+            return try await clients.opencode.subagentHistory(childSessionID: childID, workspace: workspace)
+        }
         guard isClaudeSubagent else {
             let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
             return try await clients.codex.inspectThreadReadOnly(id: childID, workspace: workspace)
@@ -962,13 +970,12 @@ extension ConversationManager {
 extension ConversationHandoff {
     /// The user's messages are cut to this many characters, newest kept whole first.
     static let optimizedUserMessagesCharacterLimit = 24_000
-    static let optimizedPlanCharacterLimit = 16_000
     static let optimizedFinalAnswerCharacterLimit = 2_400
     /// The outline lists at most this many of the newest turns, one line each.
     static let optimizedOutlineTurnLimit = 200
 
     /// The seed of an optimized follow-up's fresh session: the conversation's positional
-    /// outline, every message the user wrote, the latest plan and the latest final answer,
+    /// outline, every message the user wrote and the latest final answer (never a plan),
     /// with how to read the rest. Nil for a conversation with nothing in it yet.
     static func optimizedFollowUpContext(taskID: UUID, timeline: ConversationTimeline) -> String? {
         guard !timeline.turns.isEmpty else { return nil }
@@ -1017,10 +1024,9 @@ extension ConversationHandoff {
         if !userLines.isEmpty {
             sections.append((["The user's messages, oldest first:"] + userLines.reversed()).joined(separator: "\n\n"))
         }
-        if let plan = timeline.latestPlan {
-            sections.append("The latest plan (@\(plan.position)):\n\n" + shortenedWithReadHint(plan, limit: optimizedPlanCharacterLimit))
-        }
-        if let answer = timeline.latestFinalAnswer, answer.position != timeline.latestPlan?.position {
+        // A plan is not seeded: an old plan read as current instructions confuses the fresh
+        // session. The outline still gives its position for conversation read.
+        if let answer = timeline.entries.last(where: { $0.entry.kind == .final })?.entry {
             sections.append("The latest final answer (@\(answer.position)), shortened when long:\n\n" + shortenedWithReadHint(answer, limit: optimizedFinalAnswerCharacterLimit))
         }
         return """

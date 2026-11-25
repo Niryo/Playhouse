@@ -104,30 +104,38 @@ extension ConversationManager {
         }
     }
 
-    /// Codex exposes a manual app-server compaction request but no prompt-cache
-    /// expiry or post-compaction usage metadata. Its model-switch
-    /// compaction therefore records the known pre-size and provider activity.
-    func runCodexAutomaticCompaction(
-        taskID: UUID, threadID: String, trigger: ContextCompactionTrigger,
+    /// Codex's app-server and OpenCode's server expose a manual compaction request
+    /// but no prompt-cache expiry or post-compaction usage metadata. Their
+    /// model-switch compaction therefore records the known pre-size and provider activity.
+    func runProviderAutomaticCompaction(
+        provider: ConversationProvider, taskID: UUID, threadID: String, trigger: ContextCompactionTrigger,
         state: ContextCompactionSessionState, modelID: String, segmentID: String,
         workspace: ConversationWorkspaceContext, developerInstructions: String?, now: Date,
         onUpdate: @escaping (ConversationUpdate) -> Void
     ) async -> Bool {
         let turnID = UUID().uuidString.lowercased()
         do {
-            try await clients.codex.compactThread(
-                id: threadID, workspace: workspace, modelID: modelID,
-                developerInstructions: developerInstructions
-            )
+            switch provider {
+            case .opencode:
+                try await clients.opencode.compactSession(threadID, workspace: workspace)
+            case .codex:
+                try await clients.codex.compactThread(
+                    id: threadID, workspace: workspace, modelID: modelID,
+                    developerInstructions: developerInstructions
+                )
+            case .claude:
+                // Claude Code compacts through `runAutomaticCompaction`, which also reads its cache.
+                throw PlayhouseManagerError.invalidTransition("Claude Code compacts through its own path.")
+            }
             let event = ContextCompactionEvent(
                 id: UUID().uuidString.lowercased(), recordedAt: now, trigger: trigger,
                 preTokens: state.contextTokens, postTokens: nil,
                 idleSeconds: state.lastCallAt.map { now.timeIntervalSince($0) }, model: modelID,
-                lastCallAt: state.lastCallAt, succeeded: true, provider: ConversationProvider.codex.rawValue
+                lastCallAt: state.lastCallAt, succeeded: true, provider: provider.rawValue
             )
             // The row is its own turn, so it lands after every turn recorded before it.
             let activity = ConversationActivity(
-                id: "playhouse-codex-compaction-\(event.id)",
+                id: "playhouse-\(provider.rawValue)-compaction-\(event.id)",
                 title: "Context compacted automatically",
                 detail: ContextCompactionDetails(trigger: trigger, preTokens: state.contextTokens, postTokens: nil).summary,
                 status: "completed", isContextCompaction: true,
@@ -139,7 +147,7 @@ extension ConversationManager {
                 transcript.contextCompactions = (transcript.contextCompactions ?? []) + [event]
             }
             PlayhouseDiagnostics.record("conversation.compaction.completed", fields: [
-                "taskID": taskID.uuidString, "threadID": threadID, "provider": ConversationProvider.codex.rawValue,
+                "taskID": taskID.uuidString, "threadID": threadID, "provider": provider.rawValue,
                 "trigger": trigger.rawValue, "preTokens": String(event.preTokens ?? 0),
                 "postTokens": "unknown", "succeeded": "true"
             ])
@@ -150,10 +158,10 @@ extension ConversationManager {
                 id: UUID().uuidString.lowercased(), recordedAt: now, trigger: trigger,
                 preTokens: state.contextTokens, postTokens: nil,
                 idleSeconds: state.lastCallAt.map { now.timeIntervalSince($0) }, model: modelID,
-                lastCallAt: state.lastCallAt, succeeded: false, provider: ConversationProvider.codex.rawValue
+                lastCallAt: state.lastCallAt, succeeded: false, provider: provider.rawValue
             )
             let activity = ConversationActivity(
-                id: "playhouse-codex-compaction-\(event.id)", title: "Automatic context compaction failed",
+                id: "playhouse-\(provider.rawValue)-compaction-\(event.id)", title: "Automatic context compaction failed",
                 detail: ContextCompactionDetails(trigger: trigger, preTokens: state.contextTokens, postTokens: nil).summary,
                 status: "failed", isContextCompaction: true,
                 timelineOrder: nil,
@@ -164,7 +172,7 @@ extension ConversationManager {
                 transcript.contextCompactions = (transcript.contextCompactions ?? []) + [event]
             }
             PlayhouseDiagnostics.record("conversation.compaction.failed", fields: [
-                "taskID": taskID.uuidString, "threadID": threadID, "provider": ConversationProvider.codex.rawValue,
+                "taskID": taskID.uuidString, "threadID": threadID, "provider": provider.rawValue,
                 "trigger": trigger.rawValue, "preTokens": String(state.contextTokens),
                 "error": error.localizedDescription
             ])

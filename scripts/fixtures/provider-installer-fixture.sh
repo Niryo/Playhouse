@@ -1,6 +1,6 @@
 #!/bin/sh
 # Deterministic stand-in for the providers' official network installers, which the bridge
-# and UI suites run instead of `curl ... | bash`. Run as `<fixture> <claude|codex>` from a
+# and UI suites run instead of `curl ... | bash`. Run as `<fixture> <claude|codex|opencode>` from a
 # folder the test owns, it logs the provider to `installs.log` beside itself, then installs
 # `<provider>.payload` from that folder as the executable `<provider>`, where the test points
 # PLAYHOUSE_E2E_<PROVIDER>_EXECUTABLE. A `<provider>.install-fails` file makes it fail the

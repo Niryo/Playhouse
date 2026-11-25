@@ -680,17 +680,19 @@ extension PlayhouseUITests {
     /// environment a CLI-driven turn needs. Must run before `launchApp` so the
     /// app's own turns use it too.
     func installClaudeFixture(named name: String) throws -> [String: String] {
+        ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": try installClaudeFixtureExecutable(named: name).path]
+    }
+    /// Installs the OpenCode server fixture for this case and returns the environment a CLI-driven
+    /// turn needs. Must run before `launchApp` so the app's own turns use it too.
+    func installOpenCodeFixture(named name: String) throws -> [String: String] {
         let executable = dataDirectory.appendingPathComponent(name)
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
+        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("opencode-fixture-ui"), to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        try Data("Playhouse test owns this OpenCode protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-opencode-fixture-owner")
         )
-        claudeFixtureExecutable = executable.path
-        return ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        openCodeFixtureExecutable = executable.path
+        return ["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE": executable.path]
     }
     /// The usage dot is one flat hue, so the dominant channel says where on the
     /// green-to-red heatmap it currently sits. `leftEdgeFraction` restricts the

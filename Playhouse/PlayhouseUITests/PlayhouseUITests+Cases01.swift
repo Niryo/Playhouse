@@ -98,11 +98,7 @@ extension PlayhouseUITests {
         codexFixtureExecutable = codex.path
         // The shared fixture keeps its account beside itself; a case that failed mid-switch leaves another one.
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: codex.path + ".account"))
-        let claude = dataDirectory.appendingPathComponent("claude-fixture-usage-failure")
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claude)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8)
-        claudeFixtureExecutable = claude.path
+        let claude = try installClaudeFixtureExecutable(named: "claude-fixture-usage-failure")
         launchApp(defaultParent: fixture.parent.path)
         func text(_ id: String) -> String { let item = element(id); return item.exists ? accessibleLabelOrValue(of: item) : "" }
         XCTAssertTrue(element("agents-info-codex-window-primary").waitToExist(timeout: 30))
@@ -148,14 +144,9 @@ extension PlayhouseUITests {
         try? FileManager.default.removeItem(at: codexAccount)
         defer { try? FileManager.default.removeItem(at: codexAccount) }
         codexFixtureExecutable = codexExecutable.path
-        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-agents-info")
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
-        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
-        )
-        claudeFixtureExecutable = claudeExecutable.path
-        launchApp(defaultParent: fixture.parent.path)
+        let claudeExecutable = try installClaudeFixtureExecutable(named: "claude-fixture-agents-info")
+        // The window's periodic usage refresh is idle time here; a short one still runs the same reads.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ["PLAYHOUSE_E2E_USAGE_REFRESH_SECONDS": "3"])
 
         func text(_ identifier: String) -> String {
             let match = element(identifier)
@@ -373,7 +364,7 @@ extension PlayhouseUITests {
         waitForBoardOrAbortSuite()
         let bare = try XCTUnwrap(try runCLI(["usage", "get"])["result"] as? [String: Any])
         let installed = (bare["providers"] as? [[String: Any]] ?? []).map { $0["installed"] as? Bool }
-        XCTAssertEqual(installed, [false, false], "Neither CLI is installed without the fixtures.")
+        XCTAssertEqual(installed, [false, false, false], "No CLI is installed without the fixtures.")
         XCTAssertFalse(waitUntil({ self.element("plugin-section-agents-info").exists }, timeout: 15), "With neither CLI installed the section should not show.")
         XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").exists)
         attachScreenshot(named: "Sidebar without Agents info when no agent CLI is installed")

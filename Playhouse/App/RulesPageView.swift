@@ -259,7 +259,7 @@ struct RulesSectionView: View {
     /// Who Playhouse hands the rule to, because they don't read it themselves.
     private static func sharedNote(_ rule: RuleRecord) -> String? {
         guard !rule.sharedWith.isEmpty else { return nil }
-        return "Playhouse shares it with " + rule.sharedWith.map(\.displayName).joined(separator: " and ") + "."
+        return "Playhouse shares it with " + ConversationProvider.names(rule.sharedWith) + "."
     }
 
     /// A rule on one line: its name, a mark when it has a problem, its Fix,
@@ -289,8 +289,9 @@ struct RulesSectionView: View {
                     Spacer(minLength: 8)
                 }
                 .overlay {
-                    PressAreaView(showsPointingHand: true, onClick: { openEditor(rule) }, onLongPress: {})
+                    PressAreaView(onClick: { openEditor(rule) }, onLongPress: {})
                 }
+                .buttonHoverPointer()
                 .accessibilityHint(rule.summary)
                 if rule.issue != nil, rule.editable {
                     Button { fix(rule) } label: { Label("Fix", systemImage: "wand.and.stars") }
@@ -356,7 +357,7 @@ struct RulesSectionView: View {
                     .accessibilityIdentifier("rule-issue-\(key)")
             }
             if !isEnabled(rule), !rule.alwaysOnFor.isEmpty {
-                Text("\(rule.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still reads this file itself, so turning it off applies to the other agent only.")
+                Text("\(ConversationProvider.names(rule.alwaysOnFor)) still \(rule.alwaysOnFor.count == 1 ? "reads" : "read") this file itself, so turning it off applies to the other agents only.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -387,11 +388,9 @@ struct RulesSectionView: View {
     private func actions(_ rule: RuleRecord, key: String) -> some View {
         Menu {
             Button(rule.editable ? "Edit…" : "View…") { openEditor(rule) }
-                .buttonHoverPointer()
                 .help(rule.editable ? "Edit the rule file" : "Read the rule file")
                 .accessibilityIdentifier("rule-edit-\(key)")
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: rule.filePath)]) }
-                .buttonHoverPointer()
                 .help("Show the rule file in Finder")
                 .accessibilityIdentifier("rule-reveal-\(key)")
             if rule.editable {
@@ -400,18 +399,15 @@ struct RulesSectionView: View {
                     Button("Remove Outside Link") {
                         perform { _ = try await manager.linkRule(taskID: task.id, ruleID: rule.id, linked: false) }
                     }
-                    .buttonHoverPointer()
                     .help("Remove the symlink; Playhouse sessions still share the rule")
                     .accessibilityIdentifier("rule-unlink-\(key)")
                 } else if rule.linkable {
                     Button("Make Available Outside Playhouse…") { pendingLink = rule }
-                        .buttonHoverPointer()
                         .help("Write a symlink so the claude and codex CLIs read the rule on their own")
                         .accessibilityIdentifier("rule-link-\(key)")
                 }
                 Divider()
                 Button("Delete…", role: .destructive) { pendingDelete = rule }
-                    .buttonHoverPointer()
                     .help("Delete the rule file from disk")
                     .accessibilityIdentifier("rule-delete-\(key)")
             }
@@ -608,6 +604,7 @@ private struct NewRulePanel: View {
                     Picker("Kind", selection: $form) {
                         ForEach(Form.allCases) { form in Text(form.rawValue).tag(form) }
                     }
+                    .buttonHoverPointer()
                     .pickerStyle(.segmented)
                     .fixedSize()
                     .accessibilityIdentifier("new-rule-form")
@@ -615,6 +612,7 @@ private struct NewRulePanel: View {
                         Text("Global").tag("global")
                         ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }
                     }
+                    .buttonHoverPointer()
                     .fixedSize()
                     .accessibilityIdentifier("new-rule-scope")
                 }

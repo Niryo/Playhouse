@@ -302,6 +302,33 @@ class BridgeTestCases27:
         self.assertEqual(again["phase"], "upToDate")
         self.assertIsNone(again.get("available"))
 
+    # case-contract: test_update_notice_keeps_notes_from_older_installer | An update started by a version that didn't keep the release it was installing still shows its notes: when the new version reports its launch before the installer has recorded a result, it keeps the offered release, so after its launch check finds nothing newer and clears the offer and the installer then records the install, the Updated notice carries the release's notes and What's new shows them.
+    def test_update_notice_keeps_notes_from_older_installer(self):
+        fixture, environment = self.make_update_fixture()
+        self.assertEqual(self.assert_success(self.call_cli("update", "check", extra_environment=environment)[0])["phase"], "available")
+        self.assertEqual(self.assert_success(self.call_cli("update", "download", extra_environment=environment)[0])["phase"], "ready")
+        self.assertTrue(self.assert_success(self.call_cli("update", "install", extra_environment=environment)[0])["started"])
+        self.assertEqual(self.wait_for_install_record(environment)["status"], "installed")
+        # Recreate a relaunch after an install that an older version started: the installer
+        # hasn't recorded a result yet, and the state doesn't name the release being installed.
+        updates = self.data_directory / "Updates"
+        record_file = updates / "last-install.json"
+        held_record = record_file.read_text(encoding="utf-8")
+        record_file.unlink()
+        state_file = updates / "state.json"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state.pop("installing")["version"], "0.2.0", "The installing version keeps the release it installs.")
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+
+        first = self.assert_success(self.call_cli("update", "launched", extra_environment=environment)[0])
+        self.assertIsNone(first.get("lastInstall"), "Nothing is recorded before the installer finishes.")
+        launch_check = self.assert_success(self.call_cli("update", "check", "--at-launch", "true", extra_environment=environment)[0])
+        self.assertIsNone(launch_check.get("available"), "The launch check finds nothing newer than 0.2.0 and clears the offer.")
+        record_file.write_text(held_record, encoding="utf-8")
+        launched = self.assert_success(self.call_cli("update", "launched", extra_environment=environment)[0])
+        self.assertEqual((launched["lastInstall"]["status"], launched["lastInstall"]["toVersion"], launched["lastInstall"]["notes"]),
+                         ("installed", "0.2.0", "Faster boards and a new update button."), launched)
+
     # case-contract: test_update_install_rolls_back_broken_release | A release whose bridge daemon doesn't run passes download verification but fails the installer's health check after the swap, so the installer puts the previous version back: the installed app, command-line tool and daemon are the old version again, nothing is left staged, and the app is told that the update didn't install and why until that is dismissed, while the release stays offered. A release whose command-line tool doesn't run can't start its own installer, so the install is reported as failed until dismissed and the installed app is untouched.
     def test_update_install_rolls_back_broken_release(self):
         fixture, environment = self.make_update_fixture(tamper="broken")
@@ -399,7 +426,7 @@ class BridgeTestCases27:
         self.assertNotEqual(after["phase"], "waiting")
         self.assertIsNone(after.get("activeTurns"))
 
-    # case-contract: test_update_installs_over_its_own_app_and_daemon | The installed app's own command-line tool accepts its bundle with verify-bundle and refuses a copy changed after signing. Updating the app a request comes from, with no test target, stops that app's own bridge daemon on its private service and installs over it, so the app, its command-line tool and the next daemon on that service report the new version; a daemon another service started from the old bundle reports that it was replaced on disk and is retired by the next request, which starts one from the new bundle (the visible suite's sandboxed runner can't start a daemon itself, so only the headless suite starts one on another service). With the app's window running, the installer asks it to quit, the app quits by itself rather than being stopped, and the installer reopens the new version in the same data folder and bridge service, where it says it was updated; the headless suite runs no window, so nothing is reopened.
+    # case-contract: test_update_installs_over_its_own_app_and_daemon | The installed app's own command-line tool accepts its bundle with verify-bundle and refuses a copy changed after signing. Updating the app a request comes from, with no test target, stops that app's own bridge daemon on its private service and installs over it, so the app, its command-line tool and the next daemon on that service report the new version; a daemon another service started from the old bundle reports that it was replaced on disk and is retired by the next request, which starts one from the new bundle (the visible suite's sandboxed runner can't start a daemon itself, so only the headless suite starts one on another service). With the app's window running, the installer asks it to quit, the app quits by itself rather than being stopped, and the installer reopens the new version in the same data folder and bridge service, where it says it was updated and its What's new shows the release's notes, although its launch check found nothing newer and cleared the offer before the installer recorded the result; the headless suite runs no window, so nothing is reopened, and it makes that launch check from the command line before reading the notice.
     def test_update_installs_over_its_own_app_and_daemon(self):
         fixture, environment = self.make_update_fixture()
         installed = Path(fixture["installedApp"])
@@ -436,6 +463,13 @@ class BridgeTestCases27:
             self.assertFalse(self.process_is_running(before["processID"]), "The installer stops the daemon of the app it replaces.")
             after = self.assert_success(self.call_cli("daemon", "info", extra_environment=environment, cli=own_cli)[0])
             self.assertEqual((after["appVersion"], after["replacedOnDisk"]), ("0.2.0", False), after)
+            # A reopened window's launch check runs before the installer records the result,
+            # finds nothing newer and clears the offer; the notice still has the notes.
+            launch_check = self.assert_success(self.call_cli("update", "check", "--at-launch", "true", extra_environment=environment, cli=own_cli)[0])
+            self.assertIsNone(launch_check.get("available"), launch_check)
+            launched = self.assert_success(self.call_cli("update", "launched", extra_environment=environment, cli=own_cli)[0])
+            self.assertEqual((launched["lastInstall"]["toVersion"], launched["lastInstall"]["notes"]),
+                             ("0.2.0", "Faster boards and a new update button."), launched)
 
             # Started from the old bundle on another service, this daemon outlived the swap.
             stale = self.assert_success(self.call_cli("daemon", "info", extra_environment=other, cli=own_cli)[0])

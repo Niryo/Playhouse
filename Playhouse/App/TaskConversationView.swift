@@ -258,6 +258,8 @@ struct TaskConversationView: View {
     /// folds back into Worked for once the turn settles. A collapse the reader
     /// performs mid-turn stays collapsed until the next turn starts.
     @State var isActivityExpanded = false
+    /// The live operation that has run long enough for its own row; see `activeProcess`.
+    @State var settledActiveProcessID: String?
     @State var responseStartedAt: Date?
     @State var completedResponseDuration: Int?
     @State var collapsedProgressTurnIDs = Set<String>()
@@ -731,7 +733,7 @@ struct TaskConversationView: View {
         .pluginPresentation($openConversationPlugin, props: pluginProps, actions: pluginActions)
         .onChange(of: task.id, initial: true) {
             runtimeSlice.observe(conversationRuntime, taskID: task.id.uuidString) { [task] in
-                Set([task.codexThreadID, task.claudeSessionID].compactMap { $0 })
+                task.allConversationIDs
             }
         }
         .onAppear {

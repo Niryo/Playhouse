@@ -306,7 +306,7 @@ extension TaskConversationView {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .buttonHoverPointer()
+                    .plainButtonHoverPointer()
                     .nativeHelp("Send the next message without recalling this conversation")
                     .accessibilityLabel("Stop recalling \(page.title)")
                     .accessibilityIdentifier("composer-recalled-page-remove-\(page.id)")
@@ -373,7 +373,7 @@ extension TaskConversationView {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Remove the new page: the next message continues the current page")
                 .accessibilityLabel("Remove new page")
                 .accessibilityIdentifier("new-chat-page-remove")
@@ -480,7 +480,7 @@ extension TaskConversationView {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp("Return to the newest messages")
             .accessibilityLabel("Jump to latest messages")
             .accessibilityIdentifier("chat-jump-to-latest")
@@ -505,7 +505,7 @@ struct NewChatPageButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .onHover { isHovering = $0 }
         .nativeHelp("New page: your next message starts a new topic without the current page's context")
         .accessibilityLabel("New page")
@@ -533,7 +533,7 @@ struct ChatPageRecallButton: View {
             .fixedSize()
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .onHover { isHovering = $0 }
         .nativeHelp("Reference this conversation: your next message will recall it for the agent")
         .accessibilityLabel("Recall this conversation")

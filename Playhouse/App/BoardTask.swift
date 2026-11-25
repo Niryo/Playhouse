@@ -122,6 +122,7 @@ enum CPUUsageHeatmap {
 enum ConversationProvider: String, Codable, CaseIterable, Identifiable, Sendable {
     case codex
     case claude
+    case opencode
 
     var id: String { rawValue }
 
@@ -129,7 +130,15 @@ enum ConversationProvider: String, Codable, CaseIterable, Identifiable, Sendable
         switch self {
         case .codex: "Codex"
         case .claude: "Claude"
+        case .opencode: "OpenCode"
         }
+    }
+
+    /// Providers' names as one phrase: "Codex", "Claude and Codex", "Claude, Codex and OpenCode".
+    static func names(_ providers: [ConversationProvider]) -> String {
+        let names = providers.map(\.displayName)
+        guard let last = names.last else { return "" }
+        return names.count == 1 ? last : names.dropLast().joined(separator: ", ") + " and " + last
     }
 }
 
@@ -176,6 +185,7 @@ final class BoardTask {
     var totalInProgressSeconds: Double = 0
     var codexThreadID: String?
     var claudeSessionID: String?
+    var openCodeSessionID: String?
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
@@ -291,6 +301,7 @@ final class BoardTask {
         totalInProgressSeconds = 0
         codexThreadID = nil
         claudeSessionID = nil
+        openCodeSessionID = nil
         conversationProviderRawValue = conversationProvider.rawValue
         conversationEffortRawValue = "medium"
         conversationModelIDsData = nil

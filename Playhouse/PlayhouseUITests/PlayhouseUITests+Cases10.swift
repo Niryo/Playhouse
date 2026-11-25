@@ -11,16 +11,7 @@ import Vision
 extension PlayhouseUITests {
     // case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt, which explains the page metadata header and tells the agent to run chat page read only for a page the message continues, plus a Playhouse page metadata header, never a User line, that names the current page by title and ID with a shortened excerpt of its latest exchange and lists recent pages newest first by title and ID only. Later turns on that page resume it without repeating the header, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries that whole page into the current turn, marked as a Playhouse page. A page whose latest answer is long sends only the start of that answer, and the agent loads the whole page itself with the real chat page read command. Rotating sessions still leaves every page's messages visible in the transcript.
     func test_standalone_chat_page_sessions_isolate_context() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-sessions")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-chat-page-sessions")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
@@ -219,16 +210,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal. When Claude runs that signal after its answer and before its closing line, the answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. The chat instructions ask for close-turn before the final reply, which must end the turn, keep exactly one real close-turn per turn and no page bookkeeping in the answer, and carry no hidden escalation. A turn that runs close-turn first and answers after it shows exactly one final answer, filed onto the active page, with no nudge. When the turn ends on close-turn and Claude Code adds its own no-visible-output notice to the same turn, the notice streams once as a user-side message and stays in fresh history between the answer and what Claude writes after it, rendering as an automatic message from Claude Code rather than the user's bubble; that later text is a separate final message, so no bubble holds the answer twice, and the notice is never filed into a chat page. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream and only Claude Code adds such a notice inside a turn, while Codex reports the phase in its own protocol and never injects a hidden message into a turn.
     func test_standalone_chat_answer_stays_final_around_close_turn() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-chat-close-turn")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
@@ -269,11 +251,12 @@ extension PlayhouseUITests {
         element("codex-activity-disclosure").click()
         let activityDetails = element("codex-activity-details")
         XCTAssertTrue(activityDetails.waitToExist(timeout: 5), "Worked for should expand.")
-        // A progress bubble carries its text as the element's value, not its label, so it is
-        // identified by the provider message it was built from.
+        // A progress bubble is a Markdown atom whose prose text view carries its text as the
+        // element's value, identified by the provider message it was built from.
         func progressBubbles(forMessageID messageID: String) -> XCUIElementQuery {
             activityDetails.staticTexts.matching(
-                NSPredicate(format: "identifier BEGINSWITH %@", "codex-progress-message-\(messageID)")
+                // Its ID can carry a suffix after the message ID (`msg_chat_intent-0`).
+                NSPredicate(format: "identifier BEGINSWITH %@ AND identifier CONTAINS %@", "codex-progress-message-\(messageID)", "-prose-")
             )
         }
         XCTAssertEqual(progressBubbles(forMessageID: "msg_chat_answer").count, 0,
@@ -376,16 +359,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_standalone_chat_missed_close_turn_gets_visible_nudge | When a standalone chat turn ends without its chat page close-turn signal, Playhouse sends exactly one follow-up turn through the same unsettled-turn recovery loop task conversations use. Its prompt starts with the Playhouse nudge marker, asks for close-turn on the previous reply and never for a task outcome, and stays in the chat transcript as an automatic message from Playhouse, followed by the agent's reply. A close-turn run in that nudge settles the turn and classifies the user's turn, which moves to the new titled page without the fallback classifier; the nudge turn and its reply are never filed into a chat page or replayed into a page's seeded context. A nudge that goes unanswered is not retried, the background classifier then decides the page, the chat never gets a board status such as Blocked, and task outcome is rejected for the chat. The nudge loop, the close-turn CLI and the turn outcome store are shared by Claude and Codex, so one representative provider (Claude) covers this case, and the round-trip case shows a Codex chat turn reaching the same nudge.
     func test_standalone_chat_missed_close_turn_gets_visible_nudge() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn-nudge")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-chat-close-turn-nudge")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
@@ -485,16 +459,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
     func test_standalone_chat_recalls_loaded_pages() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-recall")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-chat-recall")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
@@ -572,16 +537,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     func test_standalone_chat_claude_fallback_classifier() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-fallback")
-        try copyFixtureFile(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
-            to: executable
-        )
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
-            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
-        )
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-chat-page-fallback")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)

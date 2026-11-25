@@ -23,7 +23,7 @@ extension PlayhouseUITests {
             ".codex/agents/reviewer.toml": "name = \"reviewer\"\ndescription = \"Reviews changes\"\n",
             ".codex/agents/helper.toml": "name = \"helper\"\ndescription = \"Codex-only helper\"\n",
         ])
-        let executable = try installSkillsClaudeFixture("claude-fixture-mentions")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-mentions")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         // A held Codex turn for the steer at the end; the fixture's name selects its hold mode.
         let codex = dataDirectory.appendingPathComponent("codex-fixture-mention-steer-serial-success-wait")
@@ -282,7 +282,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(try runCLI(["mentions", "list", "--task", UUID().uuidString], expectedStatus: 3)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "not_found")
         XCTAssertEqual(try runCLI(["mentions", "list"], expectedStatus: 2)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "invalid_argument")
     }
-    // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule row shows only its name led by one icon for the agents that follow it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider icon: each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
+    // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule row shows only its name led by one icon for the agents that follow it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for every agent, and an outlined check naming the agents for some, such as Codex and OpenCode, which Playhouse passes nothing and which uses only the skills, rules and MCP servers it finds itself in the task's working folder and home folder), without hovering, and its other details show in a hint while the pointer rests on it, which carries no provider icon: each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
     func test_rules_catalog_lists_repo_global_and_managed_rules() throws {
         let working = try makeSkillRepository("rules-catalog-repo", skills: [
             "AGENTS.md": "# Repository conventions\nUse tabs.\n",
@@ -300,7 +300,7 @@ extension PlayhouseUITests {
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("CLAUDE.md"), "# Claude home rules\n")
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("rules/global-style.md"), "Prefer small functions.\n")
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-catalog")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-catalog")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Rules catalog", repositories: [working, linked, override, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -319,7 +319,7 @@ extension PlayhouseUITests {
             XCTAssertFalse(element(detail).exists, "A rule row shows only its name and agents until the pointer rests on it (\(detail)).")
         }
         XCTAssertFalse(app.staticTexts["Repository conventions"].exists, "The rule's summary waits for its hint.")
-        XCTAssertEqual(rowProviders("rule-provider-\(agents)"), ["claude", "codex"],
+        XCTAssertEqual(rowProviders("rule-provider-\(agents)"), ["claude", "codex", "opencode"],
                       "Both agents follow the repository's AGENTS.md, marked on its row.")
         XCTAssertFalse(revealRuleHint(agents).descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-provider-'")).firstMatch.exists,
                        "The agents show on the row, not in the hint.")
@@ -336,7 +336,12 @@ extension PlayhouseUITests {
         XCTAssertEqual(rowProviders("rule-provider-rules-override-repo:AGENTS.override.md"), ["codex"], "AGENTS.override.md is Codex's own.")
         XCTAssertEqual(rowBadge("rule-provider-rules-override-repo:AGENTS.override.md-codex").label, "Codex only", "A Codex-only rule shows the Codex logo.")
         XCTAssertEqual(rowProviders("rule-provider-rules-override-repo:AGENTS.md"), ["claude"],
-                       "Codex reads the override instead of AGENTS.md, which is left to Claude.")
+                       "Codex reads the override instead of AGENTS.md, and OpenCode reads only the working folder's rules.")
+        XCTAssertEqual(rowBadge("rule-provider-rules-override-repo:AGENTS.md-claude").label, "Claude only")
+        XCTAssertEqual(rowProviders("rule-provider-rules-catalog-repo:CLAUDE.md"), ["claude", "codex"],
+                       "OpenCode reads AGENTS.md instead of the CLAUDE.md beside it.")
+        XCTAssertEqual(rowBadge("rule-provider-rules-catalog-repo:CLAUDE.md-claude-codex").label, "Claude and Codex",
+                       "A rule some agents follow names them on an outlined check.")
         assertSkillsModalLayout(search: "rules-search", newButton: "new-rule-button", anchors: "rules-tab-picker")
         // A broken rule's row carries the most controls: its icon, problem mark, Fix, switch and menu.
         assertRowFitsSkillsModal("rule-row-rules-catalog-repo:CLAUDE.md", name: "rule-name-rules-catalog-repo:CLAUDE.md")
@@ -386,10 +391,10 @@ extension PlayhouseUITests {
         // Clearing the search scrolls the list back to the top; jump back to the Global rules.
         jumpToSection("Global", picker: "rules-tab-picker")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("rule-shared-\(shared)")), "Playhouse shares it with Claude and Codex.",
-                       "Neither CLI reads ~/.agents/AGENTS.md on its own.")
-        for name in ["~/.claude/CLAUDE.md", "~/.claude/rules/global-style.md"] {
+                       "Neither CLI reads ~/.agents/AGENTS.md on its own, and Playhouse passes OpenCode nothing.")
+        for (name, providers) in [("~/.claude/CLAUDE.md", ["claude", "codex", "opencode"]), ("~/.claude/rules/global-style.md", ["claude", "codex"])] {
             XCTAssertTrue(element("rule-row-\(name)").exists, "\(name) is a global rule.")
-            XCTAssertEqual(rowProviders("rule-provider-\(name)"), ["claude", "codex"])
+            XCTAssertEqual(rowProviders("rule-provider-\(name)"), Set(providers), "OpenCode reads Claude Code's global CLAUDE.md itself, not its rules folder.")
         }
         let codexName = realPath(skillsCodexHome.appendingPathComponent("AGENTS.md").path)
         XCTAssertTrue(element("rule-row-global:codex/AGENTS.md").exists, "Codex's global AGENTS.md is listed (\(codexName)).")
@@ -408,7 +413,7 @@ extension PlayhouseUITests {
                       "Every section stays in the list.")
         XCTAssertFalse(managedRow.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-toggle-'")).firstMatch.exists,
                        "The managed CLAUDE.md can't be turned off.")
-        XCTAssertFalse(managedRow.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-provider-' AND identifier ENDSWITH '-codex'")).firstMatch.exists,
+        XCTAssertFalse(managedRow.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-provider-' AND (identifier ENDSWITH '-codex' OR identifier ENDSWITH '-opencode' OR identifier ENDSWITH '-both')")).firstMatch.exists,
                        "The managed CLAUDE.md is Claude's only.")
         XCTAssertTrue(managedRow.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-provider-' AND identifier ENDSWITH '-claude'")).firstMatch.exists,
                       "Claude follows the managed CLAUDE.md.")
@@ -417,7 +422,7 @@ extension PlayhouseUITests {
 
         let catalog = try ruleCatalog(taskID: taskID)
         let byID = rulesByID(catalog)
-        XCTAssertEqual(byID["repo:\(working.path)#AGENTS.md"]?["nativeProviders"] as? [String], ["codex"])
+        XCTAssertEqual(byID["repo:\(working.path)#AGENTS.md"]?["nativeProviders"] as? [String], ["codex", "opencode"])
         XCTAssertEqual(byID["global:agents/AGENTS.md"]?["nativeProviders"] as? [String], [])
         XCTAssertEqual(byID["global:agents/AGENTS.md"]?["providers"] as? [String], ["claude", "codex"])
         XCTAssertEqual(byID["repo:\(linked.path)#AGENTS.md"]?["availableOutsidePlayhouse"] as? Bool, true)
@@ -433,7 +438,7 @@ extension PlayhouseUITests {
     func test_rules_create_update_and_delete_on_disk() throws {
         let repository = try makeSkillRepository("rules-manage-repo", skills: [:])
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-manage")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-manage")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Rules manage", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -579,7 +584,7 @@ extension PlayhouseUITests {
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
         let claudeFile = rulesClaudeConfig.appendingPathComponent("CLAUDE.md")
         try writeRuleFile(claudeFile, "Mine, in the way.\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-link")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-link")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Rules links", repositories: [working, other])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -599,7 +604,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ ((try? rule("repo:\(working.path)#AGENTS.md"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a rule off is saved where a fresh CLI process reads it.")
         XCTAssertTrue(hintDetail("rule-always-on-\(agents)").waitToExist(timeout: 5), "The page says Codex still reads the file itself.")
-        XCTAssertEqual(rowProviders("rule-provider-\(agents)"), ["codex"], "Turning it off stops Claude following it.")
+        XCTAssertEqual(rowProviders("rule-provider-\(agents)"), ["codex", "opencode"], "Turning it off stops Claude following it.")
+        XCTAssertEqual(rowBadge("rule-provider-\(agents)-codex-opencode").label, "Codex and OpenCode", "Codex and OpenCode still read it themselves.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: skillsCodexHome.appendingPathComponent("config.toml").path), "Codex's config is not written.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: rulesClaudeConfig.appendingPathComponent("settings.json").path), "Claude's settings are not written.")
         attachScreenshot(named: "A rule Codex reads itself, turned off")
@@ -641,7 +647,8 @@ extension PlayhouseUITests {
         }
         XCTAssertEqual(element("rules-group-global").descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-row-'")).count, 1,
                        "The linked files are one rule in the Global section.")
-        XCTAssertFalse(hintDetail("rule-shared-\(shared)").exists, "Both CLIs read the linked rule natively, so Playhouse no longer shares it.")
+        XCTAssertFalse(element("rule-shared-\(shared)").exists,
+                       "Every agent reads the linked rule itself (OpenCode reads Claude Code's global CLAUDE.md link), so Playhouse shares it with none.")
         attachScreenshot(named: "~/.agents/AGENTS.md linked for both CLIs")
 
         selectSkillsTab("Repo", picker: "rules-tab-picker")
@@ -674,7 +681,7 @@ extension PlayhouseUITests {
         let broken = rulesClaudeConfig.appendingPathComponent("rules/broken.md")
         try writeRuleFile(broken, "---\npaths:\n  - src/**\nThe frontmatter never closes.\n")
         try writeRuleFile(rulesManaged.appendingPathComponent("CLAUDE.md"), "# Company policy\n")
-        let executable = try installSkillsClaudeFixture("claude-fixture-rules-fix")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-rules-fix")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let source = try createSkillsTask("Rules fix source", repositories: [repository], provider: "claude")
@@ -751,7 +758,7 @@ extension PlayhouseUITests {
         try writeRuleFile(skillsHome.appendingPathComponent("notes/imported.md"), "Imported text.\n")
         try writeRuleFile(skillsCodexHome.appendingPathComponent("AGENTS.md"), "Codex global text.\n")
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("CLAUDE.md"), "Claude global text.\n")
-        let executable = try installSkillsClaudeFixture("claude-fixture-rules-bridge")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-rules-bridge")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Claude rules", repositories: [repository, extra], provider: "claude")
@@ -827,7 +834,7 @@ extension PlayhouseUITests {
         try writeRuleFile(skillsHome.appendingPathComponent(".agents/AGENTS.md"), "Shared global text for Codex.\n")
         try writeRuleFile(rulesClaudeConfig.appendingPathComponent("CLAUDE.md"), "Claude global text for Codex.\n")
         try writeRuleFile(skillsCodexHome.appendingPathComponent("AGENTS.md"), "Codex global native text.\n")
-        _ = try installSkillsClaudeFixture("claude-fixture-rules-codex")
+        try installClaudeFixtureExecutable(named: "claude-fixture-rules-codex")
         // Its own daemon, so restarting it below leaves the UI runner's shared one alone.
         let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).rules-codex-\(UUID().uuidString.prefix(8))"]
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)

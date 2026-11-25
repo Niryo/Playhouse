@@ -46,7 +46,7 @@ extension TaskConversationView {
                 on: conversationContextMode == .optimized,
                 help: conversationContextMode == .optimized
                     ? "Turn off optimized context: follow-ups resume the whole conversation"
-                    : "Optimized context: each follow-up starts a fresh session with your messages, the last plan and the last answer, and the agent reads more on demand"
+                    : "Optimized context: each follow-up starts a fresh session with your messages and the last answer, and the agent reads more on demand"
             ),
             goal: provider.supportsGoals
                 ? .init(on: isEnteringGoal, help: isEnteringGoal ? "Stop entering a goal" : "Set a goal to keep pursuing")
@@ -286,6 +286,7 @@ extension TaskConversationView {
                     Text("Once").tag(TaskScheduleKind.once)
                     Text("Recurring").tag(TaskScheduleKind.recurring)
                 }
+                .buttonHoverPointer()
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .accessibilityIdentifier("schedule-kind-picker")
@@ -307,6 +308,7 @@ extension TaskConversationView {
                             Text(preset.label).tag(preset)
                         }
                     }
+                    .buttonHoverPointer()
                     .labelsHidden()
                     .fixedSize()
                     .accessibilityIdentifier("schedule-repeat-picker")
@@ -316,6 +318,7 @@ extension TaskConversationView {
                                 Text(Calendar.current.weekdaySymbols[day - 1]).tag(day)
                             }
                         }
+                        .buttonHoverPointer()
                         .labelsHidden()
                         .fixedSize()
                         .accessibilityIdentifier("schedule-weekday-picker")
@@ -327,6 +330,7 @@ extension TaskConversationView {
                                 Text(String(format: ":%02d", minute)).tag(minute)
                             }
                         }
+                        .buttonHoverPointer()
                         .labelsHidden()
                         .fixedSize()
                         .accessibilityIdentifier("schedule-minute-picker")
@@ -400,6 +404,7 @@ extension TaskConversationView {
                         Color.black.opacity(0.28)
                             .contentShape(Rectangle())
                             .onTapGesture {}
+                            // no-pointer: the backdrop only swallows clicks; it is not a control.
                             .accessibilityHidden(true)
                             .transition(.opacity)
                         SkillsPageView(
@@ -469,7 +474,7 @@ extension TaskConversationView {
         }
         // Before the daemon answers every provider is listed, as is the task's own if it was uninstalled.
         let switchable = providerInstallStatuses.isEmpty
-            ? ConversationProvider.allCases
+            ? ConversationProvider.allCases.filter(isProviderOffered)
             : ConversationProvider.allCases.filter { installedProviders.contains($0) || $0 == provider }
         return .init(
             title: installing ?? provider.displayName,

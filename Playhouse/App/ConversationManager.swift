@@ -26,7 +26,7 @@ extension ConversationManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Type a message for the side chat.")
         }
         if let requestedModelID, !Self.isValidModelID(requestedModelID) {
-            throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
+            throw BridgeCommandError(code: "invalid_argument", message: ConversationManager.invalidModelIDMessage)
         }
         let id: String
         var prompt = message
@@ -455,7 +455,7 @@ final class ConversationManager {
             client(for: task).isTurnActive(threadID: $0)
                 || client(for: task).isTurnActiveInProcess(threadID: $0)
                 || ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: $0) != nil
-                || (provider == .codex && ConversationSteerMailbox.activeTurnID(threadID: $0) != nil)
+                || (provider.runsTurnsOnSharedServer && ConversationSteerMailbox.activeTurnID(threadID: $0) != nil)
         } == true
         var message = ConversationMessage(
             id: UUID().uuidString.lowercased(), role: .assistant,

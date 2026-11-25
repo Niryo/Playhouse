@@ -4,11 +4,12 @@ import Foundation
 import OSLog
 import SwiftUI
 
-/// A cursor shown while the pointer rests over a view. It comes from a mechanism the system
-/// re-applies for as long as the pointer stays there: SwiftUI's pointer style, or an AppKit cursor
-/// rect before macOS 15. A cursor pushed from `onHover` must not be used for this: AppKit sets the
-/// window's cursor again whenever it rebuilds cursor rects (after a layout pass, a tooltip, or a
-/// neighboring text view's I-beam rect), silently replacing the pushed one with the arrow.
+/// A cursor shown while the pointer rests over a view. It comes from mechanisms the system
+/// re-applies for as long as the pointer stays there: SwiftUI's pointer style, and over a control
+/// AppKit draws an AppKit view over it that answers the window's cursor updates. A cursor pushed from `onHover` must
+/// not be used for this: AppKit sets the window's cursor again whenever it rebuilds cursor rects
+/// (after a layout pass, a tooltip, or a neighboring text view's I-beam rect), silently replacing
+/// the pushed one with the arrow.
 enum HoverCursorKind {
     /// The pointing hand over a clickable control.
     case pointingHand
@@ -31,47 +32,86 @@ enum HoverCursorKind {
     }
 }
 
-/// The macOS 14 fallback for `hoverCursor`: a click-through view behind the content whose cursor
-/// rect AppKit maintains for the view's frame.
-private struct HoverCursorRect: NSViewRepresentable {
-    let cursor: NSCursor
+/// A view over the content that sets `cursor` for its frame. SwiftUI's pointer style never reaches
+/// a control AppKit draws (a bordered or prominent button, a segmented or pop-up picker, a toggle):
+/// the window sends its cursor update to that control, which passes it up to the hosting view, and
+/// the hosting view shows the arrow. So this view takes the cursor update itself: it is the hit
+/// view only while the window dispatches one, and lets clicks, scrolls and drags through to what is
+/// under it. Its cursor rect for its frame is what shows the cursor before macOS 15.
+private struct HoverCursorArea: NSViewRepresentable {
+    let cursor: NSCursor?
 
-    func makeNSView(context: Context) -> CursorRectView {
-        let view = CursorRectView()
+    func makeNSView(context: Context) -> CursorAreaView {
+        let view = CursorAreaView()
         view.cursor = cursor
         return view
     }
 
-    func updateNSView(_ view: CursorRectView, context: Context) {
+    func updateNSView(_ view: CursorAreaView, context: Context) {
         guard view.cursor !== cursor else { return }
         view.cursor = cursor
         view.window?.invalidateCursorRects(for: view)
     }
 
-    final class CursorRectView: NSView {
-        var cursor = NSCursor.arrow
+    final class CursorAreaView: NSView {
+        var cursor: NSCursor?
+        private var area: NSTrackingArea?
 
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // `currentEvent` outlives its dispatch, so only a cursor update for this window counts.
+            guard cursor != nil, let event = NSApp.currentEvent, event.type == .cursorUpdate, event.window === window else { return nil }
+            return super.hitTest(point)
+        }
+
         override func isAccessibilityElement() -> Bool { false }
 
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let area { removeTrackingArea(area) }
+            let area = NSTrackingArea(rect: .zero, options: [.cursorUpdate, .activeInActiveApp, .inVisibleRect], owner: self)
+            addTrackingArea(area)
+            self.area = area
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            if let cursor { cursor.set() } else { super.cursorUpdate(with: event) }
+        }
+
         override func resetCursorRects() {
-            addCursorRect(bounds, cursor: cursor)
+            if let cursor { addCursorRect(bounds, cursor: cursor) }
         }
     }
 }
 
 extension View {
-    /// The pointing hand over a clickable control; every app action control carries it.
+    /// The pointing hand over a clickable control AppKit draws, or one whose style it inherits: a
+    /// bordered or default button, a picker, a toggle, a link, or an AppKit view taking clicks.
     func buttonHoverPointer() -> some View {
+        hoverCursor(.pointingHand, overAppKitControl: true)
+    }
+
+    /// The pointing hand over a control SwiftUI draws: a button styled `.plain` in its own modifiers,
+    /// or a view made clickable with a tap gesture. SwiftUI's pointer style reaches these, so they
+    /// skip the AppKit view, which would otherwise add a view and a tracking area to every row of
+    /// the transcript and the board.
+    func plainButtonHoverPointer() -> some View {
         hoverCursor(.pointingHand)
     }
 
+    /// `kind`'s cursor while the pointer is over the view; nil leaves the cursor to what is under it,
+    /// keeping the view's identity so a control that turns its cursor on or off keeps its state.
+    /// Over a control AppKit draws, SwiftUI's pointer style has no effect, so the AppKit view sets it.
     @ViewBuilder
-    func hoverCursor(_ kind: HoverCursorKind) -> some View {
+    func hoverCursor(_ kind: HoverCursorKind?, overAppKitControl: Bool = false) -> some View {
         if #available(macOS 15.0, *) {
-            pointerStyle(kind.pointerStyle)
+            if overAppKitControl {
+                pointerStyle(kind?.pointerStyle)
+                    .overlay(HoverCursorArea(cursor: kind?.cursor).accessibilityHidden(true))
+            } else {
+                pointerStyle(kind?.pointerStyle)
+            }
         } else {
-            background(HoverCursorRect(cursor: kind.cursor).accessibilityHidden(true))
+            overlay(HoverCursorArea(cursor: kind?.cursor).accessibilityHidden(true))
         }
     }
 }
@@ -508,7 +548,7 @@ struct WorkspaceRootSelector: View {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.system(size: 11))
                             }
-                            .buttonHoverPointer()
+                            .plainButtonHoverPointer()
                             .buttonStyle(.plain)
                             .nativeHelp("Remove \(displayNames[root.standardizedFileURL.path] ?? root.path)")
                             .accessibilityLabel("Remove \(displayNames[root.standardizedFileURL.path] ?? root.lastPathComponent)")
@@ -553,7 +593,7 @@ struct WorkspaceRootSelector: View {
                                 .padding(.vertical, 7)
                                 .contentShape(Rectangle())
                             }
-                            .buttonHoverPointer()
+                            .plainButtonHoverPointer()
                             .nativeHelp("Add repository \(repository.lastPathComponent)")
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")

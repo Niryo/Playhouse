@@ -86,7 +86,7 @@ extension ConversationManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "The conversation changed. Click Stop again to review its background work.")
             }
             let accepted: Bool
-            if confirmationID != nil, task.conversationProvider == .claude {
+            if confirmationID != nil, !task.conversationProvider.runsTurnsOnSharedServer {
                 accepted = await providerClient.forceStopActiveTurn(threadID: threadID, interruptProvider: false)
             } else if isDeleting {
                 accepted = try await providerClient.interruptActiveTurn(threadID: threadID)
@@ -280,12 +280,17 @@ extension ConversationManager {
         }
     }
 
-    func steer(taskID: UUID, text: String, imageDataURLs: [String] = []) async throws -> Bool {
+    /// `sentAt` is when the user sent the steer, if a window that delivers its steers one at a
+    /// time sends it later; it defaults to now.
+    func steer(taskID: UUID, text: String, imageDataURLs: [String] = [], sentAt: Date? = nil) async throws -> Bool {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
+        // The steer joins the transcript where the user sent it, before whatever the turn
+        // records while it waits for the turn to launch or for the provider to take it.
+        let sentAt = min(sentAt ?? Date(), Date())
         // A steer sent while the turn is still launching is delivered as soon as the provider
         // turn exists, instead of missing it and running as a turn of its own.
         await waitForAcceptedSendToLaunch(taskID)
@@ -301,9 +306,19 @@ extension ConversationManager {
         let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else { return false }
         let steeredText = await expandMentions(normalizedText, for: task)
-        // The running turn records and streams the steered input itself.
-        return try await client(for: task).steerActiveTurn(threadID: threadID, text: steeredText, imageDataURLs: imageDataURLs)
+        // The running turn records and streams the steered input itself, as of `sentAt`.
+        let client = client(for: task)
+        return try await Self.$steerSentAt.withValue(sentAt) {
+            try await client.steerActiveTurn(threadID: threadID, text: steeredText, imageDataURLs: imageDataURLs)
+        }
     }
+
+    /// When the user sent the steer this task is delivering. A provider accepts a steer only
+    /// once its turn has started and it has read the turn's earlier events, which can take
+    /// seconds; the turn's steer callback, called from this same task, records the steer as of
+    /// this time so it stays above what the turn wrote meanwhile. A steer handed to another
+    /// process's turn carries it in its mailbox request.
+    @TaskLocal static var steerSentAt: Date?
 
     /// Whether the task's provider already has a turn that takes an interrupt or a steer.
     private func canInterruptProviderTurn(_ taskID: UUID) -> Bool {
@@ -419,7 +434,7 @@ extension ConversationManager {
         try tasks.removeQueuedMessage(taskID: taskID, messageID: messageID)
     }
 
-    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
+    func steerQueuedMessage(taskID: UUID, messageID: UUID, sentAt: Date? = nil) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
         let item = try tasks.queuedConversationMessages(taskID: taskID).first { $0.id == messageID }
         guard let item, item.state == .queued else {
             throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
@@ -430,7 +445,7 @@ extension ConversationManager {
         Self.bumpVisibleRevision(taskID)
         defer { Self.bumpVisibleRevision(taskID) }
         do {
-            let accepted = try await steer(taskID: taskID, text: item.text, imageDataURLs: item.imageDataURLs ?? [])
+            let accepted = try await steer(taskID: taskID, text: item.text, imageDataURLs: item.imageDataURLs ?? [], sentAt: sentAt)
             if accepted {
                 if let itemID = item.asyncQuestionItemID {
                     try await tasks.recordAnsweredAsyncQuestion(taskID: taskID, itemID: itemID)

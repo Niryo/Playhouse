@@ -339,7 +339,7 @@ struct McpServersSectionView: View {
         }
         .buttonStyle(.plain)
         .disabled(signingIn.contains(key))
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .nativeHelp(isConnector ? "Connect \(server.name) in claude.ai's connector settings" : "Open your browser to sign in to \(server.name) for Claude")
         .accessibilityIdentifier("mcp-connector-signin-\(server.name)")
     }
@@ -393,15 +393,14 @@ struct McpServersSectionView: View {
 
     private static func sharedNote(_ server: McpServerRecord) -> String? {
         guard !server.sharedWith.isEmpty else { return nil }
-        return "Playhouse passes it to " + server.sharedWith.map(\.displayName).joined(separator: " and ") + "."
+        return "Playhouse passes it to " + ConversationProvider.names(server.sharedWith) + "."
     }
 
     /// The providers that reported the server needs a sign-in.
     private func signInNeeded(_ server: McpServerRecord) -> [ConversationProvider] {
         guard let status else { return [] }
-        return [ConversationProvider.claude, .codex].filter { provider in
-            let reports = provider == .claude ? status.claude : status.codex
-            return reports.contains { $0.name == server.name && $0.needsSignIn }
+        return ConversationProvider.allCases.filter { provider in
+            status.statuses(for: provider).contains { $0.name == server.name && $0.needsSignIn }
         }
     }
 
@@ -429,8 +428,9 @@ struct McpServersSectionView: View {
                     Spacer(minLength: 8)
                 }
                 .overlay {
-                    PressAreaView(showsPointingHand: true, onClick: { openEditor(server) }, onLongPress: {})
+                    PressAreaView(onClick: { openEditor(server) }, onLongPress: {})
                 }
+                .buttonHoverPointer()
                 .accessibilityHint(server.summary)
                 // Outside the click-to-open area above, so the buttons get their own clicks.
                 signInButtons(server, key: key)
@@ -508,7 +508,7 @@ struct McpServersSectionView: View {
                 Text(limitation).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("mcp-limitation-\(key)")
             }
             if !isEnabled(server), !server.alwaysOnFor.isEmpty {
-                Text("\(server.alwaysOnFor.map(\.displayName).joined(separator: " and ")) still starts it from its own configuration, so turning it off applies to the other agent only. Delete it to stop both.")
+                Text("\(ConversationProvider.names(server.alwaysOnFor)) still \(server.alwaysOnFor.count == 1 ? "starts" : "start") it from its own configuration, so turning it off applies to the other agents only. Delete it to stop it everywhere.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -540,7 +540,7 @@ struct McpServersSectionView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(waiting)
-                    .buttonHoverPointer()
+                    .plainButtonHoverPointer()
                     .nativeHelp("Open your browser to sign in to \(server.name) for \(provider.displayName)")
                     .accessibilityIdentifier("mcp-signin-\(key)-\(provider.rawValue)")
                 }
@@ -561,12 +561,10 @@ struct McpServersSectionView: View {
     private func actions(_ server: McpServerRecord, key: String) -> some View {
         Menu {
             Button(server.editable ? "Edit…" : "View…") { openEditor(server) }
-                .buttonHoverPointer()
                 .help(server.editable ? "Edit the server" : "Read the server's definition")
                 .accessibilityIdentifier("mcp-edit-\(key)")
             if let path = server.locations.first?.path {
                 Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
-                    .buttonHoverPointer()
                     .help("Show the file that defines the server in Finder")
                     .accessibilityIdentifier("mcp-reveal-\(key)")
             }
@@ -574,13 +572,11 @@ struct McpServersSectionView: View {
                 if server.linkable {
                     Divider()
                     Button("Make Available Outside Playhouse…") { pendingLink = server }
-                        .buttonHoverPointer()
                         .help("Write the server into the configuration of the CLI that doesn't start it yet")
                         .accessibilityIdentifier("mcp-link-\(key)")
                 }
                 Divider()
                 Button("Delete…", role: .destructive) { pendingDelete = server }
-                    .buttonHoverPointer()
                     .help("Remove the server from every file that defines it")
                     .accessibilityIdentifier("mcp-delete-\(key)")
             }
@@ -796,12 +792,14 @@ private struct McpServerEditorPanel: View {
                             Text("Global").tag("global")
                             ForEach(roots, id: \.rootPath) { root in Text(root.name).tag(root.rootPath) }
                         }
+                        .buttonHoverPointer()
                         .fixedSize()
                         .accessibilityIdentifier("mcp-editor-scope")
                     }
                     Picker("Kind", selection: $kind) {
                         ForEach(Kind.allCases) { kind in Text(kind.rawValue).tag(kind) }
                     }
+                    .buttonHoverPointer()
                     .pickerStyle(.segmented)
                     .fixedSize()
                     .disabled(!editable)

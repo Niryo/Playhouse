@@ -21,6 +21,13 @@ import Foundation
 // compaction. Codex resends the whole history on every request, so a request
 // was sent the instructions plus every item before its own output. Codex does
 // not save its tool definitions; they show as one measured hidden-overhead item.
+//
+// OpenCode's server lists a session's messages, which Playhouse writes to
+// `opencode-request-logs/<session>.jsonl` one per line (`OpenCodeRequestLog`).
+// Each assistant message is one model request, sent every message before it
+// since the last compaction, whose summary then stands for what came before.
+// OpenCode returns neither its system prompt nor its tool definitions; like
+// Codex's, they show as one measured hidden-overhead item.
 
 /// Where each provider keeps its session files.
 struct ProviderSessionHomes: Sendable, Equatable {
@@ -148,6 +155,9 @@ struct ProviderRequestWindow: Equatable, Sendable {
 struct ProviderAgentLog: Sendable {
     let provider: ConversationProvider
     let file: URL
+    /// The file the log was parsed from (its file number): a file replaced since (OpenCode's,
+    /// rewritten at every model step) no longer holds its items at their offsets.
+    var fileNumber: Int?
     var items: [ProviderContextItem] = []
     var requests: [ProviderRequestUsage] = []
     /// Every request the log records, measured or not, in the order it was made.
@@ -170,7 +180,7 @@ struct ProviderAgentLog: Sendable {
     /// turn's last request on the conversation's own source.
     func within(_ window: ProviderRequestWindow) -> ProviderAgentLog {
         let kept = sent.indices.filter { window.contains(timestamp: sent[$0].timestamp) }
-        var log = ProviderAgentLog(provider: provider, file: file)
+        var log = ProviderAgentLog(provider: provider, file: file, fileNumber: fileNumber)
         log.sent = kept.map { sent[$0] }
         log.requests = log.sent.compactMap(\.usage)
         log.sentRequests = kept.count
@@ -239,6 +249,8 @@ enum ProviderContextText {
     static func display(_ value: Any, kind: ProviderContextKind) -> String {
         if kind == .toolDefinition { return prettyJSON(value) }
         if let string = value as? String { return string }
+        // An OpenCode tool result is its list of content parts.
+        if kind == .toolResult, let parts = value as? [Any] { return content(parts) }
         guard let block = value as? [String: Any] else { return prettyJSON(value) }
         switch block["type"] as? String {
         case "text", "input_text", "output_text":
@@ -836,11 +848,10 @@ final class CodexRolloutParser: ProviderRequestLogParser {
         for (previous, next) in zip(records, records.dropFirst()) where previous.epoch == next.epoch && next.boundary >= previous.boundary {
             deltas.append((Array(epochs[next.epoch][previous.boundary..<next.boundary]), next.input - previous.input))
         }
-        let ratio = ProviderTokenCalibration.appendRatio(items: items, deltas: deltas) ?? 0.25
         let first = records[0]
-        let firstVisible = instructions + epochs[first.epoch][0..<first.boundary]
-        let visibleEstimate = Int((Double(firstVisible.reduce(0) { $0 + items[$1].weight }) * ratio).rounded())
-        let hiddenTokens = max(0, first.input - visibleEstimate)
+        let hiddenTokens = ProviderTokenCalibration.hiddenTokens(
+            items: items, firstVisible: instructions + epochs[first.epoch][0..<first.boundary], firstContext: first.input, deltas: deltas
+        )
 
         let sent = records.map { record -> (items: [Int], context: Int?) in
             ([hidden] + instructions + epochs[record.epoch][0..<record.boundary], record.input)
@@ -852,6 +863,153 @@ final class CodexRolloutParser: ProviderRequestLogParser {
         log.requests = records.map {
             ProviderRequestUsage(
                 timestamp: $0.timestamp, contextTokens: $0.input, cacheReadTokens: $0.cached, cacheWriteTokens: nil, outputTokens: $0.output
+            )
+        }
+        log.sent = zip(records.indices, sent).map { index, request in
+            ProviderSentRequest(
+                timestamp: log.requests[index].timestamp, querySource: nil, items: request.items,
+                messageLengths: [], missingMessages: 0, missingShape: false, usage: log.requests[index], line: nil,
+                compacted: index > 0 && records[index].epoch != records[index - 1].epoch
+            )
+        }
+        log.finalTranscript = sent[sent.count - 1].items
+        log.finalRequest = sent.count - 1
+        for id in log.finalTranscript { items[id].inFinalTranscript = true }
+        log.sentRequests = records.count
+        log.compactions = compactions
+        log.items = items
+        return log
+    }
+}
+
+final class OpenCodeMessageLogParser: ProviderRequestLogParser {
+    private struct Record {
+        let epoch: Int
+        /// The request was sent the epoch's items before this one.
+        let boundary: Int
+        let timestamp: String?
+        let context: Int
+        let cacheRead: Int
+        let cacheWrite: Int
+        let output: Int
+    }
+
+    private var builder = ProviderItemBuilder()
+    private var epochs: [[Int]] = [[]]
+    private var records: [Record] = []
+    private var compactions = 0
+
+    func consume(_ object: [String: Any], offset: UInt64, length: Int) {
+        func at(_ path: [ProviderJSONPathComponent]) -> ProviderContextLocation { .init(offset: offset, length: length, path: path) }
+        let timestamp = ((object["time"] as? [String: Any])?["created"] as? NSNumber).map {
+            Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(Date(timeIntervalSince1970: $0.doubleValue / 1_000))
+        }
+        switch object["type"] as? String {
+        case "user":
+            append(builder.add(object["text"] ?? "", kind: .userText, role: "user", label: "User message", location: at([.key("text")])))
+            for (index, file) in (object["files"] as? [[String: Any]] ?? []).enumerated() {
+                let isImage = (file["mime"] as? String ?? file["uri"] as? String ?? "").contains("image")
+                append(builder.add(
+                    isImage ? ["type": "image", "source": file] : file, kind: isImage ? .image : .other, role: "user",
+                    label: isImage ? "Image" : file["name"] as? String ?? "Attached file", location: at([.key("files"), .index(index)])
+                ))
+            }
+        case "synthetic", "system":
+            let text = object["text"] as? String ?? ""
+            append(builder.add(text, kind: .systemReminder, role: "user", label: ProviderContextText.reminderLabel(text), location: at([.key("text")])))
+        case "skill":
+            append(builder.add(object["text"] ?? "", kind: .systemReminder, role: "user",
+                               label: "Skill \(object["name"] as? String ?? "")", location: at([.key("text")])))
+        case "shell":
+            append(builder.add(object["output"] ?? object["command"] ?? "", kind: .toolResult, role: "user",
+                               label: "shell", location: at([.key("output")])))
+        case "assistant":
+            let boundary = epochs[epochs.count - 1].count
+            for (index, part) in (object["content"] as? [[String: Any]] ?? []).enumerated() {
+                let path: [ProviderJSONPathComponent] = [.key("content"), .index(index)]
+                switch part["type"] as? String {
+                case "text":
+                    append(builder.add(part["text"] ?? "", kind: .assistantText, role: "assistant", label: "Assistant text", location: at(path + [.key("text")])))
+                case "reasoning":
+                    append(builder.add(part["text"] ?? "", kind: .thinking, role: "assistant", label: "Reasoning", location: at(path + [.key("text")])))
+                case "tool":
+                    let state = part["state"] as? [String: Any] ?? [:]
+                    let named = ProviderContextText.toolLabel(name: part["name"] as? String ?? "tool")
+                    let callID = part["id"] as? String
+                    append(builder.add(state["input"] ?? [String: Any](), kind: .toolCall, role: "assistant", label: named.label, server: named.server,
+                                       location: at(path + [.key("state"), .key("input")]), callID: callID))
+                    if let content = state["content"] {
+                        append(builder.add(content, kind: .toolResult, role: "tool", label: named.label, server: named.server,
+                                           location: at(path + [.key("state"), .key("content")]), callID: callID))
+                    } else if let error = state["error"] {
+                        let message = (error as? [String: Any])?["message"]
+                        append(builder.add(message ?? error, kind: .toolResult, role: "tool", label: named.label, server: named.server,
+                                           location: at(path + [.key("state"), .key("error")] + (message == nil ? [] : [.key("message")])), callID: callID))
+                    }
+                default:
+                    continue
+                }
+            }
+            let tokens = object["tokens"] as? [String: Any] ?? [:]
+            let cache = tokens["cache"] as? [String: Any] ?? [:]
+            func value(_ object: [String: Any], _ key: String) -> Int { (object[key] as? NSNumber)?.intValue ?? 0 }
+            let cacheRead = value(cache, "read"), cacheWrite = value(cache, "write")
+            let context = value(tokens, "input") + cacheRead + cacheWrite
+            // A request that was cut off before OpenCode billed it reports nothing to place.
+            guard context > 0 else { return }
+            records.append(Record(
+                epoch: epochs.count - 1, boundary: boundary, timestamp: timestamp, context: context,
+                cacheRead: cacheRead, cacheWrite: cacheWrite, output: value(tokens, "output") + value(tokens, "reasoning")
+            ))
+        case "compaction":
+            guard (object["status"] as? String ?? "completed") == "completed" else { return }
+            compactions += 1
+            epochs.append([builder.add(object["summary"] ?? "", kind: .userText, role: "user", label: "Compaction summary", location: at([.key("summary")]))])
+        default:
+            return
+        }
+    }
+
+    private func append(_ id: Int) {
+        epochs[epochs.count - 1].append(id)
+    }
+
+    func finish(file: URL) -> ProviderAgentLog {
+        var log = ProviderAgentLog(provider: .opencode, file: file)
+        guard !records.isEmpty else { return log }
+        var items = builder.items
+        var calls: [String: Int] = [:]
+        for item in items where item.kind == .toolCall {
+            if let callID = item.callID { calls[callID] = item.id }
+        }
+        for index in items.indices where items[index].kind == .toolResult {
+            if let callID = items[index].callID { items[index].callItemID = calls[callID] }
+        }
+        let hidden = items.count
+        items.append(ProviderContextItem(
+            id: hidden, kind: .hiddenOverhead, role: "system",
+            label: "System prompt, tool definitions and other context OpenCode does not return",
+            weight: 0, textLength: 0, preview: "OpenCode sends this with every request but its server does not list it with the session's messages.",
+            contentKey: 0, location: nil, callID: nil
+        ))
+        var deltas: [(items: [Int], tokens: Int)] = []
+        for (previous, next) in zip(records, records.dropFirst()) where previous.epoch == next.epoch && next.boundary >= previous.boundary {
+            deltas.append((Array(epochs[next.epoch][previous.boundary..<next.boundary]), next.context - previous.context))
+        }
+        let first = records[0]
+        let hiddenTokens = ProviderTokenCalibration.hiddenTokens(
+            items: items, firstVisible: Array(epochs[first.epoch][0..<first.boundary]), firstContext: first.context, deltas: deltas
+        )
+        let sent = records.map { record -> (items: [Int], context: Int?) in
+            ([hidden] + epochs[record.epoch][0..<record.boundary], record.context)
+        }
+        for request in sent {
+            for id in Set(request.items) { items[id].requests += 1 }
+        }
+        ProviderTokenCalibration.apply(items: &items, requests: sent, preassigned: [hidden: hiddenTokens])
+        log.requests = records.map {
+            ProviderRequestUsage(
+                timestamp: $0.timestamp, contextTokens: $0.context, cacheReadTokens: $0.cacheRead, cacheWriteTokens: $0.cacheWrite, outputTokens: $0.output
             )
         }
         log.sent = zip(records.indices, sent).map { index, request in
@@ -916,6 +1074,7 @@ final class ProviderRequestLogStore: @unchecked Sendable {
                 }
             }
             current.log = current.parser.finish(file: file)
+            current.log?.fileNumber = fileNumber
         }
         return current.log
     }
@@ -928,7 +1087,12 @@ final class ProviderRequestLogStore: @unchecked Sendable {
             existing.lastUsed = Date()
             return existing
         }
-        let created = Entry(parser: provider == .claude ? ClaudeRequestLogParser() : CodexRolloutParser(), fileNumber: fileNumber)
+        let parser: ProviderRequestLogParser = switch provider {
+        case .claude: ClaudeRequestLogParser()
+        case .codex: CodexRolloutParser()
+        case .opencode: OpenCodeMessageLogParser()
+        }
+        let created = Entry(parser: parser, fileNumber: fileNumber)
         entries[file.path] = created
         while entries.count > Self.entryLimit, let oldest = entries.min(by: { $0.value.lastUsed < $1.value.lastUsed })?.key {
             entries[oldest] = nil
@@ -954,8 +1118,19 @@ final class ProviderRequestLogStore: @unchecked Sendable {
         return result
     }
 
+    /// The log's file, unless it was replaced since the log was parsed.
+    private static func open(_ log: ProviderAgentLog) -> FileHandle? {
+        guard let handle = try? FileHandle(forReadingFrom: log.file) else { return nil }
+        var info = stat()
+        if let expected = log.fileNumber, fstat(handle.fileDescriptor, &info) != 0 || Int(info.st_ino) != expected {
+            try? handle.close()
+            return nil
+        }
+        return handle
+    }
+
     private func readValues(of locations: [(Int, ProviderContextLocation)], in log: ProviderAgentLog, _ body: (Int, Any) -> Void) {
-        guard let handle = try? FileHandle(forReadingFrom: log.file) else { return }
+        guard let handle = Self.open(log) else { return }
         defer { try? handle.close() }
         for (offset, lineLocations) in Dictionary(grouping: locations, by: { $0.1.offset }) {
             autoreleasepool {
@@ -984,7 +1159,8 @@ final class ProviderRequestLogStore: @unchecked Sendable {
     /// The full text of one item, read back from its line in the file.
     func text(of item: ProviderContextItem, in log: ProviderAgentLog) -> String {
         guard let location = item.location else { return item.preview }
-        let key = "\(log.file.path)#\(item.id)"
+        // A replaced file (OpenCode's) numbers its items afresh, so its texts are cached apart.
+        let key = "\(log.file.path)#\(log.fileNumber ?? 0)#\(item.id)"
         lock.lock()
         if let recent = recentTexts.first(where: { $0.key == key }) {
             lock.unlock()
@@ -992,7 +1168,7 @@ final class ProviderRequestLogStore: @unchecked Sendable {
         }
         lock.unlock()
         var text = item.preview
-        if let handle = try? FileHandle(forReadingFrom: log.file) {
+        if let handle = Self.open(log) {
             defer { try? handle.close() }
             try? handle.seek(toOffset: location.offset)
             if let data = try? handle.read(upToCount: location.length),

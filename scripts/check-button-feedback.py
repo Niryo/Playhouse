@@ -11,6 +11,8 @@ FILES = tuple(sorted(APP.rglob("*.swift")))
 # Files whose controls are menu-bar commands rather than views in the window.
 MENU_BAR_FILES = {"PlayhouseApp.swift", "DebugConversationImport/DebugConversationImport.swift"}
 CONTROL = re.compile(r"\b(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*\{))")
+# Selection controls AppKit draws: they need the pointing hand too, and keep their label as the hint.
+SELECTION = re.compile(r"\b(Picker|Toggle)(?=\s*\()")
 
 
 def matching(source: str, opening: str, closing: str, start: int) -> int | None:
@@ -76,7 +78,7 @@ def control_end(source: str, kind: str, start: int) -> int | None:
             return matching(source, "{", "}", next_token)
         return end
 
-    if kind == "Button" and opening_paren >= 0 and (opening_brace < 0 or opening_paren < opening_brace):
+    if kind in ("Button", "Picker", "Toggle") and opening_paren >= 0 and (opening_brace < 0 or opening_paren < opening_brace):
         end = matching(source, "(", ")", opening_paren)
         if end is None:
             return None
@@ -149,8 +151,18 @@ def main() -> int:
             line_start = source.rfind("\n", 0, start) + 1
             indent = len(source[line_start:start])
             chain = modifier_chain(source, end, indent)
-            if ".buttonHoverPointer()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
-                errors.append(f"{location}: {kind} is missing buttonHoverPointer()")
+            # SwiftUI draws a `.plain` button, so its pointer style reaches it without the AppKit
+            # cursor view; every other control may be drawn by AppKit and needs that view.
+            pointer = "plainButtonHoverPointer" if kind == "Button" and ".buttonStyle(.plain)" in chain else "buttonHoverPointer"
+            other = "buttonHoverPointer" if pointer == "plainButtonHoverPointer" else "plainButtonHoverPointer"
+            # A `Menu`/`.contextMenu` item is a native menu item AppKit draws, so no pointer reaches
+            # it, and the AppKit cursor view a pointer modifier adds becomes a second, blank item.
+            if any(a < start < b for a, b in menus):
+                if ".buttonHoverPointer()" in chain or ".plainButtonHoverPointer()" in chain:
+                    errors.append(f"{location}: {kind} is a menu item; remove its hover pointer, which adds a blank menu item")
+            elif f".{pointer}()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
+                errors.append(f"{location}: {kind} is missing {pointer}()"
+                              + (f" (it has {other}(), which is for " + ("controls AppKit draws)" if pointer == "plainButtonHoverPointer" else "plain buttons SwiftUI draws)") if f".{other}()" in chain else ""))
             # Window controls use `.nativeHelp`: SwiftUI's `.help` alone does not present its
             # tooltip for most controls in the main window. Menu items (menu-bar commands and
             # `Menu`/`.contextMenu` content) are native menu items and keep `.help`.
@@ -169,20 +181,54 @@ def main() -> int:
                 hint = help_match.group(1).strip().strip('"')
                 if not hint or hint == "Activate this button":
                     errors.append(f"{location}: {kind} has a missing or generic help hint")
+        for match in SELECTION.finditer(source):
+            kind = match.group(1)
+            start = match.start()
+            if name in MENU_BAR_FILES or any(a < start < b for a, b in menus):
+                continue
+            end = control_end(source, kind, start)
+            location = f"{name}:{source.count(chr(10), 0, start) + 1}"
+            if end is None:
+                errors.append(f"{location}: could not locate the end of this {kind}")
+                continue
+            controls_seen += 1
+            line_start = source.rfind("\n", 0, start) + 1
+            chain = modifier_chain(source, end, len(source[line_start:start]))
+            if ".buttonHoverPointer()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
+                errors.append(f"{location}: {kind} is missing buttonHoverPointer()")
+
+        # A view made clickable with a tap gesture is a control too, unless it says why it is not.
+        for match in re.finditer(r"\.onTapGesture\b", source):
+            start = match.start()
+            location = f"{name}:{source.count(chr(10), 0, start) + 1}"
+            opening = source.find("{", start)
+            end = matching(source, "{", "}", opening) if opening >= 0 else None
+            if end is None:
+                errors.append(f"{location}: could not locate the end of this onTapGesture")
+                continue
+            controls_seen += 1
+            line_start = source.rfind("\n", 0, start) + 1
+            chain = modifier_chain(source, end, len(source[line_start:start]) - 1)
+            if ".plainButtonHoverPointer()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
+                errors.append(f"{location}: onTapGesture is missing plainButtonHoverPointer()")
 
     support = (APP / "WorkspaceSupport.swift").read_text(encoding="utf-8")
     # Buttons get the pointing hand from a cursor the system re-applies (SwiftUI's pointer style,
     # or an AppKit cursor rect before macOS 15). A cursor pushed from `onHover` is replaced by the
     # arrow whenever AppKit re-evaluates the window's cursor, so the hover handler must never push.
-    if "hoverCursor(.pointingHand)" not in support:
-        errors.append("buttonHoverPointer() does not use the shared hover cursor with .pointingHand")
-    hover = re.search(r"func hoverCursor\(_ kind: HoverCursorKind\)[^{]*\{(.*?)\n    \}", support, re.S)
+    # SwiftUI's pointer style never reaches a control AppKit draws (a bordered button, a segmented
+    # picker, a toggle), so over those an overlay that answers the window's cursor updates sets it.
+    if "hoverCursor(.pointingHand, overAppKitControl: true)" not in support or "hoverCursor(.pointingHand)\n" not in support:
+        errors.append("buttonHoverPointer() and plainButtonHoverPointer() must use the shared hover cursor with .pointingHand")
+    hover = re.search(r"func hoverCursor\(_ kind: HoverCursorKind\?, overAppKitControl: Bool = false\)[^{]*\{(.*?)\n    \}", support, re.S)
     if not hover:
-        errors.append("WorkspaceSupport.swift does not define hoverCursor(_ kind: HoverCursorKind)")
-    elif "pointerStyle(kind.pointerStyle)" not in hover.group(1) or "HoverCursorRect(" not in hover.group(1):
-        errors.append("hoverCursor() must use SwiftUI's pointer style with the cursor-rect fallback")
+        errors.append("WorkspaceSupport.swift does not define hoverCursor(_ kind: HoverCursorKind?, overAppKitControl:)")
+    elif hover.group(1).count("pointerStyle(kind?.pointerStyle)") != 2 or hover.group(1).count("overlay(HoverCursorArea(") != 2:
+        errors.append("hoverCursor() must use SwiftUI's pointer style, with the cursor-update overlay over AppKit controls and before macOS 15")
     if "case .pointingHand: .link" not in support or "addCursorRect(bounds, cursor: cursor)" not in support:
         errors.append("The hover cursor must map the pointing hand to .link and add its cursor rect")
+    if "override func cursorUpdate(with event: NSEvent)" not in support or "event.type == .cursorUpdate, event.window === window" not in support:
+        errors.append("HoverCursorArea must take the window's cursor updates, and only those, as the hit view")
     if re.search(r"\.onHover[^\n]*\n(?:[^\n]*\n){0,6}?[^\n]*\.push\(\)", support):
         errors.append("WorkspaceSupport.swift must not push a cursor on hover; a pushed cursor is lost on cursor updates")
 

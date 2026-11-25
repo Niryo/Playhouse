@@ -109,7 +109,7 @@ struct SideChatBubble: View {
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Copy selected text")
                 .accessibilityLabel("Copy selected text")
                 .accessibilityIdentifier("side-chat-copy-selection")
@@ -512,6 +512,8 @@ final class CommentTrackingTextView: MeasuredTextView {
     var accessibilityBlocks: [AccessibilityBlock] = [] {
         didSet { if accessibilityBlocks != oldValue { blockElements = nil } }
     }
+    /// Reports the blocks as static texts rather than groups; see `SelectableAnnotationText.blocksAreText`.
+    var blocksAreText = false
     /// Accessibility clients hold on to children between queries, so the elements live as long
     /// as the blocks they describe.
     private var blockElements: [BlockAccessibilityElement]?
@@ -527,13 +529,13 @@ final class CommentTrackingTextView: MeasuredTextView {
         weak var textView: NSTextView?
         let range: NSRange
 
-        init(block: AccessibilityBlock, textView: NSTextView) {
+        init(block: AccessibilityBlock, textView: NSTextView, isText: Bool) {
             self.textView = textView
             range = block.range
             super.init()
-            setAccessibilityRole(.group)
+            setAccessibilityRole(isText ? .staticText : .group)
             setAccessibilityLabel(block.label)
-            setAccessibilityIdentifier(block.identifier)
+            if !block.identifier.isEmpty { setAccessibilityIdentifier(block.identifier) }
             setAccessibilityParent(textView)
         }
 
@@ -558,7 +560,7 @@ final class CommentTrackingTextView: MeasuredTextView {
     override func accessibilityChildren() -> [Any]? {
         let children = super.accessibilityChildren() ?? []
         guard !accessibilityBlocks.isEmpty else { return children }
-        let elements = blockElements ?? accessibilityBlocks.map { BlockAccessibilityElement(block: $0, textView: self) }
+        let elements = blockElements ?? accessibilityBlocks.map { BlockAccessibilityElement(block: $0, textView: self, isText: blocksAreText) }
         blockElements = elements
         return children + elements
     }

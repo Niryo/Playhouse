@@ -363,10 +363,23 @@ extension PlayhouseUITests {
         // Counted from before the reopened view's first load, which is already a mid-turn read.
         let resumesBeforeReopen = providerResumeCount()
 
+        // The window's reads of the newest page, which the test's own unlimited reads don't match.
+        let followedTaskID = try taskID(named: title).uppercased()
+        func windowPageReads() -> Int {
+            ((try? diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == "conversation.history.read" && $0["taskID"] as? String == followedTaskID
+                    && $0["messageLimit"] as? String == "80"
+            }.count
+        }
+        let pageReadsBeforeReopen = windowPageReads()
+
         // A reopened conversation is a new view that no longer reads the send's stream.
         element("back-to-board-button").click()
         openTask(named: title)
         XCTAssertTrue(transcriptMessage(prompt).waitToExist(timeout: 10), "The reopened conversation should load the running turn's prompt.")
+        XCTAssertTrue(waitUntil({ windowPageReads() > pageReadsBeforeReopen }, timeout: 10), "Reopening should read the newest page.")
+        XCTAssertFalse(waitUntil({ windowPageReads() > pageReadsBeforeReopen + 1 }, timeout: 3),
+                       "Following the held turn should not read the page the reopen just loaded again.")
         XCTAssertFalse(visibleText(progressText).exists, "No progress exists before the fixture continues.")
         let taskID = try taskID(named: title)
         func revision() throws -> Int {
@@ -864,9 +877,15 @@ extension PlayhouseUITests {
         XCTAssertTrue(records.allSatisfy { $0["isPending"] as? Bool == false })
         return added
     }
-    func installSkillsClaudeFixture(_ name: String) throws -> URL {
+    /// Copies the Claude Code protocol fixture into this case's data directory under `name`,
+    /// marks the directory as the fixture's owner, and makes the app's turns use it. Must run
+    /// before `launchApp`. Returns the copied executable.
+    @discardableResult
+    func installClaudeFixtureExecutable(named name: String) throws -> URL {
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path), "The prepared Claude Code fixture is missing or not executable.")
         let executable = dataDirectory.appendingPathComponent(name)
-        try copyFixtureFile(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: executable)
+        try copyFixtureFile(at: source, to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
             to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
@@ -1050,7 +1069,8 @@ extension PlayhouseUITests {
     func rowBadge(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         for kind in ["skill", "rule", "mcp"] where identifier.hasPrefix("\(kind)-provider-") {
             var key = String(identifier.dropFirst("\(kind)-provider-".count))
-            if let dash = key.lastIndex(of: "-") { key = String(key[..<dash]) }
+            // The badge's suffix is `-both` or the providers it names, such as `-codex-opencode`.
+            if let suffix = key.firstMatch(of: /(-both|(-(claude|codex|opencode))+)$/) { key = String(key[..<suffix.range.lowerBound]) }
             let row = element("\(kind)-row-\(key)")
             XCTAssertTrue(row.waitToExist(timeout: 10), "\(kind)-row-\(key) should be listed.", file: file, line: line)
             return row.descendants(matching: .any).matching(identifier: identifier).firstMatch
@@ -1058,12 +1078,16 @@ extension PlayhouseUITests {
         XCTFail("\(identifier) is not a provider badge.", file: file, line: line)
         return element(identifier)
     }
-    /// The agents a rule's or MCP server's single provider icon names (`<base>-both`,
-    /// `-claude` or `-codex` on its row): both, one, or none when the row shows no icon.
+    /// The agents a rule's or MCP server's single provider icon names (`<base>-both` for every
+    /// agent, or the agents it names, such as `-codex-opencode`), or none when the row shows no icon.
     func rowProviders(_ base: String, file: StaticString = #filePath, line: UInt = #line) -> Set<String> {
-        if rowBadge("\(base)-both", file: file, line: line).exists { return ["claude", "codex"] }
-        if rowBadge("\(base)-claude", file: file, line: line).exists { return ["claude"] }
-        if rowBadge("\(base)-codex", file: file, line: line).exists { return ["codex"] }
+        let providers = ["claude", "codex", "opencode"]
+        if rowBadge("\(base)-both", file: file, line: line).exists { return Set(providers) }
+        for mask in 1..<(1 << providers.count) {
+            let named = providers.enumerated().filter { mask & (1 << $0.offset) != 0 }.map(\.element)
+            guard named.count < providers.count else { continue }
+            if rowBadge("\(base)-" + named.joined(separator: "-"), file: file, line: line).exists { return Set(named) }
+        }
         return []
     }
     /// Whether a section shows in a list: its heading at the list's top, or the

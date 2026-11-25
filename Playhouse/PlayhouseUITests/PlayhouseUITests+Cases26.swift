@@ -565,6 +565,8 @@ extension PlayhouseUITests {
         sendFromComposer(prompt)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: hold + "-ready") }, timeout: 20), "The fixture holds the turn while the heredoc runs.")
         XCTAssertTrue(longTitle.waitToExist(timeout: 10), "The running heredoc shows as the live command row.")
+        // It takes the live row once it has run for a moment; Working for lists it until then.
+        XCTAssertTrue(waitUntil({ !toggle.exists && longRow.label.contains(lastLine) }, timeout: 5), "The running heredoc moves to the live command row.")
         XCTAssertTrue(text(of: longTitle).contains(heredocPreview), "The live row shows the command's first line with an ellipsis: \(text(of: longTitle))")
         XCTAssertFalse(text(of: longTitle).contains("Release note line"), "The live row shows none of the heredoc's body.")
         XCTAssertFalse(toggle.exists, "The live command row has no expand control.")
@@ -851,7 +853,7 @@ extension PlayhouseUITests {
         }
         attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
     }
-    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the Skills button beside the terminal button at the bottom of the task sidebar (the composer has no Skills button there; with the sidebar collapsed, its rail keeps that one Skills button and it opens the page) as a modal card centered over the task, a narrow column 403 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the composer's Skills button in a standalone chat, which has no task sidebar, its backdrop covers the board beside the main sidebar, from the chat's leading edge to the window's, rather than only the chat, leaving the main sidebar uncovered, the card centers in that board, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session), whose section starts collapsed until its header or anchor expands it. The header shows the Skills | Rules | MCP tabs after the page's icon. Each section's header has an info icon whose hover hint (not a tooltip) opens below it and explains the section. Each skill row shows only its name led by one icon for the agents that can use it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), on the name's line left of the name and without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged right of the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the Skills button beside the terminal button at the bottom of the task sidebar (the composer has no Skills button there; with the sidebar collapsed, its rail keeps that one Skills button and it opens the page) as a modal card centered over the task, a narrow column 403 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the composer's Skills button in a standalone chat, which has no task sidebar, its backdrop covers the board beside the main sidebar, from the chat's leading edge to the window's, rather than only the chat, leaving the main sidebar uncovered, the card centers in that board, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session), whose section starts collapsed until its header or anchor expands it. The header shows the Skills | Rules | MCP tabs after the page's icon. Every control on the page shows the pointing hand while the pointer rests on it, the ones AppKit draws included: the close button, the Skills | Rules | MCP tabs, the bordered New Skill button, the anchors, a section's header and a skill row that opens on click, which the rendered page marks with its pointer, while the page's title keeps the arrow. Each section's header has an info icon whose hover hint (not a tooltip) opens below it and explains the section. Each skill row shows only its name led by one icon for the agents that can use it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for every agent, and an outlined check naming the agents for some, such as Codex and OpenCode, which Playhouse passes nothing and which uses only the skills, rules and MCP servers it finds itself in the task's working folder and home folder), on the name's line left of the name and without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged right of the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     func test_skills_catalog_lists_repo_global_and_builtin_skills() throws {
         let repository = try makeSkillRepository("skills-catalog-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Agents layout repository skill"),
@@ -867,7 +869,7 @@ extension PlayhouseUITests {
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills"), "codex-legacy", "Codex legacy user skill")
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
         try writeSkill(in: skillsHome.appendingPathComponent(".claude/skills/synced/bucket-one"), "synced-skill", "Synced from claude.ai")
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-catalog")
+        try installClaudeFixtureExecutable(named: "claude-fixture-skills-catalog")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Skills catalog", repositories: [repository, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -893,6 +895,20 @@ extension PlayhouseUITests {
         assertSkillsModalLayout(search: "skills-search", newButton: "new-skill-button", anchors: "skills-tab-picker")
 
         XCTAssertTrue(element("skills-repo-section-skills-catalog-repo").waitToExist(timeout: 10))
+        // Every control shows the pointing hand, the ones AppKit draws (the segmented tabs and the
+        // bordered New Skill button) and a row's press area included; the title keeps the arrow,
+        // read between controls so a probe that always read the hand could not pass.
+        for (id, name) in [("skills-back-button", "The close button"), ("skills-kind-picker", "The Skills | Rules | MCP tabs"), ("new-skill-button", "The bordered New Skill button"),
+                           ("skills-anchor-repo", "The Repo anchor"), ("skills-collapse-repo", "The Repo section's header"), ("skill-text-repo-agents", "A skill row that opens on click")] {
+            restPointer(on: element(id).coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+            XCTAssertTrue(waitUntil({ self.systemCursorIsPointingHand() }, timeout: 3), "\(name) should show the pointing hand: \(systemCursorDescription())")
+            // A cursor rect the hosting view overrides shows the hand only briefly, so it is read again.
+            Thread.sleep(forTimeInterval: 1.5)
+            XCTAssertTrue(systemCursorIsPointingHand(), "\(name) should keep the pointing hand while the pointer rests on it: \(systemCursorDescription())")
+            restPointer(on: element("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+            XCTAssertTrue(waitUntil({ NSCursor.currentSystem != nil && !self.systemCursorIsPointingHand() }, timeout: 3), "The page's title should show the arrow after \(name): \(systemCursorDescription())")
+        }
+        restPointerOffList(hints: "skill-hint-")
         attachElementScreenshot(element("skills-page"), named: "The narrow 403-point Skills modal")
         XCTAssertTrue(element("skills-repo-section-skills-empty-repo").exists)
         XCTAssertTrue(element("skills-empty-skills-empty-repo").exists, "A repository without skills shows an empty state.")
@@ -902,7 +918,7 @@ extension PlayhouseUITests {
         }
         XCTAssertFalse(element("skill-description-repo-agents").exists, "A row shows only its name until the pointer rests on it.")
         XCTAssertTrue(rowBadge("skill-provider-repo-agents-both").exists, "A skill both agents can use shows one green icon on its row without the hint.")
-        XCTAssertEqual(element("skill-provider-repo-agents-both").label, "Claude and Codex")
+        XCTAssertEqual(element("skill-provider-repo-agents-both").label, "Claude, Codex and OpenCode")
         XCTAssertFalse(rowBadge("skill-provider-repo-agents-claude").exists || rowBadge("skill-provider-repo-agents-codex").exists, "No separate Claude or Codex label.")
         XCTAssertLessThan(element("skill-provider-repo-agents-both").frame.maxX, element("skill-name-repo-agents").frame.minX, "The icon leads the name.")
         XCTAssertLessThan(abs(element("skill-provider-repo-agents-both").frame.midY - element("skill-name-repo-agents").frame.midY), 4, "The icon shares the name's line.")
@@ -984,7 +1000,15 @@ extension PlayhouseUITests {
             XCTAssertTrue(element("skill-row-\(name)").waitToExist(timeout: 5), "\(name) should be a global skill.")
             XCTAssertTrue(isListed("skill-row-\(name)", inSection: "skills-group-global"), "\(name) is under Global.")
             revealSkillHint(name)
-            XCTAssertTrue(rowBadge("skill-provider-\(name)-both").exists)
+            if name == "codex-legacy" {
+                // OpenCode reads the home folder's .agents and .claude skills itself, not Codex's own folder.
+                XCTAssertEqual(rowBadge("skill-provider-codex-legacy-claude-codex").label, "Claude and Codex", "A Codex-folder skill isn't OpenCode's.")
+                XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-codex-legacy")).contains("Not on OpenCode: it doesn't read Codex's skill folder"),
+                              "The hint says why OpenCode doesn't use it.")
+                attachElementScreenshot(revealSkillHint(name), named: "A Codex-folder skill is Claude's and Codex's only")
+            } else {
+                XCTAssertTrue(rowBadge("skill-provider-\(name)-both").exists, "OpenCode reads \(name) itself, so every agent uses it.")
+            }
         }
         XCTAssertFalse(isListed("skill-row-synced-skill", inSection: "skills-group-global"), "claude.ai's synced skills are built-in, not global.")
         attachScreenshot(named: "The Global anchor scrolls to the Global section")
@@ -1106,7 +1130,7 @@ extension PlayhouseUITests {
     func test_skills_create_update_move_and_delete_on_disk() throws {
         let repository = try makeSkillRepository("skills-manage-repo", skills: [:])
         // The Skills page reads Claude Code's built-ins from a provider session.
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-manage")
+        try installClaudeFixtureExecutable(named: "claude-fixture-skills-manage")
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Skills manage", repositories: [repository])

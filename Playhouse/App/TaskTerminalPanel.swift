@@ -229,7 +229,7 @@ struct TaskTerminalPanel: View {
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Hide the terminal")
                 .accessibilityLabel("Hide terminal")
                 .accessibilityIdentifier("close-terminal-button")

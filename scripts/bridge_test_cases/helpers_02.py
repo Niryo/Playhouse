@@ -72,6 +72,16 @@ class BridgeTestHelpers02:
                 [revision(snapshot) for snapshot in later if revision(snapshot) != revision(quiet)], [],
                 "A turn with no visible output yet should not ask windows to reload history.",
             )
+            # The read a window opens the task with already holds the running turn's prompt,
+            # so the window starts following the turn without reading the page again.
+            open_read = self.assert_success(self.call_cli(
+                "conversation", "history", task_id, "--limit", "80", "--include-task", extra_environment=environment
+            )[0])
+            self.assertIn(
+                prompt, [message.get("text") for message in open_read["messages"] if message.get("role") == "user"],
+                "The open read of a held turn should already hold its prompt.",
+            )
+            self.assertEqual(open_read["task"]["id"], task_id, "The open read should return the task with its page.")
 
             resumes_before_progress = provider_resume_count()
             resume.write_text("Show progress.\n", encoding="utf-8")

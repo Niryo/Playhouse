@@ -515,14 +515,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running. The held conversation first completes a turn with a tool call. Before the held turn reports anything, its mid-turn history has only its question after that turn, with no assistant message or activity of its own, and it shows only a Thinking row with a spinner in place of an empty Working for, despite the earlier turn's tool call; once the turn settles, opening its Worked for shows no Thinking row.
     func test_conversation_runs_concurrent_claude_sends_in_parallel() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-sends")
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
-        try copyFixtureFile(at: source, to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
-            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-parallel-sends")
         launchApp(defaultParent: fixture.parent.path)
 
         let first = try XCTUnwrap(try runCLI([
@@ -647,14 +640,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history. While the failing task's conversation is open and its turn held, the parallel turn starts, finishes and advances only its own revision: CLI/XPC runtime still reports the held session active and interruptible and the parallel session inactive, and the open conversation still offers an enabled Stop and never shows the parallel answer.
     func test_conversation_isolates_failing_claude_turn_from_parallel_send() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-failure")
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
-        try copyFixtureFile(at: source, to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
-            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-parallel-failure")
         launchApp(defaultParent: fixture.parent.path)
 
         let first = try XCTUnwrap(try runCLI([
@@ -745,14 +731,7 @@ extension PlayhouseUITests {
     }
     // case-contract: test_claude_stop_leaves_parallel_conversation_running | Stopping one Claude turn pauses only that conversation while a second Claude conversation runs in parallel. The parallel conversation answers and keeps its own activity rows and measured durations while the first turn is still thinking; the stopped task moves to Waiting Response with no failure reason, records no answer, and leaves the parallel task's Waiting Response result untouched. A fresh CLI/XPC read confirms both results.
     func test_claude_stop_leaves_parallel_conversation_running() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-stop")
-        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
-        try copyFixtureFile(at: source, to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
-            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
-        claudeFixtureExecutable = executable.path
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-parallel-stop")
         launchApp(defaultParent: fixture.parent.path)
 
         let stopped = try XCTUnwrap(try runCLI([

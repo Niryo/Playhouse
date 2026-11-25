@@ -24,6 +24,7 @@ final class PlayhouseUITests: XCTestCase {
     var serviceName: String!
     var codexFixtureExecutable: String?
     var claudeFixtureExecutable: String?
+    var openCodeFixtureExecutable: String?
     var codexFixtureStateDirectory: URL?
     var launchDefaultParent: String?
     /// A launch with no suggestions folder opens the Suggestions from prompt over the board; unless
@@ -49,6 +50,7 @@ final class PlayhouseUITests: XCTestCase {
         // cases that need a specific fixture replace it.
         codexFixtureExecutable = isLiveIntegration ? nil : WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui").path
         claudeFixtureExecutable = nil
+        openCodeFixtureExecutable = nil
         codexFixtureStateDirectory = nil
         launchWindowTitle = nil
         fixture = try WorkspaceFixture.load()
@@ -236,6 +238,8 @@ final class PlayhouseUITests: XCTestCase {
         else if !isLiveIntegration { environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = "none" }
         if let claudeFixtureExecutable { environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable }
         else if !isLiveIntegration { environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none" }
+        if let openCodeFixtureExecutable { environment["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE"] = openCodeFixtureExecutable }
+        else if liveProvider != "opencode" { environment["PLAYHOUSE_E2E_OPENCODE_EXECUTABLE"] = "none" }
         return environment
     }
 

@@ -18,7 +18,7 @@ extension PlayhouseBridgeRuntime {
         case "archive.search":
             let conversations = ConversationManager(
                 tasks: taskManager,
-                clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient()),
+                clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient(), opencode: OpenCodeClient()),
                 settingsManager: settings
             )
             return try Self.value(await conversations.searchArchive(query: request.requiredString("query")))

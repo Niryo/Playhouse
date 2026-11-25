@@ -99,7 +99,7 @@ extension TaskConversationView {
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .buttonStyle(.plain)
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Choose this answer for \(question.title)")
                                 .accessibilityIdentifier("async-question-option-\(message.id)-\(index)-\(optionIndex)")
                                 .accessibilityValue(asyncQuestionAnswers[answerKey] == option ? "selected" : "not selected")
@@ -232,12 +232,12 @@ extension TaskConversationView {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Open attached image")
                         .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
-                        .buttonHoverPointer()
+                        .plainButtonHoverPointer()
                         .nativeHelp("Open image at full size")
                     }
                 }
                 if !displayText.isEmpty {
-                    assistantMarkdownContent(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
+                    assistantMarkdown(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
                         .font(.system(size: 16, weight: .regular))
                         .foregroundStyle(WorkspaceTheme.conversationText)
                         .padding(.horizontal, 15)
@@ -331,7 +331,7 @@ extension TaskConversationView {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Open attached image")
                         .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
-                        .buttonHoverPointer()
+                        .plainButtonHoverPointer()
                         .nativeHelp("Open image at full size")
                     }
                 }
@@ -592,153 +592,48 @@ extension TaskConversationView {
         )
     }
 
-    func assistantMarkdownContent(
+    /// A reply's Markdown through the Markdown atom at the transcript's reading size. Its host
+    /// adds the transcript's comments, side chats and selection actions to each prose run.
+    func assistantMarkdown(
         _ markdown: String,
-        messageID: String? = nil,
-        responseAnnotations: [ResponseAnnotationReference] = []
-    ) -> some View {
-        // Progress text without a message ID is short-lived, so only replies are kept.
-        let blocks = messageID.map { messageID in
-            Self.markdownBlocksCache.value(slot: messageID, key: markdown) { MarkdownDocument.blocks(markdown) }
-        } ?? MarkdownDocument.blocks(markdown)
-        return VStack(alignment: .leading, spacing: 7) {
-            if let messageID {
-                ForEach(AssistantMarkdownSegment.segments(of: blocks)) { segment in
-                    switch segment {
-                    case .prose(let prose):
-                        assistantProseText(prose, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
-                    case .card(let block):
-                        markdownCard(block)
-                    }
-                }
-            } else {
-                ForEach(blocks) { block in
-                    switch block.kind {
-                    case .heading(let level):
-                        markdownBlockText(block)
-                            .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
-                            .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
-                    case .listItem:
-                        // The marker is rendered through SelectableAnnotationText/NSTextView, so
-                        // its baseline is AppKit's, as in a transcript reply's prose text.
-                        HStack(alignment: .top, spacing: 7) {
-                            markerText("•")
-                            markdownBlockText(block)
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel(MarkdownInlineText.plainText(block.text))
-                        .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
-                    case .orderedListItem(let number):
-                        HStack(alignment: .top, spacing: 7) {
-                            markerText("\(number).")
-                            markdownBlockText(block)
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("\(number). " + MarkdownInlineText.plainText(block.text))
-                        .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
-                    case .quote:
-                        markdownBlockText(block)
-                            .markdownQuote()
-                            .accessibilityIdentifier("assistant-markdown-quote-\(block.id)")
-                    case .codeBlock, .table, .rule:
-                        markdownCard(block)
-                    case .paragraph:
-                        markdownBlockText(block)
-                            .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
-                            .padding(.bottom, 5)
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    func markdownCard(_ block: MarkdownBlock) -> some View {
-        switch block.kind {
-        case .codeBlock(let language):
-            CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
-                .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
-        case .table(let headers, let alignments, let rows):
-            TableBlockView(blockID: block.id, headers: headers, alignments: alignments, rows: rows, font: block.font)
-        case .rule:
-            MarkdownRule()
-                .accessibilityIdentifier("assistant-markdown-rule-\(block.id)")
-        case .heading, .listItem, .orderedListItem, .quote, .paragraph:
-            EmptyView()
-        }
-    }
-
-    /// One reply's consecutive prose blocks in a single text view, so a selection, and the
-    /// comment made on it, can run across headings, paragraphs, and list items.
-    func assistantProseText(
-        _ blocks: [MarkdownBlock],
         messageID: String,
-        responseAnnotations: [ResponseAnnotationReference],
-        wholeMessageText: String
+        responseAnnotations: [ResponseAnnotationReference]
     ) -> some View {
-        let layout = AssistantProseLayout.cached(slot: "\(messageID):\(blocks[0].id)", blocks: blocks, responseAnnotations: responseAnnotations)
-        return SelectableAnnotationText(
-            text: layout.text.string,
-            highlightedRanges: annotations.filter { $0.messageID == messageID }.compactMap(layout.range(of:)),
-            chatRanges: sideChatRanges(messageID: messageID, rangeOf: layout.range(of:)),
-            onHighlightClick: { range, bounds in
-                reopenHighlight(range, bounds: bounds, messageID: messageID, anchorID: layout.id, rangeOf: layout.range(of:))
-            },
-            responseAnnotations: responseAnnotations,
-            responseCommentSourcePrefix: "\(messageID):\(layout.id)",
-            isAssistantText: true,
-            onSelection: { range, text, bounds in
-                guard !text.isEmpty, let positions = layout.blockPositions(of: range) else {
-                    currentTextSelection = nil
-                    return
-                }
-                currentTextSelection = AnnotationSelection(
-                    messageID: messageID, anchorID: layout.id,
-                    blockID: positions.blockID, startOffset: positions.startOffset,
-                    endBlockID: positions.endBlockID, endOffset: positions.endOffset,
-                    text: text, bounds: bounds
-                )
-            },
-            formattedText: layout.text,
-            wholeMessageText: wholeMessageText,
-            accessibilityBlocks: layout.accessibilityBlocks
+        AtomMarkdown(
+            props: MarkdownProps(text: markdown, size: Double(Self.transcriptTextSize), selectable: true),
+            host: MarkdownTextHost(
+                slot: messageID,
+                identifierPrefix: "assistant-markdown",
+                // A reply's links open as they did before replies were an atom.
+                opensAnyLink: true,
+                blocksAreGroups: true,
+                responseAnnotations: responseAnnotations,
+                highlightedRanges: { layout in
+                    annotations.filter { $0.messageID == messageID }.compactMap(layout.range(of:))
+                },
+                chatRanges: { layout in sideChatRanges(messageID: messageID, rangeOf: layout.range(of:)) },
+                onHighlightClick: { layout, range, bounds in
+                    reopenHighlight(range, bounds: bounds, messageID: messageID, anchorID: layout.id, rangeOf: layout.range(of:))
+                },
+                onSelection: { layout, range, text, bounds in
+                    guard !text.isEmpty, let positions = layout.blockPositions(of: range) else {
+                        currentTextSelection = nil
+                        return
+                    }
+                    currentTextSelection = AnnotationSelection(
+                        messageID: messageID, anchorID: layout.id,
+                        blockID: positions.blockID, startOffset: positions.startOffset,
+                        endBlockID: positions.endBlockID, endOffset: positions.endOffset,
+                        text: text, bounds: bounds
+                    )
+                },
+                overlay: { layout in AnyView(selectionHint(messageID: messageID, anchorID: layout.id)) }
+            )
         )
-            .fixedSize(horizontal: false, vertical: true)
-            .overlay(alignment: .topLeading) { selectionHint(messageID: messageID, anchorID: layout.id) }
-            .accessibilityIdentifier("assistant-markdown-prose-\(layout.id)")
-            .padding(.bottom, layout.endsWithParagraph ? 5 : 0)
     }
 
-    func markdownBlockText(_ block: MarkdownBlock) -> some View {
-        // A row is placed at the height it measured, and a stack around this text, like the question form's,
-        // may hand that height out unevenly; keeping the text's natural height stops it truncating to one line.
-        MarkdownInlineText.text(block.text, baseFont: block.font)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// Renders a list marker ("•" or "1.") through the same `SelectableAnnotationText`/NSTextView
-    /// plumbing as list-item content, so the marker shares identical font metrics and
-    /// `textContainerInset` with its sibling content view — guaranteeing `.top`-aligned HStack
-    /// rows line up exactly, rather than approximating the gap between two different text-layout
-    /// engines (SwiftUI `Text` vs. AppKit `NSTextView`) with a guessed padding constant.
-    func markerText(_ marker: String) -> some View {
-        let markerFont = marker == "•" ? AssistantProseLayout.bulletFont : AssistantProseLayout.markerFont
-        // Measure the marker itself instead of a fixed column width, so two-digit (or longer)
-        // ordered-list numbers ("10.", "100.") get enough width and never wrap/clip.
-        let markerWidth = NSAttributedString(string: marker, attributes: [.font: markerFont]).size().width
-        return SelectableAnnotationText(
-            text: marker,
-            highlightedRanges: [],
-            onSelection: { _, _, _ in },
-            formattedText: NSAttributedString(string: marker, attributes: [
-                .font: markerFont,
-                .foregroundColor: NSColor.labelColor,
-            ]),
-            font: markerFont
-        )
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(width: ceil(markerWidth) + 4, alignment: .leading)
-    }
+    /// Replies, and the questions and progress notes written like them, read at this size.
+    static let transcriptTextSize: CGFloat = 16
 
     /// The ranges of a message's text that saved side chats discuss.
     func sideChatRanges(messageID: String, rangeOf: (ConversationTextSource) -> NSRange?) -> [NSRange] {
@@ -851,8 +746,6 @@ extension TaskConversationView {
         }
     }
 
-    static let markdownBlocksCache = ReplyRenderCache<[MarkdownBlock]>(countLimit: 2000)
-
 }
 
 /// An automatic message's text (a Playhouse nudge, a provider's own notice), which can carry
@@ -916,7 +809,7 @@ struct CollapsibleAutomaticMessageText<FullText: View>: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp(isExpanded ? "Show only the start of this automatic message" : "Show the whole automatic message")
                 .accessibilityLabel(isExpanded ? "Collapse automatic message" : "Expand automatic message to show all text")
                 .accessibilityValue(isExpanded ? "expanded" : "collapsed")

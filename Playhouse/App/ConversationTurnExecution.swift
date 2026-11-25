@@ -141,7 +141,7 @@ extension ConversationManager {
         let client = clients.client(for: provider)
         let modelID = try requestedModelID ?? self.modelID(taskID: taskID) ?? provider.defaultModelID
         guard Self.isValidModelID(modelID) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
+            throw BridgeCommandError(code: "invalid_argument", message: ConversationManager.invalidModelIDMessage)
         }
         // A Done task keeps its conversation; a follow-up reopens it below, once validated.
         let availableRoots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
@@ -515,9 +515,11 @@ extension ConversationManager {
             if resumesExistingSession, !task.isStandaloneChat, let segment,
                !hideSensitiveRecoveryPrompt, userInputAnswers.isEmpty {
                 let settings = settingsManager.contextCompaction
-                let state = provider == .claude
-                    ? claudeSessionCacheState(sessionID: threadID)
-                    : codexCompactionState(taskID: taskID, threadID: threadID)
+                let state: ClaudeSessionCacheState? = switch provider {
+                case .claude: claudeSessionCacheState(sessionID: threadID)
+                case .codex: codexCompactionState(taskID: taskID, threadID: threadID)
+                case .opencode: await clients.opencode.compactionState(sessionID: threadID, workspace: workspace)
+                }
                 resumeCacheState = provider == .claude ? state : nil
                 if let state,
                    let trigger = ContextCompactionPolicy.beforeTurnTrigger(
@@ -549,8 +551,8 @@ extension ConversationManager {
                             now: .now, onUpdate: onUpdate
                         )
                     } else {
-                        compactedBeforeTurn = await runCodexAutomaticCompaction(
-                            taskID: taskID, threadID: threadID, trigger: trigger, state: state,
+                        compactedBeforeTurn = await runProviderAutomaticCompaction(
+                            provider: provider, taskID: taskID, threadID: threadID, trigger: trigger, state: state,
                             modelID: state.model ?? modelID, segmentID: segment.segmentID,
                             workspace: workspace, developerInstructions: compactionInstructions,
                             now: .now, onUpdate: onUpdate

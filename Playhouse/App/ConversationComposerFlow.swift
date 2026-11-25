@@ -283,12 +283,11 @@ extension TaskConversationView {
                             .accessibilityIdentifier("ai-question-header-\(question.id)")
                     }
                     // Providers write questions in Markdown, as they do replies, so they share the reply
-                    // renderer and size. The renderer sizes only bold, italic and code runs; plain text takes this font.
-                    assistantMarkdownContent(question.question)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(WorkspaceTheme.conversationText)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("ai-question-text-\(question.id)")
+                    // renderer and size.
+                    AtomMarkdown(
+                        props: MarkdownProps(text: question.question, size: Double(Self.transcriptTextSize), color: "text", selectable: true),
+                        common: AtomCommon(testID: "ai-question-text-\(question.id)")
+                    )
                     if question.options.isEmpty {
                         Group {
                             if question.isSecret {
@@ -318,7 +317,7 @@ extension TaskConversationView {
                                     Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
                                         .font(.system(size: 15))
                                 }
-                                .buttonHoverPointer()
+                                .plainButtonHoverPointer()
                                 .nativeHelp("Select answer: \(option.label)")
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
@@ -342,7 +341,7 @@ extension TaskConversationView {
                                 Label("Other", systemImage: userInputOtherSelected.contains(question.id) ? "largecircle.fill.circle" : "circle")
                                     .font(.system(size: 15))
                             }
-                            .buttonHoverPointer()
+                            .plainButtonHoverPointer()
                             .nativeHelp("Select a free-text answer")
                             .buttonStyle(.plain)
                             .accessibilityValue(userInputOtherSelected.contains(question.id) ? "selected" : "not selected")
@@ -1050,10 +1049,13 @@ extension TaskConversationView {
         let steer = PendingLocalSteer(text: message.text, imageDataURLs: message.imageDataURLs ?? [])
         showLocalSteer(steer)
         errorMessage = nil
+        // The transcript records the steer as of now, where it shows, though it reaches the daemon
+        // only after the steers sent before it.
+        let sentAt = Date()
         deliverSteerInOrder {
             defer { steeringQueuedMessageIDs.remove(message.id) }
             do {
-                let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
+                let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id, sentAt: sentAt)
                 settleLocalSteer(steer, delivered: outcome.accepted)
                 refreshQueuedMessages()
                 guard !outcome.accepted else { return }
@@ -1083,9 +1085,10 @@ extension TaskConversationView {
         showLocalSteer(steer)
         clearHandedOffDraft()
         errorMessage = nil
+        let sentAt = Date()
         deliverSteerInOrder {
             do {
-                let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
+                let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs, sentAt: sentAt)
                 settleLocalSteer(steer, delivered: accepted)
                 guard !accepted else { return }
                 // The turn ended first, so the message runs as a turn of its own.

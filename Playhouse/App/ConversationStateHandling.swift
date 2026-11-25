@@ -34,8 +34,21 @@ extension TaskConversationView {
         chatPageJumpCount += 1
         errorMessage = nil
         let draftAtLoadStart = draft
-        // A turn this window didn't send streams once the loaded history is in place.
-        defer { watchRunningTurnIfNeeded() }
+        var appliedHistory = false
+        // The turn the page is read during, taken before the read: a `pendingRead` is issued
+        // just before this call, with no suspension in between, and otherwise it is read below.
+        let turnThreadAtRead = providerTurnIsActive ? task.activeConversationID : nil
+        let revisionAtRead = conversationRuntime.snapshot.conversationRevisions[task.id.uuidString]
+        // A turn this window didn't send streams once the loaded history is in place. A page
+        // read while that same turn already ran, and applied before it changed, already shows
+        // its prompt, so the watch doesn't read it again. A turn that starts, progresses or
+        // ends while the page loads raises the revision or changes the thread, and is re-read.
+        defer {
+            let pageShowsFollowedTurn = appliedHistory && turnThreadAtRead != nil
+                && turnThreadAtRead == task.activeConversationID
+                && revisionAtRead == conversationRuntime.snapshot.conversationRevisions[task.id.uuidString]
+            watchRunningTurnIfNeeded(historyIsCurrent: pageShowsFollowedTurn)
+        }
         defer {
             isLoadingHistory = false
             hasLoadedConversation = true
@@ -61,6 +74,7 @@ extension TaskConversationView {
             // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
             flushStreamedTextDeltas()
             messages = history.messages
+            appliedHistory = true
             earlierStoredMessageCount = history.earlierMessageCount ?? 0
             historyGap = nil
             let savedUserInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
@@ -268,12 +282,12 @@ extension TaskConversationView {
         }
     }
 
-    /// The prompt names only models the provider lists; Claude's "Default" is a
+    /// The prompt names only models the provider lists; Claude's and OpenCode's "Default" is a
     /// placeholder, not a model, and an unlisted ID isn't a name.
     var promptModelName: String? {
         if !selectedModelID.isEmpty, !modelOptions.contains(where: { $0.id == selectedModelID }) { return nil }
         let name = selectedModelName
-        return provider == .claude && name == provider.defaultModelName ? nil : name
+        return provider.defaultModelIsPlaceholder && name == provider.defaultModelName ? nil : name
     }
 
     var selectedModelName: String {
@@ -429,8 +443,9 @@ extension TaskConversationView {
 
     /// Streams a running turn this window didn't send: a CLI send, a schedule, or a turn the
     /// daemon reattached after a restart. History reloads alone would show its progress but
-    /// not its text as it is written.
-    func watchRunningTurnIfNeeded() {
+    /// not its text as it is written. `historyIsCurrent` skips the read that shows the turn's
+    /// prompt when the caller has just applied the newest page.
+    func watchRunningTurnIfNeeded(historyIsCurrent: Bool = false) {
         guard !isReadOnly, !isLoadingHistory, !isWatchingRunningTurn, followedTurnStreams == 0, providerTurnIsActive else { return }
         isWatchingRunningTurn = true
         let assistantMessageID = UUID().uuidString
@@ -444,7 +459,7 @@ extension TaskConversationView {
                 streamedRepliesAboveSteers[assistantMessageID] = nil
             }
             // The turn's prompt is already saved; show it while the rest streams in.
-            await refreshGoalConversation(keepingShownTurn: true)
+            if !historyIsCurrent { await refreshGoalConversation(keepingShownTurn: true) }
             _ = try? await conversationManager.watch(taskID: task.id, onUpdate: { update in
                 applyStreamedUpdate(update, assistantMessageID: assistantMessageID)
             }, onUserInput: { request in
@@ -938,12 +953,17 @@ extension TaskConversationView {
     }
 
     var installedProviders: [ConversationProvider] {
-        providerInstallStatuses.filter(\.isInstalled).map(\.provider)
+        providerInstallStatuses.filter(\.isInstalled).map(\.provider).filter(isProviderOffered)
     }
 
     /// The providers the menu offers to install. None until the daemon reports what's installed.
     var missingProviders: [ConversationProvider] {
-        providerInstallStatuses.filter { !$0.isInstalled }.map(\.provider)
+        providerInstallStatuses.filter { !$0.isInstalled }.map(\.provider).filter(isProviderOffered)
+    }
+
+    /// A plugin editor isn't offered OpenCode, which doesn't get Playhouse's plugin skill.
+    func isProviderOffered(_ option: ConversationProvider) -> Bool {
+        ConversationManager.canRun(task, on: option)
     }
 
     /// Reads which providers are installed. A conversation that hasn't started, whose provider
@@ -1075,6 +1095,8 @@ extension TaskConversationView {
             parts.append("Claude uses its own settings: \(current.skills.count) skills and commands, \(current.mcpServers.count) MCP servers.")
         case .codex:
             parts.append("Codex runs without apps or hooks, with the MCP servers turned on in Skills, Rules & MCP.")
+        case .opencode:
+            parts.append("OpenCode uses the model providers you connected to it and finds its own skills, rules and MCP servers; the switches in Skills, Rules & MCP don't apply to it.")
         }
         parts.append(provider.supportsGoals ? "Goals are available." : "Goals are available only with Codex.")
         parts.append("Earlier turns are shared as text context on the next message.")

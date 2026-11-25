@@ -150,7 +150,7 @@ extension AgentsInfoModel {
     /// Providers whose CLI is installed, in display order; none until the first read.
     static func visibleProviders(_ report: AgentUsageReport?) -> [AgentProviderUsage] {
         guard let report else { return [] }
-        return [ConversationProvider.claude, .codex].compactMap { provider in
+        return [ConversationProvider.claude, .codex, .opencode].compactMap { provider in
             report.providers.first { $0.provider == provider.rawValue && $0.installed }
         }
     }
@@ -165,12 +165,20 @@ extension AgentsInfoModel {
         }
     }
 
+    private static func icon(_ provider: ConversationProvider) -> String {
+        switch provider {
+        case .claude: "sparkle"
+        case .codex: "chevron.left.forwardslash.chevron.right"
+        case .opencode: "square.dashed.inset.filled"
+        }
+    }
+
     private static func agent(provider: ConversationProvider, usage: AgentProviderUsage, hasRunningTask: Bool, now: Date) -> Agent {
         let identity = [usage.account, usage.plan].compactMap { $0 }
         var agent = Agent(
             provider: provider.rawValue,
             name: provider.displayName,
-            icon: provider == .claude ? "sparkle" : "chevron.left.forwardslash.chevron.right",
+            icon: icon(provider),
             identity: identity.isEmpty ? nil : identity.joined(separator: " "),
             identityHelp: identity.isEmpty ? nil : identity.joined(separator: " · "),
             canSwitch: usage.loggedIn != nil,

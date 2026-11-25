@@ -32,7 +32,7 @@ MARKER_NAME = ".playhouse-live-integration-owner"
 MARKER_VALUE = "Playhouse live integration suite owns this disposable workspace (v1).\n"
 BRIDGE_FIXTURE_MARKER_VALUE = "Playhouse bridge tests own this deterministic fixture (v1).\n"
 WORKTREE_MARKER_VALUE = "Playhouse live integration suite owns this worktree root.\n"
-PROVIDERS = ("claude", "codex")
+PROVIDERS = ("claude", "codex", "opencode")
 MINIMUM_CLAUDE_VERSION = "2.1.296"
 
 
@@ -315,7 +315,7 @@ def scenario_plan_edit_resume_and_reload(ws):
     require(len(second_history.get("messages", [])) >= len(first_history.get("messages", [])) + 2, "Resumed history did not retain both turns.")
     require(second_history.get("activities"), "Resumed turn history omitted its activity rows.")
     require(followup_marker in ws.fixture_diff(second, secondary_file.name), "Resumed turn diff omitted its changed line.")
-    native_id = ws.run_cli("task", "get", task_id)["claudeSessionID" if provider == "claude" else "codexThreadID"]
+    native_id = ws.run_cli("task", "get", task_id)[{"claude": "claudeSessionID", "codex": "codexThreadID", "opencode": "openCodeSessionID"}[provider]]
     require(native_id, f"The task should keep its native {provider} conversation ID.")
 
     reopened = ws.run_cli("conversation", "history", task_id)
@@ -636,6 +636,7 @@ def scenario_concurrent_auto_branch(ws):
 def scenario_bridged_skill_reaches_provider(ws):
     # Each provider gets a skill only the other provider reads natively, so the
     # turn can use it only through Playhouse's skill bridge.
+    # OpenCode, like Codex, reads .agents/skills itself and gets .claude/skills through the bridge.
     layout = ".agents/skills" if ws.provider == "claude" else ".claude/skills"
     token = f"SKILL-BRIDGE-{ws.provider.upper()}-OK"
     skill = ws.first / layout / "live-bridge-check"
@@ -756,6 +757,7 @@ SHARED_SCENARIOS = [
 UNIQUE_SCENARIOS = {
     "claude": [scenario_claude_question_round_trip, scenario_claude_capabilities, scenario_claude_answer_survives_outcome_report],
     "codex": [scenario_codex_pinned_model],
+    "opencode": [],
 }
 
 
@@ -763,9 +765,13 @@ def preflight(provider):
     if provider == "claude":
         result = subprocess.run(["claude", "auth", "status"], capture_output=True, text=True)
         require(result.returncode == 0 and json.loads(result.stdout or "{}").get("loggedIn"), "Live Claude turns require a working `claude` sign-in on this host.")
-    else:
+    elif provider == "codex":
         result = subprocess.run(["codex", "login", "status"], capture_output=True, text=True)
         require(result.returncode == 0, "Live Codex turns require a working `codex login` on this host.")
+    else:
+        # OpenCode runs its free OpenCode Zen models with no sign-in; a connected provider works too.
+        result = subprocess.run(["opencode", "--version"], capture_output=True, text=True)
+        require(result.returncode == 0, "Live OpenCode turns require the `opencode` CLI on this host.")
 
 
 def main():
@@ -775,7 +781,8 @@ def main():
     arguments = parser.parse_args()
     if os.environ.get("PLAYHOUSE_RUN_LIVE_INTEGRATION") != "1" and os.environ.get("PLAYHOUSE_RUN_CODEX_INTEGRATION") != "1":
         raise SystemExit("This suite makes live provider turns. Set PLAYHOUSE_RUN_LIVE_INTEGRATION=1 after confirming the provider sign-in works.")
-    providers = list(PROVIDERS) if arguments.provider == "all" else [arguments.provider]
+    # `all` is the two providers the cross-provider handoff runs between.
+    providers = ["claude", "codex"] if arguments.provider == "all" else [arguments.provider]
 
     app_bundle = Path(os.environ.get(
         "PLAYHOUSE_APP_PATH",

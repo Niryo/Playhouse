@@ -168,7 +168,7 @@ class BridgeTestCases18:
         self.assert_success(self.call_cli("settings", "reset-prompt", "pr-description")[0])
         self.assertTrue(all(not item["custom"] for item in prompts().values()))
         self.assertEqual(generated_title_prompt("Add dark mode"), f"{default_title}\n\nAdd dark mode", "A reset prompt sends the default again.")
-    # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the Skills button beside the terminal button at the bottom of the task sidebar (the composer has no Skills button there; with the sidebar collapsed, its rail keeps that one Skills button and it opens the page) as a modal card centered over the task, a narrow column 403 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the composer's Skills button in a standalone chat, which has no task sidebar, its backdrop covers the board beside the main sidebar, from the chat's leading edge to the window's, rather than only the chat, leaving the main sidebar uncovered, the card centers in that board, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session), whose section starts collapsed until its header or anchor expands it. The header shows the Skills | Rules | MCP tabs after the page's icon. Each section's header has an info icon whose hover hint (not a tooltip) opens below it and explains the section. Each skill row shows only its name led by one icon for the agents that can use it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), on the name's line left of the name and without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged right of the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page opens from the Skills button beside the terminal button at the bottom of the task sidebar (the composer has no Skills button there; with the sidebar collapsed, its rail keeps that one Skills button and it opens the page) as a modal card centered over the task, a narrow column 403 points wide and nearly as tall as the window, over a dimmed backdrop, and its close button returns to the conversation. Opened from the composer's Skills button in a standalone chat, which has no task sidebar, its backdrop covers the board beside the main sidebar, from the chat's leading edge to the window's, rather than only the chat, leaving the main sidebar uncovered, the card centers in that board, and closing it keeps the chat open. It lists, in one sectioned list whose Repo, Global and Built-in anchors scroll it to their sections, the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session), whose section starts collapsed until its header or anchor expands it. The header shows the Skills | Rules | MCP tabs after the page's icon. Every control on the page shows the pointing hand while the pointer rests on it, the ones AppKit draws included: the close button, the Skills | Rules | MCP tabs, the bordered New Skill button, the anchors, a section's header and a skill row that opens on click, which the rendered page marks with its pointer, while the page's title keeps the arrow. Each section's header has an info icon whose hover hint (not a tooltip) opens below it and explains the section. Each skill row shows only its name led by one icon for the agents that can use it (the Claude logo for Claude only, the Codex logo for Codex only, a green check for every agent, and an outlined check naming the agents for some, such as Codex and OpenCode, which Playhouse passes nothing and which uses only the skills, rules and MCP servers it finds itself in the task's working folder and home folder), on the name's line left of the name and without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each user skill's row shows it usable by both Claude and Codex and its hint shows its description; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged right of the name as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     def test_skills_catalog_lists_repo_global_and_builtin_skills(self):
         manifest = self.skill_manifest
         repository = self.make_skill_repository("skills-catalog-repo", {
@@ -201,7 +201,7 @@ class BridgeTestCases18:
         repo = self.skills_by_name(sections[0]["skills"])
         self.assertEqual(sorted(repo), ["repo-agents", "repo-broken", "repo-claude", "repo-dup", "repo-shared"])
         for name in ["repo-agents", "repo-claude", "repo-shared"]:
-            self.assertEqual(repo[name]["providers"], ["claude", "codex"], f"{name} should be usable by both providers.")
+            self.assertEqual(repo[name]["providers"], ["claude", "codex", "opencode"], f"{name} should be usable by both providers.")
             self.assertIsNone(repo[name].get("issue"))
             self.assertTrue(repo[name]["enabled"])
             self.assertEqual(repo[name]["id"], f"repo:{repository}#{name}")
@@ -224,7 +224,10 @@ class BridgeTestCases18:
         self.assertEqual(sorted(global_skills), ["codex-legacy", "global-agents", "global-claude"])
         self.assertEqual({name: skill["locations"][0]["layout"] for name, skill in global_skills.items()},
                          {"codex-legacy": "codexLegacy", "global-agents": "agents", "global-claude": "claude"})
-        self.assertTrue(all(skill["providers"] == ["claude", "codex"] for skill in global_skills.values()))
+        self.assertEqual({name: skill["providers"] for name, skill in global_skills.items()},
+                         {"codex-legacy": ["claude", "codex"], "global-agents": ["claude", "codex", "opencode"], "global-claude": ["claude", "codex", "opencode"]},
+                         "OpenCode reads the home folder's .agents and .claude skills itself, not Codex's own folder.")
+        self.assertIn("doesn't read Codex's skill folder", global_skills["codex-legacy"]["providerNote"])
         self.assertEqual(global_skills["global-agents"]["id"], "global:global-agents")
         self.assertNotIn("synced", global_skills, "claude.ai's synced folder is not a global skill.")
 
@@ -251,6 +254,19 @@ class BridgeTestCases18:
         self.assertEqual(detail["skill"]["name"], "repo-agents")
         missing, _ = self.call_cli("skills", "get", "--task", task["id"], "--skill", "global:no-such-skill", expected_status=3)
         self.assert_failure(missing, "not_found")
+
+        # The rendered page carries the controls the window shows the pointing hand over: the
+        # AppKit-drawn tabs and bordered New Skill button beside plain buttons, and a row that opens on click.
+        page = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage")[0])
+        self.assertEqual(page["errors"], [])
+        controls = {test_id: self.plugin_node(page["tree"], test_id) for test_id in
+                    ["skills-back-button", "skills-kind-picker", "new-skill-button", "skills-anchor-repo", "skills-collapse-repo", "skill-text-release-notes", "skills-title"]}
+        self.assertEqual({test_id: node["type"] for test_id, node in controls.items()}, {
+            "skills-back-button": "Button", "skills-kind-picker": "Segmented", "new-skill-button": "Button", "skills-anchor-repo": "Button",
+            "skills-collapse-repo": "Button", "skill-text-release-notes": "PressArea", "skills-title": "Stack",
+        })
+        self.assertEqual(controls["new-skill-button"]["props"]["style"], "bordered", "New Skill is an AppKit-drawn bordered button.")
+        self.assertIs(controls["skill-text-release-notes"]["props"]["pointer"], True, "A row that opens on click is marked for the pointing hand.")
     # case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md exactly as written, keeping frontmatter Playhouse does not parse, and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor modal straight on its whole SKILL.md, frontmatter included, with no structured header form, and its Preview tab shows that Markdown rendered with the frontmatter as a table; saving there writes the edited file, a description-less edit is rejected in the editor while keeping the file, and after the editor closes the page still answers clicks. A structured CLI edit rewrites the header (reading a YAML list as one field), removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill asks only for a name, a description, and instructions it can preview, and a header field given to the CLI's create is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
     def test_skills_create_update_move_and_delete_on_disk(self):
         repository = self.make_skill_repository("skills-manage-repo", {})
@@ -271,7 +287,7 @@ class BridgeTestCases18:
 
         created = self.assert_success(create("--scope", "global", "--name", "release-notes", "--description", "Draft release notes", "--body", "Summarize merged changes."))
         self.assertEqual(created["id"], "global:release-notes")
-        self.assertEqual(created["providers"], ["claude", "codex"])
+        self.assertEqual(created["providers"], ["claude", "codex", "opencode"])
         manifest_path = global_folder / "release-notes" / "SKILL.md"
         self.assertEqual(manifest_path.read_text(encoding="utf-8"),
                          '---\nname: release-notes\ndescription: "Draft release notes"\n---\n\nSummarize merged changes.\n')
@@ -674,7 +690,8 @@ class BridgeTestCases18:
         self.assertEqual(created["id"], private_id)
         self.assertEqual(created["scope"], "private")
         self.assertEqual(created["repositoryPath"], str(repository))
-        self.assertEqual(created["providers"], ["claude", "codex"])
+        self.assertEqual(created["providers"], ["claude", "codex"], "OpenCode reads only skills in the repository and the home folder.")
+        self.assertIn("Not on OpenCode", created["providerNote"])
         self.assertEqual([location["layout"] for location in created["locations"]], ["playhousePrivate"])
         folder = store / ".claude" / "skills" / "deploy-notes"
         self.assertSamePath(created["folderPath"], folder)

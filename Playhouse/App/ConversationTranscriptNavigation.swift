@@ -497,6 +497,7 @@ extension TaskConversationView {
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
                     .onTapGesture { openSubagent(activity) }
+                    .plainButtonHoverPointer()
                     .accessibilityLabel("\(activity.title) agent icon")
             }
             Button {
@@ -528,7 +529,7 @@ extension TaskConversationView {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 5)
             }
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp("Open the read-only conversation for this agent")
             .buttonStyle(.plain)
             // Beside the button, like the icon, so it stays its own element.
@@ -538,6 +539,7 @@ extension TaskConversationView {
                 .frame(width: 16, height: 30)
                 .contentShape(Rectangle())
                 .onTapGesture { openSubagent(activity) }
+                .plainButtonHoverPointer()
                 .accessibilityLabel("Open \(activity.title)")
                 .accessibilityIdentifier("subagent-row-chevron")
         }
@@ -623,7 +625,7 @@ extension TaskConversationView {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .buttonHoverPointer()
+                    .plainButtonHoverPointer()
                     .nativeHelp(isTitleExpanded ? "Show only the start of this title" : "Show the whole title")
                     .accessibilityLabel(isTitleExpanded ? "Collapse activity title" : "Expand activity title to show all text")
                     .accessibilityValue(isTitleExpanded ? "expanded" : "collapsed")
@@ -771,7 +773,7 @@ extension TaskConversationView {
                 } label: {
                     Label("Back", systemImage: "arrow.left")
                 }
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Return to the parent conversation")
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("subagent-back-button")

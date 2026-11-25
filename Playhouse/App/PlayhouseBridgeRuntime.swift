@@ -91,6 +91,7 @@ final class PlayhouseBridgeRuntime {
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string
             let claudeConfigDirectory = request.arguments["__claudeConfigDirectory"]?.string
+            let openCodeExecutable = request.arguments["__opencodeExecutable"]?.string
             // A window's requests follow the Goal turns of the threads they read and set. The
             // window and the CLI share one Codex client and app-server per Codex home.
             let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
@@ -121,6 +122,7 @@ final class PlayhouseBridgeRuntime {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: callerCodexHome, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
+                    opencode: OpenCodeClient.sharedPrimaryClient(executableOverride: openCodeExecutable, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     skills: skills,
                     rules: rules,
                     mcp: mcp,
@@ -130,11 +132,13 @@ final class PlayhouseBridgeRuntime {
             }
             // Watchers receive provider pushes immediately and periodically refresh both
             // accounts to catch usage incurred by other clients or missed notifications.
+            // Every 30 seconds; tests shorten it with `PLAYHOUSE_E2E_USAGE_REFRESH_SECONDS`.
             if request.command == "usage.subscribe" {
                 let clients = conversationClients()
+                let interval = PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_USAGE_REFRESH_SECONDS"].flatMap(Double.init).flatMap { $0 > 0 ? $0 : nil } ?? 30
                 let refresh = Task { @MainActor in
                     while !Task.isCancelled {
-                        do { try await Task.sleep(for: .seconds(30)) } catch { break }
+                        do { try await Task.sleep(for: .seconds(interval)) } catch { break }
                         guard !Task.isCancelled else { break }
                         _ = await AgentUsageService.report(clients: clients, refresh: true)
                     }
@@ -598,7 +602,7 @@ final class PlayhouseBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let modelID = try request.requiredString("modelID")
                 guard ConversationManager.isValidModelID(modelID) else {
-                    throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, numbers, periods, underscores, or hyphens.")
+                    throw BridgeCommandError(code: "invalid_argument", message: ConversationManager.invalidModelIDMessage)
                 }
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 try await conversations.setModelID(taskID: taskID, modelID: modelID)
@@ -1189,7 +1193,7 @@ final class PlayhouseBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let provider = try request.arguments["provider"]?.string.map { value -> ConversationProvider in
                     guard let provider = ConversationProvider(rawValue: value) else {
-                        throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.")
+                        throw BridgeCommandError(code: "invalid_argument", message: ConversationProvider.validValuesMessage)
                     }
                     return provider
                 }
@@ -1197,10 +1201,10 @@ final class PlayhouseBridgeRuntime {
                 case "mcp.status":
                     result = try Self.value(await conversations.mcpStatus(taskID: taskID, provider: provider))
                 case "mcp.authenticate":
-                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.") }
+                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: ConversationProvider.validValuesMessage) }
                     result = try Self.value(await conversations.startMcpLogin(taskID: taskID, provider: provider, name: request.requiredString("name")))
                 default:
-                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.") }
+                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: ConversationProvider.validValuesMessage) }
                     result = try Self.value(await conversations.mcpLoginResult(taskID: taskID, provider: provider, name: request.requiredString("name")))
                 }
             case "conversation.provider.capabilities":

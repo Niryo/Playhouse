@@ -42,7 +42,7 @@ struct AtomPillPicker: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp((common.help ?? "{help}").replacingOccurrences(of: "{help}", with: shownOption?.help ?? ""))
                 .accessibilityLabel(common.label ?? shownOption?.label ?? shown)
                 .accessibilityValue(shown)
@@ -88,7 +88,7 @@ struct AtomPillPicker: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .nativeHelp(option.help ?? option.label)
         .accessibilityLabel(option.label)
         .accessibilityValue(isSelected ? "selected" : "")
@@ -124,7 +124,7 @@ struct AtomCard<Content: View>: View {
                         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .buttonStyle(.plain) // no-tooltip: clicking a card obviously opens it; VoiceOver gets the hint.
                 .accessibilityLabel(common.label ?? "")
                 .accessibilityHint(common.hint ?? "")
@@ -158,7 +158,6 @@ struct AtomCard<Content: View>: View {
                     Button(item.title, systemImage: item.icon ?? "circle", role: item.destructive == true ? .destructive : nil) {
                         onMenu(item.id)
                     }
-                    .buttonHoverPointer()
                     .help(item.title.replacingOccurrences(of: "…", with: ""))
                     .accessibilityIdentifier(item.testID ?? "")
                 }
@@ -194,7 +193,7 @@ struct AtomDisclosure<Content: View>: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .buttonHoverPointer()
+            .plainButtonHoverPointer()
             .nativeHelp(props.collapsed ? "Expand \(props.title)" : "Collapse \(props.title)")
             .accessibilityLabel(props.title)
             .accessibilityValue(props.collapsed ? "Collapsed" : "Expanded")

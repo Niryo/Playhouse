@@ -102,12 +102,23 @@ enum InlineCodeStyle {
     }
 }
 
-/// Draws each inline code run's pill behind its glyphs, one per line the run spans.
-final class InlineCodeLayoutManager: NSLayoutManager {
+/// Draws what Markdown text shows behind its glyphs: each inline code run's pill, one per line
+/// the run spans, and each quote's bar down the leading edge of its lines.
+final class MarkdownLayoutManager: NSLayoutManager {
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: NSPoint) {
         super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
         guard let storage = textStorage, let container = textContainers.first else { return }
         let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        storage.enumerateAttribute(MarkdownQuoteStyle.attribute, in: characters) { value, range, _ in
+            guard let color = value as? NSColor else { return }
+            var bar = NSRect.null
+            enumerateLineFragments(forGlyphRange: glyphRange(forCharacterRange: range, actualCharacterRange: nil)) { lineRect, usedRect, _, _, _ in
+                bar = bar.union(NSRect(x: lineRect.minX, y: usedRect.minY, width: MarkdownQuoteStyle.barWidth, height: usedRect.height))
+            }
+            guard !bar.isNull else { return }
+            color.setFill()
+            NSBezierPath(roundedRect: bar.offsetBy(dx: origin.x, dy: origin.y), xRadius: 1.5, yRadius: 1.5).fill()
+        }
         storage.enumerateAttribute(InlineCodeStyle.attribute, in: characters) { value, range, _ in
             guard let color = value as? NSColor else { return }
             let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
@@ -152,247 +163,6 @@ struct ComposerDraftScope<Content: View>: View {
     var body: some View { content() }
 }
 
-/// The transcript's sizes for each block: larger than the app's body text, for reading replies.
-extension MarkdownBlock {
-    var font: NSFont {
-        switch kind {
-        case .heading(let level): NSFont.systemFont(ofSize: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
-        case .listItem, .orderedListItem, .quote, .paragraph, .rule: NSFont.systemFont(ofSize: 16)
-        case .codeBlock: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-        case .table: NSFont.systemFont(ofSize: 14)
-        }
-    }
-}
-
-/// A reply's Markdown blocks as rendered: runs of prose share one text view, while each code
-/// block and table keeps its own card.
-enum AssistantMarkdownSegment: Identifiable {
-    case prose([MarkdownBlock])
-    case card(MarkdownBlock)
-
-    var id: Int {
-        switch self {
-        case .prose(let blocks): blocks[0].id
-        case .card(let block): block.id
-        }
-    }
-
-    static func segments(of blocks: [MarkdownBlock]) -> [AssistantMarkdownSegment] {
-        var segments: [AssistantMarkdownSegment] = []
-        var prose: [MarkdownBlock] = []
-        for block in blocks {
-            if block.kind.isCard {
-                if !prose.isEmpty { segments.append(.prose(prose)) }
-                prose.removeAll()
-                segments.append(.card(block))
-            } else {
-                prose.append(block)
-            }
-        }
-        if !prose.isEmpty { segments.append(.prose(prose)) }
-        return segments
-    }
-}
-
-/// Remembers a value derived from reply text for each slot, such as one reply's prose run. Every
-/// message in the transcript re-renders when any of it changes, as on each update of a streaming
-/// reply, and parsing and styling every earlier reply again each time kept the main thread busy.
-/// A slot holds only its latest text, so a streaming reply replaces its own entry rather than
-/// filling the cache with each partial version and pushing finished replies out.
-final class ReplyRenderCache<Value> {
-    private final class Entry {
-        let key: String
-        let value: Value
-        init(key: String, value: Value) {
-            self.key = key
-            self.value = value
-        }
-    }
-
-    private let cache = NSCache<NSString, Entry>()
-
-    init(countLimit: Int) {
-        cache.countLimit = countLimit
-    }
-
-    func value(slot: String, key: String, make: () -> Value) -> Value {
-        if let entry = cache.object(forKey: slot as NSString), entry.key == key { return entry.value }
-        let value = make()
-        cache.setObject(Entry(key: key, value: value), forKey: slot as NSString)
-        return value
-    }
-}
-
-/// Consecutive prose blocks laid out as one attributed string. Comments keep block-relative
-/// offsets, so they survive a change in how blocks are grouped; this maps between those and
-/// positions in the combined text.
-struct AssistantProseLayout {
-    private struct PlacedBlock {
-        let block: MarkdownBlock
-        /// The block's own text, after any list marker.
-        let contentRange: NSRange
-        /// The whole line, list marker included.
-        let lineRange: NSRange
-    }
-
-    let text: NSAttributedString
-    private let placed: [PlacedBlock]
-
-    var id: Int { placed[0].block.id }
-
-    var endsWithParagraph: Bool {
-        if case .paragraph = placed[placed.count - 1].block.kind { return true }
-        return false
-    }
-
-    /// The text's own size and color: the reply's bullets read as part of the text, like an
-    /// editor's rendered Markdown, rather than as faint annotations beside it.
-    static let markerFont = NSFont.systemFont(ofSize: 16)
-    static let bulletFont = NSFont.systemFont(ofSize: 16, weight: .black)
-    /// Indent shared by every item, so bullets and numbers line up down a list.
-    private static let listIndent: CGFloat = 26
-    /// A quote's indent; it reads as a quote by its dimmed color and indent alone.
-    private static let quoteIndent: CGFloat = 16
-
-    private static func isListItem(_ kind: MarkdownBlock.Kind) -> Bool {
-        switch kind {
-        case .listItem, .orderedListItem: true
-        case .heading, .quote, .paragraph, .codeBlock, .table, .rule: false
-        }
-    }
-
-    private static let cache = ReplyRenderCache<AssistantProseLayout>(countLimit: 2000)
-
-    /// The layout for these blocks, kept for `slot` until their text or comments change.
-    static func cached(slot: String, blocks: [MarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) -> AssistantProseLayout {
-        var key = ""
-        for block in blocks {
-            let kind = switch block.kind {
-            case .heading(let level): "h\(level)"
-            case .listItem: "li"
-            case .orderedListItem(let number): "ol\(number)"
-            case .quote: "q"
-            case .paragraph: "p"
-            case .codeBlock, .table, .rule: "card"
-            }
-            key += "\(block.id)\u{1}\(kind)\u{1}\(block.text)\u{2}"
-        }
-        for annotation in responseAnnotations {
-            key += "\u{3}\(annotation.text)\u{1}\(annotation.comment)"
-        }
-        return cache.value(slot: slot, key: key) { AssistantProseLayout(blocks: blocks, responseAnnotations: responseAnnotations) }
-    }
-
-    init(blocks: [MarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) {
-        let text = NSMutableAttributedString()
-        var placed: [PlacedBlock] = []
-        for (index, block) in blocks.enumerated() {
-            let lineStart = text.length
-            let style = NSMutableParagraphStyle()
-            style.lineSpacing = 4
-            // A list's items sit close together; paragraphs and whole lists keep more room.
-            let next = index + 1 < blocks.count ? blocks[index + 1].kind : nil
-            switch block.kind {
-            case .heading: style.paragraphSpacing = 8
-            case .listItem, .orderedListItem:
-                style.paragraphSpacing = next.map(Self.isListItem) == true ? 6 : 14
-            case .quote, .paragraph, .codeBlock, .table, .rule:
-                style.paragraphSpacing = next.map(Self.isListItem) == true ? 10 : 14
-            }
-            if case .quote = block.kind {
-                style.firstLineHeadIndent = Self.quoteIndent
-                style.headIndent = Self.quoteIndent
-            }
-            let marker: (text: String, font: NSFont)? = switch block.kind {
-            case .listItem: ("•", Self.bulletFont)
-            case .orderedListItem(let number): ("\(number).", Self.markerFont)
-            case .heading, .quote, .paragraph, .codeBlock, .table, .rule: nil
-            }
-            if let marker {
-                // Wrapped lines align under the text, past the widest marker ("10.", "100.").
-                let markerWidth = ceil((marker.text as NSString).size(withAttributes: [.font: marker.font]).width)
-                let indent = max(Self.listIndent, markerWidth + 10)
-                style.firstLineHeadIndent = 6
-                style.headIndent = indent
-                style.tabStops = [NSTextTab(textAlignment: .left, location: indent)]
-                text.append(NSAttributedString(string: marker.text + "\t", attributes: [
-                    .font: marker.font,
-                    .foregroundColor: NSColor.labelColor,
-                    .paragraphStyle: style,
-                ]))
-            }
-            let content = NSMutableAttributedString(
-                attributedString: MarkdownInlineText.nsAttributedString(block.text, baseFont: block.font)
-            )
-            // Replaced here rather than by the text view, so offsets count the visible labels.
-            SelectableAnnotationText.replaceResponseAnnotationMarkers(in: content, references: responseAnnotations)
-            let contentRange = NSRange(location: text.length, length: content.length)
-            content.enumerateAttribute(.font, in: NSRange(location: 0, length: content.length)) { font, range, _ in
-                if font == nil { content.addAttribute(.font, value: block.font, range: range) }
-            }
-            content.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: content.length))
-            if case .quote = block.kind {
-                content.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: content.length)) { color, range, _ in
-                    if color == nil { content.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range) }
-                }
-            }
-            text.append(content)
-            placed.append(PlacedBlock(
-                block: block,
-                contentRange: contentRange,
-                lineRange: NSRange(location: lineStart, length: text.length - lineStart)
-            ))
-            if index < blocks.count - 1 {
-                text.append(NSAttributedString(string: "\n", attributes: [.font: block.font, .paragraphStyle: style]))
-            }
-        }
-        self.text = text
-        self.placed = placed
-    }
-
-    /// The comment's range in `text`, or nil when it belongs to blocks outside this run.
-    func range(of annotation: ConversationAnnotation) -> NSRange? {
-        range(of: annotation.source)
-    }
-
-    func range(of source: ConversationTextSource) -> NSRange? {
-        guard let start = placed.first(where: { $0.block.id == source.blockID })?.contentRange,
-              let end = placed.first(where: { $0.block.id == source.endBlockID })?.contentRange,
-              (0...start.length).contains(source.startOffset),
-              (0...end.length).contains(source.endOffset) else { return nil }
-        let location = start.location + source.startOffset
-        let endLocation = end.location + source.endOffset
-        guard endLocation > location else { return nil }
-        return NSRange(location: location, length: endLocation - location)
-    }
-
-    /// A selection in `text` as block-relative positions, with list markers and line breaks at
-    /// its ends left out; nil when it covers no block text.
-    func blockPositions(of range: NSRange) -> (blockID: Int, startOffset: Int, endBlockID: Int, endOffset: Int)? {
-        guard let start = placed.first(where: { NSMaxRange($0.contentRange) > range.location }),
-              let end = placed.last(where: { $0.contentRange.location < NSMaxRange(range) }) else { return nil }
-        let startLocation = max(range.location, start.contentRange.location)
-        let endLocation = min(NSMaxRange(range), NSMaxRange(end.contentRange))
-        guard endLocation > startLocation else { return nil }
-        return (start.block.id, startLocation - start.contentRange.location,
-                end.block.id, endLocation - end.contentRange.location)
-    }
-
-    var accessibilityBlocks: [CommentTrackingTextView.AccessibilityBlock] {
-        placed.map { placed in
-            let content = (text.string as NSString).substring(with: placed.contentRange)
-            let (identifier, label): (String, String) = switch placed.block.kind {
-            case .heading: ("assistant-markdown-heading-\(placed.block.id)", content)
-            case .listItem: ("assistant-markdown-list-item-\(placed.block.id)", content)
-            case .orderedListItem(let number): ("assistant-markdown-ordered-list-item-\(placed.block.id)", "\(number). " + content)
-            case .quote: ("assistant-markdown-quote-\(placed.block.id)", content)
-            case .paragraph, .codeBlock, .table, .rule: ("assistant-markdown-paragraph-\(placed.block.id)", content)
-            }
-            return CommentTrackingTextView.AccessibilityBlock(identifier: identifier, label: label, range: placed.lineRange)
-        }
-    }
-}
-
 struct CodeBlockCardView: View {
     let blockID: Int
     let code: String
@@ -433,7 +203,7 @@ struct CodeBlockCardView: View {
                         .font(.system(size: 12, weight: .medium))
                 }
                 .buttonStyle(.plain)
-                .buttonHoverPointer()
+                .plainButtonHoverPointer()
                 .nativeHelp("Copy code")
                 .accessibilityLabel("Copy code")
                 .cardIdentifier(identifierPrefix.map { "\($0)-code-block-copy-\(blockID)" })
@@ -503,7 +273,7 @@ struct CopyMessageButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .buttonHoverPointer()
+        .plainButtonHoverPointer()
         .nativeHelp("Copy message")
         .accessibilityLabel("Copy message")
         .accessibilityValue(didCopy ? "Copied" : "")

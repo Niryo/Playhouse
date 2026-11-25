@@ -172,6 +172,68 @@ enum PluginAgentRuns {
         }
     }
 
+    /// Starts an OpenCode run in a session of its own, read-only like a Codex run, and returns
+    /// its ID once OpenCode accepted the prompt. OpenCode's server has no structured output, so a
+    /// run with a JSON schema asks for it in the prompt (`PluginJSONSchema`) and checks the
+    /// answer; one that doesn't match is asked once more in the same session, and the session
+    /// is removed when the run ends.
+    static func startOpenCode(_ request: Request, opencode: OpenCodeClient, store: PluginAgentRunStore, origin: BridgeRequest) async throws -> String {
+        guard opencode.isInstalled else {
+            throw BridgeCommandError(code: "unavailable", message: "OpenCode isn't installed, so a plugin can't run an agent on it.")
+        }
+        guard var workspace = try? ConversationWorkspaceContext(roots: [request.cwd]) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The agent's cwd \(request.cwd.path) can't be used.")
+        }
+        workspace.isReadOnly = true
+        let client = opencode.makePluginAgentClient()
+        let sessionID: String
+        do {
+            sessionID = try await client.startThread(workspace: workspace, modelID: request.model ?? OpenCodeClient.defaultModelID, developerInstructions: nil)
+        } catch {
+            throw BridgeCommandError(code: client.isProviderUnavailable(error) ? "unavailable" : "operation_failed",
+                                     message: "OpenCode couldn't start the agent: \(error.localizedDescription)")
+        }
+        let record = PluginAgentRunRecord(
+            runID: newRunID(), pluginID: request.pluginID, context: request.context, startedAt: Date(),
+            model: request.model, process: nil, provider: ConversationProvider.opencode.rawValue, threadID: sessionID, turnID: nil
+        )
+        if !request.allowedTools.isEmpty {
+            PlayhouseDiagnostics.record("plugin.agent.allowed_tools_ignored", fields: ["pluginID": request.pluginID, "provider": "opencode", "count": String(request.allowedTools.count)])
+        }
+        let schema = request.jsonSchema
+        func send(_ text: String) async throws -> String {
+            var answer = ""
+            try await client.sendMessage(
+                text, mode: .code, modelID: request.model ?? OpenCodeClient.defaultModelID, effort: .medium,
+                threadID: sessionID, workspace: workspace,
+                onDelta: { _ in }, onFinalMessage: { answer = $0 }, onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
+                onActionRequest: {}, onUserInput: { _ in }, onTurnStarted: { _ in }
+            )
+            return answer
+        }
+        let turn = Task { @MainActor () -> Outcome in
+            let outcome: Outcome
+            do {
+                outcome = try await openCodeOutcome(
+                    first: send(schema.map { PluginJSONSchema.prompt(request.prompt, schema: $0) } ?? request.prompt),
+                    schema: schema, pluginID: request.pluginID, retry: send
+                )
+            } catch {
+                outcome = Outcome(status: "failed", result: .null, error: client.wasLastTurnInterrupted(threadID: sessionID)
+                    ? "OpenCode interrupted the turn." : error.localizedDescription)
+            }
+            await client.deleteSession(sessionID, workspace: workspace)
+            return outcome
+        }
+        let stop = { [weak client] in
+            // A run stopped between its answer and the schema's retry asks no more.
+            turn.cancel()
+            Task { @MainActor in _ = try? await client?.interruptActiveTurn(threadID: sessionID) }
+            return
+        }
+        return follow(record, request: request, store: store, origin: origin, stop: stop) { await turn.value }
+    }
+
     private static func newRunID() -> String { "agent-run-" + UUID().uuidString.lowercased() }
 
     /// Tracks and saves a started run, ends it at the timeout, and tells its
@@ -232,6 +294,28 @@ enum PluginAgentRuns {
             return Outcome(status: "failed", result: .null, error: turn.error ?? "Codex interrupted the turn.")
         default:
             return Outcome(status: "failed", result: .null, error: turn.error ?? "Codex couldn't finish the turn.")
+        }
+    }
+
+    /// How an OpenCode run ended: its final answer, or with a schema the JSON in it. An answer
+    /// that doesn't match the schema is asked for once more with what was wrong; a second
+    /// mismatch fails the run.
+    static func openCodeOutcome(
+        first answer: String, schema: PluginValue?, pluginID: String, retry: (String) async throws -> String
+    ) async throws -> Outcome {
+        guard let schema else { return Outcome(status: "done", result: .string(answer), error: nil) }
+        let problem: String
+        switch PluginJSONSchema.check(answer, schema: schema) {
+        case .valid(let value): return Outcome(status: "done", result: value, error: nil)
+        case .invalid(let found): problem = found
+        }
+        try Task.checkCancellation()
+        PlayhouseDiagnostics.record("plugin.agent.schema_retry", fields: ["pluginID": pluginID, "provider": "opencode", "problem": problem])
+        switch PluginJSONSchema.check(try await retry(PluginJSONSchema.correction(problem, schema: schema)), schema: schema) {
+        case .valid(let value):
+            return Outcome(status: "done", result: value, error: nil)
+        case .invalid(let again):
+            return Outcome(status: "failed", result: .null, error: "OpenCode's answer didn't match the JSON schema: \(again)")
         }
     }
 

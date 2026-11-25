@@ -49,6 +49,15 @@ enum ProviderTokenCalibration {
         items[heaviest].tokens += tokens - given
     }
 
+    /// What a provider's log leaves out of every request (its system prompt and tool
+    /// definitions): whatever the first request cost beyond its visible items, measured with
+    /// the append ratio.
+    static func hiddenTokens(items: [ProviderContextItem], firstVisible: [Int], firstContext: Int, deltas: [(items: [Int], tokens: Int)]) -> Int {
+        let ratio = appendRatio(items: items, deltas: deltas) ?? 0.25
+        let visibleEstimate = Int((Double(firstVisible.reduce(0) { $0 + items[$1].weight }) * ratio).rounded())
+        return max(0, firstContext - visibleEstimate)
+    }
+
     /// Ratio measured only from requests that append to the one before them.
     static func appendRatio(items: [ProviderContextItem], deltas: [(items: [Int], tokens: Int)]) -> Double? {
         var tokens = 0
@@ -70,6 +79,8 @@ struct ProviderSessionReference: Sendable {
     let sessionID: String
     /// Codex subagents run on their own threads, each with its own rollout file.
     let subagentThreadIDs: [String]
+    /// OpenCode: where its turns wrote the session's messages (`OpenCodeRequestLog`).
+    var requestLogDirectory: URL? = nil
 }
 
 /// What a token map reads: the provider sessions, and for one turn the span its requests were sent in.
@@ -319,6 +330,12 @@ enum ProviderTokenMap {
                     if let file = store.codexRolloutFile(threadID: thread, codexHome: homes.codexHome) {
                         files.append(("\(provider)/\(thread)", "Codex subagent \(thread)", false, file))
                     }
+                }
+            case .opencode:
+                guard let directory = session.requestLogDirectory else { continue }
+                files.append((provider, "OpenCode main agent", true, OpenCodeRequestLog.file(sessionID: session.sessionID, in: directory)))
+                for child in OpenCodeRequestLog.subagentFiles(of: session.sessionID, in: directory) {
+                    files.append(("\(provider)/\(child.sessionID)", "OpenCode subagent \(child.sessionID)", false, child.file))
                 }
             }
             for file in files {
@@ -618,6 +635,8 @@ enum ProviderTokenMap {
             if sent.missingShape { gaps.append("its system prompt and tool definitions") }
             if sent.missingMessages > 0 { gaps.append("\(sent.missingMessages) \(sent.missingMessages == 1 ? "message" : "messages")") }
             note = "Rebuilt from Claude Code's request log, which does not hold everything this request named; missing here: \(gaps.joined(separator: " and "))."
+        case .opencode:
+            note = "Reconstructed: OpenCode resends the session's messages, so this is every message its server lists before this request's answer, from the last compaction on. OpenCode does not return its system prompt or tool definitions; they are one estimated hidden-overhead item and are left out of the JSON export."
         case .codex:
             note = "Reconstructed: Codex resends the whole history, so this is its base instructions plus every item its rollout file saved before this request's output. Codex does not save its tool definitions or request framing; they are one estimated hidden-overhead item and are left out of the JSON export."
         }
@@ -689,6 +708,7 @@ enum ProviderTokenMap {
 
     /// Claude: the request's parameters, system prompt, tools and messages,
     /// with its cache markers put back. Codex: its instructions and input items.
+    /// OpenCode: the message parts it was sent, as its server lists them.
     private static func requestBody(_ sent: ProviderSentRequest, of log: ProviderAgentLog, store: ProviderRequestLogStore) throws -> [String: Any] {
         var locations: [(key: Int, location: ProviderContextLocation)] = sent.items.enumerated().compactMap { position, id in
             log.items[id].location.map { (position, $0) }
@@ -697,6 +717,9 @@ enum ProviderTokenMap {
         let values = store.values(at: locations, in: log)
         func value(_ position: Int) -> Any { values[position] ?? NSNull() }
         switch log.provider {
+        case .opencode:
+            let kinds = sent.items.map { log.items[$0].kind }
+            return ["messages": kinds.indices.filter { kinds[$0] != .hiddenOverhead }.map(value)]
         case .codex:
             let kinds = sent.items.map { log.items[$0].kind }
             return [

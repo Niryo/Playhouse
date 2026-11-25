@@ -252,7 +252,7 @@ extension BoardTaskManager {
     func markScheduledRunFailed(_ id: UUID, reason: String) async throws {
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
-            guard task.codexThreadID == nil, task.claudeSessionID == nil else { return }
+            guard !task.hasConversation else { return }
             task.status = .blocked
             task.statusMessage = "The scheduled run couldn't start: \(reason)"
             if task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty { task.hasUnsentDraft = true }

@@ -11,7 +11,7 @@
     "skills": true,
     "attach": { "disabled": false, "help": "Attach images" },
     "plan": { "on": false, "help": "Plan before making changes" },
-    "optimizedContext": { "on": false, "help": "Optimized context: each follow-up starts a fresh session with your messages, the last plan and the last answer, and the agent reads more on demand" },
+    "optimizedContext": { "on": false, "help": "Optimized context: each follow-up starts a fresh session with your messages and the last answer, and the agent reads more on demand" },
     "goal": { "on": false, "help": "Set a goal to keep pursuing" },
     "startImplementing": {
       "disabled": false,

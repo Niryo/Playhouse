@@ -178,7 +178,9 @@ extension PlayhouseUITests {
     // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing one of two pending repositories leaves the remaining repository in task context and remembered settings, while preserving the removed source repository; the next task restores only the remaining remembered repository. Removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
     func test_task_repository_removal_preserves_state_on_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        launchApp(defaultParent: fixture.parent.path)
+        // Its own daemon, so killing it below leaves the UI runner's shared one alone.
+        let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).repo-removal-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
 
         let soleTitle = "Two repository removal through UI"
         let sole = try runCLI(["task", "create", "--title", soleTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any]
@@ -244,7 +246,7 @@ extension PlayhouseUITests {
         defer {
             if !cleanReservationReleased { try? cleanReservation.release() }
         }
-        _ = try runCLI(["task", "repository", "remove", cleanActiveID, "--repo", fixture.alternate.path])
+        _ = try runCLI(["task", "repository", "remove", cleanActiveID, "--repo", fixture.alternate.path], extraEnvironment: daemonEnvironment)
         XCTAssertTrue(FileManager.default.fileExists(atPath: cleanWorktreePath))
         let cleanupScheduled = try XCTUnwrap(diagnosticEvents().first {
             $0["event"] as? String == "workspace.repository.deferred_removal_scheduled"
@@ -252,13 +254,16 @@ extension PlayhouseUITests {
         })
         let bridgePIDText = try XCTUnwrap(cleanupScheduled["processID"] as? String)
         let bridgePID = pid_t(try XCTUnwrap(Int32(bridgePIDText)))
+        XCTAssertEqual(try daemonProcessID(environment: daemonEnvironment), Int(bridgePID), "The case's own daemon should have scheduled the cleanup.")
+        XCTAssertNotEqual(try daemonProcessID(environment: ["PLAYHOUSE_BRIDGE_SERVICE_NAME": serviceName]), Int(bridgePID), "The daemon killed here must not be the runner's shared one.")
         if kill(bridgePID, SIGKILL) != 0 {
             XCTAssertEqual(errno, ESRCH, "The bridge service should either be killed here or already have exited.")
         }
         XCTAssertTrue(waitUntil({ kill(bridgePID, 0) != 0 && errno == ESRCH }, timeout: 5), "The isolated bridge service should exit before recovery is tested.")
         try cleanReservation.release()
         cleanReservationReleased = true
-        _ = try taskRecord(id: cleanActiveID)
+        // A fresh daemon on the same service recovers the cleanup the killed one scheduled.
+        _ = try runCLI(["task", "get", cleanActiveID], extraEnvironment: daemonEnvironment)
         XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: cleanWorktreePath) }, timeout: 10),
                       "Deferred cleanup should remove an unchanged managed worktree after the turn releases.")
 

@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name led by one icon for the agents that start it in Playhouse sessions (the Claude logo for Claude only, the Codex logo for Codex only, a green check for both), without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
+    // case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists, in one sectioned list whose Repo, Global and Managed anchors scroll it to their sections, each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server row shows only its name led by one icon for the agents that start it in Playhouse sessions (the Claude logo for Claude only, the Codex logo for Codex only, a green check for every agent, and an outlined check naming the agents for some, such as Codex and OpenCode, which Playhouse passes nothing and which uses only the skills, rules and MCP servers it finds itself in the task's working folder and home folder), without hovering, and its other details show in a hint left of the row while the pointer rests on it, which carries no provider icon: each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
     func test_mcp_catalog_lists_repo_global_and_managed_servers() throws {
         let working = try makeSkillRepository("mcp-catalog-repo", skills: [
             ".mcp.json": #"{"mcpServers": {"repo-docs": {"type": "stdio", "command": "node", "args": ["docs.js"], "env": {"DOCS_TOKEN": "${DOCS_TOKEN}", "DOCS_MODE": "secret-mode-value"}}, "repo-sse": {"type": "sse", "url": "https://sse.example.com/mcp"}}}"#,
@@ -35,7 +35,7 @@ extension PlayhouseUITests {
             "[mcp_servers.off-tool]", "command = \"off-tool\"", "enabled = false", "",
         ].joined(separator: "\n"))
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-catalog")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-catalog")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("MCP catalog", repositories: [working, other, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -61,8 +61,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-env-\(docs)")), "Environment: DOCS_MODE, DOCS_TOKEN",
                        "Only the names of its environment variables are shown.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'secret-mode-value'")).firstMatch.exists, "Values are never shown.")
-        XCTAssertEqual(rowProviders("mcp-provider-\(docs)"), ["claude", "codex"], "The agents that start it show on its row.")
-        XCTAssertEqual(rowBadge("mcp-provider-\(docs)-both").label, "Claude and Codex", "One green icon marks a server both agents start.")
+        XCTAssertEqual(rowProviders("mcp-provider-\(docs)"), ["claude", "codex"], "The agents that start it show on its row; OpenCode reads only its own opencode.json.")
+        XCTAssertEqual(rowBadge("mcp-provider-\(docs)-claude-codex").label, "Claude and Codex", "An outlined check names the agents that start it.")
         XCTAssertFalse(revealMcpHint(docs).descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'mcp-provider-'")).firstMatch.exists,
                        "The agents show on the row, not in the hint.")
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-\(docs)")), "Playhouse passes it to Codex.", ".mcp.json is Claude's own.")
@@ -118,7 +118,8 @@ extension PlayhouseUITests {
         search.typeKey(.delete, modifierFlags: [])
         XCTAssertTrue(element("mcp-row-claude-only").waitToExist(timeout: 5), "Clearing the search shows every global server again.")
         XCTAssertTrue(hintDetail("mcp-native-shared").exists, "A server both global files define the same way is one entry both CLIs start.")
-        XCTAssertFalse(hintDetail("mcp-shared-shared").exists)
+        // The same hint, still open, names the agent Playhouse passes it to.
+        XCTAssertFalse(element("mcp-shared-shared").exists, "Claude Code and Codex each read it themselves, and Playhouse passes OpenCode nothing.")
         XCTAssertTrue(element("mcp-conflict-clash").exists, "Two global definitions that differ are a conflict.")
         XCTAssertTrue(accessibleLabelOrValue(of: hintDetail("mcp-issue-clash")).contains("differently"))
         XCTAssertEqual(accessibleLabelOrValue(of: hintDetail("mcp-shared-claude-only")), "Playhouse passes it to Codex.")
@@ -180,7 +181,7 @@ extension PlayhouseUITests {
             "[profiles.fast]", "model = \"gpt-6-mini\"", "",
         ].joined(separator: "\n"))
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-manage")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-manage")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("MCP manage", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -316,7 +317,7 @@ extension PlayhouseUITests {
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
         let beforeClaude = try String(contentsOf: mcpClaudeState, encoding: .utf8)
         let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-link")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-link")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("MCP links", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -395,7 +396,7 @@ extension PlayhouseUITests {
         try writeMcpJSON(mcpClaudeState, ["mcpServers": ["clash": ["type": "stdio", "command": "clash-a", "args": [], "env": [:]]]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.clash]\ncommand = \"clash-b\"\n")
         try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
-        let executable = try installSkillsClaudeFixture("claude-fixture-mcp-fix")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-fix")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let source = try createSkillsTask("MCP fix source", repositories: [repository], provider: "claude")
@@ -469,7 +470,7 @@ extension PlayhouseUITests {
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\nenv_vars = [\"CODEX_KEY\"]\n\n[mcp_servers.codex-off]\ncommand = \"codex-off\"\n")
         let beforeClaude = try String(contentsOf: mcpClaudeState, encoding: .utf8)
         let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
-        let executable = try installSkillsClaudeFixture("claude-fixture-mcp-bridge")
+        let executable = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-bridge")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Claude MCP", repositories: [repository, extra], provider: "claude")
@@ -544,7 +545,7 @@ extension PlayhouseUITests {
         ]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\n\n[mcp_servers.codex-off]\ncommand = \"codex-off\"\n")
         let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
-        _ = try installSkillsClaudeFixture("claude-fixture-mcp-codex")
+        try installClaudeFixtureExecutable(named: "claude-fixture-mcp-codex")
         launchApp(defaultParent: fixture.parent.path)
         let task = try createSkillsTask("Codex MCP", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -634,7 +635,7 @@ extension PlayhouseUITests {
         let repository = try makeSkillRepository("mcp-status-repo", skills: [:])
         try writeMcpJSON(mcpClaudeState, ["mcpServers": ["claude-remote": ["type": "http", "url": "https://remote.example.com/mcp"]]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-remote]\nurl = \"https://codex.example.com/mcp\"\n\n[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\n")
-        let claude = try installSkillsClaudeFixture("claude-fixture-mcp-status")
+        let claude = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-status")
         try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [
             ["name": "claude-remote", "status": "needs-auth"],
             ["name": "claude.ai Notes", "status": "needs-auth"],
@@ -740,7 +741,7 @@ extension PlayhouseUITests {
             "claude-other": ["type": "http", "url": "https://other.example.com/mcp"],
         ]])
         try writeRuleFile(mcpCodexConfig, "[mcp_servers.shared-remote]\nurl = \"https://remote.example.com/mcp\"\n\n[mcp_servers.codex-remote]\nurl = \"https://codex.example.com/mcp\"\n\n[mcp_servers.codex-other]\nurl = \"https://codex-other.example.com/mcp\"\n")
-        let claude = try installSkillsClaudeFixture("claude-fixture-mcp-auth")
+        let claude = try installClaudeFixtureExecutable(named: "claude-fixture-mcp-auth")
         try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [
             ["name": "shared-remote", "status": "needs-auth"], ["name": "claude-other", "status": "needs-auth"],
         ])

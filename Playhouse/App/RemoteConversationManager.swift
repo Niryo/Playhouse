@@ -20,7 +20,7 @@ struct RemoteConversationManager {
         // These clients are never started: the store operations below don't use them.
         store = ConversationManager(
             tasks: BoardTaskManager(modelContext: modelContext),
-            clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient())
+            clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient(), opencode: OpenCodeClient())
         )
     }
 
@@ -227,12 +227,13 @@ struct RemoteConversationManager {
         }
     }
 
-    func steer(taskID: UUID, text: String, imageDataURLs: [String] = []) async throws -> Bool {
+    func steer(taskID: UUID, text: String, imageDataURLs: [String] = [], sentAt: Date = Date()) async throws -> Bool {
         let result = try await daemon.call("conversation.steer", [
             "taskID": id(taskID),
             "message": .string(text),
             "images": .array(imageDataURLs.map(BridgeValue.string)),
             "queueIfMissed": .boolean(false),
+            "sentAt": .decimal(sentAt.timeIntervalSince1970),
         ])
         return result.object?["accepted"]?.bool ?? false
     }
@@ -245,8 +246,10 @@ struct RemoteConversationManager {
         ]).decoded(QueuedConversationMessage.self)
     }
 
-    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
-        let result = try await daemon.call("conversation.queue.steer", ["taskID": id(taskID), "messageID": .string(messageID.uuidString)])
+    func steerQueuedMessage(taskID: UUID, messageID: UUID, sentAt: Date = Date()) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
+        let result = try await daemon.call("conversation.queue.steer", [
+            "taskID": id(taskID), "messageID": .string(messageID.uuidString), "sentAt": .decimal(sentAt.timeIntervalSince1970),
+        ])
         let queued = result.object?["queued"]?.bool ?? false
         return (result.object?["text"]?.string ?? "", result.object?["images"]?.strings ?? [], !queued)
     }
