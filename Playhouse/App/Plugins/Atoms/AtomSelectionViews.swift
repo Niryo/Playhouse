@@ -158,7 +158,6 @@ struct AtomCard<Content: View>: View {
                     Button(item.title, systemImage: item.icon ?? "circle", role: item.destructive == true ? .destructive : nil) {
                         onMenu(item.id)
                     }
-                    .buttonHoverPointer()
                     .help(item.title.replacingOccurrences(of: "…", with: ""))
                     .accessibilityIdentifier(item.testID ?? "")
                 }

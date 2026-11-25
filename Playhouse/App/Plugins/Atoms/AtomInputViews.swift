@@ -177,7 +177,6 @@ struct AtomMenu: View {
                         }
                     }
                     .disabled(item.disabled == true)
-                    .buttonHoverPointer()
                     .help(item.help ?? item.title)
                     .modifier(Applied(when: item.testID != nil) { $0.accessibilityIdentifier(item.testID ?? "") })
                 }

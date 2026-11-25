@@ -90,7 +90,6 @@ struct PlayhouseApp: App {
                 Button("Search Tasks") {
                     NotificationCenter.default.post(name: .playhouseShowBoardSearch, object: nil)
                 }
-                .buttonHoverPointer()
                 .help("Search tasks")
                 .keyboardShortcut("f", modifiers: .command)
             }
@@ -237,7 +236,6 @@ struct PluginsMenuContent: View {
         Toggle("Add Plugin Mode", isOn: Binding(get: { isAddModeOn }, set: { PluginRegistry.setAddMode($0) }))
             .help("Show where a new plugin's button can go")
         Button("Plugin Catalog") { openWindow(id: "plugin-catalog") }
-            .buttonHoverPointer()
             .help("Open the Plugin Catalog")
         if !registry.builtInPlugins.isEmpty {
             Divider()
@@ -310,7 +308,6 @@ struct PluginsMenuContent: View {
         }
         Divider()
         Button("Reload Plugins") { Task { await registry.reload() } }
-            .buttonHoverPointer()
             .help("Read the plugins folder again")
     }
 
@@ -409,7 +406,6 @@ struct CheckForUpdatesMenuItem: View {
 
     var body: some View {
         Button("Check for Updates…") { Task { await updates.checkNow() } }
-            .buttonHoverPointer()
             .help("Check GitHub for a newer Playhouse release")
             .disabled(!updates.isRelease || updates.isWorking)
     }

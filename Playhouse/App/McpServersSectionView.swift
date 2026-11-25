@@ -561,12 +561,10 @@ struct McpServersSectionView: View {
     private func actions(_ server: McpServerRecord, key: String) -> some View {
         Menu {
             Button(server.editable ? "Edit…" : "View…") { openEditor(server) }
-                .buttonHoverPointer()
                 .help(server.editable ? "Edit the server" : "Read the server's definition")
                 .accessibilityIdentifier("mcp-edit-\(key)")
             if let path = server.locations.first?.path {
                 Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
-                    .buttonHoverPointer()
                     .help("Show the file that defines the server in Finder")
                     .accessibilityIdentifier("mcp-reveal-\(key)")
             }
@@ -574,13 +572,11 @@ struct McpServersSectionView: View {
                 if server.linkable {
                     Divider()
                     Button("Make Available Outside Playhouse…") { pendingLink = server }
-                        .buttonHoverPointer()
                         .help("Write the server into the configuration of the CLI that doesn't start it yet")
                         .accessibilityIdentifier("mcp-link-\(key)")
                 }
                 Divider()
                 Button("Delete…", role: .destructive) { pendingDelete = server }
-                    .buttonHoverPointer()
                     .help("Remove the server from every file that defines it")
                     .accessibilityIdentifier("mcp-delete-\(key)")
             }
