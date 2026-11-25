@@ -277,7 +277,7 @@ extension PlayhouseUITests {
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line once it has run for a second, and in the window it is first listed inside until then, so a process reported started and finished together never flashes outside; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows in the live turn and in history reloaded from Playhouse's store. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line once it has run for a second, and in the window it is first listed inside until then, so a process reported started and finished together never flashes outside; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click and lists the in-flight calls instead of a Thinking row, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live duration; each finished call is one line until the reader expands it, which reveals its detail and completed duration, and collapsing returns it to one line. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows in the live turn and in history reloaded from Playhouse's store. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -343,11 +343,18 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("codex-activity-row-item_fixture_mcp_call").waitToExist(timeout: 10), "Working for should list an in-flight call.")
         XCTAssertFalse(element("codex-activity-thinking").exists, "Thinking should give way once Working for lists activity.")
         attachScreenshot(named: "Working for stays open while the turn runs")
-        // Activity rows are groups; their details and durations are child texts.
+        // Activity rows are groups that stay one line until expanded; their details and
+        // durations are child texts of the expanded row, so reading them expands it.
         func rowText(_ id: String) -> String {
-            [element("codex-activity-row-\(id)").label,
-             element("codex-activity-detail-\(id)").value as? String ?? "",
-             element("codex-activity-duration-\(id)").value as? String ?? ""].joined(separator: " ")
+            let toggle = element("codex-activity-toggle-\(id)")
+            if toggle.exists, toggle.value as? String == "collapsed" {
+                bringIntoTranscriptViewport(toggle, scrollView: element("conversation-scroll-view"))
+                toggle.click()
+                XCTAssertTrue(element("codex-activity-duration-\(id)").waitToExist(timeout: 5), "Expanding \(id) shows its duration.")
+            }
+            return [element("codex-activity-row-\(id)").label,
+                    element("codex-activity-detail-\(id)").value as? String ?? "",
+                    element("codex-activity-duration-\(id)").value as? String ?? ""].joined(separator: " ")
         }
         func containsPositiveDuration(_ value: String) -> Bool {
             value.range(of: #"Duration · [1-9][0-9]* ms"#, options: .regularExpression) != nil
@@ -447,6 +454,23 @@ extension PlayhouseUITests {
         let completedMcpRow = activityRow("item_fixture_mcp_call")
         let completedDynamicRow = activityRow("item_fixture_dynamic_call")
         let completedLegacyDynamicRow = activityRow("item_fixture_dynamic_legacy")
+        // A finished row is one line; expanding it shows its detail and duration.
+        XCTAssertLessThan(completedDynamicRow.frame.height, 45, "A collapsed tool row is a single line: \(completedDynamicRow.frame)")
+        XCTAssertFalse(element("codex-activity-detail-item_fixture_dynamic_call").exists, "A collapsed row hides its detail.")
+        XCTAssertFalse(element("codex-activity-duration-item_fixture_dynamic_call").exists, "A collapsed row hides its duration.")
+        let dynamicToggle = element("codex-activity-toggle-item_fixture_dynamic_call")
+        XCTAssertEqual(dynamicToggle.value as? String, "collapsed")
+        bringIntoTranscriptViewport(completedDynamicRow, scrollView: element("conversation-scroll-view"))
+        attachElementScreenshot(completedDynamicRow, named: "Collapsed tool row is one line")
+        dynamicToggle.click()
+        let dynamicDetail = element("codex-activity-detail-item_fixture_dynamic_call")
+        XCTAssertTrue(dynamicDetail.waitToExist(timeout: 5), "Expanding a row shows its detail.")
+        XCTAssertTrue("\(dynamicDetail.label) \(dynamicDetail.value as? String ?? "")".contains("Tool call failed"))
+        XCTAssertEqual(element("codex-activity-duration-item_fixture_dynamic_call").value as? String, "Duration · 37 ms", "Expanding a row shows its duration.")
+        XCTAssertGreaterThan(completedDynamicRow.frame.height, 45, "The expanded row grows past one line: \(completedDynamicRow.frame)")
+        attachElementScreenshot(completedDynamicRow, named: "Expanded tool row shows its detail and duration")
+        dynamicToggle.click()
+        XCTAssertTrue(waitUntil({ !dynamicDetail.exists && completedDynamicRow.frame.height < 45 }, timeout: 5), "Collapsing returns the row to one line.")
         XCTAssertTrue(completedMcpRow.label.contains("MCP · lookup"))
         XCTAssertTrue(rowText("item_fixture_mcp_call").contains("fixture-server"))
         XCTAssertTrue(rowText("item_fixture_mcp_call").contains("Returned 1 result item"))
