@@ -25,9 +25,9 @@ comments and side chats.
 
 | Path | What it is |
 | --- | --- |
-| `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`), `PluginCommands` (the `/` commands a plugin exposes: their manifest, the handlers' results, `JavaScriptCommandHandler` and the daemon's `PluginHeadlessHost`). Also compiled into the bridge daemon. |
-| `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom name to a builder that decodes the node's props. |
-| `Renderer/` | `PluginSurface` (runs one script and renders its tree) and the Plugin Catalog window. |
+| `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `AtomEvents` (where atoms send their events: a plugin's runtime or a native tree's `AtomEventHandlers`), `PluginRenderCommand` (`playhouse plugin render`), `PluginCommands` (the `/` commands a plugin exposes: their manifest, the handlers' results, `JavaScriptCommandHandler` and the daemon's `PluginHeadlessHost`). Also compiled into the bridge daemon. |
+| `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom's props type to a builder that makes its view from the props the node stores. |
+| `Renderer/` | `PluginSurface` (runs one script and renders its tree), the Plugin Catalog window, and `AtomTreeBenchmark` (a development benchmark, see "Typed and dynamic props"). |
 | `Host/` | Installed plugins in the app: `PluginRegistry` (the plugins `plugin list` reports), `PluginSlot` (a placement's entry buttons and Add Plugin mode's "Add here" placeholder), `PluginInlineSlot` (a placement's inline plugins, rendered in place), `PluginHost` (the host calls, answered the same way for script and built-in plugins), `PluginSurfaceView` (a mounted script plugin with live props), its popover, modal, sidebar, page and inline presentations, and the mode's banner. |
 | `BuiltIn/` | The built-in plugins, written in Swift and compiled into the app (see "Built-in plugins"). |
 | `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, `TokenStats.js`, `SkillsPage.js`, `RepositoryChips.js`, `Composer.js`, `KanbanColumn.js`, `DoneArchive.js`, and their `sample-*.json` data). |
@@ -268,7 +268,8 @@ These are composites too, and still to settle:
 | `PressArea`, `Popover`, `Modal` | A press or presentation around a column `Stack`; a Popover's or Modal's `inset` and `spacing` are a padded nested `Stack`'s `padding` and `spacing`, and a titled Modal's header is a row `Stack` of the accent `Icon`, a column `Stack` of the title and subtitle `Text`s, a `Spacer` and a `Button` around an `xmark` `Icon` whose `onPress` closes it (`AtomModalHeader`, built from those atoms' views) | The column, padding and header are reachable through those atoms (give the Modal `inset: 0` and no `title`), but they draw their own |
 | `Page`, `SidePanel` | A presentation around a column `Stack` on a `window`-filled surface | The column and the fill are reachable through a `Stack`; the shadow over what they cover and the SidePanel's one-edge hairline are reachable through no smaller atom |
 
-To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
+To add an atom, add its case, its props struct (an `AtomProps` naming its
+`atomType`) and its `propsType` to `Core/AtomProps.swift`, its
 view to `Atoms/AtomViews.swift`, its registry entry to
 `Atoms/AtomRegistry.swift`, and a catalog page `catalog/<Atom>.js`. Add one
 only when a native composite needs it, and only when existing smaller atoms
@@ -746,8 +747,9 @@ Swift applies a commit with `PluginNodeTree.apply`. A malformed op rejects the
 whole commit before any of it applies. Each `create` and
 `update` is checked against the atom's props struct first.
 `PluginValueDecoder` decodes the props struct straight from the
-`PluginValue`s, with no JSON in between, both for this check and on every
-render in `AtomRegistry`. An invalid prop is reported with its path and what
+`PluginValue`s, with no JSON in between, once, for this check; the node
+stores the decoded structs, so rendering never decodes (see "Typed and
+dynamic props"). An invalid prop is reported with its path and what
 is wrong, for example `<PillPicker> has an invalid prop: options.0.label: missing`. Every
 `PluginNode` is observed on its own, so an op redraws only the SwiftUI view
 of the node it changes. For example, toggling a label sends one `text` op,
@@ -755,8 +757,57 @@ and only that `Text` re-renders.
 
 Timer callbacks run inside `batchedUpdates` too, so one tick commits once.
 
-Events go the other way. An atom view calls
-`PluginRuntime.dispatch(nodeID:event:value:)`, which runs
-`__playhouseDispatch(id, event, value)`. That finds the node's current
-handler and calls it inside `batchedUpdates`, so its state updates arrive as
-one commit.
+### Typed and dynamic props
+
+A `PluginNode` holds its props one of two ways (`PluginNodeProps`):
+
+- **Dynamic**, from a plugin: the op's `[String: PluginValue]` dictionary.
+  `AtomType.validate` checks and decodes it once when the op applies, into
+  the atom's props struct and `AtomCommon`, and the node stores them in
+  `resolved`. An update with equal props changes nothing. A tree without
+  validation decodes on its own and keeps the error in `resolved`, which the
+  node's view shows as `plugin-node-error`; the error is computed when the op
+  applies, not when the node renders.
+- **Typed**, from native Swift: `PluginNode(id:props:common:)` takes the
+  props struct itself (`PluginNode(id: 3, props: MeterProps(fraction: 0.4),
+  common: AtomCommon(width: 80))`), its atom is the struct's `atomType`, and
+  `setProps(_:common:)` replaces them, doing nothing when they are equal.
+  There is no dictionary and nothing is decoded. Native code is trusted, so
+  typed props skip the op checks (unknown keys, a Button's reserved shortcut,
+  an Image's URL, a Markdown's frontmatter mode). Where an atom's own prop
+  shares a name with a common one (`width` and `height` of `Popover`,
+  `Modal` and `SidePanel`), one plugin key sets both, so typed props must set
+  them alike (`PluginNodeProps.conflictingKeys`, asserted in debug builds).
+
+Either way, a node's view reads only `resolved`, and `AtomRegistry` has one
+entry per props type that builds the atom's view from it, so both kinds share
+the same view code and rendering never decodes. Like the rest of `Core/`, the
+node, its props and the typed API are Foundation-only, and props hold only
+plain values (strings, numbers, booleans and string names such as `accent`),
+never SwiftUI types. The props structs are `Codable`: `PluginNodeProps.values`
+encodes typed props into the dictionary a plugin would send (the tree
+snapshot shows them that way), so a tree can be serialized for a UI written
+in another language.
+
+`scripts/benchmark-atom-tree.sh` measures the renderer in a Release build (the
+`PLAYHOUSE_ATOM_BENCHMARK` condition compiles in `Renderer/AtomTreeBenchmark.swift`
+and its decode and body counters, never into a shipped app): a board of 300
+card-like trees opened, streamed into and fully updated, a lazy 500-card list
+scrolled, and the streaming on a typed board, which must decode nothing. It
+prints the median of several fresh app runs. `scripts/unit/plugin-node-props-tests.swift`,
+run by `scripts/test-e2e.sh`, checks the decode counts, typed nodes, stored
+errors, the Codable round trip and the native event handlers.
+
+Events go the other way. An atom view calls `dispatch(nodeID:event:value:)`
+on the tree's `AtomEventHandler` (`Core/AtomEvents.swift`), which
+`PluginNodeView` takes beside the node. For a plugin that is its
+`PluginRuntime`, which runs `__playhouseDispatch(id, event, value)`. That finds
+the node's current handler and calls it inside `batchedUpdates`, so its state
+updates arrive as one commit. A native tree passes an `AtomEventHandlers`
+instead and registers a Swift closure per node and event
+(`handlers.on(node, "onPress") { _ in … }`), with no JavaScript runtime; the
+typed board in the benchmark renders that way. Registering also lists the
+event in the node's `events`, which a TextField's Return and arrows and a
+Scroll's end read to decide whether to take them, so a native tree sets
+`events` only through its handlers, never through ops. Either way `dispatch` returns
+false when the node has no handler for the event.

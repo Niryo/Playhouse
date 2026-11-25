@@ -137,6 +137,15 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/markdown-document-tests.swift" \
   -o "${markdown_document_tests}"
 "${markdown_document_tests}"
+# Checks that plugin nodes decode their props once per op, never when read, and that native
+# typed props are never decoded and round-trip through Codable. Built from all of the plugin
+# core, which so also builds with no SwiftUI or AppKit.
+plugin_node_props_tests="${test_output_dir}/plugin-node-props-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O -D PLAYHOUSE_ATOM_BENCHMARK \
+  "${repository_root}"/Playhouse/App/Plugins/Core/*.swift \
+  "${repository_root}/scripts/unit/plugin-node-props-tests.swift" \
+  -o "${plugin_node_props_tests}"
+"${plugin_node_props_tests}"
 # The CLI's command catalog against its parser: no handled command without a help entry, and
 # no declared command without a handler. Built from the CLI's sources minus its entry point.
 cli_command_catalog_tests="${test_output_dir}/cli-command-catalog-tests"
