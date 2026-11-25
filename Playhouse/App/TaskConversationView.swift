@@ -266,8 +266,8 @@ struct TaskConversationView: View {
     /// Automatic messages the reader expanded past their preview, by their full text: a
     /// streamed message gets a new id once history reloads, and its text stays the same.
     @State var expandedAutomaticMessageTexts = Set<String>()
-    /// Activities whose long title the reader expanded past its preview, by activity id.
-    @State var expandedActivityTitleIDs = Set<String>()
+    /// Activity rows the reader expanded past their one-line header, by activity id.
+    @State var expandedActivityIDs = Set<String>()
     @State var selectedSubagent: ConversationActivity?
     @State var subagentHistory: ConversationHistory?
     /// Re-reads the open agent while it is still working.

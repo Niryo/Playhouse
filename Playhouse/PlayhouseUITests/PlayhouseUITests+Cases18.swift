@@ -652,6 +652,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain inspectable.")
         let activityDetail = element("codex-activity-detail-item_playhouse_subagent")
+        XCTAssertFalse(activityDetail.exists, "The collapsed row hides its detail.")
+        element("codex-activity-toggle-item_playhouse_subagent").click()
         XCTAssertTrue(activityDetail.waitToExist(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
         XCTAssertTrue(detailDescription.contains("Inspect the project structure and report relevant files."))

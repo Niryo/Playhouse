@@ -530,7 +530,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(toggle.value as? String, "collapsed")
         attachScreenshot(named: "long-notice-6-collapsed-after-reopen")
     }
-    // case-contract: test_long_command_activity_title_is_previewed | A tool call whose command is long keeps its whole command: the streamed activity and fresh CLI/XPC history carry its title as Running followed by every line of a heredoc or every character of a long single-line command, and a short command's title is recorded unchanged. While the heredoc still runs, its live command row shows only the title's first line ending in an ellipsis, with no expand control. In the transcript's Worked for list a long title shows its first line, cut to 160 characters and ending in an ellipsis, with an expand control whose accessibility label names expanding the activity title; expanding reveals all of the command and collapsing restores the preview, while the row's accessibility label keeps the full title. A short command's row shows its whole title with no control, and reopening the task shows the long title collapsed again. The preview is Playhouse-owned presentation in the activity row both providers share, and both build a command's title as Running followed by the whole command, so Claude is the representative provider.
+    // case-contract: test_long_command_activity_title_is_previewed | A tool call whose command is long keeps its whole command: the streamed activity and fresh CLI/XPC history carry its title as Running followed by every line of a heredoc or every character of a long single-line command, and a short command's title is recorded unchanged. While the heredoc still runs, its live command row shows only the title's first line ending in an ellipsis, with no expand control. In the transcript's Worked for list a long title shows its first line, cut to 160 characters and ending in an ellipsis, and every row is one line with an expand control whose accessibility label names expanding the activity; expanding reveals all of the command and collapsing restores the one-line preview, while the row's accessibility label keeps the full title. A short command's row shows its whole title on one line with the same control and its duration hidden until expanded, and reopening the task shows the long title collapsed again. The preview is Playhouse-owned presentation in the activity row both providers share, and both build a command's title as Running followed by the whole command, so Claude is the representative provider.
     func test_long_command_activity_title_is_previewed() throws {
         _ = try installClaudeFixture(named: "claude-fixture-ui-long-command")
         let executable = dataDirectory.appendingPathComponent("claude-fixture-ui-long-command")
@@ -557,7 +557,7 @@ extension PlayhouseUITests {
         openTask(named: "Long command title")
         let longRow = element("codex-activity-row-toolu_long_heredoc")
         let longTitle = element("codex-activity-title-toolu_long_heredoc")
-        let toggle = element("codex-activity-title-toggle-toolu_long_heredoc")
+        let toggle = element("codex-activity-toggle-toolu_long_heredoc")
 
         // While the heredoc runs it is the live command row, which shows only its preview.
         let hold = executable.path + ".long-command"
@@ -584,41 +584,49 @@ extension PlayhouseUITests {
         XCTAssertTrue(toggle.waitToExist(timeout: 5), "A long title offers an expand control.")
         XCTAssertTrue(text(of: longTitle).contains(heredocPreview), "The collapsed title is the command's first line ending in an ellipsis: \(text(of: longTitle))")
         XCTAssertFalse(text(of: longTitle).contains("Release note line"), "The collapsed title shows none of the heredoc's body.")
-        XCTAssertEqual(toggle.label, "Expand activity title to show all text")
+        XCTAssertEqual(toggle.label, "Expand activity to show all text")
         XCTAssertEqual(toggle.value as? String, "collapsed")
         XCTAssertTrue(longRow.label.contains(lastLine), "The row's accessibility label keeps the whole command.")
         let collapsedHeight = longRow.frame.height
-        XCTAssertLessThan(collapsedHeight, 120, "The collapsed row stays a few lines tall: \(longRow.frame)")
+        XCTAssertLessThan(collapsedHeight, 45, "The collapsed row is a single line: \(longRow.frame)")
 
         // A long single-line command is cut at 160 characters.
         let singleTitle = element("codex-activity-title-toolu_long_single_line")
-        let singleToggle = element("codex-activity-title-toggle-toolu_long_single_line")
+        let singleToggle = element("codex-activity-toggle-toolu_long_single_line")
         XCTAssertTrue(singleTitle.waitToExist(timeout: 5), "The single-line command's row is listed under Worked for.")
         XCTAssertTrue(text(of: singleTitle).contains(singleLinePreview), "The title is cut to its first 160 characters: \(text(of: singleTitle))")
         XCTAssertFalse(text(of: singleTitle).contains("release-note-040"), "The collapsed title stops before the line's end.")
         XCTAssertTrue(singleToggle.exists, "A long single-line title offers an expand control.")
+        let singleRow = element("codex-activity-row-toolu_long_single_line")
+        let singleCollapsedHeight = singleRow.frame.height
+        XCTAssertLessThan(singleCollapsedHeight, 45, "A title wider than the row is cut to one line: \(singleRow.frame)")
 
-        // A short command's row shows its whole title, with no control.
+        // A short command's row shows its whole title on one line.
         let shortRow = element("codex-activity-row-toolu_short_command")
         let shortTitle = element("codex-activity-title-toolu_short_command")
         XCTAssertTrue(shortTitle.waitToExist(timeout: 5), "The short command's row is listed under Worked for.")
         XCTAssertTrue(text(of: shortTitle).contains("Running echo release notes checked"))
         XCTAssertFalse(text(of: shortTitle).contains("…"), "A title that fits shows without an ellipsis.")
-        XCTAssertFalse(element("codex-activity-title-toggle-toolu_short_command").exists, "A short title has no expand control.")
+        XCTAssertLessThan(shortRow.frame.height, 45, "The short command's row is a single line: \(shortRow.frame)")
+        let shortToggle = element("codex-activity-toggle-toolu_short_command")
+        XCTAssertTrue(shortToggle.exists, "Every row offers an expand control for its details.")
+        XCTAssertFalse(element("codex-activity-duration-toolu_short_command").exists, "A collapsed row hides its duration.")
         attachScreenshot(named: "long-command-2-collapsed-previews")
         attachElementScreenshot(longRow, named: "long-command-2-collapsed-heredoc-row")
-        attachElementScreenshot(shortRow, named: "long-command-2-short-row-without-control")
+        attachElementScreenshot(shortRow, named: "long-command-2-short-row-one-line")
 
         singleToggle.click()
         XCTAssertTrue(waitUntil({ (singleToggle.value as? String) == "expanded" && text(of: singleTitle).contains("release-note-040") }, timeout: 5),
                       "Expanding the single-line title reveals the end of the line.")
+        XCTAssertGreaterThan(singleRow.frame.height, singleCollapsedHeight, "The expanded title wraps past one line: \(singleRow.frame)")
         singleToggle.click()
         XCTAssertTrue(waitUntil({ (singleToggle.value as? String) == "collapsed" && text(of: singleTitle).contains(singleLinePreview) }, timeout: 5))
+        XCTAssertLessThan(singleRow.frame.height, 45, "Collapsing returns the title to one line: \(singleRow.frame)")
 
         toggle.click()
         XCTAssertTrue(waitUntil({ (toggle.value as? String) == "expanded" && text(of: longTitle).contains(lastLine) }, timeout: 5),
                       "Expanding reveals every line of the command.")
-        XCTAssertEqual(toggle.label, "Collapse activity title")
+        XCTAssertEqual(toggle.label, "Collapse activity")
         XCTAssertFalse(text(of: longTitle).contains("…"), "The expanded title has no ellipsis.")
         XCTAssertGreaterThan(longRow.frame.height, collapsedHeight + 500, "The expanded row shows the heredoc's lines: \(longRow.frame)")
         bringIntoTranscriptViewport(toggle, scrollView: element("conversation-scroll-view"))
@@ -628,7 +636,7 @@ extension PlayhouseUITests {
         toggle.click()
         XCTAssertTrue(waitUntil({ (toggle.value as? String) == "collapsed" && text(of: longTitle).contains(heredocPreview) }, timeout: 5),
                       "Collapsing restores the preview.")
-        XCTAssertEqual(toggle.label, "Expand activity title to show all text")
+        XCTAssertEqual(toggle.label, "Expand activity to show all text")
         XCTAssertLessThan(longRow.frame.height, collapsedHeight + 2, "The collapsed row returns to its preview height.")
 
         // Reopening the task, left expanded, starts the title collapsed again.
