@@ -360,6 +360,79 @@ extension PlayhouseUITests {
         }, timeout: 30), "The handoff should start an implementation turn with the plan context.")
         attachScreenshot(named: "Plan mode stays active until implementation starts")
     }
+    // case-contract: test_assistant_reply_copy_message_copies_full_markdown | A reply whose Markdown holds a heading, bold text, a list, a pipe table and a fenced code block, which render as separate views a text selection cannot span, shows a Copy message button in its header only while the pointer is over that reply, its header or its body such as the table: with the reply still on screen, moving the pointer off it hides the button and hovering it reveals the button again. Clicking it places the reply's exact Markdown source on the pasteboard, table pipes, code fence and bold markers included, replacing what was there, and the button confirms the copy as Copied before returning to its resting state; the next reply's button copies only its own text. CLI/XPC history returns the same exact Markdown text for each reply, after a fresh read. Every provider's final reply renders through the one shared assistant reply view that holds the button and copies the message's stored text, so one representative provider (Codex) covers the case.
+    func test_assistant_reply_copy_message_copies_full_markdown() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Copy message", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Copy message")
+        let markdownReply = "## Release summary\n\nThe **build** passed on every target.\n\n- Shipped the copy action\n- Kept the table intact\n\n| Target | Result |\n| --- | :---: |\n| macOS | Passed |\n| Daemon | Passed |\n\n```swift\nprint(\"copied\")\n```\n\nThat is everything in this reply."
+        let followUpReply = "Answers received: Blue / fixture-secret."
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Copy message fixture input."])
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Copy message follow-up."])
+        let history = try XCTUnwrap((try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        let replies = history.filter { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+        let markdownID = try XCTUnwrap(replies.first { $0["text"] as? String == markdownReply }?["id"] as? String,
+                                       "History should hold the reply's exact Markdown: \(replies)")
+        let followUpID = try XCTUnwrap(replies.first { $0["text"] as? String == followUpReply }?["id"] as? String)
+
+        openTask(named: "Copy message")
+        let scrollView = element("conversation-scroll-view")
+        let markdownHeader = element("assistant-provider-\(markdownID)")
+        let followUpHeader = element("assistant-provider-\(followUpID)")
+        let markdownCopy = element("assistant-copy-message-\(markdownID)")
+        let followUpCopy = element("assistant-copy-message-\(followUpID)")
+        // The transcript opens at its latest turn, and earlier rows render only near the viewport.
+        XCTAssertTrue(scrollTranscriptUntilExists(element("assistant-message-\(markdownID)")), "The Markdown reply should render.")
+        let markdownTable = element("assistant-message-\(markdownID)").descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier MATCHES %@", "assistant-markdown-table-[0-9]+")).firstMatch
+        XCTAssertTrue(markdownTable.waitToExist(timeout: 5), "The reply's table renders as its own grid, apart from the prose a selection covers.")
+
+        let composer = element("message-composer")
+        // Hiding is checked on the same reply while it is on screen: earlier rows render only near
+        // the viewport, so another reply's missing button would prove nothing.
+        XCTAssertTrue(scrollTranscriptUntilExists(followUpHeader))
+        XCTAssertTrue(scrollFullyIntoView(followUpHeader, in: scrollView, margin: 60))
+        composer.hover()
+        XCTAssertTrue(followUpCopy.waitForNonExistence(timeout: 5), "A reply the pointer is not over hides its Copy message button.")
+        XCTAssertTrue(followUpHeader.isHittable, "The follow-up reply stays on screen while its button is hidden.")
+        followUpHeader.hover()
+        XCTAssertTrue(followUpCopy.waitToExist(timeout: 5), "Hovering a reply should reveal its Copy message button.")
+        composer.hover()
+        XCTAssertTrue(followUpCopy.waitForNonExistence(timeout: 5), "Leaving the reply hides its button again.")
+
+        XCTAssertTrue(scrollTranscriptUntilExists(markdownHeader))
+        XCTAssertTrue(scrollFullyIntoView(markdownHeader, in: scrollView, margin: 60))
+        XCTAssertTrue(scrollFullyIntoView(markdownTable, in: scrollView, margin: 60))
+        composer.hover()
+        XCTAssertTrue(markdownCopy.waitForNonExistence(timeout: 5), "The Markdown reply hides its button while the pointer is elsewhere.")
+        XCTAssertTrue(markdownHeader.isHittable && markdownTable.isHittable, "The Markdown reply stays on screen while its button is hidden.")
+        // The body, not just the header: the pointer usually rests on the reply's text or table.
+        markdownTable.hover()
+        XCTAssertTrue(markdownCopy.waitToExist(timeout: 5), "Hovering the Markdown reply's table should reveal its Copy message button.")
+        XCTAssertEqual(markdownCopy.label, "Copy message")
+        attachAppWindowScreenshot(named: "Copy message button revealed on hover")
+        attachRegionScreenshot([markdownHeader, markdownCopy], named: "Copy message button close-up", padding: 24)
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("Earlier clipboard text", forType: .string)
+        markdownCopy.click()
+        // Captured first, while the 1.5-second confirmation still shows.
+        attachRegionScreenshot([markdownHeader, markdownCopy], named: "Copy message confirms the copy", padding: 24)
+        XCTAssertEqual(markdownCopy.value as? String, "Copied", "The button should confirm the copy.")
+        attachAppWindowScreenshot(named: "Copy message after the copy")
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), markdownReply,
+                       "Copy message should place the reply's exact Markdown, table pipes and code fence included, on the pasteboard.")
+        XCTAssertTrue(waitUntil({ (markdownCopy.value as? String ?? "") != "Copied" }, timeout: 5),
+                      "The confirmation should return to the resting button.")
+
+        XCTAssertTrue(scrollTranscriptUntilExists(followUpHeader))
+        XCTAssertTrue(scrollFullyIntoView(followUpHeader, in: scrollView, margin: 60))
+        followUpHeader.hover()
+        XCTAssertTrue(followUpCopy.waitToExist(timeout: 5))
+        followUpCopy.click()
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), followUpReply, "Each reply's button copies only its own text.")
+    }
     // case-contract: test_start_implementing_explains_missing_repository | A task with neither a repository nor a working folder can still plan, but once the plan exists its Start Implementing button is disabled and explains why: its tooltip and accessibility value read "Add a repository to this task to start implementing.", and a visible No repository warning beside it carries the same reason and opens the repository picker. Bridge state for the planned task has no workspace roots and no repository worktrees. Adding a repository gives the task a workspace root; in the still-open conversation the warning disappears and Start Implementing enables without reopening the task, then switches to Code mode and starts an implementation turn recorded after the plan turn, which runs in the task's created repository worktree as its only workspace root.
     func test_start_implementing_explains_missing_repository() throws {
         let executable = dataDirectory.appendingPathComponent("codex-fixture-plan-handoff-markdown")

@@ -204,47 +204,52 @@ extension TaskConversationView {
             ? displayText
             : "Response from \((message.provider ?? provider).displayName)"
         let responseAnnotations = responseAnnotationReferences(for: message)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                if let createdAt = message.createdAt {
-                    Text(createdAt, format: .dateTime.hour().minute())
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityIdentifier("message-time-\(message.id)")
-                }
-                Text(assistantLabel(for: message))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("assistant-provider-\(message.id)")
-            }
-
-            deferredImagesPlaceholder(for: message)
-            ForEach(Array(transcriptImageDataURLs(for: message).enumerated()), id: \.offset) { index, dataURL in
-                if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
-                    Button { selectedChatImage = image } label: {
-                        Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+        return AssistantReplyHoverScope { isHovering in
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    if let createdAt = message.createdAt {
+                        Text(createdAt, format: .dateTime.hour().minute())
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .accessibilityIdentifier("message-time-\(message.id)")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Open attached image")
-                    .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
-                    .plainButtonHoverPointer()
-                    .nativeHelp("Open image at full size")
+                    Text(assistantLabel(for: message))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("assistant-provider-\(message.id)")
+                    if !displayText.isEmpty {
+                        CopyMessageButton(markdown: displayText, messageID: message.id, isRevealed: isHovering)
+                    }
+                }
+
+                deferredImagesPlaceholder(for: message)
+                ForEach(Array(transcriptImageDataURLs(for: message).enumerated()), id: \.offset) { index, dataURL in
+                    if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
+                        Button { selectedChatImage = image } label: {
+                            Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open attached image")
+                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                        .plainButtonHoverPointer()
+                        .nativeHelp("Open image at full size")
+                    }
+                }
+                if !displayText.isEmpty {
+                    assistantMarkdown(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(WorkspaceTheme.conversationText)
+                        .padding(.horizontal, 15)
+                        .padding(.vertical, 11)
+                        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel(accessibilityText)
+                        .accessibilityIdentifier("assistant-message-\(message.id)")
                 }
             }
-            if !displayText.isEmpty {
-                assistantMarkdown(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(WorkspaceTheme.conversationText)
-                    .padding(.horizontal, 15)
-                    .padding(.vertical, 11)
-                    .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel(accessibilityText)
-                    .accessibilityIdentifier("assistant-message-\(message.id)")
-            }
+            .frame(maxWidth: 620, alignment: .leading)
         }
-        .frame(maxWidth: 620, alignment: .leading)
     }
 
     /// A message's images: its own, or those read since its history page deferred them.

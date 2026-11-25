@@ -760,6 +760,35 @@ class BridgeTestCases12:
         self.assertFalse(any(event.get("event") == "codex.notification" and event.get("method") == "item/plan/delta"
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
+    # case-contract: test_assistant_reply_copy_message_copies_full_markdown | A reply whose Markdown holds a heading, bold text, a list, a pipe table and a fenced code block, which render as separate views a text selection cannot span, shows a Copy message button in its header only while the pointer is over that reply, its header or its body such as the table: with the reply still on screen, moving the pointer off it hides the button and hovering it reveals the button again. Clicking it places the reply's exact Markdown source on the pasteboard, table pipes, code fence and bold markers included, replacing what was there, and the button confirms the copy as Copied before returning to its resting state; the next reply's button copies only its own text. CLI/XPC history returns the same exact Markdown text for each reply, after a fresh read. Every provider's final reply renders through the one shared assistant reply view that holds the button and copies the message's stored text, so one representative provider (Codex) covers the case.
+    def test_assistant_reply_copy_message_copies_full_markdown(self):
+        task_id = self.create_task(title="Copy message", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-success"
+        copy_file(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        markdown_reply = '## Release summary\n\nThe **build** passed on every target.\n\n- Shipped the copy action\n- Kept the table intact\n\n| Target | Result |\n| --- | :---: |\n| macOS | Passed |\n| Daemon | Passed |\n\n```swift\nprint("copied")\n```\n\nThat is everything in this reply.'
+        follow_up_reply = "Answers received: Blue / fixture-secret."
+        sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Copy message fixture input.", extra_environment=env)
+        self.assertIn(markdown_reply, [message["text"] for message in self.assert_success(sent)["messages"]
+                                       if message["role"] == "assistant"],
+                      "The reply should be stored as the exact Markdown the provider wrote.")
+        followed, _ = self.call_cli("conversation", "send", task_id, "--message", "Copy message follow-up.", extra_environment=env)
+        self.assert_success(followed)
+        history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        replies = [message["text"] for message in self.assert_success(history)["messages"]
+                   if message["role"] == "assistant" and message["phase"] == "final_answer"
+                   and message["text"] != "Fixture internal reminder reply."]
+        self.assertEqual(replies, [markdown_reply, follow_up_reply],
+                         "A fresh history read returns each reply's exact text, the one Copy message copies.")
+        self.assertIn("| Target | Result |\n| --- | :---: |\n| macOS | Passed |", replies[0],
+                      "History keeps the reply's table as raw Markdown.")
+        self.assertIn("```swift\nprint(\"copied\")\n```", replies[0], "History keeps the reply's code fence.")
+        self.assertIn("The **build** passed", replies[0], "History keeps the reply's bold markers.")
     # case-contract: test_start_implementing_explains_missing_repository | A task with neither a repository nor a working folder can still plan, but once the plan exists its Start Implementing button is disabled and explains why: its tooltip and accessibility value read "Add a repository to this task to start implementing.", and a visible No repository warning beside it carries the same reason and opens the repository picker. Bridge state for the planned task has no workspace roots and no repository worktrees. Adding a repository gives the task a workspace root; in the still-open conversation the warning disappears and Start Implementing enables without reopening the task, then switches to Code mode and starts an implementation turn recorded after the plan turn, which runs in the task's created repository worktree as its only workspace root.
     def test_start_implementing_explains_missing_repository(self):
         task_id = self.create_task(title="Plan without repository", roots=[])["id"]

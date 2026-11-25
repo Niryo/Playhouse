@@ -403,6 +403,8 @@ def answer_text(runtime, user_message):
         return "Recovered answer: Green; private token fixture-secret was applied."
     if runtime.Path(runtime.sys.argv[0]).name.endswith("-user-question"):
         return "Answer received: Continue."
+    if user_message == "Copy message fixture input.":
+        return runtime.COPY_MESSAGE_REPLY
     if isinstance(user_message, str) and user_message.startswith("Long response fixture input."):
         return "A long fixture response gives the conversation enough content to test comment hint truncation. " * 8
     if isinstance(user_message, str) and ("<response-comments>" in user_message or "<response-annotations>" in user_message):
