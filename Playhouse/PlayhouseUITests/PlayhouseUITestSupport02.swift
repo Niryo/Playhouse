@@ -268,7 +268,11 @@ extension PlayhouseUITests {
     /// follow-up bar, a live activity row) can push the form's first options above the
     /// viewport, where a click lands on the header instead. True once it is fully visible.
     func revealInConversation(_ target: XCUIElement) -> Bool {
-        let scrollView = element("conversation-scroll-view")
+        reveal(target, in: element("conversation-scroll-view"))
+    }
+    /// Scrolls `scrollView` until `target` lies inside its visible area: a pointer sent to a row
+    /// clipped at the edge lands on whatever is drawn there. True once it is fully visible.
+    func reveal(_ target: XCUIElement, in scrollView: XCUIElement) -> Bool {
         guard scrollView.exists else { return true }
         for _ in 0..<8 {
             guard target.exists else { return false }

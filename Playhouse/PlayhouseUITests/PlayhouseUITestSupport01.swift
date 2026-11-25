@@ -105,6 +105,7 @@ extension PlayhouseUITests {
         menu.click()
         let choice = app.menuItems["conversation-provider-\(provider)"]
         XCTAssertTrue(choice.waitToExist(timeout: 5))
+        assertMenuRowsUnique(under: menu)
         choice.click()
         try afterSelection()
         XCTAssertTrue(waitUntil({
@@ -984,8 +985,15 @@ extension PlayhouseUITests {
         // Rest on the row even when its hint already shows: a hint opened by a pointer
         // left there by chance (say, after a panel closed over the row) closes as soon
         // as the list shifts under it.
-        for _ in 0..<3 {
+        for attempt in 0..<3 {
             _ = waitUntilUncovered(row, timeout: 3)
+            // A list scrolled back to its top (say, after its search is cleared) can leave the row
+            // clipped below its edge, where the pointer rests on what is drawn there instead. Looking
+            // up the list costs most of a second, so only a retry does it.
+            if attempt > 0, let list = app.scrollViews.containing(.any, identifier: rowIdentifier).allElementsBoundByIndex
+                .min(by: { $0.frame.height < $1.frame.height }) {
+                XCTAssertTrue(reveal(row, in: list), "\(rowIdentifier) should scroll fully into its list.", file: file, line: line)
+            }
             row.hover()
             if hint.waitToExist(timeout: 3) { return hint }
             // Leave the row and come back, so its tracking area sees a fresh entry.
@@ -993,6 +1001,27 @@ extension PlayhouseUITests {
         }
         XCTFail("Resting on \(rowIdentifier) should show its hint.", file: file, line: line)
         return hint
+    }
+    /// Fails when the menu open under `owner` shows a row twice or a row with no title: a view
+    /// attached to a menu item's button (such as the AppKit hover-cursor view) becomes an extra,
+    /// disabled menu row. Separators (untitled AppKit rows whose identifier starts with "_") are skipped;
+    /// an item without its own identifier gets such an identifier too, so a caller whose menu has
+    /// such items passes `separators`, the exact number of untitled rows the menu may have.
+    func assertMenuRowsUnique(under owner: XCUIElement, separators: Int? = nil, file: StaticString = #filePath, line: UInt = #line) {
+        let menu = owner.menus.firstMatch
+        XCTAssertTrue(menu.waitToExist(timeout: 5), "The menu is open.", file: file, line: line)
+        guard let snapshot = try? menu.snapshot() else { return XCTFail("The open menu can be read.", file: file, line: line) }
+        let items = snapshot.children.filter { $0.elementType == .menuItem }
+        let untitled = items.filter { $0.title.isEmpty && $0.identifier.hasPrefix("_") }
+        if let separators {
+            XCTAssertEqual(untitled.count, separators, "The menu has \(separators) separator(s) and no empty row.", file: file, line: line)
+        }
+        let rows = items.filter { !($0.title.isEmpty && $0.identifier.hasPrefix("_")) }
+        let identifiers = rows.map(\.identifier).filter { !$0.isEmpty && !$0.hasPrefix("_") }
+        let titles = rows.map(\.title).filter { !$0.isEmpty }
+        XCTAssertEqual(identifiers.count, Set(identifiers).count, "Each menu row is shown once: \(identifiers)", file: file, line: line)
+        XCTAssertEqual(titles.count, Set(titles).count, "Each menu row is shown once: \(titles)", file: file, line: line)
+        XCTAssertFalse(rows.contains { $0.title.isEmpty }, "No menu row is empty: \(rows.map { "\($0.identifier)|\($0.title)" })", file: file, line: line)
     }
     /// Waits until `target` exists, can be clicked and `ready` holds. Another row's hint, opened
     /// where the pointer last rested (say, after an error banner pushed the rows down under it),
@@ -1177,6 +1206,7 @@ extension PlayhouseUITests {
         actions.click()
         if !app.menuItems["Reveal in Finder"].waitToExist(timeout: 3) { actions.click() }
         XCTAssertTrue(app.menuItems["Reveal in Finder"].waitToExist(timeout: 5), "\(key)'s actions menu opens.", file: file, line: line)
+        assertMenuRowsUnique(under: actions, file: file, line: line)
     }
     func clickRuleMenuItem(rule key: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         openRuleActions(key, file: file, line: line)
@@ -1227,6 +1257,7 @@ extension PlayhouseUITests {
         if !byIdentifier.waitToExist(timeout: 3), !app.menuItems[title].exists { actions.click() }
         let item = byIdentifier.waitToExist(timeout: 3) ? byIdentifier : app.menuItems[title]
         XCTAssertTrue(item.waitToExist(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
+        assertMenuRowsUnique(under: actions, file: file, line: line)
         item.click()
     }
     func replaceText(in field: XCUIElement, with text: String) {

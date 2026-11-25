@@ -600,81 +600,68 @@ extension TaskConversationView {
             .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
             .accessibilityIdentifier("codex-activity-row-\(activity.id)")
         } else {
+        // A row is one line until the reader expands it: the title's first line, its status and,
+        // while it runs, its elapsed time. Expanding shows the whole title, the detail and the
+        // duration. The row's accessibility value carries the detail and duration either way.
+        let isExpanded = expandedActivityIDs.contains(activity.id)
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
                 Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : ["interrupted", "stopped"].contains(activity.status) ? "pause.circle.fill" : "gearshape.2.fill")
                     .foregroundStyle(activity.status == "completed" ? .green : ["interrupted", "stopped"].contains(activity.status) ? .orange : .accentColor)
                 // A long title shows its preview until the reader expands it; see `titlePreview`.
                 let titlePreview = activity.titlePreview
-                let isTitleExpanded = titlePreview != nil && expandedActivityTitleIDs.contains(activity.id)
-                if !isTitleExpanded {
+                if !isExpanded || titlePreview == nil {
                     Text(titlePreview ?? activity.title)
                         .font(.system(size: 11, weight: .medium))
+                        .lineLimit(isExpanded ? nil : 1)
+                        .truncationMode(.tail)
                         .textSelection(.enabled)
                         .accessibilityIdentifier("codex-activity-title-\(activity.id)")
                 }
                 Spacer(minLength: 4)
-                if titlePreview != nil {
-                    Button {
-                        if isTitleExpanded { expandedActivityTitleIDs.remove(activity.id) } else { expandedActivityTitleIDs.insert(activity.id) }
-                    } label: {
-                        Image(systemName: isTitleExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18, height: 18)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .plainButtonHoverPointer()
-                    .nativeHelp(isTitleExpanded ? "Show only the start of this title" : "Show the whole title")
-                    .accessibilityLabel(isTitleExpanded ? "Collapse activity title" : "Expand activity title to show all text")
-                    .accessibilityValue(isTitleExpanded ? "expanded" : "collapsed")
-                    .accessibilityIdentifier("codex-activity-title-toggle-\(activity.id)")
+                if !isExpanded, activity.isActive, activity.startedAt != nil {
+                    activityDurationText(activity)
                 }
+                Button {
+                    if isExpanded { expandedActivityIDs.remove(activity.id) } else { expandedActivityIDs.insert(activity.id) }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .plainButtonHoverPointer()
+                .nativeHelp(isExpanded ? "Show only the first line of this activity" : "Show this activity's whole title and details")
+                .accessibilityLabel(isExpanded ? "Collapse activity" : "Expand activity to show all text")
+                .accessibilityValue(isExpanded ? "expanded" : "collapsed")
+                .accessibilityIdentifier("codex-activity-toggle-\(activity.id)")
                 Text(activity.statusLabel)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }
-            if expandedActivityTitleIDs.contains(activity.id), activity.titlePreview != nil {
-                // On its own line rather than in the header's stack, which would measure it
-                // as one line of the whole title on every pass.
-                Text(activity.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("codex-activity-title-\(activity.id)")
-            }
-            if !displayDetail.isEmpty {
-                Text(displayDetail)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .lineLimit(4)
-                    .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
-                    .accessibilityLabel(displayDetail)
-            }
-            if activity.isActive, activity.startedAt != nil {
-                TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                    let duration = activity.durationLabel(at: timeline.date) ?? ""
-                    Text(duration)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .accessibilityValue(duration)
-                        .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+            if isExpanded {
+                if activity.titlePreview != nil {
+                    // On its own line rather than in the header's stack, which would measure it
+                    // as one line of the whole title on every pass.
+                    Text(activity.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("codex-activity-title-\(activity.id)")
                 }
-            } else if let duration = activity.durationLabel() {
-                Text(duration)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .accessibilityValue(duration)
-                    .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
-            } else {
-                Text("Duration unavailable")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityValue("Duration unavailable")
-                    .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+                if !displayDetail.isEmpty {
+                    Text(displayDetail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(4)
+                        .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
+                        .accessibilityLabel(displayDetail)
+                }
+                activityDurationText(activity)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -684,6 +671,33 @@ extension TaskConversationView {
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
         .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
+        }
+    }
+
+    /// An activity's duration: ticking while it runs, its measured time once it ends.
+    @ViewBuilder
+    func activityDurationText(_ activity: ConversationActivity) -> some View {
+        if activity.isActive, activity.startedAt != nil {
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                let duration = activity.durationLabel(at: timeline.date) ?? ""
+                Text(duration)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .accessibilityValue(duration)
+                    .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+            }
+        } else if let duration = activity.durationLabel() {
+            Text(duration)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .accessibilityValue(duration)
+                .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+        } else {
+            Text("Duration unavailable")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .accessibilityValue("Duration unavailable")
+                .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
         }
     }
 

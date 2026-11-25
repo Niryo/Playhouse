@@ -8,9 +8,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "Playhouse" / "App"
 FILES = tuple(sorted(APP.rglob("*.swift")))
-# Files whose controls are menu-bar commands rather than views in the window.
+# Files whose controls are menu-bar commands rather than views in the window. Menu-bar content
+# (`CommandMenu`/`CommandGroup` bodies and the views they use) must stay in these files, or its
+# items fall under the window-control rules (a menu-bar control kept elsewhere, like the Debug
+# menu's AtomHighlightMenuItem, says so with a `// no-pointer:` opt-out).
 MENU_BAR_FILES = {"PlayhouseApp.swift", "DebugConversationImport/DebugConversationImport.swift"}
-CONTROL = re.compile(r"\b(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*\{))")
+CONTROL = re.compile(r"\b(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*[{(]))")
 # Selection controls AppKit draws: they need the pointing hand too, and keep their label as the hint.
 SELECTION = re.compile(r"\b(Picker|Toggle)(?=\s*\()")
 
@@ -78,7 +81,7 @@ def control_end(source: str, kind: str, start: int) -> int | None:
             return matching(source, "{", "}", next_token)
         return end
 
-    if kind in ("Button", "Picker", "Toggle") and opening_paren >= 0 and (opening_brace < 0 or opening_paren < opening_brace):
+    if kind in ("Button", "Menu", "Picker", "Toggle") and opening_paren >= 0 and (opening_brace < 0 or opening_paren < opening_brace):
         end = matching(source, "(", ")", opening_paren)
         if end is None:
             return None
@@ -122,9 +125,9 @@ def modifier_chain(source: str, end: int, declaration_indent: int) -> str:
 
 
 def menu_content_ranges(source: str) -> list[tuple[int, int]]:
-    """Spans of `Menu { ... }` and `.contextMenu { ... }` content, whose buttons become menu items."""
+    """Spans of `Menu { ... }`, `Menu("Title") { ... }` and `.contextMenu { ... }` content, whose buttons become menu items."""
     ranges = []
-    for match in re.finditer(r"(?<![A-Za-z])Menu\s*\{|\.contextMenu\s*\{", source):
+    for match in re.finditer(r"(?<![A-Za-z])Menu\s*(?:\([^{}()]*\))?\s*\{|\.contextMenu\s*\{", source):
         opening = match.end() - 1
         closing = matching(source, "{", "}", opening)
         if closing is not None:
@@ -151,22 +154,24 @@ def main() -> int:
             line_start = source.rfind("\n", 0, start) + 1
             indent = len(source[line_start:start])
             chain = modifier_chain(source, end, indent)
-            # SwiftUI draws a `.plain` button, so its pointer style reaches it without the AppKit
-            # cursor view; every other control may be drawn by AppKit and needs that view.
-            pointer = "plainButtonHoverPointer" if kind == "Button" and ".buttonStyle(.plain)" in chain else "buttonHoverPointer"
-            other = "buttonHoverPointer" if pointer == "plainButtonHoverPointer" else "plainButtonHoverPointer"
-            # A `Menu`/`.contextMenu` item is a native menu item AppKit draws, so no pointer reaches
-            # it, and the AppKit cursor view a pointer modifier adds becomes a second, blank item.
-            if any(a < start < b for a, b in menus):
-                if ".buttonHoverPointer()" in chain or ".plainButtonHoverPointer()" in chain:
-                    errors.append(f"{location}: {kind} is a menu item; remove its hover pointer, which adds a blank menu item")
-            elif f".{pointer}()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
-                errors.append(f"{location}: {kind} is missing {pointer}()"
-                              + (f" (it has {other}(), which is for " + ("controls AppKit draws)" if pointer == "plainButtonHoverPointer" else "plain buttons SwiftUI draws)") if f".{other}()" in chain else ""))
+            in_menu = name in MENU_BAR_FILES or any(a < start < b for a, b in menus)
+            if in_menu:
+                # A menu item is an NSMenuItem whose cursor AppKit owns. A hover pointer there does
+                # nothing, and the AppKit cursor view becomes an extra empty, disabled menu row.
+                if re.search(r"\.(plainButtonHoverPointer|buttonHoverPointer)\(\)|\.hoverCursor\(", chain):
+                    errors.append(f"{location}: {kind} is a menu item and must not carry a hover pointer"
+                                  " (the cursor view becomes an extra empty menu row)")
+            else:
+                # SwiftUI draws a `.plain` button, so its pointer style reaches it without the AppKit
+                # cursor view; every other control may be drawn by AppKit and needs that view.
+                pointer = "plainButtonHoverPointer" if kind == "Button" and ".buttonStyle(.plain)" in chain else "buttonHoverPointer"
+                other = "buttonHoverPointer" if pointer == "plainButtonHoverPointer" else "plainButtonHoverPointer"
+                if f".{pointer}()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
+                    errors.append(f"{location}: {kind} is missing {pointer}()"
+                                  + (f" (it has {other}(), which is for " + ("controls AppKit draws)" if pointer == "plainButtonHoverPointer" else "plain buttons SwiftUI draws)") if f".{other}()" in chain else ""))
             # Window controls use `.nativeHelp`: SwiftUI's `.help` alone does not present its
             # tooltip for most controls in the main window. Menu items (menu-bar commands and
             # `Menu`/`.contextMenu` content) are native menu items and keep `.help`.
-            in_menu = name in MENU_BAR_FILES or any(a < start < b for a, b in menus)
             # `.shortcutHelp(text, shortcut:)` is `.nativeHelp` naming the control's keyboard shortcut.
             help_modifier = r"\.help" if in_menu else r"\.nativeHelp"
             help_match = (re.search(help_modifier + r"\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
@@ -184,8 +189,7 @@ def main() -> int:
         for match in SELECTION.finditer(source):
             kind = match.group(1)
             start = match.start()
-            if name in MENU_BAR_FILES or any(a < start < b for a, b in menus):
-                continue
+            in_menu = name in MENU_BAR_FILES or any(a < start < b for a, b in menus)
             end = control_end(source, kind, start)
             location = f"{name}:{source.count(chr(10), 0, start) + 1}"
             if end is None:
@@ -194,7 +198,11 @@ def main() -> int:
             controls_seen += 1
             line_start = source.rfind("\n", 0, start) + 1
             chain = modifier_chain(source, end, len(source[line_start:start]))
-            if ".buttonHoverPointer()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
+            if in_menu:
+                if re.search(r"\.(plainButtonHoverPointer|buttonHoverPointer)\(\)|\.hoverCursor\(", chain):
+                    errors.append(f"{location}: {kind} is a menu item and must not carry a hover pointer"
+                                  " (the cursor view becomes an extra empty menu row)")
+            elif ".buttonHoverPointer()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
                 errors.append(f"{location}: {kind} is missing buttonHoverPointer()")
 
         # A view made clickable with a tap gesture is a control too, unless it says why it is not.
