@@ -218,10 +218,11 @@ extension PlayhouseUITests {
         let userView = element("user-message-\(sourceID)")
         XCTAssertTrue(scrollTranscriptUntilExists(userView))
         let transcriptScrollView = element("conversation-scroll-view")
-        for _ in 0..<4 {
-            guard userView.frame.midY < transcriptScrollView.frame.minY + 20 else { break }
-            transcriptScrollView.swipeDown()
-        }
+        // The message is the transcript's first, so its top is the transcript's: wherever the search
+        // above landed (once about 20 pt short of the top, where the selection pill pinned
+        // inside the transcript's top edge covers the message's first line) is not.
+        XCTAssertTrue(scrollTranscriptToTop(), "The transcript should scroll to its top.")
+        XCTAssertTrue(waitForStableFrame(userView), "The first message should settle at the transcript's top.")
         XCTAssertTrue(userView.frame.midY > transcriptScrollView.frame.minY + 20,
                       "The earlier user message should be visible before selecting its text.")
         let userBubbleScreenshot = userView.screenshot()

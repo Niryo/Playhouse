@@ -1272,15 +1272,31 @@ Playhouse.render(h(DMs));
                 return "\(kind ?? "") \(event["timestamp"] ?? "")"
             }
         }
-        let publishedBefore = focusTimeline().filter { $0.hasPrefix("plugin.event.published") }.count
+        func publishedCount() -> Int { focusTimeline().filter { $0.hasPrefix("plugin.event.published") }.count }
+        let publishedBefore = publishedCount()
+        // The second activation waits for the first to reach the app: two switches 40 ms apart
+        // once landed before the first one finished, so the app never resigned and re-became active.
+        // Each takes well under the cooldown, so both still fall within it.
+        let quickRepeatStart = Date()
         refocusApp()
+        XCTAssertTrue(waitUntil({ publishedCount() >= publishedBefore + 1 }, timeout: 10),
+                      "The first quick activation publishes app.focus: \(focusTimeline())")
         refocusApp()
-        XCTAssertTrue(waitUntil({ focusTimeline().filter { $0.hasPrefix("plugin.event.published") }.count >= publishedBefore + 2 }, timeout: 10),
+        XCTAssertTrue(waitUntil({ publishedCount() >= publishedBefore + 2 }, timeout: 10),
                       "Each quick activation publishes app.focus: \(focusTimeline())")
+        XCTAssertLessThan(Date().timeIntervalSince(quickRepeatStart), 5, "Both activations fall within one cooldown, so the second can only run as the trailing run.")
         XCTAssertTrue(waitUntil({ self.focusCountIs(base + 2, of: "focus-service") }, timeout: 20),
                       "Quick repeats collapse into one trailing run: \(focusCount()) from \(base), \(focusTimeline())")
         RunLoop.current.run(until: Date().addingTimeInterval(6))
         XCTAssertEqual(focusCount(), base + 2, "Two activations in one cooldown run the service twice, not more.")
+        // The second run trails the first by the cooldown, rather than running at once.
+        let runs = focusTimeline().filter { $0.hasPrefix("plugin.service.handled") }
+            .compactMap { ISO8601DateFormatter().date(from: String($0.split(separator: " ").last ?? "")) }.suffix(2)
+        XCTAssertEqual(runs.count, 2, "Both runs are in the timeline: \(focusTimeline())")
+        if let first = runs.first, let last = runs.last {
+            // Diagnostics timestamps are whole seconds, so a 5 s cooldown reads as at least 4 s.
+            XCTAssertGreaterThanOrEqual(last.timeIntervalSince(first), 4, "Quick repeats run once at once and once after the cooldown: \(focusTimeline())")
+        }
         let entry = element("plugin-entry-focus-service")
         XCTAssertTrue(entry.waitToExist(timeout: 10), "The popover plugin has its sidebar button.")
         entry.click()

@@ -1239,6 +1239,28 @@ extension PlayhouseUITests {
         }
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
     }
+    /// The transcript scroller's position, 0 at the top and 1 at the bottom; nil while the
+    /// transcript does not overflow.
+    func transcriptScrollPosition() -> Double? {
+        let scroller = element("conversation-scroll-view").scrollBars.firstMatch
+        guard scroller.exists else { return nil }
+        if let number = scroller.value as? NSNumber { return number.doubleValue }
+        return (scroller.value as? String).flatMap(Double.init)
+    }
+    /// Reveals every message and scrolls the transcript to its very top. Reports whether it got
+    /// there; a transcript that does not overflow is already at its top.
+    @discardableResult
+    func scrollTranscriptToTop() -> Bool {
+        let scrollView = element("conversation-scroll-view")
+        // Reaching the top of the rendered messages reveals the batch above them, so the top of
+        // the transcript is the top once every message is rendered.
+        let revealed = revealWholeTranscript(step: 3000)
+        for _ in 0..<40 {
+            guard (transcriptScrollPosition() ?? 0) > 0.001 else { break }
+            scrollView.scroll(byDeltaX: 0, deltaY: 3000)
+        }
+        return revealed && (transcriptScrollPosition() ?? 0) <= 0.001
+    }
     /// Settled turns render lazily, so a check over the whole revealed transcript has to look at
     /// it a viewport at a time. Scrolls the conversation to its top, then down to its bottom in
     /// steps shorter than the viewport, checking `found` at every step, and reports whether it
@@ -1247,21 +1269,9 @@ extension PlayhouseUITests {
     func scanTranscript(_ found: () -> Bool) -> (found: Bool, coveredWholeTranscript: Bool) {
         if found() { return (true, true) }
         let scrollView = element("conversation-scroll-view")
-        let scroller = scrollView.scrollBars.firstMatch
-        func position() -> Double? {
-            guard scroller.exists else { return nil }
-            if let number = scroller.value as? NSNumber { return number.doubleValue }
-            return (scroller.value as? String).flatMap(Double.init)
-        }
+        func position() -> Double? { transcriptScrollPosition() }
         guard position() != nil else { return (found(), false) }
-        // Reaching the top of the rendered messages reveals the batch above them, so the top of
-        // the transcript is the top once every message is rendered.
-        let revealed = revealWholeTranscript(step: 3000)
-        for _ in 0..<40 {
-            guard (position() ?? 0) > 0.001 else { break }
-            scrollView.scroll(byDeltaX: 0, deltaY: 3000)
-        }
-        let reachedTop = revealed && (position() ?? 1) <= 0.001
+        let reachedTop = scrollTranscriptToTop()
         let step = -max(100, scrollView.frame.height * 0.6)
         for _ in 0..<400 {
             // Rows near the viewport are realized a moment after a scroll lands.

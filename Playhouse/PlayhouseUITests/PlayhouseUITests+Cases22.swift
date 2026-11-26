@@ -146,6 +146,10 @@ extension PlayhouseUITests {
             element("message-composer").click()
             element("message-composer").typeText(text)
             element("send-message-button").click()
+            // The fixture can answer before the composer clears the sent draft, and while the draft
+            // is there the composer's button is Send, not Stop.
+            XCTAssertTrue(waitUntil({ ((self.element("message-composer").value as? String) ?? "").isEmpty }, timeout: 5),
+                          "Sending clears the composer's draft.")
         }
         let serverID = try create("Claude dev server")
         let earlyID = try create("Claude early report")
