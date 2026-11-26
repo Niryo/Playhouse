@@ -151,6 +151,8 @@ private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegat
         #if PLAYHOUSE_ATOM_BENCHMARK
         // Only in scripts/benchmark-atom-tree.sh's builds.
         AtomTreeBenchmark.runIfRequested()
+        TaskItemBenchmark.runIfRequested()
+        TranscriptTreeBenchmark.runIfRequested()
         #endif
     }
 

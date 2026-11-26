@@ -42,6 +42,11 @@ final class AtomEventHandlers: AtomEventHandler {
         }
     }
 
+    /// Removes the handlers of a node that is no longer in its tree.
+    func remove(nodeID: Int) {
+        handlers[nodeID] = nil
+    }
+
     @discardableResult
     func dispatch(nodeID: Int, event: String, value: PluginValue?) -> Bool {
         guard let handler = handlers[nodeID]?[event] else { return false }

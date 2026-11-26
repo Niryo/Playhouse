@@ -240,6 +240,14 @@ private struct TaskItemComparison: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("plugin-catalog-native-task-item")
                 }
+                // The atom-tree spike's card: the same atoms as data, through AtomRegistry.
+                if let demo = catalogValue("TaskItem", { try TaskItemTreeDemo(props: page.props) }) {
+                    comparisonColumn("Native atom tree (AtomRegistry)", width: 300) {
+                        TreeTaskItemDemo(demo: demo)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("plugin-catalog-tree-task-item")
+                }
             }
         }
         .padding(24)
@@ -287,6 +295,22 @@ private struct NativeTaskItemDemo: View {
                 AtomText(props: TextProps(text: "Opened \(opened) times", size: 11, color: "secondary"), common: AtomCommon(testID: "native-opened-count"))
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
+        }
+    }
+}
+
+/// `TaskItemTreeDemo`'s tree: the native card's atoms as data, rendered
+/// through `AtomRegistry`; its events re-render only the nodes they change.
+private struct TreeTaskItemDemo: View {
+    @State private var demo: TaskItemTreeDemo
+
+    init(demo: TaskItemTreeDemo) {
+        _demo = State(initialValue: demo)
+    }
+
+    var body: some View {
+        if let root = demo.root {
+            PluginNodeView(node: root, events: demo.tree.handlers)
         }
     }
 }

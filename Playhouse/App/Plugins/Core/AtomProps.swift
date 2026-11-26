@@ -272,6 +272,8 @@ struct ResolvedAtomProps {
 enum AtomCounters {
     nonisolated(unsafe) static var decodes = 0
     nonisolated(unsafe) static var bodies = 0
+    /// Atom view bodies (Stack, Text, Card, …), native or from a tree alike.
+    nonisolated(unsafe) static var views = 0
 }
 #endif
 

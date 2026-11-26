@@ -546,7 +546,7 @@ extension PlayhouseCLI {
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
             ])
         case "plugin":
-            let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>] | @<app-event>[:<json>] | +<seconds>...] [--advance <seconds>]"
+            let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> [--renderer <js|native-tree>] | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>] | @<app-event>[:<json>] | +<seconds>...] [--advance <seconds>]"
             let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | sessions | edit --id <plugin-id> | delete --id <plugin-id> | enable --id <plugin-id> | disable --id <plugin-id> | state --id <plugin-id> [--key <key> --value <json>] | event <name> [--payload <json>] | author --placement <\(pluginPlacements)> [--provider <codex|claude|opencode>] [--name <name> --presentation <popover|modal|sidebar|page|inline>] | render …"
             switch rest.first {
             case "mode":
@@ -619,8 +619,9 @@ extension PlayhouseCLI {
             default:
                 throw CLIError.unknownCommand(args)
             }
-            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--plugin", "--task", "--props", "--event", "--advance", "--mock"])
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--plugin", "--task", "--props", "--event", "--advance", "--mock", "--renderer"])
             guard [flags["--file"], flags["--page"], flags["--plugin"]].compactMap({ $0 }).count == 1 else { throw CLIError.usage(renderUsage) }
+            guard flags["--renderer"] == nil || flags["--page"] != nil else { throw CLIError.usage(renderUsage) }
             guard flags["--task"] == nil || flags["--plugin"] != nil else { throw CLIError.usage(renderUsage) }
             var arguments: [String: BridgeValue] = [:]
             // The daemon resolves paths from its own working directory, so send an absolute one.
@@ -628,6 +629,7 @@ extension PlayhouseCLI {
                 .string(URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path)
             }
             arguments["page"] = flags["--page"]?.first.map(BridgeValue.string)
+            arguments["renderer"] = flags["--renderer"]?.first.map(BridgeValue.string)
             arguments["pluginID"] = flags["--plugin"]?.first.map(BridgeValue.string)
             arguments["taskID"] = flags["--task"]?.first.map(BridgeValue.string)
             arguments["props"] = flags["--props"]?.first.map(BridgeValue.string)

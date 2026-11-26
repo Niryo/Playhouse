@@ -8,6 +8,9 @@ struct AtomStack<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         Group {
             if !props.hasSurface {
                 stack
@@ -32,7 +35,10 @@ struct AtomStack<Content: View>: View {
         }
     }
 
-    private func surfaced(_ shape: some InsettableShape) -> some View {
+    /// Type-erased: as a concrete generic view, a surfaced Stack inside a lazy
+    /// Scroll stopped re-rendering its descendants when their nodes changed
+    /// (a streamed reply in a transcript bubble kept its first text).
+    private func surfaced(_ shape: some InsettableShape) -> AnyView {
         let placement = surfacePlacement
         let stretchesLeading = placement.horizontal == .leading
         var framed = common
@@ -42,7 +48,7 @@ struct AtomStack<Content: View>: View {
         let fill = props.hasFill
             ? AnyShapeStyle((AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 1))
             : AnyShapeStyle(Color.clear)
-        return stack
+        return AnyView(stack
             .atomFrame(framed)
             .modifier(Applied(when: !stretchesLeading && common.fillWidth == true) {
                 $0.frame(maxWidth: .infinity, alignment: Alignment(horizontal: placement.horizontal, vertical: .center))
@@ -61,7 +67,7 @@ struct AtomStack<Content: View>: View {
                     .allowsHitTesting(false)
                 }
             }
-            .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true, frame: false)
+            .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true, frame: false))
     }
 
     /// Where the children sit inside the surface: at the start of the axis and
@@ -102,6 +108,9 @@ struct AtomText: View {
     var children = ""
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         let string = props.text ?? children
         Text(verbatim: string)
             .lineSpacing(CGFloat(props.lineSpacing ?? 0))
@@ -139,6 +148,9 @@ struct AtomIcon: View {
     var common = AtomCommon()
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         Group {
             if let asset = props.asset {
                 Image(asset)
@@ -225,6 +237,9 @@ struct AtomLabel: View {
     var common = AtomCommon()
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         Label(props.text, systemImage: props.icon)
             .atomFont(AtomFont.font(size: props.size, weight: props.weight))
             .atomForeground(props.color)
@@ -239,6 +254,9 @@ struct AtomButton<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         styled
             .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
             .modifier(Applied(when: props.controlSize == "large") { $0.controlSize(.large) })
@@ -335,6 +353,9 @@ struct AtomSpinner: View {
     var common = AtomCommon()
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         ProgressView()
             .controlSize(props.size == "mini" ? .mini : props.size == "regular" ? .regular : .small)
             .atomCommon(common, atom: .spinner)

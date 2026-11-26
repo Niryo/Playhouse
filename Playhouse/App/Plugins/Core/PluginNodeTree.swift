@@ -123,6 +123,9 @@ enum PluginNodeProps {
 @Observable
 final class PluginNode: Identifiable {
     static let textType = "#text"
+    /// A native tree's placeholder for content its host view supplies, named
+    /// by `text` (`AtomNodeSpec.slot`); never created by a plugin's ops.
+    static let slotType = "#slot"
 
     let id: Int
     let type: String
@@ -135,7 +138,8 @@ final class PluginNode: Identifiable {
     var events: Set<String>
     var text: String
     var children: [PluginNode] = []
-    /// How many update/text ops changed this node after it was created.
+    /// How many update/text ops (or, for typed props, `setProps` calls that
+    /// changed them) changed this node after it was created.
     @ObservationIgnored private(set) var updateCount = 0
 
     /// A node from a plugin's op (or a raw text node, with `text`). `resolved`
@@ -178,6 +182,7 @@ final class PluginNode: Identifiable {
         if case .typed(let atom, let oldCommon) = self.props, atom.isEqual(to: props), oldCommon == common { return false }
         self.props = .typed(props, common)
         resolved = .success(ResolvedAtomProps(atom: props, common: common))
+        updateCount += 1
         return true
     }
 
@@ -190,7 +195,7 @@ final class PluginNode: Identifiable {
 
     private static func resolve(type: String, props: [String: PluginValue], resolved: ResolvedAtomProps?) -> Result<ResolvedAtomProps, PluginTreeError> {
         if let resolved { return .success(resolved) }
-        if type == textType || type == "#root" { return .failure(PluginTreeError(message: "<\(type)> is not an atom.")) }
+        if type == textType || type == slotType || type == "#root" { return .failure(PluginTreeError(message: "<\(type)> is not an atom.")) }
         do {
             return .success(try AtomType.decode(type: type, props: props))
         } catch let error as PluginTreeError {

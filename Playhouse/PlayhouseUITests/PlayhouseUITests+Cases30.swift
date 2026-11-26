@@ -226,7 +226,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "System Prompts tab after Reset to Default")
         app.typeKey("w", modifierFlags: .command)
     }
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Markdown, Icon, Image, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text or Markdown, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange. On the Editor page, Return in the editor runs onSubmit with the typed text (Last: submit hi) and Command-Return runs onSteerSubmit (Last: steer), and on the PillPicker page choosing the PR option runs onChange with its value (Selected: pr).
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Markdown, Icon, Image, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text or Markdown, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. Its first row is a filled Stack whose Text redraws inside the lazy list when it changes: the Tap button makes it read Taps: 1, one text op. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange. On the Editor page, Return in the editor runs onSubmit with the typed text (Last: submit hi) and Command-Return runs onSteerSubmit (Last: steer), and on the PillPicker page choosing the PR option runs onChange with its value (Selected: pr).
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
@@ -358,6 +358,13 @@ extension PlayhouseUITests {
         let pages = element("scroll-pages")
         XCTAssertTrue(paged.waitToExist(timeout: 5))
         XCTAssertEqual(pluginText(pages), "1 pages loaded", "The paged list's end starts out of view.")
+        // A filled Stack inside the lazy list redraws its Text when the node changes.
+        // Accessibility reports the filled Stack and its one Text as a single element: the card's.
+        let cardText = element("scroll-paged-card")
+        XCTAssertTrue(cardText.waitToExist(timeout: 5), "The lazy list's first row is the counter card.")
+        XCTAssertEqual(pluginText(cardText), "Taps: 0")
+        element("scroll-paged-tap").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(cardText) == "Taps: 1" }, timeout: 5), "The card in the lazy list redrew its counter: \(pluginText(cardText))")
         for expected in ["2 pages loaded", "3 pages loaded"] {
             for _ in 0..<40 {
                 guard pluginText(pages) != expected else { break }
@@ -679,6 +686,96 @@ extension PlayhouseUITests {
         moveToDone.click()
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("js-last-action")) == "Last: menu done" }, timeout: 5), "The menu item ran onMenu with its id.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 4: text → node ") }, timeout: 5), pluginText(commit))
+    }
+    // case-contract: test_task_item_atom_tree_renders_like_native | The task item rendered as a native atom tree through AtomRegistry (the atom-tree spike's TaskItemTree, behind PLAYHOUSE_TASK_ITEM_RENDERER) matches the native SwiftUI task item: on the Plugin Catalog's Task Item page the tree card has the native card's identifiers (with a tree- prefix), atoms (Card, Stack, Text, Icon, Button and the plugin row's slot) and props, the JavaScript item's own props node for node, the same title, progress report, status message, created time (Nov 8, 2026) and token counter at the same sizes as the native card, and the native card's context menu. Blocking the tree demo changes exactly two nodes, its status message (Blocked: 2 checks failing, in red) and the toggle's label (Unblock), while the native card keeps its own state; clicking the tree card runs its onPress (Opened 1 times, one node changed) without changing the title or the card, and its menu's Move to Done runs onMenu with its id (Last: menu done, one node changed). An unknown renderer, the native tree of another page, and a renderer without a page are refused. With the switch on, the board's own cards render from the tree (each inside a task-item-tree container): a new task's card shows its title and created time, its plugin row slot shows the board's plugin row in Add Plugin mode and empties when the mode ends, its context menu offers Rename and Delete, Rename… opens the rename field and the new title persists and shows on the card, and clicking the card opens its task. The CLI covers the same tree through plugin render --renderer native-tree; the board's switch is read only by the app.
+    func test_task_item_atom_tree_renders_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ["PLAYHOUSE_TASK_ITEM_RENDERER": "tree"])
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = catalogSidebarRow("plugin-catalog-task-item")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Task Item example.")
+        example.click()
+        let treeSide = element("plugin-catalog-tree-task-item")
+        let nativeSide = element("plugin-catalog-native-task-item")
+        XCTAssertTrue(treeSide.waitToExist(timeout: 10), "The page shows the atom-tree task item.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native task item.")
+        XCTAssertFalse(treeSide.descendants(matching: .any).matching(identifier: "plugin-node-error").firstMatch.exists, "The tree renders without errors.")
+
+        let id = "C0FFEE00-0000-4000-8000-000000000001"
+        func pair(_ prefix: String) -> (tree: XCUIElement, native: XCUIElement) {
+            (element("\(prefix)tree-\(id)"), element("\(prefix)native-\(id)"))
+        }
+        for prefix in ["task-card-", "task-title-", "task-progress-report-", "task-progress-label-", "task-progress-detail-", "task-status-message-",
+                       "task-created-time-", "task-token-usage-counter-", "task-cpu-usage-bar-"] {
+            let (tree, native) = pair(prefix)
+            XCTAssertTrue(tree.waitToExist(timeout: 10), "The tree item has \(prefix)…")
+            XCTAssertTrue(native.waitToExist(timeout: 10), "The native item has \(prefix)…")
+            XCTAssertEqual(tree.frame.width, native.frame.width, accuracy: 1, "\(prefix) has the same width in both.")
+            XCTAssertEqual(tree.frame.height, native.frame.height, accuracy: 1, "\(prefix) has the same height in both.")
+        }
+        XCTAssertEqual(pluginText(pair("task-title-").tree), "Add a React renderer for plugins")
+        XCTAssertEqual(pluginText(pair("task-title-").tree), pluginText(pair("task-title-").native), "Both show the same title.")
+        XCTAssertEqual(pluginText(pair("task-progress-label-").tree), "Building")
+        XCTAssertEqual(pluginText(pair("task-created-time-").tree), "Nov 8, 2026")
+        let treeStatus = pair("task-status-message-").tree, nativeStatus = pair("task-status-message-").native
+        XCTAssertEqual(pluginText(treeStatus), "Waiting on CI checks")
+        attachScreenshot(named: "Task item: native SwiftUI beside the atom tree", around: [nativeSide, treeSide])
+
+        element("tree-toggle-blocked").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(treeStatus) == "Blocked: 2 checks failing" }, timeout: 5), "Block re-rendered the tree's status message.")
+        XCTAssertEqual(pluginText(nativeStatus), "Waiting on CI checks", "The native item keeps its own state.")
+        XCTAssertEqual(pluginText(element("tree-toggle-blocked")), "Unblock")
+        element("native-toggle-blocked").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(nativeStatus) == "Blocked: 2 checks failing" }, timeout: 5))
+        XCTAssertEqual(treeStatus.frame.height, nativeStatus.frame.height, accuracy: 1, "Both blocked messages lay out the same.")
+        attachScreenshot(named: "Task item: both blocked, native and tree", around: [nativeSide, treeSide])
+
+        let treeCard = pair("task-card-").tree
+        treeCard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("tree-opened-count")) == "Opened 1 times" }, timeout: 5), "Clicking the tree card ran its onPress.")
+        treeCard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).rightClick()
+        let moveToDone = element("move-task-to-done-menu-item")
+        XCTAssertTrue(moveToDone.waitToExist(timeout: 5), "The tree card's context menu lists Move to Done.")
+        XCTAssertTrue(element("rename-task-menu-item").exists && element("delete-task-menu-item").exists, "It has the native card's menu items.")
+        moveToDone.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("tree-last-action")) == "Last: menu done" }, timeout: 5), "The menu item ran onMenu with its id.")
+
+        // With the switch on, the board's own cards are trees too.
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ !treeSide.exists }, timeout: 5), "The Plugin Catalog closed.")
+        try createTaskFixture(title: "Atom tree board card", roots: [])
+        let taskID = try XCTUnwrap(try taskRecord(named: "Atom tree board card")?["id"] as? String).uppercased()
+        let boardCard = element("task-card-\(taskID)")
+        XCTAssertTrue(boardCard.waitToExist(timeout: 10), "The board shows the new task's card.")
+        XCTAssertTrue(element("task-item-tree-\(taskID)").exists, "The board drew the card from its atom tree.")
+        XCTAssertEqual(pluginText(element("task-title-\(taskID)")), "Atom tree board card")
+        XCTAssertTrue(element("task-created-time-\(taskID)").exists, "The card shows its created time.")
+        XCTAssertFalse(element("plugin-node-error").exists, "The board's tree cards render without errors.")
+        // The plugin row is native content in the tree's slot: Add Plugin mode shows it on every card.
+        _ = try runCLI(["plugin", "mode", "--on"])
+        let pluginRow = element("task-card-plugins-\(taskID)")
+        XCTAssertTrue(pluginRow.waitToExist(timeout: 10), "The tree card's slot shows the board's plugin row.")
+        XCTAssertTrue(boardCard.frame.insetBy(dx: -1, dy: -1).contains(pluginRow.frame), "The plugin row sits inside the card: \(pluginRow.frame) in \(boardCard.frame)")
+        attachElementScreenshot(element("task-item-tree-\(taskID)"), named: "Board card rendered from the atom tree, with its plugin row slot")
+        _ = try runCLI(["plugin", "mode", "--off"])
+        XCTAssertTrue(waitUntil({ !pluginRow.exists }, timeout: 10), "Leaving Add Plugin mode empties the slot.")
+
+        // The card's press and menu reach the board's actions through the tree's events.
+        boardCard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).rightClick()
+        let rename = element("rename-task-menu-item")
+        XCTAssertTrue(rename.waitToExist(timeout: 5), "The board card's menu offers Rename.")
+        XCTAssertTrue(element("delete-task-menu-item").exists, "The board card's menu offers Delete.")
+        rename.click()
+        let titleField = element("rename-task-title-field")
+        XCTAssertTrue(titleField.waitToExist(timeout: 5), "Rename… from the tree card's menu opened the rename field.")
+        titleField.click()
+        titleField.typeKey("a", modifierFlags: .command)
+        titleField.typeText("Renamed tree card")
+        element("save-task-rename-button").click()
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(named: "Renamed tree card")) ?? nil) != nil }, timeout: 10), "The rename persisted.")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("task-title-\(taskID)")) == "Renamed tree card" }, timeout: 10),
+                      "The tree card shows the new title.")
+        clickTaskCardTitle(boardCard)
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Clicking the tree card opened its task.")
     }
     // case-contract: test_plugin_agents_info_renders_from_atoms_like_native | The Plugin Catalog's Agents Info page shows the Agents info section composed in JavaScript from atoms beside the native SwiftUI section the board uses, built from the same atoms and sample data: both show the Agents info title button (Expanded), a Claude block above a Codex block with the same account and plan rows, window rows (label, percent, usage bar and reset time), Codex's credits, its Near limit status and the updated hints, each at the same size in both, and the JavaScript tree uses only atoms (Disclosure, Panel, Meter, Stack, Text, Icon, Button, Spacer) with the board section's identifiers. Collapsing is the Disclosure atom's own: clicking the JavaScript title runs onToggle, whose state change is one commit that updates only the Disclosure's props and the readout (Last: collapse) while the blocks stay in the tree, the JavaScript blocks go away and its title reads Collapsed while the native section stays open, the native title collapses its own section to the same size, and expanding brings the blocks back (Last: expand). Signing Claude out in the JavaScript example replaces its window rows with a Log in button the same size as the native one, whose onPress runs in JavaScript (Last: login claude) and brings the rows back, and Codex's switch-account button runs its JavaScript handler with its provider (Last: switch codex) without re-rendering any block.
     func test_plugin_agents_info_renders_from_atoms_like_native() throws {

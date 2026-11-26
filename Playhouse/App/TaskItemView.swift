@@ -1,65 +1,6 @@
+import OSLog
+import QuartzCore
 import SwiftUI
-
-/// What a board card shows, already derived from its task: plain values a
-/// native card and a plugin (as `Playhouse.props.task`) compose the same way.
-struct TaskItemModel: Codable, Equatable {
-    struct Progress: Codable, Equatable {
-        var label: String
-        var detail: String?
-        var symbol: String
-    }
-
-    struct Tokens: Codable, Equatable {
-        var compact: String
-        /// #RRGGBB on the token heatmap.
-        var color: String
-        var description: String
-    }
-
-    struct CPU: Codable, Equatable {
-        var fraction: Double
-        var label: String
-    }
-
-    var id: String
-    var title: String
-    var titleSpinner: Bool
-    var progress: Progress?
-    var schedule: String?
-    var statusMessage: String?
-    var statusIsBlocked: Bool
-    /// In progress: the time row counts up from `workingSince` (seconds since
-    /// 1970) plus `workedSeconds`; otherwise it shows `createdText`.
-    var isWorking: Bool
-    var workingSince: Double?
-    var workedSeconds: Double
-    var createdText: String
-    var tokens: Tokens?
-    var cpu: CPU?
-    /// Whether the card keeps a bottom row for its task card plugins (the
-    /// built-in pull request controls and mode pill among them): once the task
-    /// has started and has a repository.
-    var hasPluginRow: Bool
-    var canMoveToDone: Bool
-    var canMoveToReview: Bool
-
-    func workingDuration(at date: Date) -> String {
-        let active = workingSince.map { max(0, date.timeIntervalSince1970 - $0) } ?? 0
-        let activeText = Self.shortDuration(active)
-        guard workedSeconds > 0 else { return activeText }
-        return "\(activeText) (\(Self.shortDuration(workedSeconds + active)) total)"
-    }
-
-    static func shortDuration(_ seconds: TimeInterval) -> String {
-        if seconds < 60 { return "\(Int(seconds))s" }
-        let minutes = Int(seconds / 60)
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h\(minutes % 60 == 0 ? "" : " \(minutes % 60)m")" }
-        let days = hours / 24
-        return "\(days)d\(hours % 24 == 0 ? "" : " \(hours % 24)h")"
-    }
-}
 
 extension TaskItemModel {
     init(
@@ -181,15 +122,7 @@ struct TaskItemView: View {
         }
     }
 
-    private var cardProps: CardProps {
-        var menu: [CardProps.MenuItem] = []
-        if model.canMoveToDone { menu.append(.init(id: "done", title: "Move to Done", icon: "checkmark.circle", testID: "move-task-to-done-menu-item")) }
-        if model.canMoveToReview { menu.append(.init(id: "review", title: "Move to Review", icon: "eye", testID: "move-task-to-review-menu-item")) }
-        menu.append(.init(id: "rename", title: "Rename…", icon: "pencil", testID: "rename-task-menu-item"))
-        menu.append(.init(id: "stats", title: "Token Stats…", icon: "chart.bar", testID: "token-stats-task-menu-item"))
-        menu.append(.init(id: "delete", title: "Delete Task", icon: "trash", destructive: true, testID: "delete-task-menu-item"))
-        return CardProps(menu: menu, meter: model.cpu?.fraction, meterLabel: model.cpu?.label, meterTestID: "task-cpu-usage-bar-\(id)")
-    }
+    private var cardProps: CardProps { TaskItemTree.cardProps(model) }
 
     private var timeRow: some View {
         // One row of clock, time and counter, as the card had before the atoms.
@@ -205,6 +138,134 @@ struct TaskItemView: View {
             }
             if let tokens = model.tokens {
                 TokenCounterButton(tokens: tokens, testID: "task-token-usage-counter-\(id)", action: actions.showTokenStats)
+            }
+        }
+    }
+}
+
+/// Which view draws the board's task items, picked once per launch by
+/// `PLAYHOUSE_TASK_ITEM_RENDERER`: the native `TaskItemView` (the default),
+/// or, for the atom-tree spike (docs/atom-tree-performance.md), the same card
+/// as an atom tree (`tree`, typed props) or as plugin-style ops (`tree-dynamic`,
+/// dictionary props decoded once per op) rendered through `AtomRegistry`.
+enum TaskItemRenderer: String {
+    case native
+    case tree
+    case treeDynamic = "tree-dynamic"
+
+    static let current = TaskItemRenderer(rawValue: ProcessInfo.processInfo.environment["PLAYHOUSE_TASK_ITEM_RENDERER"] ?? "") ?? .native
+}
+
+/// Keeps a task item's atom tree in step with its model and sends the tree's
+/// events to the card's actions.
+@MainActor
+@Observable
+final class TaskItemTreeHost {
+    private let typed: TypedAtomTree?
+    private let dynamic: DynamicAtomTree?
+    @ObservationIgnored var actions = TaskItemActions()
+    @ObservationIgnored private(set) var model: TaskItemModel
+    private(set) var root: PluginNode?
+
+    init(model: TaskItemModel, dynamicProps: Bool, now: Date = .now) {
+        self.model = model
+        typed = dynamicProps ? nil : TypedAtomTree()
+        dynamic = dynamicProps ? DynamicAtomTree() : nil
+        typed?.onEvent = { [weak self] id, event, value in self?.handle(id, event, value) }
+        dynamic?.onEvent = { [weak self] id, event, value in self?.handle(id, event, value) }
+        apply(now: now)
+    }
+
+    var events: any AtomEventHandler { typed?.handlers ?? dynamic!.handlers }
+
+    func update(_ model: TaskItemModel, now: Date = .now) {
+        guard model != self.model else { return }
+        self.model = model
+        apply(now: now)
+    }
+
+    /// Re-renders the working time.
+    func tick(now: Date = .now) { apply(now: now) }
+
+    private func apply(now: Date) {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let started = CACurrentMediaTime()
+        let state = Self.signposter.beginInterval("build spec")
+        #endif
+        let spec = TaskItemTree.spec(model: model, now: now)
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        Self.signposter.endInterval("build spec", state)
+        let built = CACurrentMediaTime()
+        let reconcile = Self.signposter.beginInterval("reconcile")
+        defer {
+            Self.signposter.endInterval("reconcile", reconcile)
+            Self.phaseTimes["specMs", default: 0] += (built - started) * 1000
+            Self.phaseTimes["reconcileMs", default: 0] += (CACurrentMediaTime() - built) * 1000
+            Self.phaseTimes["applies", default: 0] += 1
+        }
+        #endif
+        if let typed {
+            typed.apply(spec)
+            if root !== typed.root { root = typed.root }
+        } else if let dynamic {
+            do { try dynamic.apply(spec) } catch { assertionFailure("Task item ops: \(error)") }
+            if root !== dynamic.root { root = dynamic.root }
+        }
+    }
+
+    #if PLAYHOUSE_ATOM_BENCHMARK
+    static let signposter = OSSignposter(subsystem: "Playhouse", category: "AtomTree")
+    /// Time spent building specs and reconciling trees, for `TaskItemBenchmark`.
+    static var phaseTimes: [String: Double] = [:]
+    #endif
+
+    private func handle(_ id: Int, _ event: String, _ value: PluginValue?) {
+        switch (id, event) {
+        case (TaskItemTree.ID.card, "onPress"): actions.open()
+        case (TaskItemTree.ID.card, "onMenu"): if let item = value?.string { actions.menu(item) }
+        case (TaskItemTree.ID.tokenButton, "onPress"): actions.showTokenStats()
+        default: break
+        }
+    }
+}
+
+/// `TaskItemView`'s card drawn from its atom tree (`TaskItemTree`) through
+/// `AtomRegistry`, for the atom-tree spike. It looks and acts the same.
+struct TaskItemTreeView: View {
+    let model: TaskItemModel
+    var actions = TaskItemActions()
+    var pluginRow: AnyView?
+    var dynamicProps = false
+    /// Holds the host, built on the first render: a `State`'s initial value is
+    /// evaluated on every init of the view, and a host builds its whole tree.
+    private final class HostBox {
+        var host: TaskItemTreeHost?
+    }
+    @State private var box = HostBox()
+
+    var body: some View {
+        let host = box.host ?? {
+            let host = TaskItemTreeHost(model: model, dynamicProps: dynamicProps)
+            box.host = host
+            return host
+        }()
+        // The latest closures, which capture the board's current task.
+        let _ = { host.actions = actions }()
+        Group {
+            if let root = host.root {
+                PluginNodeView(node: root, events: host.events)
+            }
+        }
+        .environment(\.atomSlots, AtomSlots(views: pluginRow.map { [TaskItemTree.pluginRowSlot: $0] } ?? [:]))
+        // Tells a tree-drawn card from a native one, which has the same identifiers inside.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-item-tree-\(model.id)")
+        .onChange(of: model) { _, model in host.update(model) }
+        .task(id: model.isWorking) {
+            guard model.isWorking else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                host.tick()
             }
         }
     }
