@@ -798,6 +798,25 @@ prints the median of several fresh app runs. `scripts/unit/plugin-node-props-tes
 run by `scripts/test-e2e.sh`, checks the decode counts, typed nodes, stored
 errors, the Codable round trip and the native event handlers.
 
+A native composite can also describe itself as data and render through
+`AtomRegistry` (the atom-tree spike, measured in
+[docs/atom-tree-performance.md](../../../docs/atom-tree-performance.md)).
+`Core/AtomTreeSpec.swift` holds the pieces: an `AtomNodeSpec` is a node's
+typed props, events and children as plain values; `TypedAtomTree` keeps typed
+nodes in step with the latest spec, touching only nodes whose props or
+children changed; `DynamicAtomTree` reaches the same tree by sending the ops a
+plugin's commit would (dictionary props, validated and decoded once per op).
+A spec can hold a slot (`AtomNodeSpec.slot`, a `#slot` node) for native
+content no atom describes, which the host view supplies by name through
+`\.atomSlots`; plugins can't create one, since `#slot` is not an atom.
+`Core/TaskItemTree.swift` is the board's task item as a spec, and
+`TaskItemTreeView` draws it when `PLAYHOUSE_TASK_ITEM_RENDERER` is `tree` or
+`tree-dynamic` (the native `TaskItemView` stays the default);
+`Core/TaskItemTreeDemo.swift` is the Plugin Catalog's tree card, which
+`plugin render --page TaskItem --renderer native-tree` runs headlessly.
+`scripts/benchmark-atom-spike.sh` runs the spike's board and transcript
+benchmarks and `scripts/trace-atom-spike.sh` records an Instruments trace of one run.
+
 Events go the other way. An atom view calls `dispatch(nodeID:event:value:)`
 on the tree's `AtomEventHandler` (`Core/AtomEvents.swift`), which
 `PluginNodeView` takes beside the node. For a plugin that is its

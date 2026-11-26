@@ -6,7 +6,9 @@ import Observation
 // create or update op and never when the node is read; native typed props are never decoded;
 // a decoding error is computed when the op applies; and the props structs round-trip through
 // Codable; and a native tree's events reach its Swift handlers. scripts/benchmark-atom-tree.sh
-// renders both kinds through AtomRegistry.
+// renders both kinds through AtomRegistry. It also checks the atom-tree spike's reconcilers
+// (AtomTreeSpec.swift): a typed tree changes only the nodes a new spec changes, and a
+// plugin-style tree sends only the ops that do.
 
 @main
 struct PluginNodePropsTests {
@@ -178,6 +180,67 @@ struct PluginNodePropsTests {
         handlers.remove(field)
         expect(handlers.dispatch(nodeID: 4, event: "onSubmit", value: nil), false, "Removing a node drops all of its handlers")
         expect(field.events, [], "Removing a node's handlers unlists all of its events")
+
+        // The atom-tree spike's reconcilers keep a tree in step with a spec (AtomTreeSpec.swift).
+        func sampleModel(blocked: Bool = false, tokens: String = "1.2M") -> TaskItemModel {
+            TaskItemModel(id: "T", title: "Title", titleSpinner: false, progress: .init(label: "Building", detail: "Step", symbol: "hammer"),
+                          schedule: nil, statusMessage: blocked ? "Blocked" : "Waiting", statusIsBlocked: blocked, isWorking: false,
+                          workingSince: nil, workedSeconds: 0, createdText: "Nov 8, 2026",
+                          tokens: .init(compact: tokens, color: "#C9A02E", description: "\(tokens) tokens"), cpu: .init(fraction: 0.35, label: "CPU 35%"),
+                          hasPluginRow: false, canMoveToDone: true, canMoveToReview: false)
+        }
+        let now = Date(timeIntervalSince1970: 0)
+        let typedTree = TypedAtomTree()
+        let firstSpec = TaskItemTree.spec(model: sampleModel(), now: now)
+        let decodesBeforeTyped = AtomCounters.decodes
+        expect(typedTree.apply(firstSpec).count, firstSpec.nodeCount, "The first apply creates every node")
+        let typedCard = typedTree.root
+        expect(typedTree.apply(firstSpec), [], "Applying the same spec changes nothing")
+        expect(typedTree.apply(TaskItemTree.spec(model: sampleModel(tokens: "1.3M"), now: now)), [TaskItemTree.ID.tokenButton, TaskItemTree.ID.tokenText],
+               "A new token count changes only the counter's button (its label) and text")
+        expect(typedTree.root === typedCard, true, "Updating keeps the card's node")
+        expect(AtomCounters.decodes - decodesBeforeTyped, 0, "A typed tree decodes nothing")
+        var noProgress = sampleModel()
+        noProgress.progress = nil
+        typedTree.apply(TaskItemTree.spec(model: noProgress, now: now))
+        expect(typedTree.root?.children.first?.children.map(\.id), [TaskItemTree.ID.titleRow, TaskItemTree.ID.status, TaskItemTree.ID.timeRow, TaskItemTree.ID.pluginRow],
+               "A row that goes away leaves its column")
+        expect(typedTree.root?.children.first?.children.last?.type, PluginNode.slotType, "The plugin row is a slot node")
+        var pressed: [String] = []
+        typedTree.onEvent = { id, event, value in pressed.append("\(id):\(event):\(value?.string ?? "")") }
+        typedTree.handlers.dispatch(nodeID: TaskItemTree.ID.card, event: "onMenu", value: .string("done"))
+        expect(pressed, ["1:onMenu:done"], "A spec's events reach the tree's handler")
+
+        var noTokens = sampleModel()
+        noTokens.tokens = nil
+        let handlerTree = TypedAtomTree()
+        handlerTree.apply(TaskItemTree.spec(model: sampleModel(), now: now))
+        expect(handlerTree.handlers.dispatch(nodeID: TaskItemTree.ID.tokenButton, event: "onPress", value: nil), true, "The token counter has its press handler")
+        handlerTree.apply(TaskItemTree.spec(model: noTokens, now: now))
+        expect(handlerTree.handlers.dispatch(nodeID: TaskItemTree.ID.tokenButton, event: "onPress", value: nil), false, "A node that leaves the tree loses its handlers")
+
+        let dynamicTree = DynamicAtomTree()
+        let decodesBeforeDynamic = AtomCounters.decodes
+        _ = try? dynamicTree.apply(firstSpec)
+        let created = AtomCounters.decodes - decodesBeforeDynamic
+        expect(created > 0, true, "A plugin-style tree decodes its ops' props")
+        let reference = TypedAtomTree()
+        reference.apply(firstSpec)
+        func withoutSlots(_ value: PluginValue) -> PluginValue {
+            guard var object = value.object else { return value }
+            if let children = object["children"]?.array {
+                let kept = children.filter { $0.object?["type"]?.string != PluginNode.slotType }.map(withoutSlots)
+                object["children"] = kept.isEmpty ? nil : .array(kept)
+            }
+            object["updates"] = nil
+            return .object(object)
+        }
+        expect(dynamicTree.root.map { withoutSlots(PluginNodeTree().snapshot($0)) }, reference.root.map { withoutSlots(PluginNodeTree().snapshot($0)) },
+               "Ops build the typed tree's nodes and props, minus the slot")
+        expect(dynamicTree.ops(for: firstSpec), [], "An unchanged spec sends no ops")
+        let blockedOps = dynamicTree.ops(for: TaskItemTree.spec(model: sampleModel(blocked: true), now: now))
+        expect(blockedOps.map(\.name), ["update"], "Blocking sends one update op")
+        expect(blockedOps.first?.nodeID, TaskItemTree.ID.status, "The update is the status message's")
 
         if failures.isEmpty {
             print("Plugin node props tests: \(checks) checks passed")

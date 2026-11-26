@@ -848,6 +848,7 @@ final class PlayhouseBridgeRuntime {
                     var command = PluginRenderCommand()
                     command.file = request.arguments["file"]?.string
                     command.page = request.arguments["page"]?.string
+                    command.renderer = request.arguments["renderer"]?.string
                     command.propsJSON = request.arguments["props"]?.string
                     // An installed plugin renders with its placement's real context.
                     if let pluginID = request.arguments["pluginID"]?.string {

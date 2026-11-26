@@ -109,6 +109,9 @@ struct AtomCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         content()
             .padding(CGFloat(common.padding ?? CardProps.defaultPadding))
             .frame(maxWidth: common.fillWidth == true ? .infinity : nil, alignment: .leading)
@@ -177,6 +180,9 @@ struct AtomDisclosure<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         VStack(alignment: .leading, spacing: CGFloat(props.spacing ?? 6)) {
             Button {
                 withAnimation(.easeInOut(duration: 0.22)) { onToggle() }
@@ -218,6 +224,9 @@ struct AtomPanel<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         AtomStack(props: props.stack, common: padded, atom: .panel, content: content)
     }
 
@@ -236,6 +245,9 @@ struct AtomMeter: View {
     var common = AtomCommon()
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         let fraction = min(1, max(0, props.fraction))
         Capsule()
             .fill(Color.primary.opacity(props.trackOpacity ?? 0.12))
@@ -275,6 +287,9 @@ struct AtomScroll<Content: View>: View {
     @State private var space = UUID()
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         ScrollViewReader { proxy in
             scrollView
                 .onChange(of: props.scrollRequest) {

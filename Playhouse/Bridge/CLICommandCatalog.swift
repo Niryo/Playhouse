@@ -175,7 +175,7 @@ enum CLICommandCatalog {
         command("plugin enable|disable|delete", "--id <plugin-id>", "Enable, disable, or delete an installed plugin.", chat),
         command("plugin state", "--id <plugin-id> [--key <key> --value <json>]", "Read a plugin's saved state, or set one key (null removes it).", plugin),
         command("plugin event", "<task.statusChanged|app.focus|plugin.stateChanged|app.launched|agent.finished> [--payload <json>]", "Send an app event to plugins.", plugin),
-        command("plugin render", "(--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>] | @<app-event>[:<json>] | +<seconds>...] [--advance <seconds>] [--mock <command>[:<tool>]=<json>...]",
+        command("plugin render", "(--file <plugin.js> | --page <catalog-page> [--renderer <js|native-tree>] | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>] | @<app-event>[:<json>] | +<seconds>...] [--advance <seconds>] [--mock <command>[:<tool>]=<json>...]",
                 "Render a plugin without the app and report its node tree and errors.", plugin),
         command("plugin service", "(--file <index.js> | --plugin <plugin-id>) --event <name>[:<json payload>]... [--props <json>] [--mock <command>[:<tool>]=<json>...]",
                 "Run a plugin's background handlers for events and report their bridge calls, state writes and errors.", plugin),

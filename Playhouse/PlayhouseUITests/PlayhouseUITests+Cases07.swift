@@ -148,7 +148,7 @@ extension PlayhouseUITests {
         try? FileManager.default.removeItem(at: activeMarker)
         try? FileManager.default.removeItem(at: releaseMarker)
     }
-    // case-contract: test_task_rename_persists_and_rejects_blank_title | A rename waits for the real per-task operation lock, then persists across fresh CLI/XPC reads; rejecting a blank rename preserves the last valid title.
+    // case-contract: test_task_rename_persists_and_rejects_blank_title | A rename waits for the real per-task operation lock, then persists across fresh CLI/XPC reads; rejecting a blank rename preserves the last valid title. By default the board draws the native task item, not its atom tree.
     func test_task_rename_persists_and_rejects_blank_title() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Before rename", roots: [fixture.primary.path])
@@ -156,6 +156,7 @@ extension PlayhouseUITests {
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         let card = app.buttons.matching(NSPredicate(format: "label == %@", "Before rename")).firstMatch
         XCTAssertTrue(card.waitToExist(timeout: 10))
+        XCTAssertFalse(element("task-item-tree-\(taskID.uppercased())").exists, "By default the board draws the native task item, not its atom tree.")
         card.rightClick()
         let renameAction = element("rename-task-menu-item")
         XCTAssertTrue(renameAction.waitToExist(timeout: 5), "The task context menu has no rename action.")

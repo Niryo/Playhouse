@@ -227,7 +227,27 @@ struct PluginNodeView: View {
         #if PLAYHOUSE_ATOM_BENCHMARK
         AtomCounters.bodies += 1
         #endif
+        if node.type == PluginNode.slotType { return AnyView(AtomSlotContent(name: node.text)) }
         return AtomRegistry.view(for: node, events: events)
+    }
+}
+
+/// What a native tree's slots (`AtomNodeSpec.slot`) show, by slot name; the
+/// host view that renders the tree supplies it.
+struct AtomSlots {
+    var views: [String: AnyView] = [:]
+}
+
+extension EnvironmentValues {
+    @Entry var atomSlots = AtomSlots()
+}
+
+private struct AtomSlotContent: View {
+    let name: String
+    @Environment(\.atomSlots) private var slots
+
+    var body: some View {
+        slots.views[name]
     }
 }
 

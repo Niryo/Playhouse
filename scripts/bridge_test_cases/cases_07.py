@@ -584,7 +584,7 @@ class BridgeTestCases07:
             outcome_hold.unlink(missing_ok=True)
             outcome_active.unlink(missing_ok=True)
             outcome_release.unlink(missing_ok=True)
-    # case-contract: test_task_rename_persists_and_rejects_blank_title | A rename waits for the real per-task operation lock, then persists across fresh CLI/XPC reads; rejecting a blank rename preserves the last valid title.
+    # case-contract: test_task_rename_persists_and_rejects_blank_title | A rename waits for the real per-task operation lock, then persists across fresh CLI/XPC reads; rejecting a blank rename preserves the last valid title. By default the board draws the native task item, not its atom tree.
     def test_task_rename_persists_and_rejects_blank_title(self):
         task_id = self.create_task()["id"]
         barrier = TaskOperationLockBarrier(self.data_directory, task_id)

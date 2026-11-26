@@ -18,6 +18,9 @@ struct AtomMarkdown: View {
     private var selectable: Bool { props.selectable == true }
 
     var body: some View {
+        #if PLAYHOUSE_ATOM_BENCHMARK
+        let _ = AtomCounters.views += 1
+        #endif
         let markdown = props.text ?? children
         let document = Self.document(markdown, frontmatter: props.frontmatter != nil, slot: host?.slot)
         let textColor = AtomColor.nsColor(props.color) ?? .labelColor

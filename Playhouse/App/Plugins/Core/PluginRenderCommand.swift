@@ -36,6 +36,9 @@ struct PluginRenderCommand: Sendable {
 
     var file: String?
     var page: String?
+    /// `native-tree` renders the TaskItem page's card as a native atom tree
+    /// (`TaskItemTreeDemo`) instead of running its JavaScript; nil or `js` runs the script.
+    var renderer: String?
     /// Props under `propsJSON`, such as an installed plugin's placement context.
     var baseProps: [String: PluginValue] = [:]
     var propsJSON: String?
@@ -87,6 +90,11 @@ struct PluginRenderCommand: Sendable {
     }
 
     func run() async throws -> PluginValue {
+        if let renderer, renderer != "js" {
+            guard renderer == "native-tree" else { throw PluginTreeError(message: "Unknown renderer \"\(renderer)\": use js or native-tree.") }
+            guard let page, page == "TaskItem" else { throw PluginTreeError(message: "Only --page TaskItem has a native tree.") }
+            return try TaskItemTreeDemo.run(props: try Self.catalogPage(page, resources: resources).props, events: events)
+        }
         let source: String
         var props = baseProps
         let name: String

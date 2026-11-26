@@ -343,7 +343,15 @@ private struct TaskCardView: View {
     let onMoveToReview: (() -> Void)?
 
     var body: some View {
-        TaskItemView(model: model, actions: TaskItemActions(
+        switch TaskItemRenderer.current {
+        case .native: TaskItemView(model: model, actions: actions, pluginRow: pluginRow)
+        case .tree: TaskItemTreeView(model: model, actions: actions, pluginRow: pluginRow)
+        case .treeDynamic: TaskItemTreeView(model: model, actions: actions, pluginRow: pluginRow, dynamicProps: true)
+        }
+    }
+
+    private var actions: TaskItemActions {
+        TaskItemActions(
             open: onOpen,
             menu: { id in
                 switch id {
@@ -356,9 +364,13 @@ private struct TaskCardView: View {
                 }
             },
             showTokenStats: onShowTokenStats
-        ), pluginRow: AnyView(TaskItemPluginRow(
+        )
+    }
+
+    private var pluginRow: AnyView {
+        AnyView(TaskItemPluginRow(
             task: task, hasBuiltInControls: model.hasPluginRow, actions: pluginActions, open: onOpenPlugin, add: onAddPlugin
-        )))
+        ))
     }
 
     /// For Codex the CPU share is the task's working-directory share of the

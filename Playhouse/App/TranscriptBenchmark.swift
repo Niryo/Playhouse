@@ -3,7 +3,7 @@ import Darwin
 import QuartzCore
 import SwiftUI
 
-#if PLAYHOUSE_TRANSCRIPT_BENCHMARK
+#if PLAYHOUSE_TRANSCRIPT_BENCHMARK || PLAYHOUSE_ATOM_BENCHMARK
 /// A development benchmark of the transcript's reply rendering, run by
 /// `scripts/benchmark-transcript.sh`; it is not a product feature. It is compiled only when that
 /// script builds the app with the PLAYHOUSE_TRANSCRIPT_BENCHMARK condition, never into a shipped
