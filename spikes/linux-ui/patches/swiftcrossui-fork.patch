@@ -1,0 +1,2136 @@
+diff --git a/Sources/Gtk/Utility/CSS/CSSBlock.swift b/Sources/Gtk/Utility/CSS/CSSBlock.swift
+index e848c78..cc986c4 100644
+--- a/Sources/Gtk/Utility/CSS/CSSBlock.swift
++++ b/Sources/Gtk/Utility/CSS/CSSBlock.swift
+@@ -15,9 +15,17 @@ public struct CSSBlock: Equatable {
+     private var keyedProperties: [String: CSSProperty] = [:]
+ 
+     public var stringRepresentation: String {
+-        ".\(cssClass){\(keyedProperties.values.map(\.stringRepresentation).joined())}"
++        ".\(cssClass){\(bodyRepresentation)}"
+     }
+ 
++    /// The declarations alone, in a stable (key-sorted) order, so that equal
++    /// blocks produce equal text and can share one stylesheet.
++    public var bodyRepresentation: String {
++        keyedProperties.sorted { $0.key < $1.key }.map(\.value.stringRepresentation).joined()
++    }
++
++    public var isEmpty: Bool { keyedProperties.isEmpty }
++
+     public init(forClass cssClass: String) {
+         self.cssClass = cssClass
+     }
+diff --git a/Sources/Gtk/Utility/CSS/CSSProperty.swift b/Sources/Gtk/Utility/CSS/CSSProperty.swift
+index d0a3a25..2af7b97 100644
+--- a/Sources/Gtk/Utility/CSS/CSSProperty.swift
++++ b/Sources/Gtk/Utility/CSS/CSSProperty.swift
+@@ -2,7 +2,7 @@
+ ///
+ /// For a list of all supported CSS properties, see [Gtk's CSS documentation](https://docs.gtk.org/gtk4/css-properties.html).
+ public struct CSSProperty: Equatable {
+-    var stringRepresentation: String {
++    public var stringRepresentation: String {
+         "\(key):\(value);"
+     }
+ 
+diff --git a/Sources/Gtk/Utility/Pango.swift b/Sources/Gtk/Utility/Pango.swift
+index 5c92f38..93fd154 100644
+--- a/Sources/Gtk/Utility/Pango.swift
++++ b/Sources/Gtk/Utility/Pango.swift
+@@ -1,16 +1,20 @@
+ import CGtk
+ 
+ public class Pango {
+-    private var pangoContext: OpaquePointer
++    /// Fork change (port of upstream's Gtk3 fix #820): the widget's cached
++    /// context (borrowed, not unreffed) and one reusable layout, instead of
++    /// `gtk_widget_create_pango_context` + a new layout per measurement.
++    private let pangoContext: OpaquePointer
++    private let layout: OpaquePointer
+ 
+-    /// Create a default pango instance with default context.
+-    /// Create a pango context for a specific
+     public init(for widget: Widget) {
+-        pangoContext = gtk_widget_create_pango_context(widget.widgetPointer)
++        pangoContext = gtk_widget_get_pango_context(widget.widgetPointer)
++        layout = pango_layout_new(pangoContext)!
++        pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR)
+     }
+ 
+     deinit {
+-        g_object_unref(UnsafeMutableRawPointer(pangoContext))
++        g_object_unref(UnsafeMutableRawPointer(layout))
+     }
+ 
+     /// Gets the size of the given text in pixels using the default font. If supplied, `proposedWidth`
+@@ -25,9 +29,7 @@ public class Pango {
+         proposedWidth: Double? = nil,
+         proposedHeight: Double? = nil
+     ) -> (width: Int, height: Int) {
+-        let layout = pango_layout_new(pangoContext)!
+         pango_layout_set_text(layout, text, Int32(text.utf8.count))
+-        pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR)
+         pango_layout_set_ellipsize(layout, ellipsize.toGtk())
+ 
+         if let proposedWidth {
+@@ -35,20 +37,22 @@ public class Pango {
+                 layout,
+                 Int32((proposedWidth * Double(PANGO_SCALE)).rounded(.towardZero))
+             )
++        } else {
++            pango_layout_set_width(layout, -1)
+         }
+         if let proposedHeight {
+             pango_layout_set_height(
+                 layout,
+                 Int32((proposedHeight * Double(PANGO_SCALE)).rounded(.towardZero))
+             )
++        } else {
++            pango_layout_set_height(layout, -1)
+         }
+ 
+         var width: Int32 = 0
+         var height: Int32 = 0
+         pango_layout_get_pixel_size(layout, &width, &height)
+ 
+-        g_object_unref(UnsafeMutableRawPointer(layout))
+-
+         return (
+             Int(width),
+             Int(height)
+diff --git a/Sources/Gtk/Widgets/Fixed.swift b/Sources/Gtk/Widgets/Fixed.swift
+index 3f104c6..f85deff 100644
+--- a/Sources/Gtk/Widgets/Fixed.swift
++++ b/Sources/Gtk/Widgets/Fixed.swift
+@@ -57,6 +57,13 @@ open class Fixed: Widget {
+         child.parentWidget = self
+     }
+ 
++    /// The child's current offset (fork: animation start points).
++    public func position(of child: Widget) -> SIMD2<Double> {
++        var x = 0.0, y = 0.0
++        gtk_fixed_get_child_position(castedPointer(), child.widgetPointer, &x, &y)
++        return SIMD2(x, y)
++    }
++
+     public func move(_ child: Widget, x: Double, y: Double) {
+         gtk_fixed_move(castedPointer(), child.widgetPointer, x, y)
+     }
+diff --git a/Sources/Gtk/Widgets/Widget.swift b/Sources/Gtk/Widgets/Widget.swift
+index a10e195..119c893 100644
+--- a/Sources/Gtk/Widgets/Widget.swift
++++ b/Sources/Gtk/Widgets/Widget.swift
+@@ -32,7 +32,13 @@ open class Widget: GObject {
+     func didMoveFromParent() {}
+ 
+     /// The CSS rules applied directly to this widget.
+-    public lazy var css: CSSBlock = CSSBlock(forClass: customCSSClass) {
++    ///
++    /// Fork change: widgets no longer get a display-wide `GtkCssProvider`
++    /// each. Every provider on a display is consulted for every style lookup,
++    /// so N widgets with N providers made styling O(N²) (500 cards ≈ 10,000
++    /// providers). Widgets with the same rules now share one class and one
++    /// refcounted provider (``SharedWidgetStyles``).
++    public var css: CSSBlock = CSSBlock(forClass: "") {
+         didSet {
+             guard oldValue != css else { return }
+             reloadCSS()
+@@ -40,7 +46,7 @@ open class Widget: GObject {
+     }
+ 
+     /// The focus related CSS rules applied directly to this widget.
+-    public lazy var focusCSS: CSSBlock = CSSBlock(forClass: "\(customCSSClass):focus") {
++    public var focusCSS: CSSBlock = CSSBlock(forClass: "") {
+         didSet {
+             guard oldValue != focusCSS else { return }
+             reloadCSS()
+@@ -48,26 +54,42 @@ open class Widget: GObject {
+     }
+ 
+     /// The focus related CSS rules applied directly to this widget.
+-    public lazy var focusWithinCSS: CSSBlock =
+-        CSSBlock(forClass: "\(customCSSClass):focus-within")
+-    {
++    public var focusWithinCSS: CSSBlock = CSSBlock(forClass: "") {
+         didSet {
+             guard oldValue != focusWithinCSS else { return }
+             reloadCSS()
+         }
+     }
+ 
++    /// Backend-owned measurement helper (a reusable Pango layout).
++    public var measurementPango: AnyObject?
++    /// Backend-owned cache of recent text measurements.
++    public var textMeasurements: AnyObject?
++
++    /// The shared style class currently applied, if any.
++    private var sharedStyle: SharedWidgetStyles.Style?
++
+     private func reloadCSS() {
+-        cssProvider.loadCss(from: """
+-                \(focusWithinCSS.stringRepresentation)
+-                \(focusCSS.stringRepresentation)
+-                \(css.stringRepresentation)
+-            """)
++        let key = SharedWidgetStyles.Key(
++            plain: css.bodyRepresentation,
++            focus: focusCSS.bodyRepresentation,
++            focusWithin: focusWithinCSS.bodyRepresentation
++        )
++        guard key != sharedStyle?.key else { return }
++        let previous = sharedStyle
++        sharedStyle = key.isEmpty ? nil : SharedWidgetStyles.acquire(key)
++        if let sharedStyle {
++            gtk_widget_add_css_class(widgetPointer, sharedStyle.className)
++        }
++        if let previous {
++            gtk_widget_remove_css_class(widgetPointer, previous.className)
++            SharedWidgetStyles.release(previous)
++        }
+     }
+ 
+-    /// A unique CSS class for this widget. The class is lazily added to the
+-    /// widget when this property is first accessed.
+-    private lazy var customCSSClass: String = {
++    /// A unique CSS class for this widget, for the few backend widgets that
++    /// still need per-widget selectors (e.g. descendant rules). Added lazily.
++    public lazy var uniqueCSSClass: String = {
+         let className = ObjectIdentifier(self).debugDescription
+             .replacingOccurrences(of: "ObjectIdentifier(0x", with: "class_")
+             .replacingOccurrences(of: ")", with: "")
+@@ -75,10 +97,21 @@ open class Widget: GObject {
+         return className
+     }()
+ 
++    func releaseSharedStyle() {
++        if let sharedStyle {
++            SharedWidgetStyles.release(sharedStyle)
++            self.sharedStyle = nil
++        }
++    }
++
+     /// A CSS provider specifically for this widget. Will get removed when
+-    /// it deinits.
++    /// it deinits. (Only a few backend widgets still use it directly.)
+     public lazy var cssProvider = CSSProvider()
+ 
++    deinit {
++        releaseSharedStyle()
++    }
++
+     public func show() {
+         gtk_widget_set_visible(widgetPointer, true.toGBoolean())
+     }
+diff --git a/Sources/GtkBackend/Features/Core.swift b/Sources/GtkBackend/Features/Core.swift
+index da205bf..756cf00 100644
+--- a/Sources/GtkBackend/Features/Core.swift
++++ b/Sources/GtkBackend/Features/Core.swift
+@@ -78,7 +78,11 @@ extension GtkBackend: BackendFeatures.Core {
+                 return 0
+             },
+             Unmanaged<ThreadActionContext>.passRetained(action).toOpaque(),
+-            { _ in }
++            // Fork: release the context (it leaked once per call before).
++            { context in
++                guard let context else { return }
++                Unmanaged<ThreadActionContext>.fromOpaque(context).release()
++            }
+         )
+     }
+ 
+@@ -106,7 +110,11 @@ extension GtkBackend: BackendFeatures.Core {
+                 return 0
+             },
+             Unmanaged<ThreadActionContext>.passRetained(action).toOpaque(),
+-            { _ in }
++            // Fork: release the context (it leaked once per call before).
++            { context in
++                guard let context else { return }
++                Unmanaged<ThreadActionContext>.fromOpaque(context).release()
++            }
+         )
+     }
+ 
+diff --git a/Sources/GtkBackend/Features/GenericContainers.swift b/Sources/GtkBackend/Features/GenericContainers.swift
+index 5699f05..eb0ea17 100644
+--- a/Sources/GtkBackend/Features/GenericContainers.swift
++++ b/Sources/GtkBackend/Features/GenericContainers.swift
+@@ -15,6 +15,16 @@ extension GtkBackend: BackendFeatures.GenericContainers {
+     public func insert(_ child: Widget, into container: Widget, at index: Int) {
+         let container = container as! Fixed
+         container.put(child, index: index, x: 0, y: 0)
++        // Fork: a view inserted by an animated update fades in, and its first
++        // size/position aren't animated (it has no previous geometry).
++        freshWidgets.insert(ObjectIdentifier(child))
++        // Only the root of an inserted subtree fades (nested fades multiply).
++        if let animation = Animator.active, !freshWidgets.contains(ObjectIdentifier(container)) {
++            child.opacity = 0
++            Animator.animate(child, .opacity, from: SIMD2(0, 0), to: SIMD2(1, 1), animation: animation) { value in
++                child.opacity = min(max(value.x, 0), 1)
++            }
++        }
+     }
+ 
+     public func swap(childAt firstIndex: Int, withChildAt secondIndex: Int, in container: Widget) {
+@@ -29,7 +39,23 @@ extension GtkBackend: BackendFeatures.GenericContainers {
+ 
+     public func setPosition(ofChildAt index: Int, in container: Widget, to position: SIMD2<Int>) {
+         let container = container as! Fixed
+-        container.move(container.children[index], x: Double(position.x), y: Double(position.y))
++        let child = container.children[index]
++        let target = SIMD2<Double>(position)
++        // Fork: animated position changes (see SwiftCrossUI's Animator).
++        if freshWidgets.remove(ObjectIdentifier(child)) == nil, let animation = Animator.active {
++            let from = container.position(of: child)
++            if from != target || Animator.target(of: child, .position) != nil {
++                Animator.animate(child, .position, from: from, to: target, animation: animation) { value in
++                    container.move(child, x: value.x.rounded(), y: value.y.rounded())
++                }
++                return
++            }
++        }
++        if let animating = Animator.target(of: child, .position) {
++            if animating == target { return }
++            Animator.cancel(child, .position)
++        }
++        container.move(child, x: Double(position.x), y: Double(position.y))
+     }
+ 
+     public func remove(childAt index: Int, from container: Widget) {
+diff --git a/Sources/GtkBackend/Features/Pickers.swift b/Sources/GtkBackend/Features/Pickers.swift
+index ac2b7ec..b913eb6 100644
+--- a/Sources/GtkBackend/Features/Pickers.swift
++++ b/Sources/GtkBackend/Features/Pickers.swift
+@@ -43,7 +43,7 @@ extension GtkBackend: BackendFeatures.Pickers {
+         }
+ 
+         // Apply the current text styles to the dropdown's labels
+-        var block = CSSBlock(forClass: picker.css.cssClass + " label")
++        var block = CSSBlock(forClass: picker.uniqueCSSClass + " label")
+         block.set(properties: Self.cssProperties(for: environment))
+         picker.cssProvider.loadCss(from: block.stringRepresentation)
+ 
+diff --git a/Sources/GtkBackend/Features/TextViews.swift b/Sources/GtkBackend/Features/TextViews.swift
+index e78a1df..f9dfc08 100644
+--- a/Sources/GtkBackend/Features/TextViews.swift
++++ b/Sources/GtkBackend/Features/TextViews.swift
+@@ -9,6 +9,47 @@ extension GtkBackend: BackendFeatures.TextViews {
+         proposedWidth: Int?,
+         proposedHeight: Int?,
+         environment: EnvironmentValues
++    ) -> SIMD2<Int> {
++        // Fork change: text measurement is pure given the text, the widget's
++        // style (font etc., which `updateTextView` has already applied as
++        // CSS), the line limit and the proposal, so each widget remembers its
++        // recent measurements. Unchanged labels in a re-laid-out card no
++        // longer reshape their text with Pango/HarfBuzz.
++        let key = TextMeasurementKey(
++            text: text,
++            style: widget.css.bodyRepresentation,
++            lineLimit: environment.lineLimitSettings.map { "\($0.limit)/\($0.reservesSpace)" },
++            proposedWidth: proposedWidth,
++            proposedHeight: proposedHeight
++        )
++        let cache = widget.textMeasurements as? TextMeasurementCache ?? {
++            let cache = TextMeasurementCache()
++            widget.textMeasurements = cache
++            return cache
++        }()
++        if let size = cache.entries[key] {
++            return size
++        }
++        let size = uncachedSize(
++            of: text,
++            whenDisplayedIn: widget,
++            proposedWidth: proposedWidth,
++            proposedHeight: proposedHeight,
++            environment: environment
++        )
++        if cache.entries.count >= 16 {
++            cache.entries.removeAll(keepingCapacity: true)
++        }
++        cache.entries[key] = size
++        return size
++    }
++
++    func uncachedSize(
++        of text: String,
++        whenDisplayedIn widget: Widget,
++        proposedWidth: Int?,
++        proposedHeight: Int?,
++        environment: EnvironmentValues
+     ) -> SIMD2<Int> {
+         let ellipsize: EllipsizeMode
+         if let widget = widget as? CustomLabel {
+@@ -23,7 +64,8 @@ extension GtkBackend: BackendFeatures.TextViews {
+             ellipsize = .none
+         }
+ 
+-        let pango = Pango(for: widget)
++        LayoutStats.textMeasurements += 1
++        let pango = measurementPango(for: widget)
+         let (width, height) = pango.getTextSize(
+             text,
+             ellipsize: proposedHeight == nil ? .none : ellipsize,
+@@ -34,22 +76,31 @@ extension GtkBackend: BackendFeatures.TextViews {
+         var imposedHeight = height
+ 
+         if let lineLimitSettings = environment.lineLimitSettings {
+-            let multilineString = [String](repeating: "a", count: lineLimitSettings.limit)
+-                .joined(separator: "\n")
+-            updateTextView(
+-                measurementCustomLabel,
+-                content: "",
+-                environment: environment
+-            )
+-
+-            let pango = Pango(for: measurementCustomLabel)
+-
+-            let (_, heightLimit) = pango.getTextSize(
+-                multilineString,
+-                ellipsize: .none,
+-                proposedWidth: nil,
+-                proposedHeight: nil
+-            )
++            // Fork change: the height of `limit` lines only depends on the
++            // text style, so it's cached instead of restyling the measurement
++            // label (a CSS reload) on every measurement.
++            let cacheKey =
++                "\(lineLimitSettings.limit)|" + Self.cssProperties(for: environment)
++                .map(\.stringRepresentation).joined()
++            let heightLimit: Int
++            if let cached = lineLimitHeightCache[cacheKey] {
++                heightLimit = cached
++            } else {
++                let multilineString = [String](repeating: "a", count: lineLimitSettings.limit)
++                    .joined(separator: "\n")
++                updateTextView(
++                    measurementCustomLabel,
++                    content: "",
++                    environment: environment
++                )
++                heightLimit = Pango(for: measurementCustomLabel).getTextSize(
++                    multilineString,
++                    ellipsize: .none,
++                    proposedWidth: nil,
++                    proposedHeight: nil
++                ).height
++                lineLimitHeightCache[cacheKey] = heightLimit
++            }
+ 
+             if heightLimit < imposedHeight || lineLimitSettings.reservesSpace {
+                 imposedHeight = heightLimit
+@@ -59,6 +110,16 @@ extension GtkBackend: BackendFeatures.TextViews {
+         return SIMD2(width, imposedHeight)
+     }
+ 
++    /// One reusable `Pango` per text widget (its layout is reused across
++    /// measurements; the context is the widget's own, so fonts set through
++    /// CSS apply).
++    func measurementPango(for widget: Widget) -> Pango {
++        if let pango = widget.measurementPango as? Pango { return pango }
++        let pango = Pango(for: widget)
++        widget.measurementPango = pango
++        return pango
++    }
++
+     public func createTextView() -> Widget {
+         let textView = CustomLabel(string: "")
+         textView.horizontalAlignment = .start
+@@ -75,6 +136,7 @@ extension GtkBackend: BackendFeatures.TextViews {
+         environment: EnvironmentValues
+     ) {
+         let textView = textView as! CustomLabel
++        if textView.label != content { textView.layoutNeedsHeight = true }
+         textView.label = content
+         textView.justify =
+             switch environment.multilineTextAlignment {
+@@ -87,6 +149,20 @@ extension GtkBackend: BackendFeatures.TextViews {
+             }
+ 
+         textView.selectable = environment.isTextSelectionEnabled
++        let previousCSS = textView.css
+         textView.css.set(properties: Self.cssProperties(for: environment), clear: true)
++        if textView.css != previousCSS { textView.layoutNeedsHeight = true }
+     }
+ }
++
++struct TextMeasurementKey: Hashable {
++    var text: String
++    var style: String
++    var lineLimit: String?
++    var proposedWidth: Int?
++    var proposedHeight: Int?
++}
++
++final class TextMeasurementCache {
++    var entries: [TextMeasurementKey: SIMD2<Int>] = [:]
++}
+diff --git a/Sources/GtkBackend/Features/Widgets.swift b/Sources/GtkBackend/Features/Widgets.swift
+index d549a65..200f9b6 100644
+--- a/Sources/GtkBackend/Features/Widgets.swift
++++ b/Sources/GtkBackend/Features/Widgets.swift
+@@ -16,6 +16,12 @@ extension GtkBackend: BackendFeatures.Widgets {
+     }
+ 
+     public func naturalSize(of widget: Widget) -> SIMD2<Int> {
++        // Fork change: a named icon's natural size is its pixel size. Measuring
++        // it the general way toggles the size request (two queued resizes) on
++        // every layout probe.
++        if let image = widget as? Gtk.Image, image.pixelSize > 0, image.iconName != nil {
++            return SIMD2(image.pixelSize, image.pixelSize)
++        }
+         let currentSize = widget.getSizeRequest()
+         widget.setSizeRequest(width: -1, height: -1)
+         let (width, height) = widget.getNaturalSize()
+@@ -24,6 +30,26 @@ extension GtkBackend: BackendFeatures.Widgets {
+     }
+ 
+     public func setSize(of widget: Widget, to size: SIMD2<Int>) {
++        // Fork: animated size changes (see SwiftCrossUI's Animator).
++        let target = SIMD2<Double>(size)
++        let current = widget.getSizeRequest()
++        if let animation = Animator.active, !freshWidgets.contains(ObjectIdentifier(widget)),
++            current.width >= 0, current.height >= 0
++        {
++            let from = SIMD2<Double>(Double(current.width), Double(current.height))
++            if from != target || Animator.target(of: widget, .size) != nil {
++                Animator.animate(widget, .size, from: from, to: target, animation: animation) { value in
++                    let rounded = SIMD2<Int>(value.rounded(.toNearestOrAwayFromZero))
++                    widget.setSizeRequest(width: max(rounded.x, 0), height: max(rounded.y, 0))
++                }
++                return
++            }
++        }
++        if let animating = Animator.target(of: widget, .size) {
++            // A running animation already heads there; otherwise this update wins.
++            if animating == target { return }
++            Animator.cancel(widget, .size)
++        }
+         widget.setSizeRequest(width: size.x, height: size.y)
+     }
+ }
+diff --git a/Sources/GtkBackend/GtkBackend.swift b/Sources/GtkBackend/GtkBackend.swift
+index 26a2267..6fdbe43 100644
+--- a/Sources/GtkBackend/GtkBackend.swift
++++ b/Sources/GtkBackend/GtkBackend.swift
+@@ -28,6 +28,12 @@ public final class GtkBackend {
+     var rootEnvironmentChangeHandler: (() -> Void)?
+ 
+     var measurementCustomLabel: CustomLabel!
++    /// Scroll observers of lazy stacks, by stack widget (fork).
++    var lazyStackObservers: [ObjectIdentifier: AdjustmentObserver] = [:]
++    /// Widgets inserted but not yet positioned (fork: not animated).
++    var freshWidgets: Set<ObjectIdentifier> = []
++    /// Line-limit heights by limit + text style (fork change).
++    var lineLimitHeightCache: [String: Int] = [:]
+ 
+     var borderedButtonPadding: SIMD2<Int>?
+ 
+@@ -47,6 +53,32 @@ public final class GtkBackend {
+             flags: SHIM_G_APPLICATION_HANDLES_OPEN
+         )
+         gtkApp.registerSession = true
++        MainActor.assumeIsolated { installAnimationDriver() }
++    }
++
++    /// Fork: drives SwiftCrossUI's Animator with GLib timeouts (~60 Hz) and
++    /// orders `withAnimation`'s cleanup after the updates it queued.
++    @MainActor
++    private func installAnimationDriver() {
++        Animator.afterQueuedUpdates = { [weak self] action in
++            self?.runInMainThread(action: action)
++        }
++        Animator.scheduleFrames = { step in
++            let context = FrameStepContext(step: step)
++            g_timeout_add_full(
++                Int32(G_PRIORITY_DEFAULT),
++                16,
++                { context in
++                    let box = Unmanaged<FrameStepContext>.fromOpaque(context!).takeUnretainedValue()
++                    return MainActor.assumeIsolated { box.step() } ? 1 : 0
++                },
++                Unmanaged.passRetained(context).toOpaque(),
++                { context in
++                    guard let context else { return }
++                    Unmanaged<FrameStepContext>.fromOpaque(context).release()
++                }
++            )
++        }
+     }
+ 
+     var globalCSSProvider: CSSProvider?
+@@ -143,3 +175,9 @@ public final class GtkBackend {
+         }
+     }
+ }
++
++/// Fork: context for the animation frame timeout.
++final class FrameStepContext {
++    let step: @MainActor () -> Bool
++    init(step: @escaping @MainActor () -> Bool) { self.step = step }
++}
+diff --git a/Sources/GtkBackend/Helpers/CustomLabel.swift b/Sources/GtkBackend/Helpers/CustomLabel.swift
+index a661e8f..aa00a2b 100644
+--- a/Sources/GtkBackend/Helpers/CustomLabel.swift
++++ b/Sources/GtkBackend/Helpers/CustomLabel.swift
+@@ -5,7 +5,16 @@ import Gtk
+ /// `Label`s only display a single line of text when ellipsizing is enabled
+ /// because they don't pass their size request to their underlying Pango layout.
+ class CustomLabel: Label {
++    /// Fork: set when the label's layout may have been recreated (new text or
++    /// style), so the height below has to be applied again.
++    var layoutNeedsHeight = true
++
+     override func setSizeRequest(width: Int, height: Int) {
++        // Fork change: committing an unchanged label used to fetch (and so
++        // build) its Pango layout every time.
++        let current = getSizeRequest()
++        if !layoutNeedsHeight && current.width == width && current.height == height { return }
++        layoutNeedsHeight = false
+         super.setSizeRequest(width: width, height: height)
+ 
+         // Override the label's layout height. We do this so that the label grows
+diff --git a/Sources/SwiftCrossUI/App.swift b/Sources/SwiftCrossUI/App.swift
+index 0eaa39d..81e8f18 100644
+--- a/Sources/SwiftCrossUI/App.swift
++++ b/Sources/SwiftCrossUI/App.swift
+@@ -235,12 +235,17 @@ extension App {
+                 throw SwiftBundlerMetadataError.noExecutableURL
+             }
+ 
+-            guard let data = try? Data(contentsOf: executable) else {
++            // Fork change: map the executable instead of reading it, and check
++            // the magic bytes by index (`suffix(8) == Array` resolved to the
++            // generic Sequence.suffix, which iterated the whole binary).
++            guard let data = try? Data(contentsOf: executable, options: .alwaysMapped) else {
+                 throw SwiftBundlerMetadataError.failedToReadExecutable
+             }
+ 
+             // Check if executable has Swift Bundler metadata magic bytes.
+-            guard data.suffix(8) == Array("SBUNMETA".utf8) else { return nil }
++            guard data.count >= 16,
++                data[(data.endIndex - 8)...].elementsEqual("SBUNMETA".utf8)
++            else { return nil }
+ 
+             let lengthStart = data.count - 16
+             let jsonLength = parseBigEndianUInt64(startingAt: lengthStart, in: data)
+diff --git a/Sources/SwiftCrossUI/Layout/LayoutSystem.swift b/Sources/SwiftCrossUI/Layout/LayoutSystem.swift
+index 4edf251..c6e1c9a 100644
+--- a/Sources/SwiftCrossUI/Layout/LayoutSystem.swift
++++ b/Sources/SwiftCrossUI/Layout/LayoutSystem.swift
+@@ -76,7 +76,7 @@ public enum LayoutSystem {
+             self.init(
+                 computeLayout: { proposedSize, environment in
+                     node.computeLayout(
+-                        with: child(),
++                        with: BodyTracking.track { child() },
+                         proposedSize: proposedSize,
+                         environment: environment
+                     )
+@@ -541,6 +541,36 @@ public enum LayoutSystem {
+             )
+         }
+ 
++        // Fork change: lay every child out at the proposal first. When they
++        // all share one layout priority (the usual case) that's exactly what
++        // the priority algorithm does, and it saves a probe of every child at
++        // the zero size just to read its priority.
++        let firstResults = children.map { child in
++            child.computeLayout(proposedSize: proposedSize, environment: environment)
++        }
++        let firstPriority = firstResults.first?.preferences.layoutPriority
++        if firstResults.allSatisfy({ $0.preferences.layoutPriority == firstPriority }) {
++            cache = StackLayoutCache(
++                priorityGroups: [
++                    LayoutPriorityGroup(children: Array(children.indices)[...], priority: firstPriority ?? 0)
++                ],
++                isHidden: [false],
++                totalSpacing: 0,
++                totalReservedSpace: 0,
++                minimumLengths: [],
++                redistributeSpaceOnCommit: false
++            )
++            var size = ViewSize.zero
++            size.width = firstResults.map(\.size.width).reduce(0, { max($0, $1) })
++            size.height = firstResults.map(\.size.height).reduce(0, { max($0, $1) })
++            return ViewLayoutResult(
++                size: size,
++                childResults: firstResults,
++                participateInStackLayoutsWhenEmpty: firstResults
++                    .contains(where: \.participateInStackLayoutsWhenEmpty)
++            )
++        }
++
+         cache = recomputeZStackCache(
+             children: children,
+             proposedSize: proposedSize,
+diff --git a/Sources/SwiftCrossUI/Scenes/WindowReference.swift b/Sources/SwiftCrossUI/Scenes/WindowReference.swift
+index ed1b9df..2acb288 100644
+--- a/Sources/SwiftCrossUI/Scenes/WindowReference.swift
++++ b/Sources/SwiftCrossUI/Scenes/WindowReference.swift
+@@ -13,6 +13,10 @@ final class WindowReference<SceneType: WindowingScene>: ModelObserver {
+     private var isFirstUpdate = true
+     /// The cached window size. Nil on first run or after a window is resized.
+     private var cachedWindowSize: SIMD2<Int>?
++    /// Fork: whether the scene content may differ from the last update (app
++    /// or window-environment changes); resizes alone don't change it.
++    private var contentMayHaveChanged = true
++    private var contentVersion: UInt64 = 0
+     /// The environment most recently provided by this node's parent scene.
+     private var parentEnvironment: EnvironmentValues
+     /// The container used to center the root view in the window.
+@@ -21,7 +25,7 @@ final class WindowReference<SceneType: WindowingScene>: ModelObserver {
+     private var preferredColorScheme: ColorScheme?
+ 
+     /// Used by the ``ModelObserver`` protocol to prevent duplicate view updates.
+-    var currentViewModelObservationID: UUID?
++    var currentViewModelObservationID: UInt64?
+ 
+     /// - Parameters:
+     ///   - closeHandler: The action to perform when the window is closed. Should
+@@ -66,6 +70,9 @@ final class WindowReference<SceneType: WindowingScene>: ModelObserver {
+ 
+         backend.setResizeHandler(ofWindow: window) { [weak self] newSize in
+             guard let self else { return }
++            // Fork change: GTK reports the size the window was just given;
++            // relaying out the whole tree for it is a full redundant pass.
++            if newSize == self.cachedWindowSize { return }
+             self.update(
+                 self.scene,
+                 proposedWindowSize: newSize,
+@@ -78,6 +85,8 @@ final class WindowReference<SceneType: WindowingScene>: ModelObserver {
+ 
+         backend.setWindowEnvironmentChangeHandler(of: window) { [weak self] in
+             guard let self else { return }
++            DataGeneration.bump()
++            self.contentMayHaveChanged = true
+             self.update(
+                 self.scene,
+                 proposedWindowSize: backend.size(ofWindow: window),
+@@ -94,6 +103,7 @@ final class WindowReference<SceneType: WindowingScene>: ModelObserver {
+         backend: Backend,
+         environment: EnvironmentValues
+     ) {
++        contentMayHaveChanged = true
+         guard let window = window as? Backend.Window else {
+             fatalError("Scene updated with a backend incompatible with the window it was given")
+         }
+@@ -151,6 +161,14 @@ final class WindowReference<SceneType: WindowingScene>: ModelObserver {
+ 
+         parentEnvironment = environment
+ 
++        if contentMayHaveChanged || contentVersion == 0 {
++            contentVersion = LayoutContext.newVersion()
++        }
++        contentMayHaveChanged = false
++        let previousVersion = LayoutContext.parentVersion
++        LayoutContext.parentVersion = contentVersion
++        defer { LayoutContext.parentVersion = previousVersion }
++
+         if let newScene {
+             // Don't set default size even if it has changed. We only set that once
+             // at window creation since some backends don't have a concept of
+diff --git a/Sources/SwiftCrossUI/State/ModelObserver.swift b/Sources/SwiftCrossUI/State/ModelObserver.swift
+index 4461d95..16193ff 100644
+--- a/Sources/SwiftCrossUI/State/ModelObserver.swift
++++ b/Sources/SwiftCrossUI/State/ModelObserver.swift
+@@ -19,7 +19,7 @@ import ObservationPolyfillCore
+ @MainActor
+ protocol ModelObserver: AnyObject, Sendable {
+     /// Used by the ``ModelObserver`` protocol to prevent duplicate view updates.
+-    var currentViewModelObservationID: UUID? { get set }
++    var currentViewModelObservationID: UInt64? { get set }
+ 
+     /// This method is called at most once after a call to `observe()` if an object conforming to
+     /// `Observable` used in the `computation` closure of the last call to ``observe(with:_:)``
+@@ -52,7 +52,9 @@ extension ModelObserver {
+         with backend: Backend,
+         _ computation: () -> Result
+     ) -> Result {
+-        let observationTrackingID = UUID()
++        // Fork change: a counter instead of UUID() (which costs a getrandom
++        // syscall per observed layout).
++        let observationTrackingID = ObservationIDs.next()
+         self.currentViewModelObservationID = observationTrackingID
+         return ObservationPolyfillCore.withObservationTracking {
+             computation()
+@@ -66,3 +68,78 @@ extension ModelObserver {
+         }
+     }
+ }
++
++/// Fork change: cheap, unique observation IDs.
++@MainActor
++enum ObservationIDs {
++    private static var last: UInt64 = 0
++    static func next() -> UInt64 {
++        last &+= 1
++        return last
++    }
++}
++
++/// Fork change: body-scoped observation.
++///
++/// Upstream wraps each node's whole `computeLayout` (which lays out the entire
++/// subtree) in `withObservationTracking`. Swift merges nested access lists
++/// into the enclosing one, so every ancestor up to the window root observed
++/// every property any descendant read, and a change in one card re-laid out
++/// the whole board. Now a node only tracks reads made while evaluating its
++/// own `body` (and closures evaluated on its behalf, like `ForEach` content),
++/// as SwiftUI does; descendants track their own reads and propagate size
++/// changes upwards through `onResize`.
++@MainActor
++protocol BodyObserving: AnyObject {
++    func trackBody<Result>(_ computation: () -> Result) -> Result
++}
++
++@MainActor
++public enum BodyTracking {
++    static var current: (any BodyObserving)?
++
++    /// Evaluates `computation` (a `body` or a content closure), recording its
++    /// observable reads against the node currently being laid out.
++    public static func track<Result>(_ computation: () -> Result) -> Result {
++        guard let current else { return computation() }
++        return current.trackBody(computation)
++    }
++
++    static func withCurrent<Result>(_ observer: any BodyObserving, _ work: () -> Result) -> Result {
++        let previous = current
++        current = observer
++        defer { current = previous }
++        return work()
++    }
++}
++
++/// Fork change: bumped by window-wide changes (the window environment), which
++/// invalidate every node's cached layout.
++@MainActor
++public enum DataGeneration {
++    public private(set) static var current: UInt64 = 1
++    public static func bump() { current &+= 1 }
++}
++
++/// Fork change: per-node layout invalidation.
++///
++/// A node is re-laid out only when its body's inputs changed (an observed
++/// property or `@State`, or a new view from a parent whose own inputs
++/// changed) or a descendant changed size. A parent re-laid out only because a
++/// child resized produces the same child views, so its other children reuse
++/// their layouts (and cached probe results) and skip their commits. This is
++/// what SwiftUI gets from comparing views; SwiftCrossUI's closure-holding
++/// modifiers can't be compared, so the fork tracks where changes come from.
++@MainActor
++public enum LayoutContext {
++    /// While a node lays out its children: the version of the views it
++    /// passes down. A child that already saw this version gets an equal view.
++    public static var parentVersion: UInt64 = 0
++
++    /// Passed to `onResize` by a descendant that re-laid out without changing
++    /// size at its current proposal: ancestors drop cached probe results.
++    public static let invalidationSignal = ViewSize(.nan, .nan)
++
++    /// A fresh version: the views passed down may all be different.
++    public static func newVersion() -> UInt64 { ObservationIDs.next() }
++}
+diff --git a/Sources/SwiftCrossUI/ViewGraph/ViewGraphNode.swift b/Sources/SwiftCrossUI/ViewGraph/ViewGraphNode.swift
+index 56b8ad0..2bedfbd 100644
+--- a/Sources/SwiftCrossUI/ViewGraph/ViewGraphNode.swift
++++ b/Sources/SwiftCrossUI/ViewGraph/ViewGraphNode.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import ObservationPolyfillCore
+ 
+ /// A view graph node storing a view, its widget, and its children (likely a
+ /// collection of more nodes).
+@@ -6,7 +7,7 @@ import Foundation
+ /// This is where updates are initiated when a view's state updates, and where state is persisted
+ /// even when a view gets recomputed by its parent.
+ @MainActor
+-public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserver, Sendable {
++public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserver, BodyObserving, Sendable {
+     /// The view's single widget for the entirety of its lifetime in the view graph.
+     ///
+     public var widget: Backend.Widget {
+@@ -48,6 +49,26 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+     /// that get cached responses don't update this size, as this size should stay in sync
+     /// with currentLayout.
+     private(set) var lastProposedSize: ProposedViewSize
++    /// Fork: per-node invalidation (see ``LayoutContext``).
++    /// The inputs of this view's body (its observed data, its `@State`, or the
++    /// view value its parent passes in) may have changed since the last layout.
++    private var inputsDirty = true
++    /// A descendant changed size, so this node's cached layouts are stale even
++    /// though its own body would produce the same children.
++    private var layoutDirty = true
++    /// ``DataGeneration`` at the last layout (bumped by window-wide changes).
++    private var epoch: UInt64 = 0
++    /// Whether `currentLayout` is a final (non-probing) layout, and whether the
++    /// subtree has been committed since it was computed.
++    private var currentLayoutIsFinal = false
++    private var committedCurrentLayout = false
++    private var reusedFinalLayout = false
++    /// The version of the child views this node's body produces: renewed
++    /// whenever it's laid out with changed inputs.
++    private var outputVersion: UInt64 = 0
++    /// The parent output version this node's view last came from.
++    private var seenParentVersion: UInt64 = .max
++
+     /// Whether the widget has had its first update yet.
+     private var hasHadFirstUpdate = false
+ 
+@@ -61,7 +82,7 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+     private var dynamicPropertyUpdater: DynamicPropertyUpdater<NodeView>
+ 
+     /// Used by the ``ModelObserver`` protocol to prevent duplicate view updates.
+-    var currentViewModelObservationID: UUID?
++    var currentViewModelObservationID: UInt64?
+ 
+     /// Creates a node for a given view while also creating the nodes for its children, creating
+     /// the view's widget, and starting to observe its state for changes.
+@@ -94,7 +115,8 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+ 
+         dynamicPropertyUpdater.update(view, with: viewEnvironment, previousValue: nil)
+ 
+-        self.children = self.observe(with: backend) {
++        currentViewModelObservationID = ObservationIDs.next()
++        self.children = BodyTracking.withCurrent(self) {
+             view.children(
+                 backend: backend,
+                 snapshots: childSnapshots,
+@@ -109,7 +131,11 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+         )
+         _widget = widget
+ 
+-        let tag = String(String(describing: NodeView.self).split(separator: "<")[0])
++        let tag = ViewGraphSnapshotter.name(of: NodeView.self)
++        if LayoutStats.byTypeEnabled {
++            LayoutStats.computedByType["W:\(type(of: widget as AnyObject))", default: 0] += 1
++            LayoutStats.computedByType["N:\(tag)", default: 0] += 1
++        }
+         backend.tag(widget: widget, as: tag)
+ 
+         // Update the view and its children when state changes (children are always updated first).
+@@ -131,13 +157,31 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+             }
+ 
+             let cancellable = value.didChange.observeAsUIUpdater(backend: backend) { [weak self] in
++                self?.inputsDirty = true
+                 self?.bottomUpUpdate()
+             }
+             cancellables.append(cancellable)
+         }
+     }
+ 
++    func trackBody<Result>(_ computation: () -> Result) -> Result {
++        let observationID = currentViewModelObservationID
++        // Run the body without the caller's scope, then observe only it.
++        let previous = BodyTracking.current
++        BodyTracking.current = nil
++        defer { BodyTracking.current = previous }
++        return ObservationPolyfillCore.withObservationTracking {
++            computation()
++        } onChange: { [backend, weak self] in
++            backend.runInMainThread {
++                guard let self, self.currentViewModelObservationID == observationID else { return }
++                self.viewModelDidChange(backend: backend)
++            }
++        }
++    }
++
+     func viewModelDidChange<B: BackendFeatures.Core>(backend: B) {
++        inputsDirty = true
+         bottomUpUpdate()
+     }
+ 
+@@ -158,13 +202,38 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+             resultCache[lastProposedSize] = newLayout
+             parentEnvironment.onResize(newLayout.size)
+         } else {
++            // Same size at the current proposal, but sizes at other proposals
++            // may have changed: drop the ancestors' cached probe results.
++            parentEnvironment.onResize(LayoutContext.invalidationSignal)
+             _ = self.commit()
+         }
+     }
+ 
++    /// Fork: drops cached layouts for proposals other than the current one,
++    /// here and in every ancestor.
++    private func invalidateProbeResults() {
++        // Nothing but the current result cached: every cached result above
++        // that went through this node used its current (unchanged) size, so
++        // the walk can stop here.
++        if resultCache.count == 0 || (resultCache.count == 1 && resultCache[lastProposedSize] != nil) {
++            return
++        }
++        let current = resultCache[lastProposedSize]
++        resultCache.removeAll(keepingCapacity: true)
++        if let current { resultCache[lastProposedSize] = current }
++        parentEnvironment.onResize(LayoutContext.invalidationSignal)
++    }
++
+     private func updateEnvironment(_ environment: EnvironmentValues) -> EnvironmentValues {
+-        environment.with(\.onResize) { [weak self] _ in
++        // Fork: one closure (an environment copy each) for both the resize
++        // chain and probe-cache invalidation (`LayoutContext.invalidationSignal`).
++        environment.with(\.onResize) { [weak self] size in
+             guard let self else { return }
++            if size.width.isNaN {
++                self.invalidateProbeResults()
++                return
++            }
++            self.layoutDirty = true
+             self.bottomUpUpdate()
+         }
+     }
+@@ -203,23 +272,37 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+             hasHadFirstUpdate = true
+         }
+ 
+-        if proposedSize == lastProposedSize && !resultCache.isEmpty
+-            && (!parentEnvironment.allowLayoutCaching || environment.allowLayoutCaching),
+-           let currentLayout
+-        {
+-            // If the previous proposal is the same as the current one, and our
+-            // cache hasn't been invalidated, then we can reuse the current layout.
+-            // But only if the previous layout was computed without caching, or the
+-            // current layout is being computed with caching, cause otherwise we could
+-            // end up using a layout computed with caching while computing a layout
+-            // without caching.
+-            return currentLayout
+-        } else if environment.allowLayoutCaching, let cachedResult = resultCache[proposedSize] {
+-            // If this layout pass is a probing pass (not a final pass), then we
+-            // can reuse any layouts that we've computed since the cache was last
+-            // cleared. The cache gets cleared on commit.
++        // Fork: reuse layouts while nothing this node depends on changed. A
++        // view passed in by a parent whose own inputs were unchanged is the
++        // same view (bodies are functions of their inputs), so it doesn't
++        // dirty this node; a window-wide change (``DataGeneration``) does.
++        let parentVersion = LayoutContext.parentVersion
++        if newView != nil && parentVersion != seenParentVersion { inputsDirty = true }
++        if epoch != DataGeneration.current { inputsDirty = true }
++        if inputsDirty || layoutDirty {
++            resultCache.removeAll(keepingCapacity: true)
++        } else if !environment.allowLayoutCaching {
++            if proposedSize == lastProposedSize, currentLayoutIsFinal, let currentLayout {
++                LayoutStats.cacheHits += 1
++                // The subtree is already committed with this layout: skip it.
++                reusedFinalLayout = committedCurrentLayout
++                return currentLayout
++            }
++        } else if let cachedResult = resultCache[proposedSize] {
++            LayoutStats.cacheHits += 1
+             return cachedResult
+         }
++        reusedFinalLayout = false
++        if inputsDirty || outputVersion == 0 { outputVersion = ObservationIDs.next() }
++        seenParentVersion = parentVersion
++
++        LayoutStats.computed += 1
++        if LayoutStats.byTypeEnabled {
++            LayoutStats.computedByType[String(String(describing: NodeView.self).prefix(40)), default: 0] += 1
++            if NodeView.self == LayoutStats.traceType {
++                LayoutStats.computedByType["P[\(proposedSize.width.map { "\($0)" } ?? "nil")x\(proposedSize.height.map { "\($0)" } ?? "nil")|cache=\(environment.allowLayoutCaching)]", default: 0] += 1
++            }
++        }
+ 
+         parentEnvironment = environment
+         lastProposedSize = proposedSize
+@@ -236,7 +319,11 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+ 
+         dynamicPropertyUpdater.update(view, with: viewEnvironment, previousValue: previousView)
+ 
+-        let result = self.observe(with: backend) {
++        // Fork change: only reads made while evaluating this node's body are
++        // observed (see BodyTracking); a new ID retires earlier observations.
++        currentViewModelObservationID = ObservationIDs.next()
++        LayoutContext.parentVersion = outputVersion
++        let result = BodyTracking.withCurrent(self) {
+             view.computeLayout(
+                 widget,
+                 children: children,
+@@ -245,6 +332,7 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+                 backend: backend
+             )
+         }
++        LayoutContext.parentVersion = parentVersion
+ 
+         // We assume that the view's sizing behaviour won't change between consecutive
+         // layout computations and the following commit, because groups of updates
+@@ -253,6 +341,11 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+         resultCache[proposedSize] = result
+ 
+         currentLayout = result
++        currentLayoutIsFinal = !environment.allowLayoutCaching
++        committedCurrentLayout = false
++        inputsDirty = false
++        layoutDirty = false
++        epoch = DataGeneration.current
+         return result
+     }
+ 
+@@ -268,6 +361,12 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+             return .leafView(size: .zero)
+         }
+ 
++        if reusedFinalLayout {
++            reusedFinalLayout = false
++            return currentLayout
++        }
++        LayoutStats.commits += 1
++
+         if !currentLayout.isNeverFocusable {
+             BackendHelpers.applyFocusRelatedProperties(
+                 from: parentEnvironment,
+@@ -300,7 +399,9 @@ public class ViewGraphNode<NodeView: View, Backend: BaseAppBackend>: ModelObserv
+             environment: parentEnvironment,
+             backend: backend
+         )
+-        resultCache = [:]
++        // Fork: cached results stay valid while the node is clean (they're
++        // dropped when it gets dirty), so they survive the commit.
++        committedCurrentLayout = currentLayoutIsFinal
+ 
+         backend.showUpdate(of: widget)
+ 
+diff --git a/Sources/SwiftCrossUI/ViewGraph/ViewGraphSnapshotter.swift b/Sources/SwiftCrossUI/ViewGraph/ViewGraphSnapshotter.swift
+index d167caa..15c2326 100644
+--- a/Sources/SwiftCrossUI/ViewGraph/ViewGraphSnapshotter.swift
++++ b/Sources/SwiftCrossUI/ViewGraph/ViewGraphSnapshotter.swift
+@@ -100,9 +100,17 @@ public struct ViewGraphSnapshotter: ErasedViewGraphNodeTransformer {
+     }
+ 
+     public static nonisolated func name<V: View>(of viewType: V.Type) -> String {
+-        String(String(describing: V.self).split(separator: "<")[0])
++        // Fork change: cached per type (formatting and splitting long generic
++        // type names was a few percent of building a board).
++        let key = ObjectIdentifier(V.self)
++        if let name = nameCache.withLock({ $0[key] }) { return name }
++        let name = String(String(describing: V.self).split(separator: "<")[0])
++        nameCache.withLock { $0[key] = name }
++        return name
+     }
+ 
++    private static let nameCache = NameCache()
++
+     /// Attempts to match a list of snapshots to a list of views. Uses assumptions about
+     /// a few common types of changes which occur when using hot reloading (e.g. adding/removing
+     /// single-child modifier views, adding an extra view between two siblings, etc). At
+@@ -151,3 +159,14 @@ public struct ViewGraphSnapshotter: ErasedViewGraphNodeTransformer {
+         return sortedSnapshots
+     }
+ }
++
++/// Fork: a small locked dictionary for ``ViewGraphSnapshotter/name(of:)``.
++final class NameCache: @unchecked Sendable {
++    private var names: [ObjectIdentifier: String] = [:]
++    private let lock = NSLock()
++    func withLock<R>(_ body: (inout [ObjectIdentifier: String]) -> R) -> R {
++        lock.lock()
++        defer { lock.unlock() }
++        return body(&names)
++    }
++}
+diff --git a/Sources/SwiftCrossUI/Views/GeometryReader.swift b/Sources/SwiftCrossUI/Views/GeometryReader.swift
+index e4375b5..b9c301c 100644
+--- a/Sources/SwiftCrossUI/Views/GeometryReader.swift
++++ b/Sources/SwiftCrossUI/Views/GeometryReader.swift
+@@ -60,7 +60,7 @@ public struct GeometryReader<Content: View>: TypeSafeView, View {
+         backend: Backend
+     ) -> ViewLayoutResult {
+         let size = proposedSize.replacingUnspecifiedDimensions(by: ViewSize(10, 10))
+-        let view = content(GeometryProxy(size: size))
++        let view = BodyTracking.track { content(GeometryProxy(size: size)) }
+ 
+         let environment = environment.with(\.layoutAlignment, .leading)
+ 
+@@ -78,11 +78,15 @@ public struct GeometryReader<Content: View>: TypeSafeView, View {
+             backend.insert(contentNode.widget.into(), into: container, at: 0)
+         }
+ 
++        // Fork: the content is a function of the size, not just of this view.
++        let previousParentVersion = LayoutContext.parentVersion
++        LayoutContext.parentVersion = LayoutContext.newVersion()
+         let contentResult = contentNode.computeLayout(
+             with: view,
+             proposedSize: ProposedViewSize(size),
+             environment: environment
+         )
++        LayoutContext.parentVersion = previousParentVersion
+ 
+         return ViewLayoutResult(
+             size: size,
+diff --git a/Sources/SwiftCrossUI/Views/Modifiers/EnvironmentModifier.swift b/Sources/SwiftCrossUI/Views/Modifiers/EnvironmentModifier.swift
+index 4472b66..f522838 100644
+--- a/Sources/SwiftCrossUI/Views/Modifiers/EnvironmentModifier.swift
++++ b/Sources/SwiftCrossUI/Views/Modifiers/EnvironmentModifier.swift
+@@ -19,6 +19,15 @@ struct EnvironmentModifier<Child: View>: View {
+         )
+     }
+ 
++    /// Fork change: no container of its own (see TupleView1): the modified
++    /// view's widget is this view's widget.
++    func asWidget<Backend: BaseAppBackend>(
++        _ children: any ViewGraphNodeChildren,
++        backend: Backend
++    ) -> Backend.Widget {
++        (children as! TupleViewChildren1<Child>).child0.widget.into()
++    }
++
+     func computeLayout<Backend: BaseAppBackend>(
+         _ widget: Backend.Widget,
+         children: any ViewGraphNodeChildren,
+diff --git a/Sources/SwiftCrossUI/Views/ScrollView.swift b/Sources/SwiftCrossUI/Views/ScrollView.swift
+index 33680a4..6eb698b 100644
+--- a/Sources/SwiftCrossUI/Views/ScrollView.swift
++++ b/Sources/SwiftCrossUI/Views/ScrollView.swift
+@@ -63,18 +63,36 @@ public struct ScrollView<Content: View>: TypeSafeView, View {
+             !axes.contains(axis) || proposedSize[component: axis] == nil
+         })
+ 
++        // Fork change: the window's minimum-size probe proposes zero to the
++        // whole tree. A scroll view can shrink to nothing along its scroll
++        // axes, so answer that probe without laying out the content (for a
++        // board that's a full layout of every card at width 0). Trade-off: a
++        // scroll view no longer imposes its content's minimum width on the
++        // window.
++        if environment.allowLayoutCaching && proposedSize == .zero {
++            return ViewLayoutResult(
++                size: .zero,
++                childResults: [],
++                participateInStackLayoutsWhenEmpty: true
++            )
++        }
++
+         // Probe how big the child would like to be
+         var childProposal = proposedSize
+         for axis in Axis.allCases where axes.contains(axis) {
+             childProposal[component: axis] = nil
+         }
+ 
++        // Fork change: with overlay scroll bars (zero width, as on GTK) the
++        // final proposal always equals the probe, so lay the content out once
++        // instead of a caching probe followed by a full second pass.
++        let scrollBarsTakeNoSpace = backend.scrollBarWidth == 0
+         let childResult = children.child.computeLayout(
+             with: body,
+             proposedSize: childProposal,
+             environment: environment.with(
+                 \.allowLayoutCaching,
+-                !willEarlyExit || environment.allowLayoutCaching
++                (!willEarlyExit && !scrollBarsTakeNoSpace) || environment.allowLayoutCaching
+             )
+         )
+ 
+@@ -119,11 +137,14 @@ public struct ScrollView<Content: View>: TypeSafeView, View {
+         }
+ 
+         // Propose a final size to the child view.
+-        let finalChildResult = children.child.computeLayout(
+-            with: nil,
+-            proposedSize: finalContentSizeProposal,
+-            environment: environment
+-        )
++        let finalChildResult =
++            scrollBarsTakeNoSpace && finalContentSizeProposal == childProposal
++            ? childResult
++            : children.child.computeLayout(
++                with: nil,
++                proposedSize: finalContentSizeProposal,
++                environment: environment
++            )
+ 
+         // Compute the outer size.
+         var outerSize = finalChildResult.size
+diff --git a/Sources/SwiftCrossUI/Views/Shapes/StyledShape.swift b/Sources/SwiftCrossUI/Views/Shapes/StyledShape.swift
+index 7e6acda..0cdc4e5 100644
+--- a/Sources/SwiftCrossUI/Views/Shapes/StyledShape.swift
++++ b/Sources/SwiftCrossUI/Views/Shapes/StyledShape.swift
+@@ -98,12 +98,30 @@ extension StyledShape {
+             environment: environment
+         )
+ 
++        let resolvedStroke = (strokeColor ?? .clear).resolve(in: environment)
++        let resolvedFill = (fillColor ?? .clear).resolve(in: environment)
++        if Animator.active != nil {
++            // Fork: while the widget's size animates, redraw the shape at
++            // each interpolated size (a rounded rectangle keeps its radius).
++            let strokeStyle = self.strokeStyle
++            Animator.sizeObservers[ObjectIdentifier(widget as AnyObject)] = { size in
++                let bounds = Path.Rect(x: 0, y: 0, width: size.x, height: size.y)
++                backend.updatePath(
++                    backendPath, self.path(in: bounds), bounds: bounds, pointsChanged: true,
++                    environment: environment
++                )
++                backend.renderPath(
++                    backendPath, container: widget, strokeColor: resolvedStroke,
++                    fillColor: resolvedFill, overrideStrokeStyle: strokeStyle
++                )
++            }
++        }
+         backend.setSize(of: widget, to: layout.size.vector)
+         backend.renderPath(
+             backendPath,
+             container: widget,
+-            strokeColor: (strokeColor ?? .clear).resolve(in: environment),
+-            fillColor: (fillColor ?? .clear).resolve(in: environment),
++            strokeColor: resolvedStroke,
++            fillColor: resolvedFill,
+             overrideStrokeStyle: strokeStyle
+         )
+     }
+diff --git a/Sources/SwiftCrossUI/Views/TupleView.swift b/Sources/SwiftCrossUI/Views/TupleView.swift
+index 9717298..4d0092d 100644
+--- a/Sources/SwiftCrossUI/Views/TupleView.swift
++++ b/Sources/SwiftCrossUI/Views/TupleView.swift
+@@ -126,6 +126,74 @@ extension TupleView1: TupleView {
+     }
+ }
+ 
++// Fork change: a single-element tuple doesn't need a container of its own;
++// it uses its child's widget and passes layout straight through. (About a
++// fifth of a typical view tree's GtkFixed containers were these.) When it's
++// handed some other widget (a view that made its own container), it keeps
++// the container behaviour of Group.
++extension TupleView1 {
++    @MainActor
++    func asWidget<Backend: BaseAppBackend>(
++        _ children: Children,
++        backend: Backend
++    ) -> Backend.Widget {
++        children.child0.widget.into()
++    }
++
++    @MainActor
++    private func isPassThrough<Backend: BaseAppBackend>(
++        _ widget: Backend.Widget, _ children: Children, backend: Backend
++    ) -> Bool {
++        if let known = children.passesThroughWidget { return known }
++        let childWidget: Backend.Widget = children.child0.widget.into()
++        let passes = (childWidget as AnyObject) === (widget as AnyObject)
++        children.passesThroughWidget = passes
++        return passes
++    }
++
++    @MainActor
++    func computeLayout<Backend: BaseAppBackend>(
++        _ widget: Backend.Widget,
++        children: Children,
++        proposedSize: ProposedViewSize,
++        environment: EnvironmentValues,
++        backend: Backend
++    ) -> ViewLayoutResult {
++        guard isPassThrough(widget, children, backend: backend) else {
++            return Group(content: self).computeLayout(
++                widget, children: children, proposedSize: proposedSize,
++                environment: environment, backend: backend
++            )
++        }
++        let result = children.child0.computeLayout(
++            with: view0, proposedSize: proposedSize, environment: environment
++        )
++        return ViewLayoutResult(
++            size: result.size,
++            childResults: [result],
++            participateInStackLayoutsWhenEmpty: result.participateInStackLayoutsWhenEmpty
++        )
++    }
++
++    @MainActor
++    func commit<Backend: BaseAppBackend>(
++        _ widget: Backend.Widget,
++        children: Children,
++        layout: ViewLayoutResult,
++        environment: EnvironmentValues,
++        backend: Backend
++    ) {
++        guard isPassThrough(widget, children, backend: backend) else {
++            Group(content: self).commit(
++                widget, children: children, layout: layout,
++                environment: environment, backend: backend
++            )
++            return
++        }
++        _ = children.child0.commit()
++    }
++}
++
+ /// A view with exactly 2 children. Autogenerated as an alternative to Swift's not yet
+ /// production ready variadic generics.
+ ///
+diff --git a/Sources/SwiftCrossUI/Views/TupleViewChildren.swift b/Sources/SwiftCrossUI/Views/TupleViewChildren.swift
+index 1eec4dc..940cdeb 100644
+--- a/Sources/SwiftCrossUI/Views/TupleViewChildren.swift
++++ b/Sources/SwiftCrossUI/Views/TupleViewChildren.swift
+@@ -42,6 +42,8 @@ public class TupleViewChildren1<
+     }
+ 
+     var stackLayoutCache = StackLayoutCache.initial
++    /// Fork: whether the owning TupleView1 uses its child's widget as its own.
++    var passesThroughWidget: Bool?
+ 
+     /// ``AnyViewGraphNode`` is used instead of ``ViewGraphNode`` because otherwise the backend leaks into views.
+     public var child0: AnyViewGraphNode<Child0>
+diff --git a/Sources/SwiftCrossUI/Views/View.swift b/Sources/SwiftCrossUI/Views/View.swift
+index e4dc71d..e05d28a 100644
+--- a/Sources/SwiftCrossUI/Views/View.swift
++++ b/Sources/SwiftCrossUI/Views/View.swift
+@@ -139,7 +139,7 @@ extension View {
+         snapshots: [ViewGraphSnapshotter.NodeSnapshot]?,
+         environment: EnvironmentValues
+     ) -> any ViewGraphNodeChildren {
+-        body.children(backend: backend, snapshots: snapshots, environment: environment)
++        BodyTracking.track { body }.children(backend: backend, snapshots: snapshots, environment: environment)
+     }
+ 
+     public func layoutableChildren<Backend: BaseAppBackend>(
+@@ -201,7 +201,7 @@ extension View {
+         environment: EnvironmentValues,
+         backend: Backend
+     ) -> ViewLayoutResult {
+-        return body.computeLayout(
++        return BodyTracking.track { body }.computeLayout(
+             widget,
+             children: children,
+             proposedSize: proposedSize,
+diff --git a/Sources/SwiftCrossUI/_App.swift b/Sources/SwiftCrossUI/_App.swift
+index 73bdb50..d528b9a 100644
+--- a/Sources/SwiftCrossUI/_App.swift
++++ b/Sources/SwiftCrossUI/_App.swift
+@@ -21,7 +21,7 @@ class _App<AppRoot: App>: ModelObserver {
+     var dynamicPropertyUpdater: DynamicPropertyUpdater<AppRoot>
+ 
+     /// Used by the ``ModelObserver`` protocol to prevent duplicate view updates.
+-    var currentViewModelObservationID: UUID?
++    var currentViewModelObservationID: UInt64?
+ 
+     /// Wraps a user's app implementation.
+     init(_ app: AppRoot, backend: AppRoot.Backend) {
+--- /dev/null
++++ b/Sources/Gtk/Utility/CSS/SharedWidgetStyles.swift
+@@ -0,0 +1,59 @@
++import CGtk
++
++/// Content-addressed, refcounted stylesheets for per-widget CSS (fork change).
++///
++/// Each distinct set of declarations gets one class (`scui-s<n>`) and one
++/// display-wide provider. A provider is dropped when the last widget using
++/// it changes style or is deallocated, so dynamic values (colors that follow
++/// a meter, say) don't accumulate.
++public enum SharedWidgetStyles {
++    public struct Key: Hashable {
++        var plain: String
++        var focus: String
++        var focusWithin: String
++        var isEmpty: Bool { plain.isEmpty && focus.isEmpty && focusWithin.isEmpty }
++    }
++
++    public final class Style {
++        let key: Key
++        let className: String
++        let provider: CSSProvider
++        var references = 0
++
++        init(key: Key, className: String) {
++            self.key = key
++            self.className = className
++            provider = CSSProvider()
++            var text = ""
++            if !key.focusWithin.isEmpty { text += ".\(className):focus-within{\(key.focusWithin)}" }
++            if !key.focus.isEmpty { text += ".\(className):focus{\(key.focus)}" }
++            if !key.plain.isEmpty { text += ".\(className){\(key.plain)}" }
++            provider.loadCss(from: text)
++        }
++    }
++
++    nonisolated(unsafe) private static var styles: [Key: Style] = [:]
++    nonisolated(unsafe) private static var nextID = 0
++
++    /// The number of live shared stylesheets (for diagnostics).
++    public static var count: Int { styles.count }
++
++    static func acquire(_ key: Key) -> Style {
++        if let style = styles[key] {
++            style.references += 1
++            return style
++        }
++        nextID += 1
++        let style = Style(key: key, className: "scui-s\(nextID)")
++        style.references = 1
++        styles[key] = style
++        return style
++    }
++
++    static func release(_ style: Style) {
++        style.references -= 1
++        if style.references <= 0 {
++            styles[style.key] = nil
++        }
++    }
++}
+--- /dev/null
++++ b/Sources/Gtk/Utility/ScrollObservation.swift
+@@ -0,0 +1,12 @@
++import CGtk
++
++/// Fork: observes a scrolled window's vertical adjustment (for lazy stacks).
++/// Keep the returned object alive for as long as the observation is needed.
++public final class AdjustmentObserver {
++    private let adjustment: GObject
++
++    public init(scrolledWindow: OpaquePointer, _ action: @escaping () -> Void) {
++        adjustment = GObject(OpaquePointer(gtk_scrolled_window_get_vadjustment(scrolledWindow)))
++        adjustment.addSignal(name: "value-changed", callback: action)
++    }
++}
+--- /dev/null
++++ b/Sources/GtkBackend/Features/LazyStacks.swift
+@@ -0,0 +1,45 @@
++import CGtk
++import Gtk
++@_spi(Backends) import SwiftCrossUI
++
++/// Fork: viewport queries and scroll observation for ``LazyVStack``.
++extension GtkBackend: LazyStackViewportSupport {
++    private func enclosingScrolledWindow(of widget: Widget) -> UnsafeMutablePointer<GtkWidget>? {
++        var parent = gtk_widget_get_parent(widget.widgetPointer)
++        let type = gtk_scrolled_window_get_type()
++        while let current = parent {
++            if g_type_check_instance_is_a(UnsafeMutableRawPointer(current).assumingMemoryBound(to: GTypeInstance.self), type) != 0 {
++                return current
++            }
++            parent = gtk_widget_get_parent(current)
++        }
++        return nil
++    }
++
++    public func visibleRange(of widget: Widget) -> (offset: Double, height: Double)? {
++        guard let scrolled = enclosingScrolledWindow(of: widget),
++            gtk_widget_get_height(scrolled) > 0
++        else { return nil }
++        var origin = graphene_point_t(x: 0, y: 0)
++        var inScrolled = graphene_point_t(x: 0, y: 0)
++        guard gtk_widget_compute_point(widget.widgetPointer, scrolled, &origin, &inScrolled) != 0 else {
++            return nil
++        }
++        return (offset: Double(-inScrolled.y), height: Double(gtk_widget_get_height(scrolled)))
++    }
++
++    public func observeScrolling(of widget: Widget, _ action: @escaping @MainActor () -> Void) -> Bool {
++        guard let scrolled = enclosingScrolledWindow(of: widget) else { return false }
++        let observer = AdjustmentObserver(scrolledWindow: OpaquePointer(scrolled)) {
++            MainActor.assumeIsolated { action() }
++        }
++        lazyStackObservers[ObjectIdentifier(widget)] = observer
++        return true
++    }
++
++    public func setRowVisible(_ widget: Widget, _ visible: Bool) {
++        if gtk_widget_get_visible(widget.widgetPointer) != (visible ? 1 : 0) {
++            gtk_widget_set_visible(widget.widgetPointer, visible ? 1 : 0)
++        }
++    }
++}
+--- /dev/null
++++ b/Sources/SwiftCrossUI/Animation/Animation.swift
+@@ -0,0 +1,325 @@
++import Foundation
++
++// Fork addition (POC): SwiftUI-style animations for SwiftCrossUI.
++//
++// Model: an update that runs inside an animation transaction (`withAnimation`,
++// or the subtree of an `.animation(_:value:)` whose value changed) doesn't
++// apply its new geometry at once. The backend reports each committed size,
++// position and insertion to `Animator`, which interpolates from the
++// on-screen value to the new one on every frame with the transaction's
++// curve. Shapes re-evaluate their path at each interpolated size, and views
++// inserted by the transaction fade in. Removal transitions and animatable
++// view properties (colors, custom `animatableData`) are not implemented.
++
++/// The timing of an animation: a curve and a duration (or a spring).
++public struct Animation: Sendable, Equatable {
++    enum Curve: Sendable, Equatable {
++        case linear
++        case bezier(Double, Double, Double, Double)
++        case spring(response: Double, dampingFraction: Double)
++    }
++
++    var curve: Curve
++    /// The duration in seconds (for springs, the time to settle).
++    public private(set) var duration: Double
++    var delay: Double = 0
++
++    public static func linear(duration: Double) -> Animation {
++        Animation(curve: .linear, duration: duration)
++    }
++    public static func easeIn(duration: Double) -> Animation {
++        Animation(curve: .bezier(0.42, 0, 1, 1), duration: duration)
++    }
++    public static func easeOut(duration: Double) -> Animation {
++        Animation(curve: .bezier(0, 0, 0.58, 1), duration: duration)
++    }
++    public static func easeInOut(duration: Double) -> Animation {
++        Animation(curve: .bezier(0.42, 0, 0.58, 1), duration: duration)
++    }
++    public static func timingCurve(
++        _ c0x: Double, _ c0y: Double, _ c1x: Double, _ c1y: Double, duration: Double
++    ) -> Animation {
++        Animation(curve: .bezier(c0x, c0y, c1x, c1y), duration: duration)
++    }
++    /// A damped spring. `response` is the period of the undamped spring in
++    /// seconds; `dampingFraction` < 1 overshoots, 1 is critically damped.
++    public static func spring(response: Double = 0.5, dampingFraction: Double = 0.825) -> Animation {
++        let omega = 2 * Double.pi / max(response, 0.001)
++        let zeta = max(dampingFraction, 0.01)
++        // Time for the envelope to fall below 0.1%.
++        let settle = zeta < 1 ? log(1000) / (zeta * omega) : 9.2 / omega
++        return Animation(curve: .spring(response: response, dampingFraction: zeta), duration: settle)
++    }
++
++    public static var linear: Animation { .linear(duration: 0.35) }
++    public static var easeIn: Animation { .easeIn(duration: 0.35) }
++    public static var easeOut: Animation { .easeOut(duration: 0.35) }
++    public static var easeInOut: Animation { .easeInOut(duration: 0.35) }
++    public static var spring: Animation { .spring() }
++    public static var bouncy: Animation { .spring(response: 0.5, dampingFraction: 0.7) }
++    public static var smooth: Animation { .spring(response: 0.5, dampingFraction: 1) }
++    public static var snappy: Animation { .spring(response: 0.3, dampingFraction: 0.85) }
++    public static var `default`: Animation { .spring(response: 0.55, dampingFraction: 1) }
++
++    public func delay(_ seconds: Double) -> Animation {
++        var copy = self
++        copy.delay += seconds
++        return copy
++    }
++
++    public func speed(_ speed: Double) -> Animation {
++        var copy = self
++        copy.duration /= max(speed, 0.001)
++        if case .spring(let response, let damping) = curve {
++            copy.curve = .spring(response: response / max(speed, 0.001), dampingFraction: damping)
++        }
++        return copy
++    }
++
++    /// The fraction (0 → 1, may overshoot for springs) at `elapsed` seconds.
++    func fraction(at elapsed: Double) -> (value: Double, finished: Bool) {
++        let t = elapsed - delay
++        if t <= 0 { return (0, false) }
++        if t >= duration { return (1, true) }
++        switch curve {
++            case .linear:
++                return (t / duration, false)
++            case .bezier(let x1, let y1, let x2, let y2):
++                return (Self.cubicBezier(t / duration, x1, y1, x2, y2), false)
++            case .spring(let response, let zeta):
++                let omega = 2 * Double.pi / max(response, 0.001)
++                if zeta < 1 {
++                    let omegaD = omega * (1 - zeta * zeta).squareRoot()
++                    let envelope = exp(-zeta * omega * t)
++                    return (1 - envelope * (cos(omegaD * t) + zeta * omega / omegaD * sin(omegaD * t)), false)
++                } else {
++                    return (1 - exp(-omega * t) * (1 + omega * t), false)
++                }
++        }
++    }
++
++    /// y for x on the cubic Bézier through (0,0), (x1,y1), (x2,y2), (1,1).
++    static func cubicBezier(_ x: Double, _ x1: Double, _ y1: Double, _ x2: Double, _ y2: Double) -> Double {
++        func sample(_ t: Double, _ a1: Double, _ a2: Double) -> Double {
++            let u = 1 - t
++            return 3 * u * u * t * a1 + 3 * u * t * t * a2 + t * t * t
++        }
++        func slope(_ t: Double, _ a1: Double, _ a2: Double) -> Double {
++            let u = 1 - t
++            return 3 * u * u * a1 + 6 * u * t * (a2 - a1) + 3 * t * t * (1 - a2)
++        }
++        var t = x
++        for _ in 0..<8 {
++            let error = sample(t, x1, x2) - x
++            if abs(error) < 1e-6 { return sample(t, y1, y2) }
++            let d = slope(t, x1, x2)
++            if abs(d) < 1e-6 { break }
++            t -= error / d
++        }
++        var low = 0.0, high = 1.0
++        t = x
++        for _ in 0..<30 {
++            let value = sample(t, x1, x2)
++            if abs(value - x) < 1e-6 { break }
++            if value < x { low = t } else { high = t }
++            t = (low + high) / 2
++        }
++        return sample(t, y1, y2)
++    }
++}
++
++/// Runs `body` (typically state or model mutations) so that the view updates
++/// it causes animate with `animation`.
++@MainActor
++@discardableResult
++public func withAnimation<Result>(
++    _ animation: Animation? = .default,
++    _ body: () throws -> Result
++) rethrows -> Result {
++    let previous = Animator.pending
++    Animator.pending = animation
++    defer {
++        // Model changes reach their views through main-thread actions queued
++        // during `body`; keep the animation pending until those have run.
++        if let schedule = Animator.afterQueuedUpdates {
++            schedule { Animator.pending = previous }
++        } else {
++            Animator.pending = previous
++        }
++    }
++    return try body()
++}
++
++/// Drives geometry and opacity animations for the backend (see the comment
++/// at the top of this file).
++@MainActor
++public enum Animator {
++    /// Set by `withAnimation` until the updates it caused have run.
++    static var pending: Animation?
++    /// Set while committing the subtree of a triggered `.animation(_:value:)`.
++    static var scoped: Animation?
++    /// Set while a transaction explicitly disables animation (`withAnimation(nil)`
++    /// inside a scoped one).
++    static var disabled = false
++
++    /// The animation for geometry committed right now, if any.
++    public static var active: Animation? { disabled ? nil : (scoped ?? pending) }
++
++    /// Installed by the backend: runs an action after the main-thread
++    /// actions already queued.
++    public static var afterQueuedUpdates: ((@escaping @MainActor () -> Void) -> Void)?
++    /// Installed by the backend: calls `step` once per frame until it returns false.
++    public static var scheduleFrames: ((@escaping @MainActor () -> Bool) -> Void)?
++
++    /// Called with each interpolated size of a widget (used by shapes to
++    /// re-evaluate their path), keyed by the widget.
++    public static var sizeObservers: [ObjectIdentifier: (SIMD2<Double>) -> Void] = [:]
++
++    struct Track {
++        var from: SIMD2<Double>
++        var to: SIMD2<Double>
++        var current: SIMD2<Double>
++        /// Set on the first frame, not at commit: the commit that starts an
++        /// animation is often followed by an expensive layout and paint, which
++        /// would otherwise eat the start of the curve.
++        var start: Double?
++        /// Animation time; advances by at most `maxFrameStep` per frame so a
++        /// stalled frame delays the animation instead of skipping part of it.
++        var elapsed = 0.0
++        var lastFrame: Double?
++        var animation: Animation
++        var apply: (SIMD2<Double>) -> Void
++    }
++
++    public enum Channel: Hashable {
++        case size, position, opacity
++    }
++
++    private struct Key: Hashable {
++        var object: ObjectIdentifier
++        var channel: Channel
++    }
++
++    private static var tracks: [Key: Track] = [:]
++    private static var ticking = false
++    /// Frames rendered by running animations (diagnostics).
++    public private(set) static var framesStepped = 0
++
++    static var now: Double { ProcessInfo.processInfo.systemUptime }
++
++    /// Where `channel` of `object` is heading, if it's animating.
++    public static func target(of object: AnyObject, _ channel: Channel) -> SIMD2<Double>? {
++        tracks[Key(object: ObjectIdentifier(object), channel: channel)]?.to
++    }
++
++    /// Animates `channel` of `object` from `from` (or from where a running
++    /// animation currently is) to `to`, calling `apply` every frame.
++    public static func animate(
++        _ object: AnyObject,
++        _ channel: Channel,
++        from: SIMD2<Double>,
++        to: SIMD2<Double>,
++        animation: Animation,
++        apply: @escaping (SIMD2<Double>) -> Void
++    ) {
++        let key = Key(object: ObjectIdentifier(object), channel: channel)
++        let start = tracks[key]?.current ?? from
++        if start == to {
++            tracks[key] = nil
++            apply(to)
++            return
++        }
++        tracks[key] = Track(from: start, to: to, current: start, start: nil, animation: animation, apply: apply)
++        if debug { print("ANIM start \(channel) \(start) -> \(to) dur=\(animation.duration)") }
++        apply(start)
++        startTicking()
++    }
++
++    /// Stops animating `channel` of `object` (a non-animated update to a
++    /// different value takes over).
++    public static func cancel(_ object: AnyObject, _ channel: Channel) {
++        tracks[Key(object: ObjectIdentifier(object), channel: channel)] = nil
++    }
++
++    private static func startTicking() {
++        guard !ticking, let scheduleFrames else { return }
++        ticking = true
++        scheduleFrames { step() }
++    }
++
++    static let maxFrameStep = 1.0 / 30
++    static let debug = ProcessInfo.processInfo.environment["PH_ANIM_DEBUG"] != nil
++
++    private static func step() -> Bool {
++        let time = now
++        framesStepped += 1
++        if debug {
++            let sizes = tracks.filter { $0.key.channel == .size }.map { "\(Int($0.value.current.y))" }.joined(separator: ",")
++            print("ANIM frame \(framesStepped) t=\(Int((time.truncatingRemainder(dividingBy: 1000)) * 1000)) tracks=\(tracks.count) h=\(sizes)")
++        }
++        for (key, var track) in tracks {
++            track.start = track.start ?? time
++            if let lastFrame = track.lastFrame {
++                track.elapsed += min(time - lastFrame, maxFrameStep)
++            }
++            track.lastFrame = time
++            let (fraction, finished) = track.animation.fraction(at: track.elapsed)
++            track.current = finished ? track.to : track.from + (track.to - track.from) * fraction
++            track.apply(track.current)
++            if key.channel == .size, let observer = sizeObservers[key.object] {
++                observer(track.current)
++            }
++            if finished {
++                tracks[key] = nil
++                if key.channel == .size { sizeObservers[key.object] = nil }
++            } else {
++                tracks[key] = track
++            }
++        }
++        ticking = !tracks.isEmpty
++        return ticking
++    }
++}
++
++/// Remembers the last value seen by an `.animation(_:value:)` modifier.
++final class AnimationValueMemory {
++    var value: Any?
++}
++
++/// Animates the geometry changes of its content whenever `value` changes.
++public struct AnimationModifier<Content: View, Value: Equatable>: View {
++    var content: Content
++    var animation: Animation?
++    var value: Value
++    @State var memory = AnimationValueMemory()
++
++    public var body: some View { content }
++
++    public func commit<Backend: BaseAppBackend>(
++        _ widget: Backend.Widget,
++        children: any ViewGraphNodeChildren,
++        layout: ViewLayoutResult,
++        environment: EnvironmentValues,
++        backend: Backend
++    ) {
++        let changed = memory.value.map { ($0 as? Value) != value } ?? false
++        memory.value = value
++        guard changed else {
++            defaultCommit(widget, children: children, layout: layout, environment: environment, backend: backend)
++            return
++        }
++        let previous = (Animator.scoped, Animator.disabled)
++        Animator.scoped = animation
++        Animator.disabled = animation == nil
++        defer { (Animator.scoped, Animator.disabled) = previous }
++        defaultCommit(widget, children: children, layout: layout, environment: environment, backend: backend)
++    }
++}
++
++extension View {
++    /// Animates this view's geometry with `animation` whenever `value` changes
++    /// (`nil` disables animation for changes in this subtree).
++    public func animation<V: Equatable>(_ animation: Animation?, value: V) -> some View {
++        AnimationModifier(content: self, animation: animation, value: value)
++    }
++}
+--- /dev/null
++++ b/Sources/SwiftCrossUI/Layout/LayoutStats.swift
+@@ -0,0 +1,20 @@
++/// Fork diagnostics: layout work counters (not thread-safe; main actor only).
++public enum LayoutStats {
++    nonisolated(unsafe) public static var computed = 0
++    nonisolated(unsafe) public static var cacheHits = 0
++    nonisolated(unsafe) public static var commits = 0
++    nonisolated(unsafe) public static var textMeasurements = 0
++    nonisolated(unsafe) public static var computedByType: [String: Int] = [:]
++    nonisolated(unsafe) public static var byTypeEnabled = false
++    nonisolated(unsafe) public static var traceType: Any.Type?
++
++    public static var summary: String {
++        let top = computedByType.sorted { $0.value > $1.value }.prefix(200)
++            .map { "\($0.key)=\($0.value)" }.joined(separator: " ")
++        return "computed=\(computed) cacheHits=\(cacheHits) commits=\(commits) text=\(textMeasurements) \(top)"
++    }
++
++    public static func reset() {
++        computed = 0; cacheHits = 0; commits = 0; textMeasurements = 0; computedByType = [:]
++    }
++}
+--- /dev/null
++++ b/Sources/SwiftCrossUI/Views/LazyVStack.swift
+@@ -0,0 +1,247 @@
++import Foundation
++
++// Fork addition (POC): a lazily materialized vertical stack.
++//
++// Only rows overlapping the scroll view's visible rect (plus a margin) get
++// view graph nodes and widgets; the rest are estimated (average measured
++// height, or `estimatedRowHeight`). Rows that scroll away are hidden but keep
++// their nodes, so their `@State` survives. Scrolling re-runs this view's
++// layout through its node's resize hook; rows already laid out are clean and
++// reuse their layouts. Needs a backend that implements
++// ``LazyStackViewportSupport`` (GTK does); others materialize every row.
++//
++// Limitations: vertical only, content must be a single `ForEach` with an ID
++// key path, positions shift when estimated heights get measured, and
++// materialized rows are never destroyed.
++
++/// Backend support for lazy stacks: where a widget is visible inside its
++/// enclosing scroll view, and when that changes.
++@MainActor
++public protocol LazyStackViewportSupport {
++    associatedtype LazyWidget
++    /// The visible vertical range of `widget`, in its own coordinates
++    /// (`offset` = how far its top is scrolled out of view), or nil if it
++    /// isn't laid out inside a scroll view yet.
++    func visibleRange(of widget: LazyWidget) -> (offset: Double, height: Double)?
++    /// Calls `action` whenever the enclosing scroll view scrolls (at most one
++    /// registration per widget).
++    func observeScrolling(of widget: LazyWidget, _ action: @escaping @MainActor () -> Void) -> Bool
++    func setRowVisible(_ widget: LazyWidget, _ visible: Bool)
++}
++
++public struct LazyVStack<Items: RandomAccessCollection, ID: Hashable, Row: View>: TypeSafeView, View {
++    var content: ForEach<Items, ID, Row>
++    var alignment: HorizontalAlignment
++    var spacing: Double
++    var estimatedRowHeight: Double
++    /// Extra height materialized above and below the visible range.
++    var margin: Double
++
++    public var body = EmptyView()
++
++    public init(
++        alignment: HorizontalAlignment = .center,
++        spacing: Int = 8,
++        estimatedRowHeight: Double = 100,
++        margin: Double = 400,
++        content: () -> ForEach<Items, ID, Row>
++    ) {
++        self.content = content()
++        self.alignment = alignment
++        self.spacing = Double(spacing)
++        self.estimatedRowHeight = estimatedRowHeight
++        self.margin = margin
++    }
++
++    func children<Backend: BaseAppBackend>(
++        backend: Backend,
++        snapshots: [ViewGraphSnapshotter.NodeSnapshot]?,
++        environment: EnvironmentValues
++    ) -> LazyVStackChildren<ID, Row> {
++        LazyVStackChildren()
++    }
++
++    func asWidget<Backend: BaseAppBackend>(
++        _ children: LazyVStackChildren<ID, Row>,
++        backend: Backend
++    ) -> Backend.Widget {
++        backend.createContainer()
++    }
++
++    func computeLayout<Backend: BaseAppBackend>(
++        _ widget: Backend.Widget,
++        children: LazyVStackChildren<ID, Row>,
++        proposedSize: ProposedViewSize,
++        environment: EnvironmentValues,
++        backend: Backend
++    ) -> ViewLayoutResult {
++        guard let idKeyPath = content.idKeyPath else {
++            fatalError("LazyVStack needs a ForEach with an id key path")
++        }
++        let elements = content.elements
++        let ids = elements.map { $0[keyPath: idKeyPath] }
++
++        // Drop rows whose elements are gone.
++        let live = Set(ids)
++        for (index, id) in children.order.enumerated().reversed() where !live.contains(id) {
++            backend.remove(childAt: index, from: widget)
++            children.order.remove(at: index)
++            children.nodes[id] = nil
++            children.heights[id] = nil
++        }
++        children.reindex()
++
++        let visible: ClosedRange<Double>
++        if let range = Self.visibleRange(of: widget, backend: backend) {
++            visible = (range.offset - margin)...(range.offset + range.height + margin)
++        } else {
++            visible = -margin...(1400 + margin)  // not laid out yet: assume a window's worth
++        }
++        let measured = children.heights.values
++        let estimate = measured.isEmpty ? estimatedRowHeight : measured.reduce(0, +) / Double(measured.count)
++        let rowProposal = ProposedViewSize(proposedSize.width, nil)
++        // The same environment a VStack gives its children.
++        let rowEnvironment = environment
++            .with(\.layoutOrientation, .vertical)
++            .with(\.layoutAlignment, alignment.asStackAlignment)
++            .with(\.layoutSpacing, Int(spacing))
++            .with(\.usesZStackLayout, false)
++
++        var y = 0.0
++        var width = 0.0
++        var placed: [(id: ID, y: Double, size: ViewSize)] = []
++        var childResults: [ViewLayoutResult] = []
++        for (offset, element) in elements.enumerated() {
++            let id = ids[offset]
++            let height = children.heights[id] ?? estimate
++            if y + height >= visible.lowerBound && y <= visible.upperBound {
++                let view = BodyTracking.track { content.child(element) }
++                let node: AnyViewGraphNode<Row>
++                if let existing = children.nodes[id] {
++                    node = existing
++                } else {
++                    node = AnyViewGraphNode(for: view, backend: backend, environment: rowEnvironment)
++                    children.nodes[id] = node
++                    children.order.append(id)
++                    children.index[id] = children.order.count - 1
++                    backend.insert(node.widget.into(), into: widget, at: children.order.count - 1)
++                }
++                let result = node.computeLayout(with: view, proposedSize: rowProposal, environment: rowEnvironment)
++                children.heights[id] = result.size.height
++                width = max(width, result.size.width)
++                placed.append((id, y, result.size))
++                childResults.append(result)
++                y += result.size.height
++            } else {
++                y += height
++            }
++            if offset < elements.count - 1 { y += spacing }
++        }
++        if !environment.allowLayoutCaching {
++            children.placed = placed
++        }
++
++        // Re-layout this view when the enclosing scroll view scrolls (the
++        // node's resize hook re-runs its layout; clean rows are reused).
++        if !children.observingScroll {
++            let onResize = environment.onResize
++            children.observingScroll = Self.observeScrolling(of: widget, backend: backend) {
++                onResize(.zero)
++            }
++        }
++
++        return ViewLayoutResult(
++            size: ViewSize(proposedSize.width ?? width, y),
++            childResults: childResults
++        )
++    }
++
++    func commit<Backend: BaseAppBackend>(
++        _ widget: Backend.Widget,
++        children: LazyVStackChildren<ID, Row>,
++        layout: ViewLayoutResult,
++        environment: EnvironmentValues,
++        backend: Backend
++    ) {
++        backend.setSize(of: widget, to: layout.size.vector)
++        let shown = Set(children.placed.map(\.id))
++        for id in children.order where !shown.contains(id) {
++            if let node = children.nodes[id] {
++                Self.setRowVisible(node.widget.into() as Backend.Widget, false, backend: backend)
++            }
++        }
++        for row in children.placed {
++            guard let node = children.nodes[row.id], let index = children.index[row.id] else { continue }
++            let size = node.commit().size
++            Self.setRowVisible(node.widget.into() as Backend.Widget, true, backend: backend)
++            let x: Double
++            switch alignment {
++                case .leading: x = 0
++                case .center: x = (layout.size.width - size.width) / 2
++                case .trailing: x = layout.size.width - size.width
++            }
++            backend.setPosition(ofChildAt: index, in: widget, to: SIMD2(Int(x.rounded()), Int(row.y.rounded())))
++        }
++        if !children.observingScroll {
++            let onResize = environment.onResize
++            children.observingScroll = Self.observeScrolling(of: widget, backend: backend) {
++                onResize(.zero)
++            }
++        }
++    }
++
++    // Backend capability helpers (no-ops without LazyStackViewportSupport).
++    private static func visibleRange<Backend: BaseAppBackend>(
++        of widget: Backend.Widget, backend: Backend
++    ) -> (offset: Double, height: Double)? {
++        func get<B: LazyStackViewportSupport>(_ backend: B) -> (offset: Double, height: Double)? {
++            backend.visibleRange(of: widget as! B.LazyWidget)
++        }
++        guard let backend = backend as? any LazyStackViewportSupport else { return nil }
++        return get(backend)
++    }
++
++    private static func observeScrolling<Backend: BaseAppBackend>(
++        of widget: Backend.Widget, backend: Backend, _ action: @escaping @MainActor () -> Void
++    ) -> Bool {
++        func observe<B: LazyStackViewportSupport>(_ backend: B) -> Bool {
++            backend.observeScrolling(of: widget as! B.LazyWidget, action)
++        }
++        guard let backend = backend as? any LazyStackViewportSupport else { return true }
++        return observe(backend)
++    }
++
++    private static func setRowVisible<Backend: BaseAppBackend>(
++        _ widget: Backend.Widget, _ visible: Bool, backend: Backend
++    ) {
++        func set<B: LazyStackViewportSupport>(_ backend: B) {
++            backend.setRowVisible(widget as! B.LazyWidget, visible)
++        }
++        guard let backend = backend as? any LazyStackViewportSupport else { return }
++        set(backend)
++    }
++}
++
++/// The lazily created rows of a ``LazyVStack``.
++public final class LazyVStackChildren<ID: Hashable, Row: View>: ViewGraphNodeChildren {
++    var nodes: [ID: AnyViewGraphNode<Row>] = [:]
++    /// Row IDs in the container's child order.
++    var order: [ID] = []
++    var index: [ID: Int] = [:]
++    var heights: [ID: Double] = [:]
++    /// The rows placed by the last final layout.
++    var placed: [(id: ID, y: Double, size: ViewSize)] = []
++    var observingScroll = false
++
++    func reindex() {
++        index = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
++    }
++
++    public var widgets: [AnyWidget] {
++        order.compactMap { nodes[$0]?.widget }
++    }
++
++    public var erasedNodes: [ErasedViewGraphNode] {
++        order.compactMap { nodes[$0].map { ErasedViewGraphNode(wrapping: $0) } }
++    }
++}

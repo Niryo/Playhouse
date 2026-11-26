@@ -1,0 +1,21 @@
+{
+  "task": {
+    "id": "C0FFEE00-0000-4000-8000-000000000001",
+    "title": "Add a React renderer for plugins",
+    "titleSpinner": false,
+    "progress": { "label": "Building", "detail": "Compiling the atom registry", "symbol": "hammer" },
+    "schedule": null,
+    "statusMessage": "Waiting on CI checks",
+    "statusIsBlocked": false,
+    "isWorking": false,
+    "workingSince": null,
+    "workedSeconds": 0,
+    "createdText": "Nov 8, 2026",
+    "tokens": { "compact": "1.2M", "color": "#C9A02E", "description": "1.2M tokens sent · 14 calls · 312K final transcript" },
+    "cpu": { "fraction": 0.35, "label": "CPU 35%" },
+    "hasPluginRow": false,
+    "canMoveToDone": true,
+    "canMoveToReview": false
+  },
+  "blockedStatusMessage": "Blocked: 2 checks failing"
+}
