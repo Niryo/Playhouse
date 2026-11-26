@@ -209,6 +209,9 @@ extension PlayhouseUITests {
         // Forget the import, and keeping PR for existing tasks, the way the CLI case does: an external
         // delete that the bridge, which already holds this case's path-named preferences suite, reads
         // at its next request. A first launch since Manual became the default runs both.
+        func passes(_ event: String) -> Int { ((try? diagnosticEvents()) ?? []).filter { $0["event"] as? String == event }.count }
+        let importsBefore = passes("plugin.pull_request_mode.imported")
+        let pinsBefore = passes("plugin.pull_request_mode.pinned")
         for flag in ["legacyPullRequestModesImported", "existingTaskPullRequestModesPinned"] {
             let forget = Process()
             forget.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
@@ -216,7 +219,15 @@ extension PlayhouseUITests {
             try forget.run()
             forget.waitUntilExit()
         }
-        let imported = try runCLI(["plugin", "state", "--id", "pull-request-mode"])["result"] as? [String: Any]
+        // The daemon's cached preferences learn of the external delete from cfprefsd, which can trail
+        // it: a request until then still reads both flags set and runs neither pass.
+        var imported: [String: Any]?
+        XCTAssertTrue(waitUntil({
+            imported = (try? self.runCLI(["plugin", "state", "--id", "pull-request-mode"]))?["result"] as? [String: Any]
+            return passes("plugin.pull_request_mode.imported") > importsBefore && passes("plugin.pull_request_mode.pinned") > pinsBefore
+        }, timeout: 10), "The import and keeping PR for existing tasks both ran again once their flags were forgotten.")
+        XCTAssertEqual(passes("plugin.pull_request_mode.imported"), importsBefore + 1, "The import runs once.")
+        XCTAssertEqual(passes("plugin.pull_request_mode.pinned"), pinsBefore + 1, "Keeping PR for existing tasks runs once.")
         XCTAssertEqual((imported?["state"] as? [String: Any])?[legacyID] as? String, "merge", "The legacy Merge columns import as the plugin's state.")
         XCTAssertEqual((imported?["state"] as? [String: Any])?[pinnedID] as? String, "pr", "A task saved while PR was the default keeps PR as its own mode.")
         launchAppWithOpen(environmentOverrides: ghEnvironment)
