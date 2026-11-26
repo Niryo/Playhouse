@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Host shortcut: scripts/fd <fork-dev.sh args> runs them in the profiling image.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+exec docker run --rm --privileged -e PH_VARIANT="${PH_VARIANT:-}" -v "$HERE":/spike -v ph-linux-ui-cache:/cache playhouse-linux-ui-profile bash /spike/scripts/fork-dev.sh "$@"
