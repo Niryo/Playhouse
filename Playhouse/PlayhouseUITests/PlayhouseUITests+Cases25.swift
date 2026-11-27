@@ -101,7 +101,7 @@ extension PlayhouseUITests {
         let legacySnapshots = #"{"claude:legacy":{"provider":"claude","updatedAt":800000000,"main":{"calls":2,"sentTokens":1200,"outputTokens":60,"lastContextTokens":650},"subagents":{"old":{"calls":1,"sentTokens":300,"outputTokens":10,"lastContextTokens":300}}}}"#
         // The app holds its container open, so close it before seeding the store.
         app.terminate()
-        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the pre-split task.")
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its task store before seeding the pre-split task.")
         let seed = Process()
         seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         seed.arguments = [

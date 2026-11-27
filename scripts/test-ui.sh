@@ -204,9 +204,6 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/task-store-seeding.swift" \
   "${repository_root}/scripts/seed-legacy-standalone-chat-task.swift" \
   -o "${legacy_chat_seeder}"
-# Real SwiftData stores from before the GRDB task store, for the migration cases.
-rm -rf "${fixture_root}/swiftdata-stores"
-cp -R "${repository_root}/Playhouse/CoreTests/Fixtures/swiftdata-stores" "${fixture_root}/swiftdata-stores"
 # Live UI cases read the selected provider from this marker; the guest
 # runner exports PLAYHOUSE_LIVE_PROVIDER alongside PLAYHOUSE_RUN_LIVE_INTEGRATION.
 live_ui_marker="/tmp/playhouse-live-ui-integration"

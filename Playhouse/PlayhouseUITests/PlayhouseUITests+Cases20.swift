@@ -195,7 +195,7 @@ extension PlayhouseUITests {
         try seedLegacyModel.run()
         seedLegacyModel.waitUntilExit()
         let seedDetails = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(seedLegacyModel.terminationStatus, 0, "Seed the real SwiftData task row with its pre-global model: \(seedDetails)")
+        XCTAssertEqual(seedLegacyModel.terminationStatus, 0, "Seed the real task row with its pre-global model: \(seedDetails)")
         let migratedModel = try XCTUnwrap(try runCLI(["conversation", "model", conversationModesTaskID])["result"] as? [String: Any])
         XCTAssertEqual(migratedModel["modelID"] as? String, migratedModelID,
             "The first bridge read should preserve the legacy model for this conversation.")

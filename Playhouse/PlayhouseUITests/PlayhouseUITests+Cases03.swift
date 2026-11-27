@@ -72,7 +72,7 @@ extension PlayhouseUITests {
             if currentTitle == "Generating title…" { RunLoop.current.run(until: Date().addingTimeInterval(0.4)) }
         }
         XCTAssertNotEqual(currentTitle, "Generating title…", "The title placeholder should eventually resolve.")
-        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before seeding the real SwiftData fixture.")
+        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before seeding the real task-store fixture.")
         try seedTaskPullRequest(
             taskID: taskID,
             number: 123,

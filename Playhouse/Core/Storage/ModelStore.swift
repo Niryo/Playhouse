@@ -40,12 +40,6 @@ package protocol ModelColumnValue: Equatable {
     var columnValue: DatabaseValue { get }
     /// Nil when the stored value can't be read as this type; the property keeps its value.
     static func fromColumn(_ value: DatabaseValue) -> Self?
-    /// The same, for a value read from a SwiftData (Core Data) store being migrated.
-    static func fromCoreDataColumn(_ value: DatabaseValue) -> Self?
-}
-
-extension ModelColumnValue {
-    package static func fromCoreDataColumn(_ value: DatabaseValue) -> Self? { fromColumn(value) }
 }
 
 extension String: ModelColumnValue {
@@ -88,18 +82,12 @@ extension Date: ModelColumnValue {
     }
 }
 
-/// UUIDs are stored as their text form; Core Data stored the 16 raw bytes.
+/// UUIDs are stored as their text form.
 extension UUID: ModelColumnValue {
     package static var columnType: String { "TEXT" }
     package var columnValue: DatabaseValue { uuidString.databaseValue }
     package static func fromColumn(_ value: DatabaseValue) -> UUID? {
         String.fromDatabaseValue(value).flatMap(UUID.init(uuidString:))
-    }
-    package static func fromCoreDataColumn(_ value: DatabaseValue) -> UUID? {
-        if let bytes = Data.fromDatabaseValue(value), bytes.count == 16 {
-            return bytes.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) }
-        }
-        return fromColumn(value)
     }
 }
 
@@ -109,38 +97,26 @@ extension Optional: ModelColumnValue where Wrapped: ModelColumnValue {
     package static func fromColumn(_ value: DatabaseValue) -> Wrapped?? {
         value.isNull ? .some(nil) : Wrapped.fromColumn(value).map { .some($0) }
     }
-    package static func fromCoreDataColumn(_ value: DatabaseValue) -> Wrapped?? {
-        value.isNull ? .some(nil) : Wrapped.fromCoreDataColumn(value).map { .some($0) }
-    }
 }
 
 /// One persisted property: its column and how to read and write it on an object.
 package struct PersistedProperty<Model: AnyObject> {
     package let name: String
     package let columnType: String
-    /// Core Data column names this property was stored under, newest first.
-    package let coreDataColumns: [String]
     package let read: (Model) -> DatabaseValue
     /// Sets the property from a stored value when it differs, so an unchanged value never
     /// notifies observers.
     package let apply: (Model, DatabaseValue) -> Void
-    package let applyCoreData: (Model, DatabaseValue) -> Void
 
     package init<Value: ModelColumnValue>(
         _ name: String,
-        _ keyPath: ReferenceWritableKeyPath<Model, Value>,
-        coreDataNames: [String] = []
+        _ keyPath: ReferenceWritableKeyPath<Model, Value>
     ) {
         self.name = name
         columnType = Value.columnType
-        coreDataColumns = ([name] + coreDataNames).map { "Z" + $0.uppercased() }
         read = { $0[keyPath: keyPath].columnValue }
         apply = { model, stored in
             guard let value = Value.fromColumn(stored), model[keyPath: keyPath] != value else { return }
-            model[keyPath: keyPath] = value
-        }
-        applyCoreData = { model, stored in
-            guard let value = Value.fromCoreDataColumn(stored), model[keyPath: keyPath] != value else { return }
             model[keyPath: keyPath] = value
         }
     }

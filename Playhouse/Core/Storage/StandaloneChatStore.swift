@@ -5,7 +5,7 @@ import GRDBSQLite
 /// repo/worktree-free conversation split into titled segments so the live provider
 /// context stays bounded while the full archive remains locally searchable.
 ///
-/// Storage lives in its own SQLite database (separate from the SwiftData task store),
+/// Storage lives in its own SQLite database (separate from the task store),
 /// mirroring `PlayhouseStore`'s per-worktree data-directory isolation so e2e fixtures
 /// and distinct app instances never share chat history.
 package struct StandaloneChatPage: Codable, Equatable {
