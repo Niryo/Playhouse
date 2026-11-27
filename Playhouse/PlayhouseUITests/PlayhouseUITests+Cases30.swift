@@ -226,7 +226,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "System Prompts tab after Reset to Default")
         app.typeKey("w", modifierFlags: .command)
     }
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Markdown, Icon, Image, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text or Markdown, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange. On the Editor page, Return in the editor runs onSubmit with the typed text (Last: submit hi) and Command-Return runs onSteerSubmit (Last: steer), and on the PillPicker page choosing the PR option runs onChange with its value (Selected: pr).
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Markdown, Icon, Image, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel, ResizeHandle, DatePicker) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text or Markdown, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange. On the Editor page, Return in the editor runs onSubmit with the typed text (Last: submit hi) and Command-Return runs onSteerSubmit (Last: steer), and on the PillPicker page choosing the PR option runs onChange with its value (Selected: pr).
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
@@ -244,7 +244,7 @@ extension PlayhouseUITests {
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         XCTAssertEqual(atoms, ["Stack", "Text", "Markdown", "Icon", "Image", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
                                "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider",
-                               "Modal", "Page", "SidePanel"])
+                               "Modal", "Page", "SidePanel", "ResizeHandle", "DatePicker"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
@@ -482,7 +482,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("overlay-count")) == "Pressed the badge 1 times" }, timeout: 5), "The badge runs its own onPress.")
         attachScreenshot(named: "Overlay atom: a badge on a chip's top trailing corner")
     }
-    // case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05, radius 8 and padding 12 unless set), and each pair is the same size, including a Panel with no padding prop beside a Stack padded 12, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth or dash) or an unknown one (shadow, or axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
+    // case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05, radius 8 and padding 12 unless set), and each pair is the same size, including a Panel with no padding prop beside a Stack padded 12, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth, dash or shadow) or an unknown one (axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
     func test_plugin_stack_surface_composes_panel_and_choice_bar() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -589,7 +589,7 @@ extension PlayhouseUITests {
             (#"Playhouse.render(h(Stack, { strokeWidth: "2" }));"#, "<Stack> has an invalid prop: strokeWidth: expected a number, found a string"),
             (#"Playhouse.render(h(Stack, { dash: "4" }));"#, "<Stack> has an invalid prop: dash: expected an array, found a string"),
             (#"Playhouse.render(h(Stack, { dash: [4, "3"] }));"#, "<Stack> has an invalid prop: dash.1: expected a number, found a string"),
-            (#"Playhouse.render(h(Stack, { shadow: 4 }));"#, #"<Stack> has no prop "shadow""#),
+            (#"Playhouse.render(h(Stack, { shadow: "big" }));"#, #"<Stack> has an invalid prop: shadow: expected a number, found a string"#),
             (#"Playhouse.render(h(Panel, { axis: "h" }));"#, #"<Panel> has no prop "axis""#),
             (#"Playhouse.render(h(Button, { selected: "yes" }));"#, "<Button> has an invalid prop: selected: expected a boolean, found a string"),
         ] {
@@ -1047,6 +1047,166 @@ extension PlayhouseUITests {
 
     func cliErrorMessage(_ response: [String: Any]) -> String {
         (response["error"] as? [String: Any])?["message"] as? String ?? ""
+    }
+
+    // case-contract: test_plugin_composite_props_and_new_atoms | The atoms the native composites are built from cover their layout, styling and the two controls composition can't make. On the Plugin Catalog's Stack page, a Stack with axis z layers its children (a badge at the top trailing corner of the base it is drawn over), a Stack with material regular, a 12-point clip and an 8-point shadow draws its translucent surface, a row with an onHover handler reports the pointer entering it (its label turns hovering, and leaving turns it back to idle), and a stretched row capped by maxWidth 160 is 160 points wide and keeps its frameAlign trailing, paddingTop 6 and paddingLeading 12. The Text page's selectable text keeps selectable. The TextField page's secure field hides what is typed while onChange still reports it (Secret length), Escape in it runs onEscape (Key: escape), its multiline monospaced field keeps multiline, size and design, and each Focus the note press raises focusRequest, which moves the keyboard into the note. The Segmented page also shows the same choice as a pop-up menu (style menu) and radio buttons (style radio), each running onChange with the chosen value. The new ResizeHandle page's 9-point invisible handle along a pane's right edge raises onDrag with the drag's translation, which widens the pane (Width: 240 after 40 points, clamped at 320), and onDragEnd once the drag ends (Drags ended: 1); the DatePicker page shows a date and time field, a date field and a time field for the same value, and editing a field runs onChange with the new date in seconds since 1970. `plugin render` reports these props and events, each event one commit; a ResizeHandle given an onPress handler, a Stack given an onPress handler, a DatePicker without a date or with a mistyped one, a mistyped Segmented style or a mistyped Stack shadow is reported in errors.
+    func test_plugin_composite_props_and_new_atoms() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        func open(_ atom: String) {
+            let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
+            row.click()
+            let title = element("plugin-catalog-title")
+            XCTAssertTrue(waitUntil({ title.exists && self.pluginText(title) == atom }, timeout: 10), "Selecting \(atom) shows its page.")
+            XCTAssertFalse(element("plugin-error").exists, "The \(atom) page renders without errors.")
+        }
+
+        func showInCatalog(_ target: XCUIElement) {
+            let scroll = app.scrollViews.containing(.any, identifier: target.identifier).firstMatch
+            XCTAssertTrue(scroll.exists)
+            for _ in 0..<12 {
+                let viewport = scroll.frame.insetBy(dx: 0, dy: 4)
+                if viewport.minY <= target.frame.minY && target.frame.maxY <= viewport.maxY { return }
+                scroll.scroll(byDeltaX: 0, deltaY: target.frame.midY > viewport.midY ? -100 : 100)
+            }
+            XCTFail("Catalog example \(target.identifier) is outside the scroll viewport.")
+        }
+
+        // Stack: layers, a translucent clipped shadowed surface, hover and the new frame props.
+        open("Stack")
+        let layers = element("stack-layers"), base = element("stack-layers-base")
+        XCTAssertTrue(layers.waitToExist(timeout: 10))
+        XCTAssertEqual(base.frame.width, 120, accuracy: 1, "The base keeps its own 120-point size under the badge.")
+        XCTAssertFalse(element("stack-layers-badge").exists, "The decorative badge is hidden from accessibility.")
+        let material = element("stack-material")
+        XCTAssertTrue(material.exists)
+        showInCatalog(layers)
+        attachScreenshot(named: "Stack atom: layers in the catalog")
+        attachElementScreenshot(layers, named: "Stack atom: layers with a top trailing badge")
+        showInCatalog(material)
+        attachScreenshot(named: "Stack atom: translucent surface in the catalog")
+        attachElementScreenshot(material, named: "Stack atom: material, clip and shadow")
+
+        let hoverRow = element("stack-hover")
+        XCTAssertTrue(hoverRow.waitToExist(timeout: 5))
+        showInCatalog(hoverRow)
+        let sidebarStack = catalogSidebarRow("plugin-catalog-atom-Stack")
+        sidebarStack.hover()
+        // The combined row can expose its text as a value. Read the rendered text
+        // so this checks the visible idle and hovering states in either AX representation.
+        func shows(_ words: String) -> Bool {
+            recognizedWords(in: hoverRow.screenshot()).contains(words)
+        }
+        XCTAssertTrue(waitUntil({ shows("hover this row") }, timeout: 5), "The row starts idle.")
+        hoverRow.hover()
+        XCTAssertTrue(waitUntil({ shows("pointer over the row") }, timeout: 5), "Entering the row runs its onHover handler.")
+        attachScreenshot(named: "Stack atom: hovered row in the catalog")
+        attachElementScreenshot(hoverRow, named: "Stack atom: a hovered row")
+        sidebarStack.hover()
+        XCTAssertTrue(waitUntil({ shows("hover this row") }, timeout: 5), "Leaving the row turns it back to idle.")
+        XCTAssertEqual(element("stack-edges").frame.width, 160, accuracy: 1, "maxWidth caps the stretched row at 160 points.")
+
+        // Text: selectable.
+        open("Text")
+        let selectable = element("text-selectable")
+        XCTAssertTrue(selectable.waitToExist(timeout: 10), "The selectable text is on the page.")
+        showInCatalog(selectable)
+        NSPasteboard.general.clearContents()
+        selectable.coordinate(withNormalizedOffset: CGVector(dx: 0.07, dy: 0.5)).doubleClick()
+        app.typeKey("c", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({
+            NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) == "selectable"
+        }, timeout: 5), "Copy places the selected text on the pasteboard.")
+        attachScreenshot(named: "Text atom: selected text in the catalog")
+
+        // TextField: secure, Escape, multiline, focus requests.
+        open("TextField")
+        let secure = element("text-field-secure")
+        XCTAssertTrue(secure.waitToExist(timeout: 10))
+        secure.click()
+        secure.typeText("hunter2")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-secure-length")) == "Secret length: 7" }, timeout: 5), "The secure field reports what is typed.")
+        XCTAssertNotEqual(secure.value as? String, "hunter2", "The secure field hides what is typed.")
+        secure.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-key")) == "Key: escape" }, timeout: 5), "Escape runs onEscape.")
+        let focusNote = element("text-field-focus")
+        let note = element("text-field-multiline")
+        XCTAssertTrue(note.waitToExist(timeout: 5))
+        let singleLineHeight = note.frame.height
+        let wrappedNote = "A long note that wraps across several lines in the narrow field."
+        focusNote.click()
+        app.typeText(wrappedNote)
+        XCTAssertTrue(waitUntil({ (note.value as? String) == wrappedNote }, timeout: 5),
+                      "The focus request reaches the multiline field. Found: \(String(describing: note.value))")
+        XCTAssertGreaterThan(note.frame.height, singleLineHeight, "The control expands to hold the wrapped lines.")
+        attachScreenshot(named: "TextField atom: secure field and wrapped note")
+        secure.click()
+        focusNote.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("focused again")
+        XCTAssertTrue(waitUntil({ (note.value as? String) == "focused again" }, timeout: 5), "A second focus request moves the keyboard back from the secure field.")
+
+        // Segmented: the same choice as a pop-up menu and radio buttons.
+        open("Segmented")
+        let menu = element("segmented-menu")
+        XCTAssertTrue(menu.waitToExist(timeout: 10))
+        menu.click()
+        let global = app.menuItems["Global"]
+        XCTAssertTrue(global.waitToExist(timeout: 5), "The menu style is a pop-up menu of the options.")
+        global.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("segmented-selected")) == "Selected: global" }, timeout: 5), "Choosing in the pop-up runs onChange.")
+        let radio = element("segmented-radio")
+        let builtIn = radio.radioButtons["Built-in"]
+        XCTAssertTrue(builtIn.waitToExist(timeout: 5), "The radio style shows a radio button per option.")
+        builtIn.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("segmented-selected")) == "Selected: builtin" }, timeout: 5), "Choosing a radio button runs onChange.")
+        attachScreenshot(named: "Segmented atom: segmented, menu and radio styles")
+
+        // ResizeHandle: dragging the pane's right edge.
+        open("ResizeHandle")
+        let pane = element("resize-handle-pane"), handle = element("resize-handle-demo")
+        XCTAssertTrue(handle.waitToExist(timeout: 10))
+        XCTAssertEqual(pane.frame.width, 200, accuracy: 1)
+        XCTAssertEqual(handle.frame.width, 9, accuracy: 1, "The handle is a 9-point grab strip.")
+        XCTAssertEqual(handle.frame.midX, pane.frame.maxX, accuracy: 2, "The handle sits on the pane's right edge.")
+        XCTAssertEqual(pluginText(element("resize-handle-width")), "Width: 200")
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 40, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(pane.frame.width - 240) <= 3 }, timeout: 5), "Dragging the handle 40 points widens the pane: \(pane.frame.width)")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("resize-handle-ended")) == "Drags ended: 1" }, timeout: 5), "The drag's end runs onDragEnd.")
+        attachScreenshot(named: "ResizeHandle atom: a pane widened by its edge")
+        let widenedEdge = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        widenedEdge.press(forDuration: 0.2, thenDragTo: widenedEdge.withOffset(CGVector(dx: 132, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(pane.frame.width - 320) <= 2 }, timeout: 5), "Dragging farther clamps the pane to 320 points.")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("resize-handle-ended")) == "Drags ended: 2" }, timeout: 5))
+        attachScreenshot(named: "ResizeHandle atom: pane at its maximum width")
+
+        // DatePicker: one value in three fields; editing a field runs onChange.
+        open("DatePicker")
+        let picker = element("date-picker-demo")
+        XCTAssertTrue(picker.waitToExist(timeout: 10))
+        let date = element("date-picker-date"), time = element("date-picker-time")
+        XCTAssertTrue(date.exists && time.exists, "The date and time components each have a field.")
+        func fieldValues(_ field: XCUIElement) -> [String] {
+            let accessibilityValues = ([field] + field.descendants(matching: .any).allElementsBoundByIndex)
+                .compactMap { $0.value.map { String(describing: $0) } }
+                .filter { !$0.isEmpty }
+            if !accessibilityValues.isEmpty { return accessibilityValues }
+            return [recognizedWords(in: field.screenshot())]
+        }
+        let dateBefore = fieldValues(date), timeBefore = fieldValues(time)
+        let value = element("date-picker-value")
+        XCTAssertEqual(pluginText(value), "Value: 1767261600")
+        picker.coordinate(withNormalizedOffset: CGVector(dx: 0.13, dy: 0.5)).click()
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(value) != "Value: 1767261600" }, timeout: 5), "Editing the date portion raises onChange.")
+        XCTAssertTrue(waitUntil({ fieldValues(date) != dateBefore }, timeout: 5), "The date-only field updates to the edited date.")
+        let dateValue = pluginText(value)
+        picker.coordinate(withNormalizedOffset: CGVector(dx: 0.71, dy: 0.5)).click()
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(value) != dateValue }, timeout: 5), "Editing the time portion raises onChange.")
+        XCTAssertTrue(waitUntil({ fieldValues(time) != timeBefore }, timeout: 5), "The time-only field updates to the edited time.")
+        attachScreenshot(named: "DatePicker atom: date and time, date and time fields")
     }
 
     // case-contract: test_task_repository_add_worktree_keeps_several_worktrees_per_repository | `task repository add-worktree` gives a task another worktree of a repository it already has, created at once on its own new branch (the given name, or a fresh one from the task title), and adding an already attached repository again does the same, so one repository can hold several worktrees, each listed with its own path and branch and persisted across fresh reads. A second worktree on a branch the task already uses is rejected and leaves the task unchanged. While a repository has several worktrees, `--repo` alone no longer picks one: remove, renew, edit and pr link fail with an error naming each worktree path and asking for `--worktree`, and `--worktree <path>`, like that worktree's chip remove badge, removes just that worktree and its folder. Each worktree's chip opens that worktree's settings. The next agent turn lists every worktree mapping and is told to open pull requests with task pr create or register them with task pr link, never to switch a worktree's branch, and to use add-worktree for another branch. `task create` can list a repository more than once: each entry is its own pending worktree with its own chip, the further automatic ones waiting as auto 2, auto 3 and so on, so each can be edited or removed on its own (with `--worktree-branch` naming it on the CLI), and starting the task gives each its own branch; giving two of them the same branch is rejected as invalid_argument and creates no task.

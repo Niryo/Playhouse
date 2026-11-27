@@ -5,113 +5,89 @@ import PlayhouseUI
 
 extension TaskConversationView {
     package var collapsedTaskSidebar: some PHView {
-        PHVStack(spacing: 8) {
-            PHButton {
+        AtomStack(
+            props: StackProps(spacing: 8, group: true, fill: "panel", fillOpacity: 0.62),
+            common: AtomCommon(testID: "task-sidebar-collapsed", width: Double(Self.collapsedSidebarWidth), fillHeight: true, paddingTop: 12)
+        ) {
+            AtomButton(
+                props: ButtonProps(shortcut: AppShortcut.sidebar),
+                common: AtomCommon(testID: "show-task-sidebar-button", label: "Show sidebar", help: "Show sidebar", width: 26, height: 24)
+            ) {
                 setTaskSidebarCollapsed(false)
-            } label: {
-                PHImage(icon: .sidebarLeft)
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 26, height: 24)
+            } content: {
+                AtomIcon(props: IconProps(name: PHIcon.sidebarLeft.name, size: 12, weight: "medium"))
             }
-            .plainButtonHoverPointer()
-            .buttonStyle(.plain)
-            .shortcutHelp("Show sidebar", shortcut: AppShortcut.sidebar)
-            .accessibilityLabel("Show sidebar")
-            .accessibilityIdentifier("show-task-sidebar-button")
 
             // Inline sidebar plugins (the built-in Changes) show their rail form here.
             PluginInlineSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions)
-            PHSpacer(minLength: 0)
+            AtomSpacer(props: SpacerProps(minLength: 0))
             // The command row's Skills button stays reachable while the sidebar is collapsed.
-            sidebarSkillsButton
-                .padding(.bottom, 6)
+            AtomStack(common: AtomCommon(paddingBottom: 6)) { sidebarSkillsButton }
         }
-        .padding(.top, 12)
-        .frame(width: Self.collapsedSidebarWidth)
-        .frame(maxHeight: .infinity)
-        .background(WorkspaceTheme.panelBackground.opacity(0.62))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("task-sidebar-collapsed")
     }
 
     package var expandedTaskSidebar: some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
-            PHHStack(spacing: 8) {
-                PHButton {
+        AtomStack(
+            props: StackProps(spacing: 0, align: "leading", group: true, fill: "panel", fillOpacity: 0.62),
+            common: AtomCommon(testID: "task-sidebar", width: Double(Self.expandedSidebarWidth), fillHeight: true)
+        ) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 10, paddingTop: 12, paddingBottom: 6)) {
+                AtomButton(
+                    props: ButtonProps(shortcut: AppShortcut.sidebar),
+                    common: AtomCommon(testID: "hide-task-sidebar-button", label: "Hide sidebar", help: "Hide sidebar", width: 22, height: 24)
+                ) {
                     setTaskSidebarCollapsed(true)
-                } label: {
-                    PHImage(icon: .sidebarLeft)
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(width: 22, height: 24)
+                } content: {
+                    AtomIcon(props: IconProps(name: PHIcon.sidebarLeft.name, size: 12, weight: "medium"))
                 }
-                .plainButtonHoverPointer()
-                .buttonStyle(.plain)
-                .shortcutHelp("Hide sidebar", shortcut: AppShortcut.sidebar)
-                .accessibilityLabel("Hide sidebar")
-                .accessibilityIdentifier("hide-task-sidebar-button")
-                PHSpacer(minLength: 0)
+                AtomSpacer(props: SpacerProps(minLength: 0))
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
 
-            PHRectangle()
-                .fill(PHColor.primary.opacity(0.07))
-                .frame(height: 1)
+            panelRule(opacity: 0.07)
 
             // Plugins lead the sidebar's sections, above the inline ones such as Changes.
-            PluginSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
+            AtomStack(common: AtomCommon(paddingX: 10, paddingTop: 8)) {
+                PluginSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
+            }
 
             // Inline plugins (the built-in Changes) render their own sections in the column.
             PluginInlineSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions)
 
-            PHSpacer(minLength: 0)
+            AtomSpacer(props: SpacerProps(minLength: 0))
 
-            PHRectangle()
-                .fill(PHColor.primary.opacity(0.07))
-                .frame(height: 1)
+            panelRule(opacity: 0.07)
 
             sidebarCommandRow
         }
-        .frame(width: Self.expandedSidebarWidth)
-        .frame(maxHeight: .infinity)
-        .background(WorkspaceTheme.panelBackground.opacity(0.62))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("task-sidebar")
+    }
+
+    /// A full-width one-point line in the primary color at `opacity`.
+    private func panelRule(opacity: Double) -> some PHView {
+        AtomStack(props: StackProps(fill: "primary", fillOpacity: opacity), common: AtomCommon(height: 1, fillWidth: true)) {}
     }
 
     package var conversationPanel: some PHView {
-        PHZStack(alignment: .leading) {
-            PHVStack(spacing: 0) {
+        AtomStack(props: StackProps(axis: "z", align: "leading", clip: true)) {
+            AtomStack(props: StackProps(spacing: 0)) {
                 if task.authoringPluginID != nil {
-                    PHHStack {
-                        PHButton(action: saveAndBack) {
-                            PHImage(icon: .chevronBackward)
-                                .frame(width: 28, height: 28)
+                    AtomStack(props: StackProps(axis: "h"), common: AtomCommon(paddingX: 26, paddingY: 15)) {
+                        AtomButton(
+                            props: ButtonProps(shortcut: AppShortcut.back),
+                            common: AtomCommon(testID: "back-to-board-button", label: "Back to Kanban board", help: "Back to Kanban", width: 28, height: 28),
+                            action: saveAndBack
+                        ) {
+                            AtomIcon(props: IconProps(name: PHIcon.chevronBackward.name))
                         }
-                        .buttonStyle(.plain)
-                        .plainButtonHoverPointer()
-                        .shortcutHelp("Back to Kanban", shortcut: AppShortcut.back)
-                        .accessibilityLabel("Back to Kanban board")
-                        .accessibilityIdentifier("back-to-board-button")
-                        PHText("Plugin editor")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        PHSpacer()
+                        AtomText(props: TextProps(text: "Plugin editor", size: 13, weight: "bold"), common: AtomCommon(fillWidth: true))
+                        AtomSpacer()
                     }
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 15)
                 } else if !task.isStandaloneChat || task.isParallelChatBubble {
                     conversationHeader
                 }
 
                 // The standalone chat beside the board has no header: the sidebar's Chat entry names and hides it.
                 if !task.isStandaloneChat || task.isParallelChatBubble {
-                    PHRectangle()
-                        .fill(PHColor.primary.opacity(0.07))
-                        .frame(height: 1)
+                    panelRule(opacity: 0.07)
                 }
 
                 safetyNotice
@@ -121,33 +97,30 @@ extension TaskConversationView {
                 if selectedSubagent == nil {
                     conversation
                 } else {
-                    PHSpacer(minLength: 0)
+                    AtomSpacer(props: SpacerProps(minLength: 0))
                 }
 
                 // With the plus on it, the overlay draws this line itself, broken around the plus.
-                PHRectangle()
-                    .fill(PHColor.primary.opacity(showsNewChatPageButton ? 0 : Self.conversationDividerOpacity))
-                    .frame(height: 1)
-                    .overlay { newChatPageRuleButton }
-                    // Above the composer, so the plus's lower half still takes clicks.
-                    .zIndex(1)
+                AtomOverlay {
+                    panelRule(opacity: showsNewChatPageButton ? 0 : Self.conversationDividerOpacity)
+                } overlay: {
+                    newChatPageRuleButton
+                }
+                // Above the composer, so the plus's lower half still takes clicks.
+                .zIndex(1)
 
                 if isReadOnly {
-                    PHLabel("Archived conversation · read only", icon: .lockFill)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 18)
-                        .accessibilityIdentifier("archived-conversation-read-only")
+                    AtomLabel(
+                        props: LabelProps(text: "Archived conversation · read only", icon: PHIcon.lockFill.name, size: 11, weight: "medium", color: "secondary"),
+                        common: AtomCommon(testID: "archived-conversation-read-only", fillWidth: true, frameAlign: "center", paddingY: 18)
+                    )
                 } else {
                     if task.status == .done {
                         // A Done task keeps its conversation; a follow-up reopens it in fresh worktrees.
-                        PHLabel(archivedFollowUpHint, icon: .archivebox)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 8)
-                            .accessibilityIdentifier("archived-conversation-follow-up-hint")
+                        AtomLabel(
+                            props: LabelProps(text: archivedFollowUpHint, icon: PHIcon.archivebox.name, size: 11, weight: "medium", color: "secondary"),
+                            common: AtomCommon(testID: "archived-conversation-follow-up-hint", fillWidth: true, frameAlign: "center", paddingTop: 8)
+                        )
                     }
                     ComposerDraftScope { composer }
                 }
@@ -194,7 +167,6 @@ extension TaskConversationView {
                     .zIndex(2)
             }
         }
-        .clipped()
         .animation(.easeInOut(duration: 0.24), value: isDiffPresented)
         .onExitCommand {
             if isDiffPresented { closeDiff() }
@@ -202,225 +174,187 @@ extension TaskConversationView {
     }
 
     package var fileDiffOverlay: some PHView {
-        PHVStack(spacing: 0) {
-            PHHStack(spacing: 11) {
-                PHButton(action: closeDiff) {
-                    PHImage(icon: .xmark)
-                        .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 26, height: 26)
-                        .contentShape(PHRectangle())
-                }
-                .plainButtonHoverPointer()
-                .buttonStyle(.plain)
-                .nativeHelp("Close diff")
-                .accessibilityLabel("Close diff")
-                .accessibilityIdentifier("close-workspace-diff-button")
+        AtomStack(props: StackProps(axis: "z")) {
+            // Escape closes the diff wherever focus is; the monitor takes no room.
+            AtomStack(common: AtomCommon(width: 0, height: 0)) { PHEscapeKeyMonitor(onEscape: closeDiff) }
 
-                if let selectedChange {
-                    PHImage(icon: PHIcon(named: changeSymbol(for: selectedChange.status)))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(changeColor(for: selectedChange.status))
-                    PHVStack(alignment: .leading, spacing: 2) {
-                        PHText(selectedChange.path)
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .accessibilityIdentifier("workspace-diff-title")
-                        PHText("\(repositoryLabel(selectedChange.repository)) · \(diffBaselineLabel(selectedChange))")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("workspace-diff-source")
-                    }
-                } else {
-                    PHText("File diff")
-                        .font(.system(size: 12, weight: .semibold))
-                }
+            AtomStack(
+                props: StackProps(spacing: 0, group: true, fill: "window"),
+                common: AtomCommon(testID: "workspace-diff-overlay", fillWidth: true, fillHeight: true, frameAlign: "center")
+            ) {
+                fileDiffHeader
 
-                PHSpacer(minLength: 0)
-                if selectedDiff?.isText == true {
-                    PHText(isMonacoReady ? "Side-by-side" : "Starting editor")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("workspace-diff-editor-status")
-                        .accessibilityValue(monacoStartupDescription)
-                    if isMonacoReady {
-                        PHText(diffHighlightStatus)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(diffChangeCount.map { $0 > 0 ? PHColor.green : PHColor.secondary } ?? PHColor.secondary)
-                            .accessibilityIdentifier("workspace-diff-highlight-status")
-                    }
-                }
-                PHText("READ ONLY")
-                    .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .tracking(0.5)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(PHColor.primary.opacity(0.06), in: PHCapsule())
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(WorkspaceTheme.windowBackground)
+                panelRule(opacity: 0.09)
 
-            PHRectangle()
-                .fill(PHColor.primary.opacity(0.09))
-                .frame(height: 1)
-
-            PHGroup {
-                if isLoadingDiff {
-                    PHProgressView("Loading file diff…")
-                        .controlSize(.small)
-                        .accessibilityIdentifier("workspace-diff-loading")
-                } else if let diffError {
-                    PHVStack(spacing: 8) {
-                        PHImage(icon: .exclamationmarkTriangleFill)
-                            .foregroundStyle(.orange)
-                        PHText(diffError)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(24)
-                    .accessibilityIdentifier("workspace-diff-error")
-                } else if let selectedDiff, selectedDiff.isText {
-                    if let monacoError {
-                        PHVStack(spacing: 9) {
-                            PHText(monacoError)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                            PHButton("Reload editor") {
-                                isMonacoReady = false
-                                diffChangeCount = nil
-                                self.monacoError = nil
-                                // Clearing the diff first takes the shared editor out of the
-                                // view tree; resetting alone can't replace a hosted NSView.
-                                self.selectedDiff = nil
-                                NativeViews.factory.resetDiffEditor()
-                                if let selectedChange { openDiff(selectedChange) }
-                            }
-                            .buttonHoverPointer()
-                            .nativeHelp("Reload editor")
-                            .font(.system(size: 11, weight: .medium))
-                        }
-                        .padding(24)
-                    } else {
-                        PHZStack {
-                            PHNativeDiffEditor(
-                                diff: selectedDiff,
-                                theme: colorScheme == .dark ? "vs-dark" : "vs",
-                                isReady: $isMonacoReady,
-                                loadError: $monacoError,
-                                diffChangeCount: $diffChangeCount,
-                                presentation: $monacoPresentation
-                            )
-                            .accessibilityIdentifier("workspace-diff-editor")
-
-                            if !isMonacoReady {
-                                PHProgressView("Starting Monaco…")
-                                    .controlSize(.small)
-                                    .padding(12)
-                                    .phMaterialBackground(.regular, in: PHRoundedRectangle(cornerRadius: 8))
-                                    .accessibilityIdentifier("workspace-diff-editor-loading")
-                            }
-                        }
-                    }
-                } else if let selectedDiff {
-                    PHVStack(spacing: 9) {
-                        PHImage(icon: .docTextMagnifyingglass)
-                            .font(.system(size: 22))
-                            .foregroundStyle(.secondary)
-                        PHText(selectedDiff.message ?? "This file can't be shown as a text diff.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .accessibilityIdentifier("workspace-diff-unsupported")
-                    }
-                    .padding(24)
+                AtomStack(props: StackProps(fill: "input"), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) {
+                    fileDiffContent
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(WorkspaceTheme.inputBackground)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WorkspaceTheme.windowBackground)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("workspace-diff-overlay")
-        .background(PHEscapeKeyMonitor(onEscape: closeDiff).frame(width: 0, height: 0))
+    }
+
+    private var fileDiffHeader: some PHView {
+        AtomStack(props: StackProps(axis: "h", spacing: 11, fill: "window"), common: AtomCommon(fillWidth: true, paddingX: 18, paddingY: 10)) {
+            AtomButton(common: AtomCommon(testID: "close-workspace-diff-button", label: "Close diff", help: "Close diff", width: 26, height: 26), action: closeDiff) {
+                AtomIcon(props: IconProps(name: PHIcon.xmark.name, size: 11, weight: "semibold"))
+            }
+
+            if let selectedChange {
+                AtomIcon(props: IconProps(name: changeSymbol(for: selectedChange.status), size: 11, weight: "medium", color: WorkspaceChangeStyle.colorName(for: selectedChange.status)))
+                AtomStack(props: StackProps(spacing: 2, align: "leading")) {
+                    AtomText(
+                        props: TextProps(text: selectedChange.path, size: 12, weight: "semibold", design: "monospaced", lineLimit: 1, truncation: "middle"),
+                        common: AtomCommon(testID: "workspace-diff-title")
+                    )
+                    AtomText(
+                        props: TextProps(text: "\(repositoryLabel(selectedChange.repository)) · \(diffBaselineLabel(selectedChange))", size: 10, color: "secondary"),
+                        common: AtomCommon(testID: "workspace-diff-source")
+                    )
+                }
+            } else {
+                AtomText(props: TextProps(text: "File diff", size: 12, weight: "semibold"))
+            }
+
+            AtomSpacer(props: SpacerProps(minLength: 0))
+            if selectedDiff?.isText == true {
+                AtomText(
+                    props: TextProps(text: isMonacoReady ? "Side-by-side" : "Starting editor", size: 10, weight: "medium", color: "secondary"),
+                    common: AtomCommon(testID: "workspace-diff-editor-status", value: monacoStartupDescription)
+                )
+                if isMonacoReady {
+                    AtomText(
+                        props: TextProps(text: diffHighlightStatus, size: 10, weight: "medium", color: (diffChangeCount ?? 0) > 0 ? "green" : "secondary"),
+                        common: AtomCommon(testID: "workspace-diff-highlight-status")
+                    )
+                }
+            }
+            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.06, capsule: true), common: AtomCommon(paddingX: 7, paddingY: 4)) {
+                AtomText(props: TextProps(text: "READ ONLY", size: 9, weight: "semibold", design: "rounded", color: "secondary", tracking: 0.5))
+            }
+        }
+    }
+
+    /// A small spinner over its secondary caption, as a labelled native progress view draws.
+    private func labelledSpinner(_ title: String) -> some PHView {
+        AtomStack(props: StackProps(spacing: 4)) {
+            AtomSpinner()
+            AtomText(props: TextProps(text: title, size: 11, color: "secondary"))
+        }
+    }
+
+    @PHViewBuilder
+    private var fileDiffContent: some PHView {
+        if isLoadingDiff {
+            AtomStack(props: StackProps(combine: true), common: AtomCommon(testID: "workspace-diff-loading")) {
+                labelledSpinner("Loading file diff…")
+            }
+        } else if let diffError {
+            AtomStack(props: StackProps(spacing: 8), common: AtomCommon(testID: "workspace-diff-error", padding: 24)) {
+                AtomIcon(props: IconProps(name: PHIcon.exclamationmarkTriangleFill.name, color: "orange"))
+                AtomText(props: TextProps(text: diffError, size: 12, color: "secondary", align: "center"))
+            }
+        } else if let selectedDiff, selectedDiff.isText {
+            if let monacoError {
+                AtomStack(props: StackProps(spacing: 9), common: AtomCommon(padding: 24)) {
+                    AtomText(props: TextProps(text: monacoError, size: 12, color: "secondary", align: "center"))
+                    AtomButton(props: ButtonProps(style: "automatic"), common: AtomCommon(help: "Reload editor")) {
+                        isMonacoReady = false
+                        diffChangeCount = nil
+                        self.monacoError = nil
+                        // Clearing the diff first takes the shared editor out of the
+                        // view tree; resetting alone can't replace a hosted NSView.
+                        self.selectedDiff = nil
+                        NativeViews.factory.resetDiffEditor()
+                        if let selectedChange { openDiff(selectedChange) }
+                    } content: {
+                        AtomText(props: TextProps(text: "Reload editor", size: 11, weight: "medium"))
+                    }
+                }
+            } else {
+                AtomStack(props: StackProps(axis: "z")) {
+                    PHNativeDiffEditor(
+                        diff: selectedDiff,
+                        theme: colorScheme == .dark ? "vs-dark" : "vs",
+                        isReady: $isMonacoReady,
+                        loadError: $monacoError,
+                        diffChangeCount: $diffChangeCount,
+                        presentation: $monacoPresentation
+                    )
+                    .accessibilityIdentifier("workspace-diff-editor")
+
+                    if !isMonacoReady {
+                        AtomStack(
+                            props: StackProps(combine: true, cornerRadius: 8, material: "regular"),
+                            common: AtomCommon(testID: "workspace-diff-editor-loading", padding: 12)
+                        ) {
+                            labelledSpinner("Starting Monaco…")
+                        }
+                    }
+                }
+            }
+        } else if let selectedDiff {
+            AtomStack(props: StackProps(spacing: 9), common: AtomCommon(padding: 24)) {
+                AtomIcon(props: IconProps(name: PHIcon.docTextMagnifyingglass.name, size: 22, color: "secondary"))
+                AtomText(
+                    props: TextProps(text: selectedDiff.message ?? "This file can't be shown as a text diff.", size: 12, color: "secondary", align: "center"),
+                    common: AtomCommon(testID: "workspace-diff-unsupported")
+                )
+            }
+        }
     }
 
 
     package var conversationHeader: some PHView {
         let backLabel = task.isParallelChatBubble ? "Back to the bubble" : "Back to Kanban board"
-        return PHHStack(spacing: 12) {
-            PHButton(action: saveAndBack) {
-                PHImage(icon: .chevronBackward)
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .contentShape(PHRectangle())
+        return AtomStack(
+            props: StackProps(axis: "h", spacing: 12, fill: "window", fillOpacity: 0.96),
+            common: AtomCommon(fillWidth: true, paddingX: 26, paddingY: 15)
+        ) {
+            AtomButton(
+                props: ButtonProps(shortcut: AppShortcut.back),
+                common: AtomCommon(testID: "back-to-board-button", label: backLabel, help: task.isParallelChatBubble ? backLabel : "Back to Kanban", width: 28, height: 28),
+                action: saveAndBack
+            ) {
+                AtomIcon(props: IconProps(name: PHIcon.chevronBackward.name, size: 13, weight: "semibold"))
             }
-            .plainButtonHoverPointer()
-            .buttonStyle(.plain)
-            .shortcutHelp(task.isParallelChatBubble ? backLabel : "Back to Kanban", shortcut: AppShortcut.back)
-            .accessibilityLabel(backLabel)
-            .accessibilityIdentifier("back-to-board-button")
 
-            PHVStack(alignment: .leading, spacing: 4) {
-                PHHStack(spacing: 8) {
+            AtomStack(props: StackProps(spacing: 4, align: "leading"), common: AtomCommon(fillWidth: true)) {
+                AtomStack(props: StackProps(axis: "h", spacing: 8)) {
                     if isGeneratingTitle || task.title == "Generating title…" {
-                        PHHStack(spacing: 7) {
-                            PHProgressView()
-                                .controlSize(.small)
-                                .accessibilityIdentifier("task-title-generating-loader")
-                            PHText("Generating title…")
+                        AtomStack(props: StackProps(axis: "h", spacing: 7), common: AtomCommon(testID: "task-title-generating")) {
+                            AtomSpinner(common: AtomCommon(testID: "task-title-generating-loader"))
+                            AtomText(props: TextProps(text: "Generating title…"))
                         }
-                        .accessibilityIdentifier("task-title-generating")
                     } else {
-                        PHText(task.title)
-                            .font(.system(size: 14, weight: .semibold))
-                            .lineLimit(1)
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("task-view-title")
+                        AtomText(
+                            props: TextProps(text: task.title, size: 14, weight: "semibold", lineLimit: 1, selectable: true),
+                            common: AtomCommon(testID: "task-view-title")
+                        )
                     }
-
                 }
 
                 if !task.isStandaloneChat {
-                    PHHStack(spacing: 6) {
-                        PHCircle()
-                            .fill(task.status.accent)
-                            .frame(width: 6, height: 6)
-                        PHText(task.status.rawValue)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
+                    AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(testID: "task-header-status")) {
+                        AtomStack(props: StackProps(fill: AtomColor.hex(task.status.accent), capsule: true), common: AtomCommon(width: 6, height: 6, decorative: true)) {}
+                        AtomText(props: TextProps(text: task.status.rawValue, size: 11, weight: "medium", color: "secondary"))
                     }
-                    .accessibilityIdentifier("task-header-status")
                     if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
-                        PHText(statusMessage)
-                            .font(.system(size: 10))
-                            .foregroundStyle(task.status == .blocked ? PHColor.red : PHColor.secondary)
-                            .lineLimit(3)
-                            .accessibilityIdentifier("task-status-message")
+                        AtomText(
+                            props: TextProps(text: statusMessage, size: 10, color: task.status == .blocked ? "red" : "secondary", lineLimit: 3),
+                            common: AtomCommon(testID: "task-status-message")
+                        )
                     }
                 }
-
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            PHSpacer(minLength: 0)
+            AtomSpacer(props: SpacerProps(minLength: 0))
 
             if !task.isStandaloneChat {
                 // The title column takes whatever is left, so the chips (with a
                 // branch each when a repository repeats) aren't squeezed first.
-                repositoryBadges
-                    .layoutPriority(1)
+                AtomStack(common: AtomCommon(layoutPriority: 1)) { repositoryBadges }
             }
         }
-        .padding(.horizontal, 26)
-        .padding(.vertical, 15)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(WorkspaceTheme.windowBackground.opacity(0.96))
     }
 
     package var repositoryBadges: some PHView {
@@ -470,6 +404,7 @@ extension TaskConversationView {
     }
 
 
+
     package var safetyNotice: some PHView {
         let additionalFolders = workspaceRootURLs.filter { url in
             !task.repositoryWorktrees.contains {
@@ -481,18 +416,14 @@ extension TaskConversationView {
                 let folderLabels = additionalFolders.map(\.lastPathComponent)
                 let folderSummary = "Working in: " + folderLabels.joined(separator: " · ")
                 let fullFolderSummary = "Working in: " + additionalFolders.map(\.path).joined(separator: " · ")
-                PHText(folderSummary)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(fullFolderSummary)
-                    .accessibilityIdentifier("working-folders-summary")
-                    .frame(maxWidth: 820, alignment: .leading)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 12)
+                AtomStack(common: AtomCommon(fillWidth: true, frameAlign: "center", paddingX: 28, paddingTop: 12)) {
+                    AtomStack(common: AtomCommon(maxWidth: 820, frameAlign: "leading")) {
+                        // Reads as the full paths, while the line shows only the folder names.
+                        AtomStack(props: StackProps(summary: true), common: AtomCommon(testID: "working-folders-summary", label: fullFolderSummary)) {
+                            AtomText(props: TextProps(text: folderSummary, size: 10, color: "secondary", lineLimit: 2, selectable: true))
+                        }
+                    }
+                }
             }
         }
     }

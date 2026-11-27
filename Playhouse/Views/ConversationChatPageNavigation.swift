@@ -304,20 +304,15 @@ extension TaskConversationView {
                         props: TextProps(text: "Recalling \(page.title)", size: 13, weight: "medium", color: "primary", lineLimit: 1),
                         common: AtomCommon(testID: "composer-recalled-page-title", opacity: 0.82)
                     )
-                    PHButton {
-                        recalledChatPages.removeAll { $0.id == page.id }
-                    } label: {
-                        PHImage(icon: .xmark)
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 16, height: 16)
-                            .contentShape(PHRectangle())
+                    AtomButton(
+                        common: AtomCommon(
+                            testID: "composer-recalled-page-remove-\(page.id)", label: "Stop recalling \(page.title)",
+                            help: "Send the next message without recalling this conversation", width: 16, height: 16
+                        ),
+                        action: { recalledChatPages.removeAll { $0.id == page.id } }
+                    ) {
+                        AtomIcon(props: IconProps(name: PHIcon.xmark.name, size: 9, weight: "bold", color: "secondary"))
                     }
-                    .buttonStyle(.plain)
-                    .plainButtonHoverPointer()
-                    .nativeHelp("Send the next message without recalling this conversation")
-                    .accessibilityLabel("Stop recalling \(page.title)")
-                    .accessibilityIdentifier("composer-recalled-page-remove-\(page.id)")
                 }
             }
         }
@@ -351,7 +346,7 @@ extension TaskConversationView {
     @PHViewBuilder
     package var newChatPageRuleButton: some PHView {
         if showsNewChatPageButton {
-            AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: "new-chat-page-rule")) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: "new-chat-page-rule", height: 22)) {
                 transcriptRule(opacity: Self.conversationDividerOpacity)
                 NewChatPageButton {
                     startsNewChatPage = true
@@ -360,7 +355,6 @@ extension TaskConversationView {
                 }
                 transcriptRule(opacity: Self.conversationDividerOpacity)
             }
-            .frame(height: 22)
         }
     }
 
@@ -368,23 +362,20 @@ extension TaskConversationView {
     package func newChatPageSeparator(removable: Bool) -> some PHView {
         AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(testID: "new-chat-page-separator", paddingY: 5)) {
             transcriptRule(opacity: 0.13)
-            AtomText(props: TextProps(text: StandaloneChatManager.newPageTitle, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "new-chat-page-title"))
-                .layoutPriority(1)
+            AtomText(
+                props: TextProps(text: StandaloneChatManager.newPageTitle, size: 11, weight: "semibold", color: "secondary", lineLimit: 1),
+                common: AtomCommon(testID: "new-chat-page-title", layoutPriority: 1)
+            )
             if removable {
-                PHButton {
-                    startsNewChatPage = false
-                } label: {
-                    PHImage(icon: .xmark)
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 16, height: 16)
-                        .contentShape(PHRectangle())
+                AtomButton(
+                    common: AtomCommon(
+                        testID: "new-chat-page-remove", label: "Remove new page",
+                        help: "Remove the new page: the next message continues the current page", width: 16, height: 16
+                    ),
+                    action: { startsNewChatPage = false }
+                ) {
+                    AtomIcon(props: IconProps(name: PHIcon.xmark.name, size: 9, weight: "bold", color: "secondary"))
                 }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .nativeHelp("Remove the new page: the next message continues the current page")
-                .accessibilityLabel("Remove new page")
-                .accessibilityIdentifier("new-chat-page-remove")
             }
             transcriptRule(opacity: 0.13)
         }
@@ -410,7 +401,7 @@ extension TaskConversationView {
     @PHViewBuilder
     package func chatPageAnchorsOverlay(showsLabels: Bool, transcriptWidth: CGFloat) -> some PHView {
         if offersChatPageAnchors(transcriptWidth: transcriptWidth) {
-            PHHStack(spacing: ChatPageAnchorsLayout.labelsHandleGap) {
+            AtomStack(props: StackProps(axis: "h", spacing: ChatPageAnchorsLayout.labelsHandleGap)) {
                 ChatPageAnchorsHandle(
                     isOpen: showsLabels,
                     isLocked: pinsChatPageAnchors,
@@ -418,18 +409,17 @@ extension TaskConversationView {
                     hover: { hoverChatPageAnchors(.handle, $0) }
                 )
                 if showsLabels {
-                    ChatPageAnchorsView(
-                        model: chatPageAnchors,
-                        width: ChatPageAnchorsLayout.labelsWidth,
-                        jump: { jumpToChatPage($0) },
-                        jumpToBottom: { returnToLatestMessages() },
-                        searchFocusChanged: { hoverChatPageAnchors(.search, $0) }
-                    )
                     // Room for the search above the labels and the arrow below them, inside the
                     // hovered area.
-                    .padding(.vertical, 26)
-                    .contentShape(PHRectangle())
-                    .phOnHover { hoverChatPageAnchors(.labels, $0) }
+                    AtomStack(common: AtomCommon(paddingY: 26), onHover: { hoverChatPageAnchors(.labels, $0) }) {
+                        ChatPageAnchorsView(
+                            model: chatPageAnchors,
+                            width: ChatPageAnchorsLayout.labelsWidth,
+                            jump: { jumpToChatPage($0) },
+                            jumpToBottom: { returnToLatestMessages() },
+                            searchFocusChanged: { hoverChatPageAnchors(.search, $0) }
+                        )
+                    }
                     // Labels that fold away under the pointer get no hover exit.
                     .onDisappear {
                         hoveredChatPageAnchorsParts.remove(.labels)
@@ -473,27 +463,24 @@ extension TaskConversationView {
     @PHViewBuilder
     package var jumpToLatestButton: some PHView {
         if isBrowsingEarlierMessages {
-            PHButton {
-                returnToLatestMessages()
-            } label: {
-                PHHStack(spacing: 5) {
-                    PHImage(icon: .arrowDown).font(.system(size: 10, weight: .bold))
-                    PHText("Latest").font(.system(size: 11, weight: .semibold))
-                }
-                .padding(.horizontal, 11)
-                .padding(.vertical, 6)
-                .background(WorkspaceTheme.panelBackground, in: PHCapsule())
-                .overlay(PHCapsule().strokeBorder(PHColor.primary.opacity(0.12)))
-                .phShadow(color: .black.opacity(0.14), radius: 5, y: 2)
-                .contentShape(PHCapsule())
-            }
-            .buttonStyle(.plain)
-            .plainButtonHoverPointer()
-            .nativeHelp("Return to the newest messages")
-            .accessibilityLabel("Jump to latest messages")
-            .accessibilityIdentifier("chat-jump-to-latest")
             // Clear of the New page plus, which reaches up from the line below the transcript.
-            .padding(.bottom, showsNewChatPageButton ? 22 : 10)
+            AtomStack(common: AtomCommon(paddingBottom: showsNewChatPageButton ? 22 : 10)) {
+                AtomButton(
+                    common: AtomCommon(testID: "chat-jump-to-latest", label: "Jump to latest messages", help: "Return to the newest messages"),
+                    action: { returnToLatestMessages() }
+                ) {
+                    AtomStack(
+                        props: StackProps(
+                            axis: "h", spacing: 5, fill: "panel", capsule: true, stroke: "primary", strokeOpacity: 0.12,
+                            shadow: 5, shadowOpacity: 0.14, shadowY: 2
+                        ),
+                        common: AtomCommon(paddingX: 11, paddingY: 6)
+                    ) {
+                        AtomIcon(props: IconProps(name: PHIcon.arrowDown.name, size: 10, weight: "bold"))
+                        AtomText(props: TextProps(text: "Latest", size: 11, weight: "semibold"))
+                    }
+                }
+            }
         }
     }
 }
@@ -504,20 +491,21 @@ package struct NewChatPageButton: PHView {
     @PHState private var isHovering = false
 
     package var body: some PHView {
-        PHButton(action: action) {
-            PHImage(icon: .plus)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(isHovering ? PHColor.primary : PHColor.secondary)
-                .frame(width: 22, height: 22)
-                .background(PHColor.primary.opacity(isHovering ? 0.12 : 0.06), in: PHCircle())
-                .contentShape(PHCircle())
+        AtomButton(
+            common: AtomCommon(
+                testID: "new-chat-page-button", label: "New page",
+                help: "New page: your next message starts a new topic without the current page's context"
+            ),
+            action: action
+        ) {
+            AtomStack(
+                props: StackProps(fill: "primary", fillOpacity: isHovering ? 0.12 : 0.06, capsule: true),
+                common: AtomCommon(width: 22, height: 22),
+                onHover: { isHovering = $0 }
+            ) {
+                AtomIcon(props: IconProps(name: PHIcon.plus.name, size: 10, weight: "bold", color: isHovering ? "primary" : "secondary"))
+            }
         }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .phOnHover { isHovering = $0 }
-        .nativeHelp("New page: your next message starts a new topic without the current page's context")
-        .accessibilityLabel("New page")
-        .accessibilityIdentifier("new-chat-page-button")
     }
 
     package init(action: @escaping () -> Void) {
@@ -532,24 +520,23 @@ package struct ChatPageRecallButton: PHView {
     @PHState private var isHovering = false
 
     package var body: some PHView {
-        PHButton(action: action) {
-            PHHStack(spacing: 3) {
-                PHImage(icon: .arrowUturnBackward).font(.system(size: 8, weight: .bold))
-                PHText("Recall").font(.system(size: 10, weight: .medium))
+        let color = isHovering ? "primary" : "secondary"
+        return AtomButton(
+            common: AtomCommon(
+                testID: "chat-page-recall-\(pageID)", label: "Recall this conversation",
+                help: "Reference this conversation: your next message will recall it for the agent"
+            ),
+            action: action
+        ) {
+            AtomStack(
+                props: StackProps(axis: "h", spacing: 3, fill: "primary", fillOpacity: isHovering ? 0.12 : 0.06, capsule: true),
+                common: AtomCommon(fixedSize: true, paddingX: 7, paddingY: 2),
+                onHover: { isHovering = $0 }
+            ) {
+                AtomIcon(props: IconProps(name: PHIcon.arrowUturnBackward.name, size: 8, weight: "bold", color: color))
+                AtomText(props: TextProps(text: "Recall", size: 10, weight: "medium", color: color))
             }
-            .foregroundStyle(isHovering ? PHColor.primary : PHColor.secondary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(PHColor.primary.opacity(isHovering ? 0.12 : 0.06), in: PHCapsule())
-            .contentShape(PHCapsule())
-            .fixedSize()
         }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .phOnHover { isHovering = $0 }
-        .nativeHelp("Reference this conversation: your next message will recall it for the agent")
-        .accessibilityLabel("Recall this conversation")
-        .accessibilityIdentifier("chat-page-recall-\(pageID)")
     }
 
     package init(pageID: String, action: @escaping () -> Void) {

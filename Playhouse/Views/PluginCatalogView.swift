@@ -13,7 +13,7 @@ package struct PluginSurface: PHView {
     @PHState private var loadError: String?
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 10) {
+        AtomStack(props: StackProps(spacing: 10, align: "leading")) {
             if let runtime {
                 PHForEach(runtime.tree.root.children) { node in
                     PluginNodeView(node: node, events: runtime)
@@ -45,11 +45,7 @@ private struct PluginErrors: PHView {
 
     var body: some PHView {
         PHForEach(Array(errors.enumerated()), id: \.offset) { _, error in
-            PHText(error)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.red)
-                .textSelection(.enabled)
-                .accessibilityIdentifier("plugin-error")
+            AtomText(props: TextProps(text: error, size: 11, design: "monospaced", color: "red", selectable: true), common: AtomCommon(testID: "plugin-error"))
         }
     }
 }
@@ -63,10 +59,7 @@ private struct PluginCommitReadout: PHView {
             let summary = commit.number == 1
                 ? "Commit 1: initial render, \(commit.ops.count) ops"
                 : "Commit \(commit.number): \(commit.ops.joined(separator: ", ")) → \(commit.touchedNodes.count == 1 ? "node" : "nodes") \(commit.touchedNodes.map(String.init).joined(separator: ", "))"
-            PHText(summary)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .accessibilityIdentifier("plugin-last-commit")
+            AtomText(props: TextProps(text: summary, size: 10, design: "monospaced", color: "tertiary"), common: AtomCommon(testID: "plugin-last-commit"))
         }
     }
 }
@@ -92,46 +85,26 @@ package struct PluginCatalogView: PHView {
 
     package var body: some PHView {
         PHNavigationSplitView {
-            PHList(selection: $selection) {
-                PHSection("Atoms") {
-                    PHForEach(AtomType.allCases, id: \.self) { atom in
-                        PHText(atom.rawValue)
-                            .tag(Page.atom(atom))
-                            .accessibilityIdentifier("plugin-catalog-atom-\(atom.rawValue)")
-                            // The always-populated first section carries the List's scroller reveal.
-                            .hoverRevealScrollers()
-                    }
+            // A Scroll of selectable rows, in the sidebar's look: section headers, then
+            // rows where the selected one is filled with the accent color.
+            AtomScroll(props: ScrollProps(spacing: 0, inset: 10)) {
+                sidebarHeader("Atoms", first: true)
+                PHForEach(AtomType.allCases, id: \.self) { atom in
+                    sidebarRow(atom.rawValue, page: .atom(atom), testID: "plugin-catalog-atom-\(atom.rawValue)")
                 }
-                PHSection("Examples") {
-                    PHText("Task Item")
-                        .tag(Page.taskItem)
-                        .accessibilityIdentifier("plugin-catalog-task-item")
-                    PHText("Agents Info")
-                        .tag(Page.agentsInfo)
-                        .accessibilityIdentifier("plugin-catalog-agents-info")
-                    PHText("Kanban Column")
-                        .tag(Page.kanbanColumn)
-                        .accessibilityIdentifier("plugin-catalog-kanban-column")
-                    PHText("Token Stats")
-                        .tag(Page.tokenStats)
-                        .accessibilityIdentifier("plugin-catalog-token-stats")
-                    PHText("Skills Page")
-                        .tag(Page.skillsPage)
-                        .accessibilityIdentifier("plugin-catalog-skills-page")
-                    PHText("Repository Chips")
-                        .tag(Page.repositoryChips)
-                        .accessibilityIdentifier("plugin-catalog-repository-chips")
-                    PHText("Composer")
-                        .tag(Page.composer)
-                        .accessibilityIdentifier("plugin-catalog-composer")
-                    PHText("Done Archive")
-                        .tag(Page.doneArchive)
-                        .accessibilityIdentifier("plugin-catalog-done-archive")
-                }
+                sidebarHeader("Examples")
+                sidebarRow("Task Item", page: .taskItem, testID: "plugin-catalog-task-item")
+                sidebarRow("Agents Info", page: .agentsInfo, testID: "plugin-catalog-agents-info")
+                sidebarRow("Kanban Column", page: .kanbanColumn, testID: "plugin-catalog-kanban-column")
+                sidebarRow("Token Stats", page: .tokenStats, testID: "plugin-catalog-token-stats")
+                sidebarRow("Skills Page", page: .skillsPage, testID: "plugin-catalog-skills-page")
+                sidebarRow("Repository Chips", page: .repositoryChips, testID: "plugin-catalog-repository-chips")
+                sidebarRow("Composer", page: .composer, testID: "plugin-catalog-composer")
+                sidebarRow("Done Archive", page: .doneArchive, testID: "plugin-catalog-done-archive")
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
         } detail: {
-            PHScrollView {
+            AtomScroll {
                 PHGroup {
                     switch selection {
                     case .atom(let atom)?:
@@ -156,7 +129,24 @@ package struct PluginCatalogView: PHView {
                         PHEmptyView()
                     }
                 }
-                .hoverRevealScrollers()
+            }
+        }
+    }
+
+    /// A sidebar section's title.
+    private func sidebarHeader(_ title: String, first: Bool = false) -> some PHView {
+        AtomText(
+            props: TextProps(text: title, size: 11, weight: "semibold", color: "secondary"),
+            common: AtomCommon(paddingTop: first ? 4 : 12, paddingBottom: 4, paddingLeading: 8)
+        )
+    }
+
+    /// A sidebar row that selects its page; the selected one is marked selected.
+    private func sidebarRow(_ title: String, page: Page, testID: String) -> some PHView {
+        let selected = selection == page
+        return AtomButton(props: ButtonProps(selected: selected), common: AtomCommon(testID: testID, fillWidth: true), action: { selection = page }) {
+            AtomStack(props: StackProps(align: "leading", fill: selected ? "accent" : "clear", cornerRadius: 5), common: AtomCommon(fillWidth: true, paddingX: 8, paddingY: 6)) {
+                AtomText(props: TextProps(text: title, size: 13, color: selected ? "white" : "primary", lineLimit: 1))
             }
         }
     }
@@ -184,47 +174,52 @@ private func catalogValue<Value>(_ page: String, _ load: () throws -> Value) -> 
     }
 }
 
-/// One side of a composite's comparison page.
-private func comparisonColumn(_ title: String, width: CGFloat, @PHViewBuilder content: () -> some PHView) -> some PHView {
-    PHVStack(alignment: .leading, spacing: 10) {
-        PHText(title).font(.headline)
+/// A catalog page: its title, then its content, inset 24 and as wide as the detail.
+private func catalogPageColumn<Content: PHView>(_ title: String, @PHViewBuilder content: @escaping () -> Content) -> some PHView {
+    AtomStack(props: StackProps(spacing: 18, align: "leading"), common: AtomCommon(fillWidth: true, paddingX: 24, paddingY: 24)) {
+        AtomText(props: TextProps(text: title, size: 17, weight: "semibold"), common: AtomCommon(testID: "plugin-catalog-title"))
         content()
     }
-    .frame(width: width, alignment: .leading)
+}
+
+/// One side of a composite's comparison page, one accessibility container named `testID`.
+private func comparisonColumn<Content: PHView>(_ title: String, width: CGFloat, testID: String, @PHViewBuilder content: @escaping () -> Content) -> some PHView {
+    AtomStack(props: StackProps(spacing: 10, align: "leading", group: true), common: AtomCommon(testID: testID, width: Double(width), frameAlign: "leading")) {
+        AtomText(props: TextProps(text: title, size: 13, weight: "bold"))
+        content()
+    }
+}
+
+/// Two comparison columns side by side.
+private func comparisonRow<Content: PHView>(@PHViewBuilder content: @escaping () -> Content) -> some PHView {
+    AtomStack(props: StackProps(axis: "h", spacing: 28, align: "top"), content: content)
 }
 
 private struct AtomCatalogPage: PHView {
     let atom: AtomType
 
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText(atom.rawValue)
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn(atom.rawValue) {
             if let page = catalogPage(atom.rawValue) {
-                PluginSurface(source: page.source, name: "\(atom.rawValue).js", props: page.props)
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(PHRoundedRectangle(cornerRadius: 10).fill(PHColor.primary.opacity(0.04)))
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-surface")
-            }
-            PHVStack(alignment: .leading, spacing: 4) {
-                PHText("Props").font(.headline)
-                PHText(atom.propKeys.isEmpty ? "none of its own" : atom.propKeys.sorted().joined(separator: ", "))
-                    .font(.system(size: 11, design: .monospaced))
-                    .accessibilityIdentifier("plugin-catalog-props")
-                if !atom.events.isEmpty {
-                    PHText("Events: \(atom.events.sorted().joined(separator: ", "))")
-                        .font(.system(size: 11, design: .monospaced))
+                AtomStack(
+                    props: StackProps(align: "leading", group: true, fill: "primary", fillOpacity: 0.04, cornerRadius: 10),
+                    common: AtomCommon(testID: "plugin-catalog-surface", fillWidth: true, paddingX: 16, paddingY: 16)
+                ) {
+                    PluginSurface(source: page.source, name: "\(atom.rawValue).js", props: page.props)
                 }
-                PHText("Every atom also takes: \(AtomCommon.keys.sorted().joined(separator: ", "))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            }
+            AtomStack(props: StackProps(spacing: 4, align: "leading")) {
+                AtomText(props: TextProps(text: "Props", size: 13, weight: "bold"))
+                AtomText(
+                    props: TextProps(text: atom.propKeys.isEmpty ? "none of its own" : atom.propKeys.sorted().joined(separator: ", "), size: 11, design: "monospaced"),
+                    common: AtomCommon(testID: "plugin-catalog-props")
+                )
+                if !atom.events.isEmpty {
+                    AtomText(props: TextProps(text: "Events: \(atom.events.sorted().joined(separator: ", "))", size: 11, design: "monospaced"))
+                }
+                AtomText(props: TextProps(text: "Every atom also takes: \(AtomCommon.keys.sorted().joined(separator: ", "))", size: 11, color: "secondary"))
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -233,28 +228,19 @@ private struct AtomCatalogPage: PHView {
 /// two never share accessibility identifiers.
 private struct TaskItemComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Task Item")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Task Item") {
             if let page = catalogPage("TaskItem"),
                let sample = catalogValue("TaskItem", { try Self.sample(page.props) }) {
-                PHHStack(alignment: .top, spacing: 28) {
-                    comparisonColumn("JavaScript (React → atoms)", width: 300) {
+                comparisonRow {
+                    comparisonColumn("JavaScript (React → atoms)", width: 300, testID: "plugin-catalog-js-task-item") {
                         PluginSurface(source: page.source, name: "TaskItem.js", props: page.props)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-js-task-item")
-                    comparisonColumn("Native SwiftUI (atoms)", width: 300) {
+                    comparisonColumn("Native SwiftUI (atoms)", width: 300, testID: "plugin-catalog-native-task-item") {
                         NativeTaskItemDemo(sample: sample)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-native-task-item")
                 }
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -308,28 +294,19 @@ private struct NativeTaskItemDemo: PHView {
 /// accessibility identifiers.
 private struct AgentsInfoComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Agents Info")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Agents Info") {
             if let page = catalogPage("AgentsInfo"),
                let sample = catalogValue("AgentsInfo", { try Self.sample(page.props) }) {
-                PHHStack(alignment: .top, spacing: 28) {
-                    comparisonColumn("JavaScript (React → atoms)", width: 240) {
+                comparisonRow {
+                    comparisonColumn("JavaScript (React → atoms)", width: 240, testID: "plugin-catalog-js-agents-info") {
                         PluginSurface(source: page.source, name: "AgentsInfo.js", props: page.props)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-js-agents-info")
-                    comparisonColumn("Native SwiftUI (atoms)", width: 240) {
+                    comparisonColumn("Native SwiftUI (atoms)", width: 240, testID: "plugin-catalog-native-agents-info") {
                         NativeAgentsInfoDemo(sample: sample)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-native-agents-info")
                 }
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -391,28 +368,19 @@ private struct NativeAgentsInfoDemo: PHView {
 /// accessibility identifiers.
 private struct KanbanColumnComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Kanban Column")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Kanban Column") {
             if let page = catalogPage("KanbanColumn"),
                let sample = catalogValue("KanbanColumn", { try Self.sample(page.props) }) {
-                PHHStack(alignment: .top, spacing: 28) {
-                    comparisonColumn("JavaScript (React → atoms)", width: 264) {
+                comparisonRow {
+                    comparisonColumn("JavaScript (React → atoms)", width: 264, testID: "plugin-catalog-js-kanban-column") {
                         PluginSurface(source: page.source, name: "KanbanColumn.js", props: page.props)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-js-kanban-column")
-                    comparisonColumn("Native SwiftUI (atoms)", width: 264) {
+                    comparisonColumn("Native SwiftUI (atoms)", width: 264, testID: "plugin-catalog-native-kanban-column") {
                         NativeKanbanColumnDemo(sample: sample)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-native-kanban-column")
                 }
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -456,26 +424,17 @@ private struct NativeKanbanColumnDemo: PHView {
 /// identifiers.
 private struct TokenStatsComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Token Stats")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Token Stats") {
             if let page = catalogPage("TokenStats"),
                let sample = catalogValue("TokenStats", { try Self.sample(page.props) }) {
-                comparisonColumn("JavaScript (React → atoms)", width: 740) {
+                comparisonColumn("JavaScript (React → atoms)", width: 740, testID: "plugin-catalog-js-token-stats") {
                     PluginSurface(source: page.source, name: "TokenStats.js", props: page.props)
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("plugin-catalog-js-token-stats")
-                comparisonColumn("Native SwiftUI (atoms)", width: 740) {
+                comparisonColumn("Native SwiftUI (atoms)", width: 740, testID: "plugin-catalog-native-token-stats") {
                     NativeTokenStatsDemo(sample: sample)
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("plugin-catalog-native-token-stats")
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -532,32 +491,23 @@ private struct NativeTokenStatsDemo: PHView {
 /// "native-" prefix so the two never share accessibility identifiers.
 private struct SkillsPageComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Skills Page")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Skills Page") {
             if let page = catalogPage("SkillsPage"),
                let sample = catalogValue("SkillsPage", { try Self.sample(page.props) }) {
-                PHScrollView(.horizontal) {
-                    PHVStack(alignment: .leading, spacing: 18) {
-                        comparisonColumn("JavaScript (React → atoms)", width: 740) {
+                AtomScroll(props: ScrollProps(axis: "horizontal")) {
+                    AtomStack(props: StackProps(spacing: 18, align: "leading")) {
+                        comparisonColumn("JavaScript (React → atoms)", width: 740, testID: "plugin-catalog-js-skills-page") {
                             PluginSurface(source: page.source, name: "SkillsPage.js", props: page.props)
                         }
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("plugin-catalog-js-skills-page")
-                        comparisonColumn("Native SwiftUI (atoms)", width: 740) {
+                        comparisonColumn("Native SwiftUI (atoms)", width: 740, testID: "plugin-catalog-native-skills-page") {
                             NativeSkillsPageDemo(sample: sample)
                         }
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("plugin-catalog-native-skills-page")
                     }
                     .hoverRevealScrollers()
                 }
                 .accessibilityIdentifier("plugin-catalog-skills-page-scroll")
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -688,28 +638,19 @@ private struct NativeSkillsPageDemo: PHView {
 /// uses a "native-" prefix so the two never share accessibility identifiers.
 private struct RepositoryChipsComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Repository Chips")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Repository Chips") {
             if let page = catalogPage("RepositoryChips"),
                let sample = catalogValue("RepositoryChips", { try Self.sample(page.props) }) {
-                PHHStack(alignment: .top, spacing: 28) {
-                    comparisonColumn("JavaScript (React → atoms)", width: 360) {
+                comparisonRow {
+                    comparisonColumn("JavaScript (React → atoms)", width: 360, testID: "plugin-catalog-js-repository-chips") {
                         PluginSurface(source: page.source, name: "RepositoryChips.js", props: page.props)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-js-repository-chips")
-                    comparisonColumn("Native SwiftUI (atoms)", width: 360) {
+                    comparisonColumn("Native SwiftUI (atoms)", width: 360, testID: "plugin-catalog-native-repository-chips") {
                         NativeRepositoryChipsDemo(sample: sample)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("plugin-catalog-native-repository-chips")
                 }
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -810,26 +751,17 @@ private struct NativeRepositoryChipsDemo: PHView {
 /// uses a "native-" prefix so the two never share accessibility identifiers.
 private struct ComposerComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Composer")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Composer") {
             if let page = catalogPage("Composer"),
                let sample = catalogValue("Composer", { try Self.sample(page.props) }) {
-                comparisonColumn("JavaScript (React → atoms)", width: 784) {
+                comparisonColumn("JavaScript (React → atoms)", width: 784, testID: "plugin-catalog-js-composer") {
                     PluginSurface(source: page.source, name: "Composer.js", props: page.props)
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("plugin-catalog-js-composer")
-                comparisonColumn("Native SwiftUI (atoms)", width: 784) {
+                comparisonColumn("Native SwiftUI (atoms)", width: 784, testID: "plugin-catalog-native-composer") {
                     NativeComposerDemo(sample: sample)
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("plugin-catalog-native-composer")
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -941,26 +873,17 @@ private struct NativeComposerDemo: PHView {
 /// never share accessibility identifiers.
 private struct DoneArchiveComparison: PHView {
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 18) {
-            PHText("Done Archive")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("plugin-catalog-title")
+        catalogPageColumn("Done Archive") {
             if let page = catalogPage("DoneArchive"),
                let sample = catalogValue("DoneArchive", { try Self.sample(page.props) }) {
-                comparisonColumn("JavaScript (React → atoms)", width: 580) {
+                comparisonColumn("JavaScript (React → atoms)", width: 580, testID: "plugin-catalog-js-done-archive") {
                     PluginSurface(source: page.source, name: "DoneArchive.js", props: page.props)
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("plugin-catalog-js-done-archive")
-                comparisonColumn("Native SwiftUI (atoms)", width: 580) {
+                comparisonColumn("Native SwiftUI (atoms)", width: 580, testID: "plugin-catalog-native-done-archive") {
                     NativeDoneArchiveDemo(sample: sample)
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("plugin-catalog-native-done-archive")
             }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     struct Sample: Decodable {

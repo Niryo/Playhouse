@@ -9,125 +9,132 @@ extension TaskConversationView {
             let scroll = transcriptScroll
             let showsPageAnchors = showsChatPageAnchors(transcriptWidth: viewport.size.width)
             let isBrowsingEarlier = isBrowsingEarlierMessages
-            PHScrollView {
-                let leadingGoalEntries = goalAchievementTimelineEntries.filter {
-                    $0.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID
-                }
-                // Worked out once per pass rather than once per row: each walks the whole transcript, and
-                // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
-                let renderedMessages = renderedConversationMessages
-                let rowContext = makeTranscriptRowContext(rendered: renderedMessages)
-                // One layout holds every row, so it knows where each message is the moment it lays
-                // out, which is what `TranscriptScrollController` positions the viewport from. Only
-                // the messages near the viewport render; the rest are boxes of their measured height.
-                TranscriptLayout(
-                    spacing: Self.transcriptRowSpacing,
-                    minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.latestTurnTopMargin),
-                    geometry: scroll.geometry
-                ) {
-                    if !messages.isEmpty {
-                        PHForEach(leadingGoalEntries) { entry in
-                            goalAchievementTimelineRow(entry)
-                                .id(entry.id)
+            AtomOverlay(props: OverlayProps(align: "bottom", group: false)) {
+                AtomOverlay(props: OverlayProps(align: "leading", group: false)) {
+                    PHScrollView {
+                        let leadingGoalEntries = goalAchievementTimelineEntries.filter {
+                            $0.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID
                         }
-                        PHForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
-                            providerBoundaryRow(boundary)
-                        }
-                        TranscriptMessageRows(
-                            ids: renderedMessages.map(\.id),
-                            signatures: transcriptRowSignatures(renderedMessages, context: rowContext),
-                            latestTurnStartID: rowContext.latestTurnStartID,
-                            virtualizer: scroll.virtualizer,
-                            pinnedIDs: Set([
-                                renderedMessages.last?.id, rowContext.activityDisclosureAnchorID,
-                                annotationSelection?.messageID, currentTextSelection?.messageID,
-                            ].compactMap { $0 }),
-                            latestTurnLeadingRows: { index in
-                                PHAnyView(transcriptLeadingRows(for: renderedMessages[index], context: rowContext))
-                            },
-                            row: { index in
-                                // One message's rows measure as one box.
-                                PHAnyView(PHVStack(alignment: .leading, spacing: Self.transcriptRowSpacing) {
-                                    transcriptRows(for: renderedMessages[index], context: rowContext)
-                                })
-                            }
-                        )
-                        // What belongs to the newest turn waits below an earlier chat page
-                        // the reader jumped to.
-                        if !isBrowsingEarlier {
-                            PHForEach(liveChatPageRecalls) { activity in
-                                if let pageID = activity.recalledChatPageID {
-                                    ChatPageRecallRow(activityID: activity.id, pageID: pageID)
+                        // Worked out once per pass rather than once per row: each walks the whole transcript, and
+                        // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
+                        let renderedMessages = renderedConversationMessages
+                        let rowContext = makeTranscriptRowContext(rendered: renderedMessages)
+                        // One layout holds every row, so it knows where each message is the moment it lays
+                        // out, which is what `TranscriptScrollController` positions the viewport from. Only
+                        // the messages near the viewport render; the rest are boxes of their measured height.
+                        AtomStack(common: AtomCommon(fillWidth: true, frameAlign: "center")) {
+                            AtomStack(common: AtomCommon(paddingY: Double(Self.conversationVerticalPadding))) {
+                                TranscriptLayout(
+                                    spacing: Self.transcriptRowSpacing,
+                                    minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.latestTurnTopMargin),
+                                    geometry: scroll.geometry
+                                ) {
+                                    if !messages.isEmpty {
+                                        PHForEach(leadingGoalEntries) { entry in
+                                            goalAchievementTimelineRow(entry)
+                                                .id(entry.id)
+                                        }
+                                        PHForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
+                                            providerBoundaryRow(boundary)
+                                        }
+                                        TranscriptMessageRows(
+                                            ids: renderedMessages.map(\.id),
+                                            signatures: transcriptRowSignatures(renderedMessages, context: rowContext),
+                                            latestTurnStartID: rowContext.latestTurnStartID,
+                                            virtualizer: scroll.virtualizer,
+                                            pinnedIDs: Set([
+                                                renderedMessages.last?.id, rowContext.activityDisclosureAnchorID,
+                                                annotationSelection?.messageID, currentTextSelection?.messageID,
+                                            ].compactMap { $0 }),
+                                            latestTurnLeadingRows: { index in
+                                                PHAnyView(transcriptLeadingRows(for: renderedMessages[index], context: rowContext))
+                                            },
+                                            row: { index in
+                                                // One message's rows measure as one box.
+                                                PHAnyView(AtomStack(props: StackProps(axis: "v", spacing: Double(Self.transcriptRowSpacing), align: "leading")) {
+                                                    transcriptRows(for: renderedMessages[index], context: rowContext)
+                                                })
+                                            }
+                                        )
+                                        // What belongs to the newest turn waits below an earlier chat page
+                                        // the reader jumped to.
+                                        if !isBrowsingEarlier {
+                                            PHForEach(liveChatPageRecalls) { activity in
+                                                if let pageID = activity.recalledChatPageID {
+                                                    ChatPageRecallRow(activityID: activity.id, pageID: pageID)
+                                                }
+                                            }
+                                            if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
+                                                activityList
+                                            }
+                                        }
+                                    } else {
+                                        // Until the first history read lands the conversation is not known to be
+                                        // empty, so it shows that it is loading rather than the empty prompt. A new
+                                        // task has nothing to read: it shows its empty state at once.
+                                        if !hasLoadedConversation && !isNewTask {
+                                            ConversationHistoryLoadingIndicator()
+                                        } else if activeGoal?.status != "complete" && (isNewTask || !isLoadingHistory) {
+                                            PHForEach(parallelChatPlaceholders.filter { $0.anchorTurnID == nil }) { placeholder in
+                                                ParallelChatPlaceholderRow(bubbleID: placeholder.id, prompt: placeholder.prompt)
+                                                    .id("parallel-chat-placeholder-\(placeholder.id.uuidString)")
+                                            }
+                                            emptyConversationPlaceholder
+                                        }
+                                        if shouldShowActivityDisclosure {
+                                            activityList
+                                        }
+                                        PHForEach(providerBoundaries) { boundary in
+                                            providerBoundaryRow(boundary)
+                                        }
+                                        PHForEach(leadingGoalEntries) { entry in
+                                            goalAchievementTimelineRow(entry)
+                                                .id(entry.id)
+                                        }
+                                    }
+                                    if !isBrowsingEarlier {
+                                        if let request = userInputRequest, request.threadID == task.activeConversationID {
+                                            AtomStack(common: AtomCommon(maxWidth: 620, frameAlign: "leading")) {
+                                                userInputForm(request)
+                                            }
+                                            .accessibilityIdentifier("conversation-user-input-request")
+                                        }
+
+                                        if let activeProcess {
+                                            activityRow(activeProcess, compact: true)
+                                        }
+                                        PHForEach(activeSubagents) { activity in
+                                            subagentTimelineRow(activity)
+                                        }
+                                        PHForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
+                                            contextCompactionTimelineRow(activity)
+                                        }
+                                    }
                                 }
                             }
-                            if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
-                                activityList
-                            }
+                            // Keep row widths stable while the page labels slide out.
+                            .modifier(ChatPageAnchorsPushedRows(push: chatPageAnchorsPush))
                         }
-                    } else {
-                        // Until the first history read lands the conversation is not known to be
-                        // empty, so it shows that it is loading rather than the empty prompt. A new
-                        // task has nothing to read: it shows its empty state at once.
-                        if !hasLoadedConversation && !isNewTask {
-                            ConversationHistoryLoadingIndicator()
-                        } else if activeGoal?.status != "complete" && (isNewTask || !isLoadingHistory) {
-                            PHForEach(parallelChatPlaceholders.filter { $0.anchorTurnID == nil }) { placeholder in
-                                ParallelChatPlaceholderRow(bubbleID: placeholder.id, prompt: placeholder.prompt)
-                                    .id("parallel-chat-placeholder-\(placeholder.id.uuidString)")
-                            }
-                            emptyConversationPlaceholder
-                        }
-                        if shouldShowActivityDisclosure {
-                            activityList
-                        }
-                        PHForEach(providerBoundaries) { boundary in
-                            providerBoundaryRow(boundary)
-                        }
-                        PHForEach(leadingGoalEntries) { entry in
-                            goalAchievementTimelineRow(entry)
-                                .id(entry.id)
-                        }
+                        .hoverRevealScrollers()
+                        .transcriptScroll(
+                            scroll,
+                            layoutTop: Self.conversationVerticalPadding,
+                            latestTurnMargin: Self.latestTurnTopMargin,
+                            rendersTranscriptEnd: !isBrowsingEarlier,
+                            isKeptAliveHidden: isKeptAliveHidden,
+                            handlers: transcriptScrollHandlers
+                        )
                     }
-                    if !isBrowsingEarlier {
-                        if let request = userInputRequest, request.threadID == task.activeConversationID {
-                            userInputForm(request)
-                                .frame(maxWidth: 620, alignment: .leading)
-                                .accessibilityIdentifier("conversation-user-input-request")
-                        }
-
-                        if let activeProcess {
-                            activityRow(activeProcess, compact: true)
-                        }
-                        PHForEach(activeSubagents) { activity in
-                            subagentTimelineRow(activity)
-                        }
-                        PHForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
-                            contextCompactionTimelineRow(activity)
-                        }
-                    }
+                    .accessibilityIdentifier("conversation-scroll-view")
+                    .accessibilityValue(hasLoadedConversation
+                        ? "Showing \(isBrowsingEarlier ? "earlier" : "latest") \(renderedConversationMessages.count) of \(storedConversationMessageCount) messages"
+                        : "Loading conversation history")
+                } overlay: {
+                    chatPageAnchorsOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
                 }
-                .padding(.vertical, Self.conversationVerticalPadding)
-                // The open page labels widen the chat sidebar and push the rows right by as much,
-                // so the rows keep their width and their text stays as it was.
-                .modifier(ChatPageAnchorsPushedRows(push: chatPageAnchorsPush))
-                .frame(maxWidth: .infinity)
-                .hoverRevealScrollers()
-                .transcriptScroll(
-                    scroll,
-                    layoutTop: Self.conversationVerticalPadding,
-                    latestTurnMargin: Self.latestTurnTopMargin,
-                    rendersTranscriptEnd: !isBrowsingEarlier,
-                    handlers: transcriptScrollHandlers
-                )
+            } overlay: {
+                jumpToLatestButton
             }
-            .accessibilityIdentifier("conversation-scroll-view")
-            .accessibilityValue(hasLoadedConversation
-                ? "Showing \(isBrowsingEarlier ? "earlier" : "latest") \(renderedConversationMessages.count) of \(storedConversationMessageCount) messages"
-                : "Loading conversation history")
-            .overlay(alignment: .leading) {
-                chatPageAnchorsOverlay(showsLabels: showsPageAnchors, transcriptWidth: viewport.size.width)
-            }
-            .overlay(alignment: .bottom) { jumpToLatestButton }
             .preference(key: ChatPageAnchorsPushKey.self, value: showsPageAnchors ? ChatPageAnchorsLayout.pushWidth : 0)
             .onChange(of: offersChatPageAnchors(transcriptWidth: viewport.size.width)) { _, offers in
                 // Labels slid out before the chat grew too narrow for them stay folded when it widens,
@@ -167,34 +174,29 @@ extension TaskConversationView {
 
     /// Shown in place of the transcript while the conversation has no messages.
     package var emptyConversationPlaceholder: some PHView {
-        PHVStack(spacing: 0) {
-            if task.isStandaloneChat || task.authoringPluginID != nil {
-                // A chat has no repository to name, so the placeholder keeps only
-                // its prompt. The leading spacer balances the trailing one that
-                // the title would otherwise have pushed against.
-                PHSpacer(minLength: 0)
-            } else {
-                PHText(emptyConversationRepositoryTitle)
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(emptyConversationRepositoryTitleColor)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .accessibilityLabel(emptyConversationRepositoryTitle)
-                    .accessibilityIdentifier("empty-conversation-repository-title")
-                PHSpacer(minLength: 58)
+        AtomStack(common: AtomCommon(paddingX: 30, paddingY: 38)) {
+            AtomStack(props: StackProps(axis: "v", spacing: 0), common: AtomCommon(minHeight: 280, fillWidth: true)) {
+                if task.isStandaloneChat || task.authoringPluginID != nil {
+                    // A chat has no repository to name, so the placeholder keeps only
+                    // its prompt. The leading spacer balances the trailing one that
+                    // the title would otherwise have pushed against.
+                    AtomSpacer(props: SpacerProps(minLength: 0))
+                } else {
+                    AtomText(props: TextProps(text: emptyConversationRepositoryTitle, size: 30, weight: "bold", color: emptyConversationRepositoryTitleColor, lineLimit: 2, align: "center"))
+                        .accessibilityLabel(emptyConversationRepositoryTitle)
+                        .accessibilityIdentifier("empty-conversation-repository-title")
+                    AtomSpacer(props: SpacerProps(minLength: 58))
+                }
+                if showsEmptyConversationAddRepositoryPrompt {
+                    emptyConversationAddRepositoryPrompt
+                } else {
+                    emptyConversationModelPrompt
+                }
+                AtomSpacer(props: SpacerProps(minLength: 28))
             }
-            if showsEmptyConversationAddRepositoryPrompt {
-                emptyConversationAddRepositoryPrompt
-            } else {
-                emptyConversationModelPrompt
-            }
-            PHSpacer(minLength: 28)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("empty-conversation")
         }
-        .frame(maxWidth: .infinity, minHeight: 280)
-        .padding(.horizontal, 30)
-        .padding(.vertical, 38)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("empty-conversation")
     }
 
     /// A repository task with nothing selected teaches the picker: the empty state's + opens the
@@ -209,14 +211,10 @@ extension TaskConversationView {
     }
 
     package var emptyConversationModelPrompt: some PHView {
-        PHVStack(spacing: 14) {
-            PHImage(icon: .bubbleLeftAndBubbleRight)
-                .font(.system(size: 29, weight: .regular))
-                .foregroundStyle(PHColor.accentColor.opacity(0.8))
+        AtomStack(props: StackProps(axis: "v", spacing: 14)) {
+            AtomIcon(props: IconProps(name: PHIcon.bubbleLeftAndBubbleRight.name, size: 29, weight: "regular", color: "accent"), common: AtomCommon(opacity: 0.8))
                 .accessibilityLabel("Conversation")
-            PHText(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
+            AtomText(props: TextProps(text: task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).", size: 14, weight: "medium", color: "secondary"))
                 .accessibilityLabel(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                 .accessibilityIdentifier("model-prompt")
             if task.authoringPluginID != nil {
@@ -240,36 +238,26 @@ extension TaskConversationView {
     }
 
     package var emptyConversationPluginDetails: some PHView {
-        PHVStack(spacing: 12) {
+        AtomStack(props: StackProps(axis: "v", spacing: 12), common: AtomCommon(maxWidth: 360)) {
             if !emptyConversationPluginDetailRows.isEmpty {
-                PHVStack(alignment: .leading, spacing: 6) {
+                AtomStack(
+                    props: StackProps(axis: "v", spacing: 6, align: "leading", fill: "primary", fillOpacity: 0.05, cornerRadius: 8, textSize: 13),
+                    common: AtomCommon(paddingX: 16, paddingY: 12)
+                ) {
                     PHForEach(emptyConversationPluginDetailRows, id: \.id) { row in
-                        PHHStack(alignment: .firstTextBaseline, spacing: 14) {
-                            PHText(row.label)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 72, alignment: .trailing)
-                            PHText(row.value)
-                                .fontWeight(.medium)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                        AtomStack(props: StackProps(axis: "h", spacing: 14, align: "baseline")) {
+                            AtomText(props: TextProps(text: row.label, color: "secondary"), common: AtomCommon(width: 72, frameAlign: "trailing"))
+                            AtomText(props: TextProps(text: row.value, weight: "medium", lineLimit: 1, truncation: "tail"))
                         }
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel("\(row.label): \(row.value)")
                         .accessibilityIdentifier("plugin-detail-\(row.id)")
                     }
                 }
-                .font(.system(size: 13))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(PHRoundedRectangle(cornerRadius: 8).fill(PHColor.primary.opacity(0.05)))
             }
-            PHText("Want to change any of these, even the name? Just ask in your prompt.")
-                .font(.system(size: 12))
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
+            AtomText(props: TextProps(text: "Want to change any of these, even the name? Just ask in your prompt.", size: 12, color: "tertiary", align: "center"))
                 .accessibilityIdentifier("plugin-details-change-hint")
         }
-        .frame(maxWidth: 360)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plugin-details")
     }
@@ -305,10 +293,8 @@ extension TaskConversationView {
         return repositoryNames.isEmpty ? "No repository selected" : repositoryNames.joined(separator: " · ")
     }
 
-    package var emptyConversationRepositoryTitleColor: PHColor {
-        colorScheme == .dark
-            ? .orange
-            : PHColor(red: 0.18, green: 0.31, blue: 0.68)
+    package var emptyConversationRepositoryTitleColor: String {
+        colorScheme == .dark ? "orange" : "#2E4FAD"
     }
 
     package var activeSubagents: [ConversationActivity] {
@@ -390,59 +376,49 @@ extension TaskConversationView {
     }
 
     package func activityDisclosure(expandedActivities: [ConversationActivity], completedAgentActivities: [ConversationActivity]) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 8) {
-            PHButton {
+        AtomStack(props: StackProps(axis: "v", spacing: 8, align: "leading")) {
+            AtomButton(props: ButtonProps(style: "plain"), common: AtomCommon(help: "Show or hide Codex activity details"), action: {
                 phWithAnimation(.easeInOut(duration: 0.16)) {
                     isActivityExpanded.toggle()
                 }
-            } label: {
+            }) {
                 activityDisclosureButtonLabel
             }
-            .plainButtonHoverPointer()
-            .nativeHelp("Show or hide Codex activity details")
-            .buttonStyle(.plain)
             .accessibilityValue(isActivityExpanded ? "Expanded, down chevron" : "Collapsed, right chevron")
             .accessibilityHint("Shows Codex progress messages and completed activity details.")
             .accessibilityIdentifier("codex-activity-disclosure")
 
 
-            PHDivider()
-                .opacity(0.32)
+            AtomDivider(common: AtomCommon(opacity: 0.32))
                 .accessibilityElement()
                 .accessibilityLabel("Separator between work duration and response")
 
             if isActivityExpanded {
-                PHVStack(alignment: .leading, spacing: 7) {
+                AtomStack(props: StackProps(axis: "v", spacing: 7, align: "leading"), common: AtomCommon(paddingTop: 6)) {
                     if !progressMessages.isEmpty {
-                        PHText("Progress")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 4)
+                        AtomText(props: TextProps(text: "Progress", size: 10, weight: "semibold", color: "secondary"), common: AtomCommon(paddingTop: 4))
                         PHForEach(progressMessages) { message in
-                            AtomMarkdown(
-                                props: MarkdownProps(text: Self.displayableAssistantText(message.text), size: 12, color: "text", selectable: true),
-                                common: AtomCommon(testID: "codex-progress-message-\(message.id)")
-                            )
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(9)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle(cornerRadius: 8))
+                            AtomStack(
+                                props: StackProps(fill: "panel", cornerRadius: 8),
+                                common: AtomCommon(fillWidth: true, frameAlign: "leading", padding: 9)
+                            ) {
+                                AtomMarkdown(
+                                    props: MarkdownProps(text: Self.displayableAssistantText(message.text), size: 12, color: "text", selectable: true),
+                                    common: AtomCommon(testID: "codex-progress-message-\(message.id)", fixedHeight: true)
+                                )
+                            }
                         }
                     }
                     PHForEach(expandedActivities) { activity in
                         activityRow(activity)
                     }
                     if !completedAgentActivities.isEmpty {
-                        PHText("Agents used")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 4)
+                        AtomText(props: TextProps(text: "Agents used", size: 10, weight: "semibold", color: "secondary"), common: AtomCommon(paddingTop: 4))
                         PHForEach(completedAgentActivities) { activity in
                             subagentTimelineRow(activity)
                         }
                     }
                 }
-                .padding(.top, 6)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("codex-activity-details")
             }
@@ -451,12 +427,9 @@ extension TaskConversationView {
 
     /// Stands in for Working for until the turn reports its first progress or activity.
     package var thinkingRow: some PHView {
-        PHHStack(spacing: 7) {
-            PHProgressView()
-                .controlSize(.small)
-            PHText("Thinking…")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
+        AtomStack(props: StackProps(axis: "h", spacing: 7)) {
+            AtomSpinner(props: SpinnerProps(size: "small"))
+            AtomText(props: TextProps(text: "Thinking…", size: 12, weight: "medium", color: "secondary"))
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Thinking…")
@@ -472,12 +445,10 @@ extension TaskConversationView {
             AtomLabel(props: LabelProps(text: actionNotice, icon: PHIcon.handRaisedFill.name, size: 11, weight: "medium", color: "orange"), common: AtomCommon(testID: "codex-action-notice"))
         }
         if let providerNotice {
-            AtomLabel(props: LabelProps(text: providerNotice, icon: PHIcon.arrowTriangleSwap.name, size: 11, weight: "medium", color: "secondary"), common: AtomCommon(testID: "provider-capabilities-notice"))
-                .fixedSize(horizontal: false, vertical: true)
+            AtomLabel(props: LabelProps(text: providerNotice, icon: PHIcon.arrowTriangleSwap.name, size: 11, weight: "medium", color: "secondary"), common: AtomCommon(testID: "provider-capabilities-notice", fixedHeight: true))
         }
         if let errorMessage {
-            AtomLabel(props: LabelProps(text: errorMessage, icon: PHIcon.exclamationmarkTriangleFill.name, size: 11, weight: "medium", color: "red"))
-                .fixedSize(horizontal: false, vertical: true)
+            AtomLabel(props: LabelProps(text: errorMessage, icon: PHIcon.exclamationmarkTriangleFill.name, size: 11, weight: "medium", color: "red"), common: AtomCommon(fixedHeight: true))
                 .accessibilitySummary(errorMessage, id: "codex-chat-error")
         }
     }
@@ -592,35 +563,31 @@ extension TaskConversationView {
     }
 
     package var composer: some PHView {
-        PHVStack(alignment: .leading, spacing: 8) {
+        AtomStack(props: StackProps(axis: "v", spacing: 8, align: "leading"), common: AtomCommon(maxWidth: 820, fillWidth: true, paddingX: 28, paddingTop: 14, paddingBottom: 22)) {
             if !pendingImages.isEmpty {
-                PHScrollView(.horizontal) {
-                    PHHStack(spacing: 8) {
+                AtomScroll(props: ScrollProps(axis: "horizontal")) {
+                    AtomStack(props: StackProps(axis: "h", spacing: 8)) {
                         PHForEach(pendingImages) { attachment in
-                            PHZStack(alignment: .topTrailing) {
-                                PHButton { selectedChatImage = attachment.image } label: {
-                                    PHImage(platformImage: attachment.image).resizable().scaledToFill()
-                                        .frame(width: 64, height: 52)
-                                        .clipShape(PHRoundedRectangle(cornerRadius: 8))
-                                        // Clipping only hides the filled image's overflow; without a shape the
-                                        // overflow still takes clicks, covering the previous thumbnail's remove badge.
-                                        .contentShape(PHRoundedRectangle(cornerRadius: 8))
+                            AtomStack(props: StackProps(axis: "z", align: "topTrailing")) {
+                                AtomButton(
+                                    common: AtomCommon(
+                                        testID: "pending-chat-image-\(attachment.id)", label: "Open attached image",
+                                        help: "Open image at full size"
+                                    ),
+                                    action: { selectedChatImage = attachment.image }
+                                ) {
+                                    AtomImage(
+                                        platformImage: attachment.image, contentMode: "fill", cornerRadius: 8,
+                                        common: AtomCommon(width: 64, height: 52)
+                                    )
                                 }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Open attached image")
-                                .accessibilityIdentifier("pending-chat-image-\(attachment.id)")
-                                .plainButtonHoverPointer()
-                                .nativeHelp("Open image at full size")
 
-                                PHButton {
+                                AtomButton(props: ButtonProps(style: "plain"), common: AtomCommon(help: "Remove image"), action: {
                                     pendingImages.removeAll { $0.id == attachment.id }
                                     persistDraft()
-                                } label: {
-                                    PHImage(icon: .xmarkCircleFill).foregroundStyle(.white, .black.opacity(0.7))
+                                }) {
+                                    AtomIcon(props: IconProps(name: PHIcon.xmarkCircleFill.name, color: "white", secondaryColor: "black", secondaryOpacity: 0.7))
                                 }
-                                .plainButtonHoverPointer()
-                                .nativeHelp("Remove image")
-                                .buttonStyle(.plain)
                                 .accessibilityLabel("Remove image")
                                 .accessibilityIdentifier("remove-pending-chat-image-\(attachment.id)")
                             }
@@ -636,58 +603,54 @@ extension TaskConversationView {
             }
             newChatPageControl
 
-            ComposerView(model: composerModel, actions: composerActions, header: {
-        recalledChatPageChips
-        let pendingCommentCount = unsentAnnotations.count
-        if pendingCommentCount > 0 {
-            AtomPanel(
-                props: PanelProps(fill: "primary", fillOpacity: 0.1, cornerRadius: 13, stroke: "primary", strokeOpacity: 0.08),
-                common: AtomCommon(padding: 0, paddingX: 12, paddingY: 8)
-            ) {
-                AtomLabel(
-                    props: LabelProps(text: "\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", icon: PHIcon.textBubble.name, size: 13, weight: "medium", color: "primary"),
-                    common: AtomCommon(testID: "pending-comment-count", opacity: 0.82)
-                )
-            }
-            // A badge on the chip's corner, like the one that removes an attached image.
-            .overlay(alignment: .topTrailing) {
-                PHButton(action: discardPendingAnnotations) {
-                    PHImage(icon: .xmarkCircleFill)
-                        .font(.system(size: 14))
-                        .foregroundStyle(.white, .black.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .nativeHelp("Discard comments")
-                .accessibilityLabel("Discard comments")
-                .accessibilityIdentifier("discard-pending-comments-button")
-                .offset(x: 6, y: -6)
-            }
-        }
-
-        if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
-            activeGoalRow(activeGoal)
-            if isGoalExpanded {
-                AtomText(
-                    props: TextProps(text: activeGoal.objective, size: 13, color: "secondary"),
-                    common: AtomCommon(testID: "active-goal-details", fillWidth: true, paddingX: 14)
-                )
-            }
-        }
-            }, scheduleContent: { scheduleHint }, pluginActions: isReadOnly ? nil : PHAnyView(
-                PluginSlot(placement: .composerActions, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
-            ), mentions: ChatEditorMentions(
-                handles: mentionHandles, edit: mentionEdit, onKey: handleComposerKey,
-                onEditingChange: { isComposerEditing = $0 }
-            ), keyboardShortcuts: true)
-                // A zero-height strip along the composer's top edge, so the menu grows upward over the
-                // transcript rather than covering the text being typed.
-                .overlay(alignment: .top) {
-                    PHColor.clear.frame(height: 0).overlay(alignment: .bottomLeading) {
-                        mentionMenu
-                        slashMenu
+            AtomOverlay(props: OverlayProps(align: "top", group: false)) {
+                ComposerView(model: composerModel, actions: composerActions, header: {
+            recalledChatPageChips
+            let pendingCommentCount = unsentAnnotations.count
+            if pendingCommentCount > 0 {
+                AtomOverlay(props: OverlayProps(align: "topTrailing", offsetX: 6, offsetY: -6, group: false)) {
+                    AtomPanel(
+                        props: PanelProps(fill: "primary", fillOpacity: 0.1, cornerRadius: 13, stroke: "primary", strokeOpacity: 0.08),
+                        common: AtomCommon(padding: 0, paddingX: 12, paddingY: 8)
+                    ) {
+                        AtomLabel(
+                            props: LabelProps(text: "\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", icon: PHIcon.textBubble.name, size: 13, weight: "medium", color: "primary"),
+                            common: AtomCommon(testID: "pending-comment-count", opacity: 0.82)
+                        )
                     }
+                } overlay: {
+                    AtomButton(props: ButtonProps(style: "plain"), common: AtomCommon(help: "Discard comments"), action: discardPendingAnnotations) {
+                        AtomIcon(props: IconProps(name: PHIcon.xmarkCircleFill.name, size: 14, color: "white", secondaryColor: "black", secondaryOpacity: 0.7))
+                    }
+                    .accessibilityLabel("Discard comments")
+                    .accessibilityIdentifier("discard-pending-comments-button")
                 }
+            }
+
+            if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
+                activeGoalRow(activeGoal)
+                if isGoalExpanded {
+                    AtomText(
+                        props: TextProps(text: activeGoal.objective, size: 13, color: "secondary"),
+                        common: AtomCommon(testID: "active-goal-details", fillWidth: true, paddingX: 14)
+                    )
+                }
+            }
+                }, scheduleContent: { scheduleHint }, pluginActions: isReadOnly ? nil : PHAnyView(
+                    PluginSlot(placement: .composerActions, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
+                ), mentions: ChatEditorMentions(
+                    handles: mentionHandles, edit: mentionEdit, onKey: handleComposerKey,
+                    onEditingChange: { isComposerEditing = $0 }
+                ), keyboardShortcuts: true)
+            } overlay: {
+                // Zero-height anchor sends the menus up over the transcript.
+                AtomOverlay(props: OverlayProps(align: "bottomLeading", group: false)) {
+                    AtomStack(common: AtomCommon(height: 0, fillWidth: true)) {}
+                } overlay: {
+                    mentionMenu
+                    slashMenu
+                }
+            }
                 .onChange(of: typedMention?.location) { _, location in
                     if location != dismissedMentionLocation { dismissedMentionLocation = nil }
                 }
@@ -720,11 +683,6 @@ extension TaskConversationView {
                 }
                 .onChange(of: draft) { _, newValue in scheduleDraftAutosave(newValue) }
         }
-        .padding(.horizontal, 28)
-        .padding(.top, 14)
-        .padding(.bottom, 22)
-        .frame(maxWidth: 820)
-        .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-composer")
     }
@@ -737,27 +695,23 @@ private struct EmptyConversationAddRepositoryPrompt: PHView {
     @PHState private var isHovering = false
 
     var body: some PHView {
-        PHVStack(spacing: 12) {
-            PHButton(action: action) {
-                PHImage(icon: .plus)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(PHColor.accentColor)
-                    .frame(width: 44, height: 44)
-                    .background(PHCircle().fill(PHColor.accentColor.opacity(isHovering ? 0.24 : 0.14)))
-                    .overlay(PHCircle().strokeBorder(PHColor.accentColor.opacity(isHovering ? 0.4 : 0.22)))
-                    .contentShape(PHCircle())
+        AtomStack(props: StackProps(axis: "v", spacing: 12)) {
+            AtomButton(props: ButtonProps(style: "plain"), common: AtomCommon(help: "Add a repository"), action: action) {
+                AtomStack(
+                    props: StackProps(
+                        fill: "accent", fillOpacity: isHovering ? 0.24 : 0.14, capsule: true,
+                        stroke: "accent", strokeOpacity: isHovering ? 0.4 : 0.22
+                    ),
+                    common: AtomCommon(width: 44, height: 44)
+                ) {
+                    AtomIcon(props: IconProps(name: PHIcon.plus.name, size: 18, weight: "semibold", color: "accent"))
+                }
             }
-            .buttonStyle(.plain)
-            .plainButtonHoverPointer()
-            .nativeHelp("Add a repository")
             .phOnHover { isHovering = $0 }
             .animation(.easeOut(duration: 0.12), value: isHovering)
             .accessibilityLabel("Add repository")
             .accessibilityIdentifier("empty-conversation-add-repository-button")
-            PHText("Add repositories to the task's context")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            AtomText(props: TextProps(text: "Add repositories to the task's context", size: 13, weight: "medium", color: "secondary", align: "center"))
                 .accessibilityIdentifier("empty-conversation-add-repository-caption")
         }
     }
@@ -770,21 +724,17 @@ private struct ConversationHistoryLoadingIndicator: PHView {
     @PHState private var isShown = false
 
     var body: some PHView {
-        PHZStack {
+        AtomStack(props: StackProps(axis: "z"), common: AtomCommon(minHeight: 280, fillWidth: true)) {
             if isShown {
-                PHHStack(spacing: 8) {
-                    PHProgressView()
-                        .controlSize(.small)
-                    PHText("Loading conversation…")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
+                AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                    AtomSpinner(props: SpinnerProps(size: "small"))
+                    AtomText(props: TextProps(text: "Loading conversation…", size: 13, weight: "medium", color: "secondary"))
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Loading conversation…")
                 .accessibilityIdentifier("conversation-history-loading")
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 280)
         .task {
             try? await Task.sleep(for: Self.delay)
             isShown = true

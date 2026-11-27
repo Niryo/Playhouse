@@ -34,7 +34,7 @@ package struct AgentsInfoPlugin: PHView {
     package var body: some PHView {
         let report = report
         let hasAgents = !AgentsInfoModel.visibleProviders(report).isEmpty
-        PHVStack(alignment: .leading, spacing: 6) {
+        AtomStack(props: StackProps(spacing: 6, align: "leading"), common: AtomCommon(fillWidth: true)) {
             if hasAgents {
                 AgentsInfoSection(
                     model: AgentsInfoModel(report: report, runningProviders: runningProviders, errorMessage: errorMessage, now: now),
@@ -45,7 +45,6 @@ package struct AgentsInfoPlugin: PHView {
                 )
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .preference(key: PluginSectionContentKey.self, value: hasAgents)
         .task {
             if PluginLaunch.claim(BuiltInPlugins.agentsInfoID) { await refresh() }

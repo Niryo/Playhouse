@@ -93,6 +93,7 @@ package final class TranscriptScrollController {
     private var intent = Intent.reading(nil)
     private var last: Metrics?
     private var isApplying = false
+    private var isKeptAliveHidden = false
     /// Older messages were revealed and have not laid out yet.
     private var isRevealPending = false
     /// Newer messages were revealed below a window that ends early and have not laid out yet.
@@ -184,6 +185,13 @@ package final class TranscriptScrollController {
         if wasFollowing != isFollowing { handlerBox?.handlers?.onFollowingChange(isFollowing) }
     }
 
+    fileprivate func setKeptAliveHidden(_ hidden: Bool) {
+        guard hidden != isKeptAliveHidden else { return }
+        isKeptAliveHidden = hidden
+        stopAnimation()
+        applyIntent()
+    }
+
     // MARK: Scroll view
 
     package func attach(to handle: PHScrollViewHandle) {
@@ -241,6 +249,12 @@ package final class TranscriptScrollController {
             return
         }
         guard metrics.offsetY != last.offsetY else { return }
+        // A hidden transcript cannot receive scroll input. Keep its reading
+        // anchor when AppKit adjusts the clip view during navigation.
+        if isKeptAliveHidden {
+            applyIntent()
+            return
+        }
         stopAnimation()
         setIntent(rendersTranscriptEnd && isAtBottom(metrics) ? .following : .reading(anchor(at: metrics)))
         self.last = metrics
@@ -252,7 +266,7 @@ package final class TranscriptScrollController {
     }
 
     private func scrollWheelDidMove(deltaY: CGFloat) {
-        guard let metrics = metrics() else { return }
+        guard !isKeptAliveHidden, let metrics = metrics() else { return }
         if deltaY > 0 {
             if metrics.offsetY <= metrics.minOffsetY + 0.5 { approachTop() }
         } else if metrics.offsetY >= metrics.maxOffsetY - 0.5 {
@@ -399,6 +413,7 @@ extension PHView {
         layoutTop: CGFloat,
         latestTurnMargin: CGFloat,
         rendersTranscriptEnd: Bool = true,
+        isKeptAliveHidden: Bool,
         handlers: TranscriptScrollController.Handlers
     ) -> some PHView {
         let box = TranscriptScrollController.HandlerBox(handlers: handlers)
@@ -409,6 +424,7 @@ extension PHView {
                 controller.layoutTop = layoutTop
                 controller.latestTurnMargin = latestTurnMargin
                 controller.rendersTranscriptEnd = rendersTranscriptEnd
+                controller.setKeptAliveHidden(isKeptAliveHidden)
             },
             attach: { controller.attach(to: $0) },
             detach: { controller.detach() }

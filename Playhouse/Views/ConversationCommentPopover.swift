@@ -18,36 +18,30 @@ package struct SelectionActionsPill: PHView {
     package static let height: CGFloat = 30
 
     package var body: some PHView {
-        PHHStack(spacing: 0) {
+        AtomStack(
+            props: StackProps(
+                axis: "h", spacing: 0, group: true, capsule: true, stroke: "white", strokeOpacity: 0.12,
+                material: "regular", shadow: 5, shadowOpacity: 0.25, shadowY: 2
+            ),
+            common: AtomCommon(testID: "selection-actions-pill", fixedSize: true)
+        ) {
             action("Comment", icon: .textBubble, help: "Comment on the selected text", identifier: "selection-comment-button", perform: comment)
-            PHRectangle()
-                .fill(PHColor.primary.opacity(0.18))
-                .frame(width: 1, height: 16)
-                .accessibilityHidden(true)
+            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.18), common: AtomCommon(width: 1, height: 16, decorative: true)) {
+                PHEmptyView()
+            }
             action("Side chat", icon: .bubbleLeftAndTextBubbleRight, help: "Discuss the selected text in a side chat", identifier: "side-chat-hint-button", perform: sideChat)
         }
-        .phMaterialBackground(.regular, in: PHCapsule())
-        .overlay(PHCapsule().strokeBorder(PHColor.white.opacity(0.12)).allowsHitTesting(false))
-        .phShadow(color: .black.opacity(0.25), radius: 5, y: 2)
-        .fixedSize()
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("selection-actions-pill")
     }
 
     private func action(
         _ title: String, icon: PHIcon, help: String, identifier: String, perform: @escaping () -> Void
     ) -> some PHView {
-        PHButton(action: perform) {
-            PHLabel(title, icon: icon)
-                .font(.system(size: 13, weight: .medium))
-                .padding(.horizontal, 12).padding(.vertical, 7)
-                .contentShape(PHRectangle())
+        AtomButton(
+            common: AtomCommon(testID: identifier, label: title, help: help, paddingX: 12, paddingY: 7),
+            action: perform
+        ) {
+            AtomLabel(props: LabelProps(text: title, icon: icon.name, size: 13, weight: "medium"))
         }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .nativeHelp(help)
-        .accessibilityLabel(title)
-        .accessibilityIdentifier(identifier)
     }
 
     package init(comment: @escaping () -> Void, sideChat: @escaping () -> Void) {
@@ -86,67 +80,56 @@ package struct CommentPopover: PHView {
     private var isEditing: Bool { editingComment != nil }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 6) {
+        AtomStack(
+            props: StackProps(spacing: 6, align: "leading", group: true),
+            common: AtomCommon(testID: "comment-popover", width: isEditing ? 395 : 355, padding: 5)
+        ) {
             if let sentComment, !isEditing {
-                PHLabel {
-                    PHText(verbatim: sentComment)
-                        .lineLimit(4)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("sent-comment-text")
-                } icon: {
-                    PHImage(icon: .textBubble)
+                AtomStack(props: StackProps(axis: "h", align: "baseline"), common: AtomCommon(fillWidth: true, paddingX: 10)) {
+                    AtomIcon(props: IconProps(name: PHIcon.textBubble.name, size: 12, color: "secondary"))
+                    AtomText(
+                        props: TextProps(text: sentComment, size: 12, color: "secondary", lineLimit: 4, wrap: true, selectable: true),
+                        common: AtomCommon(testID: "sent-comment-text")
+                    )
                 }
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .fixedSize(horizontal: false, vertical: true)
             }
-            PHHStack(spacing: 8) {
-                PHTextField(isEditing ? "Empty, saving deletes the comment" : "Add an optional comment…", text: $text)
-                    .textFieldStyle(.plain)
-                    .onSubmit { submit(text) }
-                    .onExitCommand(perform: dismiss)
-                    .accessibilityLabel("Comment")
-                    .accessibilityIdentifier("comment-input-field")
+            // The outline never takes the clicks on the buttons it is drawn over.
+            AtomStack(
+                props: StackProps(axis: "h", spacing: 8, fill: "control", capsule: true, stroke: "primary", strokeOpacity: 0.08),
+                common: AtomCommon(paddingY: 7, paddingLeading: 15, paddingTrailing: 7)
+            ) {
+                AtomTextField(
+                    props: TextFieldProps(text: text, placeholder: isEditing ? "Empty, saving deletes the comment" : "Add an optional comment…", style: "plain"),
+                    common: AtomCommon(testID: "comment-input-field", label: "Comment"),
+                    onChange: { text = $0 },
+                    onSubmit: { submit(text) }
+                )
+                .onExitCommand(perform: dismiss)
                 if isEditing {
-                    PHButton(action: discard) {
-                        PHImage(icon: .trash)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 28, height: 28)
-                            .contentShape(PHCircle())
+                    AtomButton(
+                        common: AtomCommon(testID: "discard-comment-button", label: "Discard comment", help: "Discard comment"),
+                        action: discard
+                    ) {
+                        AtomIcon(
+                            props: IconProps(name: PHIcon.trash.name, size: 12, weight: "medium", color: "secondary"),
+                            common: AtomCommon(width: 28, height: 28)
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .plainButtonHoverPointer()
-                    .nativeHelp("Discard comment")
-                    .accessibilityLabel("Discard comment")
-                    .accessibilityIdentifier("discard-comment-button")
                 }
-                PHButton { submit(text) } label: {
-                    PHImage(icon: .arrowUp)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(PHColor.black)
-                        .frame(width: 32, height: 32)
-                        .background(PHColor.white.opacity(0.78), in: PHCircle())
+                AtomButton(
+                    props: ButtonProps(disabled: isEditing && text == editingComment),
+                    common: AtomCommon(
+                        testID: "add-comment-button",
+                        label: isEditing ? "Save comment" : "Add comment",
+                        help: isEditing ? "Save comment" : "Add comment"
+                    ),
+                    action: { submit(text) }
+                ) {
+                    AtomStack(props: StackProps(fill: "white", fillOpacity: 0.78, capsule: true), common: AtomCommon(width: 32, height: 32)) {
+                        AtomIcon(props: IconProps(name: PHIcon.arrowUp.name, size: 12, weight: "semibold", color: "black"))
+                    }
                 }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .disabled(isEditing && text == editingComment)
-                .nativeHelp(isEditing ? "Save comment" : "Add comment")
-                .accessibilityLabel(isEditing ? "Save comment" : "Add comment")
-                .accessibilityIdentifier("add-comment-button")
             }
-            .padding(.leading, 15)
-            .padding(.trailing, 7)
-            .padding(.vertical, 7)
-            .background(PHColor(platformColor: .controlBackgroundColor), in: PHCapsule())
-            // Hit-testable, the outline took every click on the buttons it is drawn over.
-            .overlay(PHCapsule().strokeBorder(PHColor.primary.opacity(0.08)).allowsHitTesting(false))
         }
-        .frame(width: isEditing ? 395 : 355)
-        .padding(5)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("comment-popover")
     }
 }

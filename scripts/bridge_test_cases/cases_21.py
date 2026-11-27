@@ -213,6 +213,102 @@ class BridgeTestCases21:
             self.assertTrue(failed["ok"], "A plugin that fails still reports its render.")
             self.assertTrue(any(error in message for message in failed["result"]["errors"]), f"{source} reports {error}: {failed['result']['errors']}")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "SidePanel", "--event", "side-panel-demo:onDismiss", expected_status=2)[0], "invalid_argument")
+    # case-contract: test_plugin_composite_props_and_new_atoms | The atoms the native composites are built from cover their layout, styling and the two controls composition can't make. On the Plugin Catalog's Stack page, a Stack with axis z layers its children (a badge at the top trailing corner of the base it is drawn over), a Stack with material regular, a 12-point clip and an 8-point shadow draws its translucent surface, a row with an onHover handler reports the pointer entering it (its label turns hovering, and leaving turns it back to idle), and a stretched row capped by maxWidth 160 is 160 points wide and keeps its frameAlign trailing, paddingTop 6 and paddingLeading 12. The Text page's selectable text keeps selectable. The TextField page's secure field hides what is typed while onChange still reports it (Secret length), Escape in it runs onEscape (Key: escape), its multiline monospaced field keeps multiline, size and design, and each Focus the note press raises focusRequest, which moves the keyboard into the note. The Segmented page also shows the same choice as a pop-up menu (style menu) and radio buttons (style radio), each running onChange with the chosen value. The new ResizeHandle page's 9-point invisible handle along a pane's right edge raises onDrag with the drag's translation, which widens the pane (Width: 240 after 40 points, clamped at 320), and onDragEnd once the drag ends (Drags ended: 1); the DatePicker page shows a date and time field, a date field and a time field for the same value, and editing a field runs onChange with the new date in seconds since 1970. `plugin render` reports these props and events, each event one commit; a ResizeHandle given an onPress handler, a Stack given an onPress handler, a DatePicker without a date or with a mistyped one, a mistyped Segmented style or a mistyped Stack shadow is reported in errors.
+    def test_plugin_composite_props_and_new_atoms(self):
+        def page(name, *events):
+            options = []
+            for event in events:
+                options += ["--event", event]
+            rendered = self.assert_success(self.call_cli("plugin", "render", "--page", name, *options)[0])
+            self.assertEqual(rendered["errors"], [], f"The {name} page renders without errors.")
+            return rendered
+
+        def steps(rendered):
+            return [entry for entry in rendered["commits"] if entry["step"] != "render"]
+
+        # Stack: layers, a translucent clipped shadowed surface, hover and the new frame props.
+        stack = page("Stack")
+        layers = self.plugin_node(stack["tree"], "stack-layers")
+        self.assertEqual((layers["props"]["axis"], layers["props"]["align"]), ("z", "topTrailing"))
+        self.assertEqual([child["type"] for child in layers["children"]], ["Stack", "Stack"], "The badge is layered over its base.")
+        self.assertEqual(self.plugin_node(layers, "stack-layers-base")["props"]["width"], 120)
+        badge = self.plugin_node(layers, "stack-layers-badge")
+        self.assertEqual((badge["props"]["capsule"], badge["props"]["decorative"], badge["props"]["width"]), (True, True, 10))
+        material = self.plugin_node(stack["tree"], "stack-material")["props"]
+        self.assertEqual((material["material"], material["clip"], material["shadow"], material["shadowOpacity"], material["shadowY"], material["cornerRadius"]),
+                         ("regular", True, 8, 0.2, 3, 12))
+        hover = self.plugin_node(stack["tree"], "stack-hover")
+        self.assertEqual((hover["events"], hover["props"]["label"]), (["onHover"], "idle"))
+        edges = self.plugin_node(stack["tree"], "stack-edges")["props"]
+        self.assertEqual((edges["maxWidth"], edges["frameAlign"], edges["paddingTop"], edges["paddingLeading"], edges["fillWidth"]), (160, "trailing", 6, 12, True))
+        hovered = page("Stack", "stack-hover:onHover:true", "stack-hover:onHover:false")
+        hover_steps = steps(hovered)
+        self.assertEqual([entry["step"] for entry in hover_steps], ["stack-hover:onHover", "stack-hover:onHover"], "Each hover change is one commit.")
+        self.assertEqual(self.plugin_node(hovered["tree"], "stack-hover")["props"]["label"], "idle", "Leaving the row turns it back to idle.")
+        entered = page("Stack", "stack-hover:onHover:true")
+        self.assertEqual(self.plugin_node(entered["tree"], "stack-hover")["props"]["label"], "hovering", "Entering the row runs its onHover handler.")
+        self.assertEqual(self.plugin_text(self.plugin_node(entered["tree"], "stack-hover-text")), "Pointer over the row")
+
+        # Text: selectable.
+        self.assertTrue(self.plugin_node(page("Text")["tree"], "text-selectable")["props"]["selectable"])
+
+        # TextField: secure, Escape, multiline with a font, and focus requests.
+        fields = page("TextField")
+        secure = self.plugin_node(fields["tree"], "text-field-secure")
+        self.assertEqual((secure["props"]["secure"], sorted(secure["events"])), (True, ["onChange", "onEscape"]))
+        note = self.plugin_node(fields["tree"], "text-field-multiline")["props"]
+        self.assertEqual((note["multiline"], note["size"], note["design"]), (True, 12, "monospaced"))
+        self.assertNotIn("focusRequest", note, "The note asks for focus only once Focus the note is pressed.")
+        typed = page("TextField", "text-field-secure:onChange:hunter2", "text-field-secure:onEscape", "text-field-focus:onPress", "text-field-focus:onPress")
+        self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "text-field-secure-length")), "Secret length: 7", "The secure field still reports what is typed.")
+        self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "text-field-key")), "Key: escape", "Escape runs onEscape.")
+        self.assertEqual(self.plugin_node(typed["tree"], "text-field-multiline")["props"]["focusRequest"], 2, "Each press raises the focus request.")
+
+        # Segmented: the same choice as a pop-up menu and radio buttons.
+        segmented = page("Segmented")
+        self.assertEqual(self.plugin_node(segmented["tree"], "segmented-menu")["props"]["style"], "menu")
+        self.assertEqual(self.plugin_node(segmented["tree"], "segmented-radio")["props"]["style"], "radio")
+        chosen = page("Segmented", "segmented-menu:onChange:global", "segmented-radio:onChange:builtin")
+        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "segmented-selected")), "Selected: builtin")
+        self.assertEqual([entry["step"] for entry in steps(chosen)], ["segmented-menu:onChange", "segmented-radio:onChange"])
+
+        # ResizeHandle: an invisible strip raising onDrag and onDragEnd.
+        resize = page("ResizeHandle")
+        handle = self.plugin_node(resize["tree"], "resize-handle-demo")
+        self.assertEqual((handle["type"], handle["events"], handle["props"]["width"], handle["props"]["value"]), ("ResizeHandle", ["onDrag", "onDragEnd"], 9, "200 points"))
+        self.assertEqual(self.plugin_node(resize["tree"], "resize-handle-pane")["props"]["width"], 200)
+        dragged = page("ResizeHandle", "resize-handle-demo:onDrag:20", "resize-handle-demo:onDrag:40", "resize-handle-demo:onDragEnd")
+        self.assertEqual(self.plugin_node(dragged["tree"], "resize-handle-pane")["props"]["width"], 240, "The translation is measured from where the drag began.")
+        self.assertEqual(self.plugin_text(self.plugin_node(dragged["tree"], "resize-handle-width")), "Width: 240")
+        self.assertEqual(self.plugin_text(self.plugin_node(dragged["tree"], "resize-handle-ended")), "Drags ended: 1")
+        self.assertEqual(len(steps(dragged)), 3, "Each drag event is one commit.")
+        clamped = page("ResizeHandle", "resize-handle-demo:onDrag:500")
+        self.assertEqual(self.plugin_node(clamped["tree"], "resize-handle-pane")["props"]["width"], 320, "The page clamps the width.")
+
+        # DatePicker: one value as a date and time, a date and a time field.
+        dates = page("DatePicker")
+        demo = self.plugin_node(dates["tree"], "date-picker-demo")
+        self.assertEqual((demo["type"], demo["props"]["date"], demo["events"]), ("DatePicker", 1767261600, ["onChange"]))
+        self.assertNotIn("components", demo["props"], "A DatePicker shows the date and time by default.")
+        self.assertEqual((self.plugin_node(dates["tree"], "date-picker-date")["props"]["components"], self.plugin_node(dates["tree"], "date-picker-date")["props"]["min"]), ("date", 1767261600))
+        self.assertEqual(self.plugin_node(dates["tree"], "date-picker-time")["props"]["components"], "time")
+        edited = page("DatePicker", "date-picker-demo:onChange:1767348000")
+        self.assertEqual(self.plugin_text(self.plugin_node(edited["tree"], "date-picker-value")), "Value: 1767348000")
+        for field in ["date-picker-demo", "date-picker-date", "date-picker-time"]:
+            self.assertEqual(self.plugin_node(edited["tree"], field)["props"]["date"], 1767348000, "Every field shows the edited date.")
+
+        # What the atoms refuse.
+        for source, expected in [
+            ('Playhouse.render(h(ResizeHandle, { onPress: function () {} }));', 'has no event "onPress"'),
+            ('Playhouse.render(h(Stack, { onPress: function () {} }));', 'has no event "onPress"'),
+            ('Playhouse.render(h(DatePicker, { components: "date" }));', "date"),
+            ('Playhouse.render(h(DatePicker, { date: "tomorrow" }));', "date"),
+            ('Playhouse.render(h(Segmented, { options: [], selected: "a", style: 3 }));', "style"),
+            ('Playhouse.render(h(Stack, { shadow: "big" }));', "shadow"),
+        ]:
+            refused = self.render_plugin(source, expected_status=1)
+            self.assertTrue(any(expected in error for error in refused["result"]["errors"]), f"{source} is reported: {refused['result']['errors']}")
+
     # case-contract: test_plugin_done_archive_renders_from_atoms_like_native | The Plugin Catalog's Done Archive page shows the board's Done archive composed in JavaScript from atoms above the native SwiftUI archive the board presents, built from the same atoms and sample model, each opened by the board header's archive button (the bordered Button atom with the archivebox icon, labelled Done tasks) into a 340-point SidePanel over the trailing edge of a 560 by 460 point stand-in for the board, open at first. Both show the Done tasks title and its close button, the search field with its Search tasks and conversations placeholder, and a list of five rows, each a button opening its task with the done checkmark, its title and its date, beside its pull request actions: a #227 link valued merged (its PR's state, which also ends its help), a PR button beside a #228 link, a PRs button, a disabled busy PR button showing a spinner, and nothing for a task without repositories, each at the same size in both and with the board archive's identifiers (done-archive-task, done-archive-create-pr, done-archive-pr-link, done-archive-search, and done-archive-list valued 5 tasks loaded). The JavaScript tree uses only atoms (SidePanel, Stack, Text, Icon, Button, Link, Spinner, Spacer, Divider, TextField, Scroll), its search a plain TextField on a rounded Stack. The list's end is in view, so its onEndReached runs on both sides (End reached). Typing in the JavaScript search runs onChange (Last: search followed by the text), narrows the rows to the matching title and shows the clear button, which clears the search and brings every row back; a search that matches nothing shows No matching tasks instead of the list. A PR button runs its handler with its task (Last: create pr followed by the title), a row runs open (Last: open followed by the title) and slides the panel away, the archive button opens it again (Last: toggle open), and the close button closes it (Last: close), while the native archive keeps its own state. The list raises no onPress, so pressing it is refused as invalid_argument.
     def test_plugin_done_archive_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive")[0])

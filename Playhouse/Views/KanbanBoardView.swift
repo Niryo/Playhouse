@@ -83,7 +83,7 @@ package struct SkillsPageWindowFrame<Content: PHView>: PHView {
     @PHViewBuilder package let content: Content
 
     package var body: some PHView {
-        content.frame(width: width)
+        AtomStack(common: AtomCommon(width: width.map { Double($0) })) { content }
     }
 
     package init(@PHViewBuilder content: () -> Content) {
@@ -259,7 +259,8 @@ package struct KanbanBoardView: PHView {
     @PHState package var reviewMoveError: String?
     @PHState package var isShowingBoardSearch = false
     @PHState package var boardSearchText = ""
-    @PHFocusState package var isBoardSearchFocused: Bool
+    /// Bumped to focus the board search field (the Search Tasks command).
+    @PHState package var boardSearchFocusRequest = 0
     @PHState package var isShowingChatSidebar = false
     @PHState package var chatTask: StandaloneChat?
     /// The chat's open parallel bubbles, oldest first, and the one opened into its larger view.
@@ -311,47 +312,14 @@ package struct KanbanBoardView: PHView {
 
     /// The first part of `mainContent`'s modifier chain, split off so the type checker handles each part in time.
     private var boardBase: some PHView {
-        PHGroup {
-            if let placement = pluginSetupPlacement {
-                PluginCreationSetup(placement: placement, isStarting: isStartingPluginTask, onCancel: {
-                    pluginSetupPlacement = nil
-                }, onStart: { name, presentation in
-                    finishPluginSetup(placement, name: name, presentation: presentation)
-                })
-            } else if let pluginChat, let pluginID = pluginChat.authoredPluginID {
-                PHHStack(spacing: 0) {
-                    StandaloneChatPanel(chat: pluginChat, initialDraft: pluginInitialDraft, onOpenTask: openTask(_:sending:)) {
-                        if let folder = pluginChat.contextFolderPaths.first {
-                            let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
-                            let data = draftData.deletingLastPathComponent().deletingLastPathComponent()
-                            let library = PluginLibrary(dataDirectory: data.path)
-                            if library.hasDraftChanges(id: pluginID) { showPluginDraftNotice = true; return }
-                        }
-                        self.pluginChat = nil; pluginInitialDraft = nil
-                    }
-                        .equatable()
-                        .id(pluginChat.id)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    PHDivider()
-                    PluginAuthoringPreview(task: pluginChat, pluginID: pluginID, onClose: {
-                        self.pluginChat = nil; pluginInitialDraft = nil
-                    })
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-            } else {
-                boardContent
-                    .modifier(DeleteTaskErrorAlert(message: $deleteError))
-            }
-        }
-        .alert("Draft saved", isPresented: $showPluginDraftNotice) {
-            PHButton("OK") { pluginChat = nil; pluginInitialDraft = nil }
-                .buttonHoverPointer().nativeHelp("Close plugin editor")
-        } message: { PHText("Your changes are saved as a draft. You can return and continue editing later.") }
-        .background(WorkspaceTheme.windowBackground)
         // The open chat adds its width and the main sidebar's to the board's minimum, so the
         // content-sized window grows to keep the pushed columns visible beside them.
-        .frame(minWidth: ChatSidebarLayout.minimumBoardWidth + (isChatOverlayVisible ? ChatSidebarLayout.chatLeadingEdge + chatSidebarWidth : 0), minHeight: 640)
+        AtomStack(
+            props: StackProps(fill: "window"),
+            common: AtomCommon(minWidth: Double(ChatSidebarLayout.minimumBoardWidth + (isChatOverlayVisible ? ChatSidebarLayout.chatLeadingEdge + chatSidebarWidth : 0)), minHeight: 640)
+        ) {
+            boardPage
+        }
         .task(id: allTasks.contains { $0.scheduleKind != nil && !$0.schedulePaused }) {
             SchedulerAgent.sync(hasActiveSchedules: allTasks.contains { $0.scheduleKind != nil && !$0.schedulePaused })
         }
@@ -381,7 +349,7 @@ package struct KanbanBoardView: PHView {
         }
         .onNotification(.playhouseShowBoardSearch) { _ in
             phWithAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
-            isBoardSearchFocused = true
+            boardSearchFocusRequest += 1
         }
         .phOnAppActivation {
             // The built-in plugins' daemon services hear the focus too.
@@ -391,6 +359,49 @@ package struct KanbanBoardView: PHView {
             // And the launch, once.
             if PluginLaunch.claim("#services") { PluginServiceHost.publish(PluginEvent(name: PluginEvent.appLaunched)) }
         }
+    }
+
+    /// The page the board shows: a plugin's setup or editor, an open task, or the board itself.
+    private var boardPage: some PHView {
+        PHGroup {
+            if let placement = pluginSetupPlacement {
+                PluginCreationSetup(placement: placement, isStarting: isStartingPluginTask, onCancel: {
+                    pluginSetupPlacement = nil
+                }, onStart: { name, presentation in
+                    finishPluginSetup(placement, name: name, presentation: presentation)
+                })
+            } else if let pluginChat, let pluginID = pluginChat.authoredPluginID {
+                AtomStack(props: StackProps(axis: "h", spacing: 0)) {
+                    AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) {
+                        StandaloneChatPanel(chat: pluginChat, initialDraft: pluginInitialDraft, onOpenTask: openTask(_:sending:)) {
+                            if let folder = pluginChat.contextFolderPaths.first {
+                                let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
+                                let data = draftData.deletingLastPathComponent().deletingLastPathComponent()
+                                let library = PluginLibrary(dataDirectory: data.path)
+                                if library.hasDraftChanges(id: pluginID) { showPluginDraftNotice = true; return }
+                            }
+                            self.pluginChat = nil; pluginInitialDraft = nil
+                        }
+                        .equatable()
+                        .id(pluginChat.id)
+                    }
+                    AtomDivider()
+                    AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) {
+                        PluginAuthoringPreview(task: pluginChat, pluginID: pluginID, onClose: {
+                            self.pluginChat = nil; pluginInitialDraft = nil
+                        })
+                    }
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+            } else {
+                boardContent
+                    .modifier(DeleteTaskErrorAlert(message: $deleteError))
+            }
+        }
+        .alert("Draft saved", isPresented: $showPluginDraftNotice) {
+            PHButton("OK") { pluginChat = nil; pluginInitialDraft = nil }
+                .buttonHoverPointer().nativeHelp("Close plugin editor")
+        } message: { PHText("Your changes are saved as a draft. You can return and continue editing later.") } // ATOM-GAP: no alert atom (system alert actions and message)
     }
 
     package var mainContent: some PHView {
@@ -546,199 +557,21 @@ package struct KanbanBoardView: PHView {
         }
     }
 
-    /// The board's header, sidebar and columns.
-    private var boardBody: some PHView {
-        PHVStack(spacing: 0) {
-            PHVStack(spacing: 0) {
-                boardHeader
-
-                PHRectangle()
-                    .fill(PHColor.primary.opacity(0.07))
-                    .frame(height: 1)
-            }
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { boardBodyTop = $0 }
-
-            PHHStack(spacing: 0) {
-                boardSidebar
-
-                PHRectangle()
-                    .fill(PHColor.primary.opacity(0.07))
-                    .frame(width: 1)
-
-                if isChatOverlayVisible {
-                    PHColor.clear
-                        .frame(width: chatSidebarShownWidth)
-                        .accessibilityHidden(true)
-                }
-
-                PHVStack(spacing: 0) {
-                    if let lifecycleResetNotice {
-                        lifecycleResetBanner(lifecycleResetNotice)
-                    }
-
-                    PHHStack(spacing: 0) {
-                        // The board pins its columns to the top, just under the header, centers them
-                        // across its width with its own viewport-sized frame, and keeps the scroll
-                        // view's clip origin at zero. Left to itself, the two-axis scroll view centers
-                        // narrower content by giving AppKit's clip view a negative bounds origin, and
-                        // after a horizontal scroll nudge followed by a content-height change, SwiftUI's
-                        // hit testing lost that offset: the board drew centered while clicks resolved as
-                        // if it were flush left, so buttons stopped responding until the window was resized.
-                        // The board's scrollers always float over the content (see HoverRevealScrollers),
-                        // so the visible area is the reader's full frame.
-                        PHGeometryReader { viewport in
-                            PHScrollView([.horizontal, .vertical]) {
-                                PHHStack(alignment: .top, spacing: 0) {
-                                    PHSpacer(minLength: 30)
-                                    PHHStack(alignment: .top, spacing: 16) {
-                                        PHForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
-                                            if status == .backlog {
-                                                let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                                                PHVStack(spacing: 12) {
-                                                    if hasBlockedTasks {
-                                                        kanbanColumn(.blocked, minHeight: 220)
-                                                            .transition(.opacity.combined(with: .move(edge: .top)))
-                                                    }
-                                                    kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
-                                                }
-                                                .frame(width: 264)
-                                                .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
-                                            } else if status == .inProgress {
-                                                let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                                                PHVStack(spacing: 12) {
-                                                    if hasWaitingResponseTasks {
-                                                        kanbanColumn(.waitingResponse, minHeight: 220)
-                                                            .transition(.opacity.combined(with: .move(edge: .top)))
-                                                    }
-                                                    kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
-                                                }
-                                                .frame(width: 264)
-                                                .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
-                                            } else {
-                                                kanbanColumn(status)
-                                                    .frame(width: 264)
-                                            }
-                                        }
-                                    }
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    // The trailing spacer also leaves room for the Done drawer, so the last
-                                    // column scrolls clear of it. The spacers split spare width evenly, so the
-                                    // columns center in the whole board once it is wide enough for both minimums.
-                                    PHSpacer(minLength: 30 + DoneDropDrawer.gutterWidth)
-                                }
-                                .padding(.top, 22)
-                                .padding(.bottom, 28)
-                                .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .top)
-                                .hoverRevealScrollers()
-                            }
-                            .modifier(TopLeadingScrollAlignment())
-                            .background(WorkspaceTheme.windowBackground)
-                            .scrollContentBackground(.hidden)
-                            .accessibilityIdentifier("board-columns-scroll-view")
-                            // The drawer floats over the scroll view's trailing edge rather than
-                            // beside it, so the vertical scroller sits at the window edge with the
-                            // drawer to its left, and the drawer stays put while scrolling.
-                            .overlay(alignment: .trailing) {
-                                DoneDropDrawer(
-                                    isOpen: draggedTaskStatus.map(TaskStatus.manualDoneSources.contains) ?? false,
-                                    isActive: $isDoneTargetActive,
-                                    onDrop: { moveTask(id: $0, to: .done) }
-                                )
-                                .padding(.trailing, HoverRevealScrollers.scrollerWidth)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// The board, or the open task's conversation in its place. The standalone chat stays in this
-    /// stack while a task is open, hidden rather than removed, so going back shows it as it was:
-    /// same messages and scroll position, without loading its history again.
     package var boardContent: some PHView {
-        // The overlay needs a concrete host, since Group distributes modifiers to its children.
-        PHZStack(alignment: .topLeading) {
-            if let selectedTask {
-                conversationView(for: selectedTask)
-            } else {
-                boardBody
+        // The host of the card plugins' presentations and alerts sits behind the board, at its size.
+        AtomStack(props: StackProps(axis: "z")) {
+            AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true)) {
+                PHEmptyView()
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .overlay(alignment: .topLeading) {
-            // The sidebar keeps the same viewport proposal while the content below it switches.
-            PHZStack(alignment: .topLeading) {
-                standaloneChatOverlay
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .clipped()
-                    .padding(.leading, ChatSidebarLayout.chatLeadingEdge)
-                    .padding(.top, boardBodyTop)
-
-                parallelChatBubblesOverlay
-                    .padding(.top, boardBodyTop)
-            }
-        }
-        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
-        // Measured only while the chat is open, so resizing the window without it doesn't re-run the board.
-        .background {
-            if isShowingChatSidebar {
-                PHColor.clear.onGeometryChange(for: CGFloat.self) { $0.size.width } action: { boardContentWidth = $0 }
-            }
-        }
-        .task(id: draggedTaskID) {
-            // SwiftUI reports no end for a drag that lands outside every drop target (for
-            // example a card dropped back in place), and the drag session consumes the
-            // mouse-up, so watch the button itself. The grace period lets a real drop finish
-            // against the open drawer before it closes.
-            guard draggedTaskID != nil else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(120))
-                guard !Platform.services.isPrimaryMouseButtonDown else { continue }
-                try? await Task.sleep(for: .milliseconds(200))
-                guard !Task.isCancelled else { return }
-                if !Platform.services.isPrimaryMouseButtonDown {
-                    draggedTaskID = nil
-                    isDoneTargetActive = false
-                    return
-                }
-            }
-        }
-        // The SidePanel atom below keeps a platform view behind the board, without which
-        // accessibility hit tests over the opened Done archive resolve to the board's scroll
-        // view underneath (see `PHAccessibilityHitTestAnchor`).
-        .overlay(alignment: .topTrailing) {
-            if isShowingBoardSearch, selectedTask == nil {
-                boardSearchBar
-                    .frame(width: 360)
-                    .padding(.top, 16)
-                    .padding(.trailing, 20)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                    .zIndex(2)
-            }
-        }
-        // The archive is a SidePanel atom over the board; the main sidebar's
-        // page, modal and side panel plugins present over it too. An open task covers the board,
-        // so these wait behind it, as the search bar does, and show again on going back.
-        .atomSidePanel(
-            SidePanelProps(isPresented: isShowingDoneArchive && selectedTask == nil, width: 340),
-            common: AtomCommon(testID: "done-archive-panel")
-        ) {
-            doneArchivePanel
-        }
-        .pluginPresentation(
-            boardOnly($openBoardPlugin),
-            props: mainSidebarPluginProps,
-            actions: boardPluginActions
-        )
-        .background {
-            PHColor.clear.pluginPresentation(
+            .pluginPresentation(
                 boardOnly($openTaskItemPlugin),
                 props: { PluginContext.props(plugin: $0, appearance: appearance, task: openTaskItemPluginTask.map { PluginTaskContext(task: $0) }, composer: nil) },
                 actions: taskItemPluginActions
             )
             .modifier(PluginAlertModifier(alert: $pluginAlert))
             .modifier(PluginConfirmationModifier(confirmations: pluginConfirmations))
+
+            boardLayers
         }
         .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
             guard isShowingDoneArchive else { return }
@@ -763,9 +596,211 @@ package struct KanbanBoardView: PHView {
         }
     }
 
-    /// A board plugin's presentation, presented only while the board shows rather than over an open task.
+    /// The board or open task, with a mounted chat that preserves its history while a task is open.
+    private var boardLayers: some PHView {
+        AtomStack(props: StackProps(axis: "z", align: "topLeading"), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
+            AtomOverlay(props: OverlayProps(align: "topLeading", group: false)) {
+                AtomStack(props: StackProps(axis: "z", align: "topLeading"), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
+                    // Measured only while chat is open.
+                    if isShowingChatSidebar {
+                        AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true)) {
+                            PHEmptyView()
+                        }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { boardContentWidth = $0 }
+                    }
+
+                    if let selectedTask {
+                        conversationView(for: selectedTask)
+                    } else {
+                        boardBody
+                    }
+                }
+            } overlay: {
+                // The chat keeps its viewport while a task opens, without affecting the task's size.
+                AtomStack(props: StackProps(axis: "z", align: "topLeading")) {
+                    AtomStack(common: AtomCommon(paddingTop: Double(boardBodyTop), paddingLeading: Double(ChatSidebarLayout.chatLeadingEdge))) {
+                        AtomStack(props: StackProps(align: "leading", clip: true), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
+                            standaloneChatOverlay
+                        }
+                    }
+
+                    // Bubbles float from the chat's right edge, below the header.
+                    AtomStack(common: AtomCommon(paddingTop: Double(boardBodyTop))) {
+                        parallelChatBubblesOverlay
+                    }
+                }
+            }
+
+            // The search bar floats over the board's top trailing corner.
+            AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topTrailing")) {
+                if isShowingBoardSearch, selectedTask == nil {
+                    AtomStack(common: AtomCommon(paddingTop: 16, paddingTrailing: 20)) {
+                        AtomStack(common: AtomCommon(width: 360)) {
+                            boardSearchBar
+                        }
+                    }
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+            }
+            .zIndex(2)
+        }
+        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+        .task(id: draggedTaskID) {
+            // SwiftUI reports no end for a drag that lands outside every drop target (for
+            // example a card dropped back in place), and the drag session consumes the
+            // mouse-up, so watch the button itself. The grace period lets a real drop finish
+            // against the open drawer before it closes.
+            guard draggedTaskID != nil else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Platform.services.isPrimaryMouseButtonDown else { continue }
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+                if !Platform.services.isPrimaryMouseButtonDown {
+                    draggedTaskID = nil
+                    isDoneTargetActive = false
+                    return
+                }
+            }
+        }
+        // The SidePanel atom below keeps a platform view behind the board, without which
+        // accessibility hit tests over the opened Done archive resolve to the board's scroll
+        // view underneath (see `PHAccessibilityHitTestAnchor`).
+        // The archive is a SidePanel atom over the board; the main sidebar's
+        // page, modal and side panel plugins present over it too.
+        .atomSidePanel(
+            SidePanelProps(isPresented: isShowingDoneArchive && selectedTask == nil, width: 340),
+            common: AtomCommon(testID: "done-archive-panel")
+        ) {
+            doneArchivePanel
+        }
+        .pluginPresentation(
+            boardOnly($openBoardPlugin),
+            props: mainSidebarPluginProps,
+            actions: boardPluginActions
+        )
+    }
+
+    /// The board's header, sidebar and columns.
+    private var boardBody: some PHView {
+        AtomStack(props: StackProps(spacing: 0)) {
+            AtomStack(props: StackProps(spacing: 0)) {
+                boardHeader
+
+                AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(height: 1, fillWidth: true)) {
+                    PHEmptyView()
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { boardBodyTop = $0 }
+
+            AtomStack(props: StackProps(axis: "h", spacing: 0)) {
+                boardSidebar
+
+                AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(width: 1, fillHeight: true)) {
+                    PHEmptyView()
+                }
+
+                if isChatOverlayVisible {
+                    AtomStack(common: AtomCommon(width: Double(chatSidebarShownWidth), fillHeight: true, decorative: true)) {
+                        PHEmptyView()
+                    }
+                }
+
+                AtomStack(props: StackProps(spacing: 0)) {
+                    if let lifecycleResetNotice {
+                        lifecycleResetBanner(lifecycleResetNotice)
+                    }
+
+                    AtomStack(props: StackProps(axis: "h", spacing: 0)) {
+                        // The board pins its columns to the top, just under the header, centers them
+                        // across its width with its own viewport-sized frame, and keeps the scroll
+                        // view's clip origin at zero. Left to itself, the two-axis scroll view centers
+                        // narrower content by giving AppKit's clip view a negative bounds origin, and
+                        // after a horizontal scroll nudge followed by a content-height change, SwiftUI's
+                        // hit testing lost that offset: the board drew centered while clicks resolved as
+                        // if it were flush left, so buttons stopped responding until the window was resized.
+                        // The board's scrollers always float over the content (see HoverRevealScrollers),
+                        // so the visible area is the reader's full frame.
+                        PHGeometryReader { viewport in
+                            // The drawer floats over the scroll view's trailing edge rather than
+                            // beside it, so the vertical scroller sits at the window edge with the
+                            // drawer to its left, and the drawer stays put while scrolling.
+                            AtomStack(props: StackProps(axis: "z", align: "trailing", fill: "window")) {
+                                AtomScroll(props: ScrollProps(axis: "both")) {
+                                    boardColumns(viewport: viewport.size)
+                                }
+                                .modifier(TopLeadingScrollAlignment())
+                                .scrollContentBackground(.hidden)
+                                .accessibilityIdentifier("board-columns-scroll-view")
+
+                                AtomStack(common: AtomCommon(paddingTrailing: Double(HoverRevealScrollers.scrollerWidth))) {
+                                    DoneDropDrawer(
+                                        isOpen: draggedTaskStatus.map(TaskStatus.manualDoneSources.contains) ?? false,
+                                        isActive: $isDoneTargetActive,
+                                        onDrop: { moveTask(id: $0, to: .done) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Board plugin surfaces reappear when the open task closes.
     private func boardOnly(_ plugin: PHBinding<PluginRecord?>) -> PHBinding<PluginRecord?> {
         PHBinding(get: { selectedTask == nil ? plugin.wrappedValue : nil }, set: { plugin.wrappedValue = $0 })
+    }
+
+    /// The columns, pinned to the top of the board's scroll view and centered across the viewport.
+    /// The outer layer is surfaced (an unclipped surface) only so its minimum frame places the
+    /// columns at the top, as the viewport-sized frame did.
+    private func boardColumns(viewport: CGSize) -> some PHView {
+        AtomStack(
+            props: StackProps(axis: "z", align: "top", clip: false),
+            common: AtomCommon(minWidth: Double(viewport.width), minHeight: Double(viewport.height))
+        ) {
+            boardColumnRow
+        }
+        .hoverRevealScrollers()
+    }
+
+    private var boardColumnRow: some PHView {
+        AtomStack(props: StackProps(axis: "h", spacing: 0, align: "top"), common: AtomCommon(paddingTop: 22, paddingBottom: 28)) {
+            AtomSpacer(props: SpacerProps(minLength: 30))
+            AtomStack(props: StackProps(axis: "h", spacing: 16, align: "top"), common: AtomCommon(fixedSize: true)) {
+                PHForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
+                    if status == .backlog {
+                        let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
+                        AtomStack(props: StackProps(spacing: 12), common: AtomCommon(width: 264)) {
+                            if hasBlockedTasks {
+                                kanbanColumn(.blocked, minHeight: 220)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+                            kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
+                        }
+                        .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                    } else if status == .inProgress {
+                        let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                        AtomStack(props: StackProps(spacing: 12), common: AtomCommon(width: 264)) {
+                            if hasWaitingResponseTasks {
+                                kanbanColumn(.waitingResponse, minHeight: 220)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+                            kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                        }
+                        .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
+                    } else {
+                        kanbanColumn(status)
+                    }
+                }
+            }
+            // The trailing spacer also leaves room for the Done drawer, so the last
+            // column scrolls clear of it. The spacers split spare width evenly, so the
+            // columns center in the whole board once it is wide enough for both minimums.
+            AtomSpacer(props: SpacerProps(minLength: 30 + Double(DoneDropDrawer.gutterWidth)))
+        }
     }
 
     /// The width the chat's Skills page covers: the board from the sidebar's edge to the window's.
@@ -791,56 +826,38 @@ package struct KanbanBoardView: PHView {
 
     package var standaloneChatOverlay: some PHView {
         PHGroup {
-            // An open task hides the chat rather than removing it, so it keeps its loaded
-            // history, scroll position and streaming replies for when the board comes back.
+            // Keep the sidebar mounted so its scroll position and streaming reply survive opening a task.
             if isShowingChatSidebar, let chatTask {
-                StandaloneChatPanel(chat: chatTask, onOpenTask: openTask(_:sending:)) {
-                    setChatSidebarVisible(false)
-                }
-                .equatable()
-                // The chat's Skills page spans the board beside the sidebar, not just the chat.
-                .environment(\.skillsPageWindowWidth, chatSkillsPageWidth)
-                .environment(\.showTokenStats, ShowTokenStatsAction { taskShowingTokenStats = $0 })
-                .onPreferenceChange(SkillsPageShowingKey.self) { isChatSkillsPageShowing = $0 }
-                // The open page labels widen the sidebar, pushing the board aside, and the chat moves
-                // its rows right by the same width in the same update, so they never narrow.
-                .onPreferenceChange(ChatPageAnchorsPushKey.self) { push in
-                    guard push != chatPageAnchorsPush else { return }
-                    phWithAnimation(ChatPageAnchorsLayout.slideAnimation) { chatPageAnchorsPush = push }
-                }
-                // Closing the sidebar can remove the chat without a closing preference change.
-                .onDisappear {
-                    isChatSkillsPageShowing = false
-                    chatPageAnchorsPush = 0
-                }
-                .environment(\.chatPageAnchorsPush, chatPageAnchorsPush)
-                // While the edge moves, the chat keeps the width it was last laid out at, and the panel
-                // clips or reveals the rest; it reflows when the edge rests and when the drag ends.
-                .frame(width: (chatSidebarReflowWidth ?? chatSidebarWidth) + chatPageAnchorsPush)
-                .frame(width: chatSidebarShownWidth, alignment: .leading)
-                .background(WorkspaceTheme.windowBackground)
-                .clipShape(ChatSidebarClip(width: isChatSkillsPageShowing ? chatSkillsPageWidth : nil))
-                .task(id: chatSidebarDragWidth) {
-                    // Each move restarts this wait, so the chat reflows once the edge rests.
-                    guard let chatSidebarDragWidth else { return }
-                    try? await Task.sleep(for: .milliseconds(150))
-                    guard !Task.isCancelled else { return }
-                    chatSidebarReflowWidth = chatSidebarDragWidth
-                }
-                .frame(maxHeight: .infinity, alignment: .topLeading)
-                .overlay(alignment: .trailing) {
+                // The Overlay is the accessibility container the identifier needs: without one,
+                // it replaces the conversation controls' own.
+                AtomOverlay(
+                    props: OverlayProps(align: "trailing"),
+                    common: AtomCommon(testID: "chat-sidebar", opacity: selectedTask == nil ? 1 : 0)
+                ) {
+                    AtomStack(props: StackProps(align: "leading"), common: AtomCommon(fillHeight: true, frameAlign: "topLeading")) {
+                        // While the edge moves, the chat keeps the width it was last laid out at, and the panel
+                        // clips or reveals the rest; it reflows when the edge rests and when the drag ends.
+                        AtomStack(props: StackProps(align: "leading", fill: "window"), common: AtomCommon(width: Double(chatSidebarShownWidth), frameAlign: "leading")) {
+                            AtomStack(common: AtomCommon(width: Double((chatSidebarReflowWidth ?? chatSidebarWidth) + chatPageAnchorsPush))) {
+                                standaloneChatPanel(chatTask)
+                            }
+                        }
+                        .clipShape(ChatSidebarClip(width: isChatSkillsPageShowing ? chatSkillsPageWidth : nil)) // ATOM-GAP: no clip to a rect wider than the view (StackProps clip uses the view's own shape)
+                        .task(id: chatSidebarDragWidth) {
+                            // Each move restarts this wait, so the chat reflows once the edge rests.
+                            guard let chatSidebarDragWidth else { return }
+                            try? await Task.sleep(for: .milliseconds(150))
+                            guard !Task.isCancelled else { return }
+                            chatSidebarReflowWidth = chatSidebarDragWidth
+                        }
+                    }
+                } overlay: {
                     if !isChatSkillsPageShowing {
                         chatSidebarResizeHandle(width: chatSidebarWidth)
                     }
                 }
                 .transition(.move(edge: .leading).combined(with: .opacity))
                 .id(chatTask.id)
-                // Without a container, this identifier replaces the conversation controls' own.
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("chat-sidebar")
-                // Behind an open task: unseen, unclickable, out of VoiceOver's reach, and with its
-                // controls, shortcuts and composer disabled so it never takes the keyboard.
-                .opacity(selectedTask == nil ? 1 : 0)
                 .allowsHitTesting(selectedTask == nil)
                 .accessibilityHidden(selectedTask != nil)
                 .disabled(selectedTask != nil)
@@ -849,8 +866,36 @@ package struct KanbanBoardView: PHView {
         }
     }
 
-    @PHViewBuilder
+    private func standaloneChatPanel(_ chatTask: StandaloneChat) -> some PHView {
+        StandaloneChatPanel(chat: chatTask, onOpenTask: openTask(_:sending:)) {
+            setChatSidebarVisible(false)
+        }
+        .equatable()
+        // The chat's Skills page spans the board beside the sidebar, not just the chat.
+        .environment(\.skillsPageWindowWidth, chatSkillsPageWidth)
+        .environment(\.showTokenStats, ShowTokenStatsAction { taskShowingTokenStats = $0 })
+        .onPreferenceChange(SkillsPageShowingKey.self) { isChatSkillsPageShowing = $0 }
+        // The open page labels widen the sidebar, pushing the board aside, and the chat moves
+        // its rows right by the same width in the same update, so they never narrow.
+        .onPreferenceChange(ChatPageAnchorsPushKey.self) { push in
+            guard push != chatPageAnchorsPush else { return }
+            phWithAnimation(ChatPageAnchorsLayout.slideAnimation) { chatPageAnchorsPush = push }
+        }
+        // Closing the sidebar can remove the chat without a closing preference change.
+        .onDisappear {
+            isChatSkillsPageShowing = false
+            chatPageAnchorsPush = 0
+        }
+        .environment(\.chatPageAnchorsPush, chatPageAnchorsPush)
+    }
+
     package func kanbanColumn(_ status: TaskStatus, minHeight: CGFloat = 480) -> some PHView {
+        AtomStack(common: AtomCommon(width: 264, minHeight: Double(minHeight))) {
+            kanbanColumnView(status, minHeight: minHeight)
+        }
+    }
+
+    private func kanbanColumnView(_ status: TaskStatus, minHeight: CGFloat) -> some PHView {
         KanbanColumnView(
             status: status,
             tasks: tasks.filter { task in
@@ -875,64 +920,41 @@ package struct KanbanBoardView: PHView {
             acceptsDraggedTask: status == .review && draggedTaskStatus.map(TaskStatus.manualReviewSources.contains) ?? false,
             minHeight: minHeight
         )
-        .frame(width: 264)
-        .frame(minHeight: minHeight)
     }
 
     package var boardSearchBar: some PHView {
-        PHHStack(spacing: 9) {
-            PHImage(icon: .magnifyingglass)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(WorkspaceTheme.accent)
-            PHTextField("Search tasks", text: $boardSearchText)
-                .font(.system(size: 14))
-                .textFieldStyle(.plain)
-                .focused($isBoardSearchFocused)
-                .accessibilityIdentifier("board-search-field")
-                .onKeyPress(.escape) {
-                    boardSearchText = ""
-                    phWithAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = false }
-                    isBoardSearchFocused = false
-                    return .handled
-                }
+        AtomStack(
+            props: StackProps(
+                axis: "h", spacing: 9, group: true, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.12, strokeWidth: 1,
+                material: "regular", shadow: 10, shadowOpacity: 0.10, shadowY: 3
+            ),
+            common: AtomCommon(testID: "board-search-bar", paddingX: 13, paddingY: 9)
+        ) {
+            AtomIcon(props: IconProps(name: PHIcon.magnifyingglass.name, size: 14, weight: "medium", color: "themeAccent"))
+            AtomTextField(
+                props: TextFieldProps(text: boardSearchText, placeholder: "Search tasks", autoFocus: true, style: "plain", size: 14, focusRequest: boardSearchFocusRequest),
+                common: AtomCommon(testID: "board-search-field"),
+                onChange: { boardSearchText = $0 },
+                onEscape: closeBoardSearch
+            )
             if !boardSearchText.isEmpty {
-                PHText("\(tasks.filter { $0.status != .done && $0.title.localizedCaseInsensitiveContains(boardSearchText.trimmingCharacters(in: .whitespacesAndNewlines)) }.count) matches")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("board-search-match-count")
-                PHButton { boardSearchText = "" } label: {
-                    PHImage(icon: .xmarkCircleFill)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                AtomText(
+                    props: TextProps(text: "\(tasks.filter { $0.status != .done && $0.title.localizedCaseInsensitiveContains(boardSearchText.trimmingCharacters(in: .whitespacesAndNewlines)) }.count) matches", size: 11, weight: "medium", color: "secondary"),
+                    common: AtomCommon(testID: "board-search-match-count")
+                )
+                AtomButton(common: AtomCommon(testID: "clear-board-search-button", help: "Clear search"), action: { boardSearchText = "" }) {
+                    AtomIcon(props: IconProps(name: PHIcon.xmarkCircleFill.name, size: 12, color: "secondary"))
                 }
-                    .buttonStyle(.plain)
-                    .plainButtonHoverPointer()
-                    .nativeHelp("Clear search")
-                    .accessibilityIdentifier("clear-board-search-button")
             }
-            PHButton {
-                boardSearchText = ""
-                phWithAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = false }
-                isBoardSearchFocused = false
-            } label: {
-                PHImage(icon: .xmark)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 22, height: 22)
+            AtomButton(common: AtomCommon(testID: "close-board-search-button", label: "Close search", help: "Close search"), action: closeBoardSearch) {
+                AtomIcon(props: IconProps(name: PHIcon.xmark.name, size: 11, weight: "semibold", color: "secondary"), common: AtomCommon(width: 22, height: 22))
             }
-            .buttonStyle(.plain)
-            .plainButtonHoverPointer()
-            .nativeHelp("Close search")
-            .accessibilityLabel("Close search")
-            .accessibilityIdentifier("close-board-search-button")
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 9)
-        .phMaterialBackground(.regular, in: PHRoundedRectangle.phContinuous(cornerRadius: 12))
-        .overlay(PHRoundedRectangle.phContinuous(cornerRadius: 12).strokeBorder(PHColor.primary.opacity(0.12), lineWidth: 1))
-        .phShadow(color: .black.opacity(0.10), radius: 10, y: 3)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("board-search-bar")
+    }
+
+    private func closeBoardSearch() {
+        boardSearchText = ""
+        phWithAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = false }
     }
 
     package var runningTaskCountByProvider: [ConversationProvider: Int] {
@@ -940,9 +962,12 @@ package struct KanbanBoardView: PHView {
     }
 
     package var boardSidebar: some PHView {
-        PHVStack(alignment: .leading, spacing: 12) {
+        AtomStack(
+            props: StackProps(spacing: 12, align: "leading", group: true, fill: "panel", fillOpacity: 0.62),
+            common: AtomCommon(label: "Kanban sidebar", width: Double(boardSidebarWidth), fillHeight: true, paddingX: 12, paddingY: 12)
+        ) {
             // Spaced like the plugin entries, so Chat reads as the first of them.
-            PHVStack(alignment: .leading, spacing: 6) {
+            AtomStack(props: StackProps(spacing: 6, align: "leading")) {
                 chatSidebarEntry
 
                 PluginSlot(
@@ -955,22 +980,16 @@ package struct KanbanBoardView: PHView {
                 )
             }
 
-            PHSpacer(minLength: 0)
+            AtomSpacer(props: SpacerProps(minLength: 0))
 
             BoardSidebarBottomSlot(runningProviders: runningTaskCountByProvider, appearance: appearance, actions: boardPluginActions, add: startPluginTask)
         }
-        .padding(12)
-        .frame(width: boardSidebarWidth)
-        .frame(maxHeight: .infinity, alignment: .topLeading)
-        .background(WorkspaceTheme.panelBackground.opacity(0.62))
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Kanban sidebar")
     }
 
     /// The board's header, composed only of plugin atoms (Plugins/Atoms). The
     /// New Task button takes the window's tint (`WorkspaceTheme.accent`).
     package var boardHeader: some PHView {
-        AtomStack(props: StackProps(axis: "h", spacing: 24), common: AtomCommon(paddingX: 30)) {
+        AtomStack(props: StackProps(axis: "h", spacing: 24, group: true), common: AtomCommon(label: "Kanban header", paddingX: 30, paddingTop: 24, paddingBottom: 21)) {
             AtomStack(props: StackProps(axis: "h", spacing: 14)) {
                 AtomIcon(props: IconProps(asset: "PlayhouseLogo", original: true), common: AtomCommon(label: "Playhouse logo", width: 50, height: 50))
                 AtomStack(props: StackProps(spacing: 3, align: "leading")) {
@@ -994,10 +1013,6 @@ package struct KanbanBoardView: PHView {
                 }
             }
         }
-        .padding(.top, 24)
-        .padding(.bottom, 21)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Kanban header")
     }
 
     /// The notice that some task worktrees were kept, composed only of plugin atoms (Plugins/Atoms).

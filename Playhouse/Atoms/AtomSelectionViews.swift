@@ -309,6 +309,25 @@ package struct AtomScroll<Content: PHView>: PHView {
     @PHState private var space = UUID()
 
     package var body: some PHView {
+        surface
+            .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
+            .atomCommon(common, atom: .scroll)
+    }
+
+    @PHViewBuilder
+    private var surface: some PHView {
+        if props.axis == "horizontal" {
+            PHScrollView(.horizontal, content: content)
+        } else if props.axis == "both" {
+            PHScrollView([.horizontal, .vertical], content: content)
+        } else if props.directContent == true {
+            PHScrollView(content: content)
+        } else {
+            managedScroll
+        }
+    }
+
+    private var managedScroll: some PHView {
         PHScrollViewReader { proxy in
             scrollView
                 .onChange(of: props.scrollRequest) {
@@ -321,8 +340,6 @@ package struct AtomScroll<Content: PHView>: PHView {
                     }
                 }
         }
-        .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
-        .atomCommon(common, atom: .scroll)
     }
 
     private var scrollView: some PHView {

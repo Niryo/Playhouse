@@ -500,63 +500,44 @@ extension TaskConversationView {
         // The icon sits beside the button, not in its label, because a macOS
         // button folds its label into one accessible element and the icon must
         // stay a distinct image.
-        PHHStack(alignment: .top, spacing: 10) {
-            PHVStack(spacing: 0) {
-                PHColor.clear.frame(width: 20, height: 5).accessibilityHidden(true)
-                PHImage("SubagentIcon")
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: 20, height: 20)
-                    .contentShape(PHRectangle())
-                    .onTapGesture { openSubagent(activity) }
-                    .plainButtonHoverPointer()
-                    .accessibilityLabel("\(activity.title) agent icon")
+        AtomStack(props: StackProps(axis: "h", spacing: 10, align: "top"), common: AtomCommon(fillWidth: true, frameAlign: "leading")) {
+            AtomStack(props: StackProps(axis: "v", spacing: 0)) {
+                AtomStack(common: AtomCommon(width: 20, height: 5, decorative: true)) {}
+                AtomStack(
+                    props: StackProps(hitSurface: true),
+                    common: AtomCommon(width: 20, height: 20)
+                ) {
+                    AtomIcon(props: IconProps(asset: "SubagentIcon", original: true), common: AtomCommon(label: "\(activity.title) agent icon", width: 20, height: 20))
+                }
+                .onTapGesture { openSubagent(activity) }
+                .hoverCursor(.pointingHand) // no-pointer: the gesture uses the same pointing-hand cursor over the atom.
             }
-            PHButton {
+            AtomButton(props: ButtonProps(style: "plain"), common: AtomCommon(help: "Open the read-only conversation for this agent"), action: {
                 openSubagent(activity)
-            } label: {
-                PHVStack(alignment: .leading, spacing: 3) {
-                    PHText("\(activity.title) \(activity.timelineStatus)")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            }) {
+                AtomStack(props: StackProps(axis: "v", spacing: 3, align: "leading", hitSurface: true), common: AtomCommon(fillWidth: true, frameAlign: "leading", paddingY: 5)) {
+                    AtomText(props: TextProps(text: "\(activity.title) \(activity.timelineStatus)", size: 14, weight: "medium", color: "primary"), common: AtomCommon(fillWidth: true, frameAlign: "leading"))
                     let metadata = [activity.agentPath, activity.model, activity.reasoningEffort]
                         .compactMap { $0 }
                         .filter { !$0.isEmpty }
                     if let duration = activity.durationLabel() {
-                        PHText(duration)
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                        AtomText(props: TextProps(text: duration, size: 10, weight: "medium", design: "monospaced", color: "secondary"))
                     }
                     if !metadata.isEmpty {
-                        PHText(metadata.joined(separator: " · "))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        AtomText(props: TextProps(text: metadata.joined(separator: " · "), size: 10, color: "secondary", lineLimit: 1, truncation: "middle"), common: AtomCommon(fillWidth: true, frameAlign: "leading"))
                     }
                 }
-                .contentShape(PHRectangle())
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 5)
             }
-            .plainButtonHoverPointer()
-            .nativeHelp("Open the read-only conversation for this agent")
-            .buttonStyle(.plain)
             // Beside the button, like the icon, so it stays its own element.
-            PHImage(icon: .chevronRight)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 16, height: 30)
-                .contentShape(PHRectangle())
-                .onTapGesture { openSubagent(activity) }
-                .plainButtonHoverPointer()
-                .accessibilityLabel("Open \(activity.title)")
-                .accessibilityIdentifier("subagent-row-chevron")
+            AtomStack(
+                props: StackProps(hitSurface: true),
+                common: AtomCommon(testID: "subagent-row-chevron", label: "Open \(activity.title)", width: 16, height: 30)
+            ) {
+                AtomIcon(props: IconProps(name: PHIcon.chevronRight.name, size: 11, weight: "semibold", color: "secondary"))
+            }
+            .onTapGesture { openSubagent(activity) }
+            .hoverCursor(.pointingHand) // no-pointer: the gesture uses the same pointing-hand cursor over the atom.
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
         .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
@@ -570,44 +551,30 @@ extension TaskConversationView {
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
         if compact {
-            PHHStack(spacing: 7) {
-                PHImage(icon: activity.status == "completed" ? .checkmarkCircleFill : ["interrupted", "stopped"].contains(activity.status) ? .pauseCircleFill : .gearshapeTwoFill)
-                    .foregroundStyle(activity.status == "completed" ? .green : ["interrupted", "stopped"].contains(activity.status) ? .orange : .accentColor)
-                PHText(activity.titlePreview ?? activity.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .textSelection(.enabled)
+            AtomStack(props: StackProps(axis: "h", spacing: 7, fill: "panel", cornerRadius: 8), common: AtomCommon(fillWidth: true, frameAlign: "leading", padding: 9)) {
+                AtomIcon(props: IconProps(
+                    name: (activity.status == "completed" ? PHIcon.checkmarkCircleFill : ["interrupted", "stopped"].contains(activity.status) ? PHIcon.pauseCircleFill : PHIcon.gearshapeTwoFill).name,
+                    color: activity.status == "completed" ? "green" : ["interrupted", "stopped"].contains(activity.status) ? "orange" : "accent"
+                ))
+                AtomText(props: TextProps(text: activity.titlePreview ?? activity.title, size: 11, weight: "medium", lineLimit: 1, truncation: "tail", selectable: true))
                     .accessibilityIdentifier("codex-activity-title-\(activity.id)")
                 if !displayDetail.isEmpty {
-                    PHText(displayDetail)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    AtomText(props: TextProps(text: displayDetail, size: 10, design: "monospaced", color: "secondary", lineLimit: 1, truncation: "tail"), common: AtomCommon(fillWidth: true, frameAlign: "leading"))
                         .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
                         .accessibilityLabel(displayDetail)
                 } else {
-                    PHSpacer(minLength: 0)
+                    AtomSpacer(props: SpacerProps(minLength: 0))
                 }
-                PHText(activity.statusLabel)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                AtomText(props: TextProps(text: activity.statusLabel, size: 10, weight: "medium", color: "secondary"))
                 if activity.isActive, activity.startedAt != nil {
                     PHTimelineView(.periodic(from: .now, by: 1)) { timeline in
                         let duration = activity.durationLabel(at: timeline.date) ?? ""
-                        PHText(duration)
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                        AtomText(props: TextProps(text: duration, size: 10, weight: "medium", design: "monospaced", color: "secondary"))
                             .accessibilityValue(duration)
                             .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(9)
-            .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle(cornerRadius: 8))
             .accessibilityElement(children: .contain)
             .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
             .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
@@ -617,69 +584,47 @@ extension TaskConversationView {
         // while it runs, its elapsed time. Expanding shows the whole title, the detail and the
         // duration. The row's accessibility value carries the detail and duration either way.
         let isExpanded = expandedActivityIDs.contains(activity.id)
-        PHVStack(alignment: .leading, spacing: 3) {
-            PHHStack(spacing: 7) {
-                PHImage(icon: activity.status == "completed" ? .checkmarkCircleFill : ["interrupted", "stopped"].contains(activity.status) ? .pauseCircleFill : .gearshapeTwoFill)
-                    .foregroundStyle(activity.status == "completed" ? .green : ["interrupted", "stopped"].contains(activity.status) ? .orange : .accentColor)
+        AtomStack(props: StackProps(axis: "v", spacing: 3, align: "leading", fill: "panel", cornerRadius: 8), common: AtomCommon(fillWidth: true, frameAlign: "leading", padding: 9)) {
+            AtomStack(props: StackProps(axis: "h", spacing: 7)) {
+                AtomIcon(props: IconProps(
+                    name: (activity.status == "completed" ? PHIcon.checkmarkCircleFill : ["interrupted", "stopped"].contains(activity.status) ? PHIcon.pauseCircleFill : PHIcon.gearshapeTwoFill).name,
+                    color: activity.status == "completed" ? "green" : ["interrupted", "stopped"].contains(activity.status) ? "orange" : "accent"
+                ))
                 // A long title shows its preview until the reader expands it; see `titlePreview`.
                 let titlePreview = activity.titlePreview
                 if !isExpanded || titlePreview == nil {
-                    PHText(titlePreview ?? activity.title)
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(isExpanded ? nil : 1)
-                        .truncationMode(.tail)
-                        .textSelection(.enabled)
+                    AtomText(props: TextProps(text: titlePreview ?? activity.title, size: 11, weight: "medium", lineLimit: isExpanded ? nil : 1, truncation: "tail", selectable: true))
                         .accessibilityIdentifier("codex-activity-title-\(activity.id)")
                 }
-                PHSpacer(minLength: 4)
+                AtomSpacer(props: SpacerProps(minLength: 4))
                 if !isExpanded, activity.isActive, activity.startedAt != nil {
                     activityDurationText(activity)
                 }
-                PHButton {
+                AtomButton(props: ButtonProps(style: "plain"), common: AtomCommon(help: isExpanded ? "Show only the first line of this activity" : "Show this activity's whole title and details"), action: {
                     if isExpanded { expandedActivityIDs.remove(activity.id) } else { expandedActivityIDs.insert(activity.id) }
-                } label: {
-                    PHImage(icon: isExpanded ? .chevronUp : .chevronDown)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18, height: 18)
-                        .contentShape(PHRectangle())
+                }) {
+                    AtomIcon(props: IconProps(name: (isExpanded ? PHIcon.chevronUp : PHIcon.chevronDown).name, size: 10, weight: "semibold", color: "secondary"), common: AtomCommon(width: 18, height: 18))
                 }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .nativeHelp(isExpanded ? "Show only the first line of this activity" : "Show this activity's whole title and details")
                 .accessibilityLabel(isExpanded ? "Collapse activity" : "Expand activity to show all text")
                 .accessibilityValue(isExpanded ? "expanded" : "collapsed")
                 .accessibilityIdentifier("codex-activity-toggle-\(activity.id)")
-                PHText(activity.statusLabel)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                AtomText(props: TextProps(text: activity.statusLabel, size: 10, weight: "medium", color: "secondary"))
             }
             if isExpanded {
                 if activity.titlePreview != nil {
                     // On its own line rather than in the header's stack, which would measure it
                     // as one line of the whole title on every pass.
-                    PHText(activity.title)
-                        .font(.system(size: 11, weight: .medium))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    AtomText(props: TextProps(text: activity.title, size: 11, weight: "medium", wrap: true, selectable: true), common: AtomCommon(fillWidth: true, frameAlign: "leading"))
                         .accessibilityIdentifier("codex-activity-title-\(activity.id)")
                 }
                 if !displayDetail.isEmpty {
-                    PHText(displayDetail)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(4)
+                    AtomText(props: TextProps(text: displayDetail, size: 10, design: "monospaced", color: "secondary", lineLimit: 4, selectable: true))
                         .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
                         .accessibilityLabel(displayDetail)
                 }
                 activityDurationText(activity)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(9)
-        .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
         .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
@@ -693,22 +638,16 @@ extension TaskConversationView {
         if activity.isActive, activity.startedAt != nil {
             PHTimelineView(.periodic(from: .now, by: 1)) { timeline in
                 let duration = activity.durationLabel(at: timeline.date) ?? ""
-                PHText(duration)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                AtomText(props: TextProps(text: duration, size: 10, weight: "medium", design: "monospaced", color: "secondary"))
                     .accessibilityValue(duration)
                     .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
             }
         } else if let duration = activity.durationLabel() {
-            PHText(duration)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
+            AtomText(props: TextProps(text: duration, size: 10, weight: "medium", design: "monospaced", color: "secondary"))
                 .accessibilityValue(duration)
                 .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
         } else {
-            PHText("Duration unavailable")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+            AtomText(props: TextProps(text: "Duration unavailable", size: 10, color: "tertiary"))
                 .accessibilityValue("Duration unavailable")
                 .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
         }
@@ -741,8 +680,7 @@ extension TaskConversationView {
         let title = "Conversation switched to \(boundary.provider.displayName)"
         return AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(paddingY: 4)) {
             transcriptRule(opacity: 0.12)
-            AtomText(props: TextProps(text: title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1))
-                .fixedSize()
+            AtomText(props: TextProps(text: title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(fixedSize: true))
                 .accessibilitySummary(title, id: "provider-boundary-\(boundary.provider.rawValue)")
             transcriptRule(opacity: 0.12)
         }
@@ -791,56 +729,53 @@ extension TaskConversationView {
     }
 
     package func subagentConversation(_ activity: ConversationActivity) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
-            PHHStack(spacing: 12) {
-                PHButton {
+        AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading", fill: "window"), common: AtomCommon(fillWidth: true, fillHeight: true)) {
+            AtomStack(props: StackProps(axis: "h", spacing: 12), common: AtomCommon(paddingX: 20, paddingY: 14)) {
+                AtomButton(props: ButtonProps(style: "plain"), common: AtomCommon(help: "Return to the parent conversation"), action: {
                     subagentRefresh?.cancel()
                     selectedSubagent = nil
                     subagentHistory = nil
-                } label: {
-                    PHLabel("Back", icon: .arrowLeft)
+                }) {
+                    AtomLabel(props: LabelProps(text: "Back", icon: PHIcon.arrowLeft.name))
                 }
-                .plainButtonHoverPointer()
-                .nativeHelp("Return to the parent conversation")
-                .buttonStyle(.plain)
                 .accessibilityIdentifier("subagent-back-button")
-                PHText(activity.title).font(.system(size: 14, weight: .semibold))
-                PHSpacer()
-                PHText("Read only").font(.system(size: 11)).foregroundStyle(.secondary)
+                AtomText(props: TextProps(text: activity.title, size: 14, weight: "semibold"))
+                AtomSpacer()
+                AtomText(props: TextProps(text: "Read only", size: 11, color: "secondary"))
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            PHRectangle().fill(PHColor.primary.opacity(0.08)).frame(height: 1)
+            transcriptRule(opacity: 0.08)
             if isLoadingSubagent {
-                PHProgressView("Loading agent conversation…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                AtomStack(props: StackProps(spacing: 6), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) {
+                    AtomSpinner(props: SpinnerProps(size: "regular"))
+                    AtomText(props: TextProps(text: "Loading agent conversation…"))
+                }
             } else if let subagentError {
-                PHText(subagentError).foregroundStyle(.secondary).padding(24)
+                AtomText(props: TextProps(text: subagentError, color: "secondary"), common: AtomCommon(padding: 24))
             } else if let subagentHistory {
-                PHScrollView {
-                    PHLazyVStack(alignment: .leading, spacing: 16) {
-                        PHForEach(subagentToolCalls(after: nil, in: subagentHistory)) { activity in
-                            ToolCallTimelineRow(activity: activity, expansion: toolCallExpansion)
-                        }
-                        PHForEach(subagentHistory.messages) { message in
-                            messageBubble(message)
-                            PHForEach(subagentToolCalls(after: message.id, in: subagentHistory)) { activity in
-                                ToolCallTimelineRow(activity: activity, expansion: toolCallExpansion)
+                AtomScroll(props: ScrollProps(directContent: true)) {
+                    AtomStack(common: AtomCommon(fillWidth: true, frameAlign: "center")) {
+                        AtomStack(common: AtomCommon(maxWidth: 820, padding: 24)) {
+                            AtomStack(props: StackProps(spacing: 16, align: "leading", lazy: true)) {
+                                PHForEach(subagentToolCalls(after: nil, in: subagentHistory)) { activity in
+                                    ToolCallTimelineRow(activity: activity, expansion: toolCallExpansion)
+                                }
+                                PHForEach(subagentHistory.messages) { message in
+                                    messageBubble(message)
+                                    PHForEach(subagentToolCalls(after: message.id, in: subagentHistory)) { activity in
+                                        ToolCallTimelineRow(activity: activity, expansion: toolCallExpansion)
+                                    }
+                                }
+                                if subagentHistory.messages.isEmpty && subagentHistory.timelineActivities.isEmpty {
+                                    AtomText(props: TextProps(text: "No conversation content is available yet.", color: "secondary"), common: AtomCommon(padding: 20))
+                                }
                             }
                         }
-                        if subagentHistory.messages.isEmpty && subagentHistory.timelineActivities.isEmpty {
-                            PHText("No conversation content is available yet.").foregroundStyle(.secondary).padding(20)
-                        }
                     }
-                    .padding(24)
-                    .frame(maxWidth: 820)
-                    .frame(maxWidth: .infinity)
                     .hoverRevealScrollers()
                 }
                 .accessibilityIdentifier("subagent-conversation-scroll-view")
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WorkspaceTheme.windowBackground)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("subagent-conversation-panel")
     }

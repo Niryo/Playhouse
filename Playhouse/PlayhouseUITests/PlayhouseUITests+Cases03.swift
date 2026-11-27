@@ -627,7 +627,8 @@ extension PlayhouseUITests {
         let card = app.buttons["Dirty done UI"].firstMatch
         XCTAssertTrue(card.waitToExist(timeout: 5))
         assertDoneDrawerResting("before any drag")
-        attachScreenshot(named: "Done drawer peeks at the board edge while resting", fullScreen: true)
+        attachScreenshot(named: "Done drawer peeks at the board edge while resting")
+        attachRegionScreenshot([element("task-done-drop-target")], named: "Done drawer resting affordance", padding: 12)
         // Dropping a card back in its own column hits no drop target; the drawer must still close.
         let reviewColumn = element("column-review")
         XCTAssertTrue(reviewColumn.waitToExist(timeout: 5))
@@ -639,8 +640,8 @@ extension PlayhouseUITests {
         )
         assertDoneDrawerResting("after a card is dropped back in place")
         XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Review", "Dropping a card in place must not move the task.")
-        attachScreenshot(named: "Done drawer closes again after a drop in place", fullScreen: true)
-        let openDrawerCapture = startDelayedScreenCapture(afterSeconds: 2)
+        attachScreenshot(named: "Done drawer closes again after a drop in place")
+        let openDrawerCapture = startDelayedScreenCapture(afterSeconds: 2, region: app.windows.firstMatch.frame)
         dragTaskToDone(card)
         attachScreenCapture(openDrawerCapture, named: "Done drawer slides open while a card is dragged")
         // Scoped to the dialog sheet: a bare "Cancel" button also matches a Touch Bar element.
@@ -663,7 +664,7 @@ extension PlayhouseUITests {
             catch { return false }
         }, timeout: 15), "Confirming should persist the Done status.")
         assertDoneDrawerResting("after a card is dropped on Done")
-        attachScreenshot(named: "Done drawer closes after a drop on Done", fullScreen: true)
+        attachScreenshot(named: "Done drawer closes after a drop on Done")
         try assertTaskArchived("Dirty done UI")
         XCTAssertFalse(FileManager.default.fileExists(atPath: path), "Confirmed Done must remove the task worktree with its uncommitted changes.")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetBefore)

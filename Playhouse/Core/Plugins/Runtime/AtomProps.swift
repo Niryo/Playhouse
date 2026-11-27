@@ -38,16 +38,19 @@ package enum AtomType: String, CaseIterable, Sendable {
     case modal = "Modal"
     case page = "Page"
     case sidePanel = "SidePanel"
+    case resizeHandle = "ResizeHandle"
+    case datePicker = "DatePicker"
 
     /// The events each atom raises; a plugin's handler for any other name is never called.
     package var events: Set<String> {
         switch self {
         case .button: ["onPress"]
+        case .stack: ["onHover"]
         case .pillPicker: ["onChange"]
         case .card: ["onPress", "onMenu"]
         case .disclosure: ["onToggle"]
         case .choiceBar, .segmented: ["onChange"]
-        case .textField: ["onChange", "onSubmit", "onArrow"]
+        case .textField: ["onChange", "onSubmit", "onArrow", "onEscape"]
         case .toggle: ["onToggle"]
         case .menu: ["onMenu"]
         case .pressArea: ["onPress", "onLongPress"]
@@ -55,7 +58,9 @@ package enum AtomType: String, CaseIterable, Sendable {
         case .popover, .modal: ["onDismiss"]
         case .stepSlider: ["onChange"]
         case .scroll: ["onEndReached"]
-        case .stack, .text, .markdown, .icon, .image, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
+        case .resizeHandle: ["onDrag", "onDragEnd"]
+        case .datePicker: ["onChange"]
+        case .text, .markdown, .icon, .image, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
         }
     }
 
@@ -63,7 +68,7 @@ package enum AtomType: String, CaseIterable, Sendable {
     package var takesAtomChildren: Bool {
         switch self {
         case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .overlay, .popover, .modal, .page, .sidePanel: true
-        case .text, .markdown, .icon, .image, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
+        case .text, .markdown, .icon, .image, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider, .resizeHandle, .datePicker: false
         }
     }
 
@@ -74,7 +79,7 @@ package enum AtomType: String, CaseIterable, Sendable {
         switch self {
         case .stack, .panel, .card, .scroll, .disclosure, .overlay, .popover, .modal, .page, .sidePanel: true
         case .text, .markdown, .icon, .image, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
-             .toggle, .textField, .segmented, .menu, .pressArea, .editor, .stepSlider: false
+             .toggle, .textField, .segmented, .menu, .pressArea, .editor, .stepSlider, .resizeHandle, .datePicker: false
         }
     }
 
@@ -125,6 +130,8 @@ package enum AtomType: String, CaseIterable, Sendable {
         case .modal: Self.keys(ModalProps.CodingKeys.self)
         case .page: Self.keys(PageProps.CodingKeys.self)
         case .sidePanel: Self.keys(SidePanelProps.CodingKeys.self)
+        case .resizeHandle: Self.keys(ResizeHandleProps.CodingKeys.self)
+        case .datePicker: Self.keys(DatePickerProps.CodingKeys.self)
         }
     }
 
@@ -216,6 +223,8 @@ package enum AtomType: String, CaseIterable, Sendable {
         case .modal: ModalProps.self
         case .page: PageProps.self
         case .sidePanel: SidePanelProps.self
+        case .resizeHandle: ResizeHandleProps.self
+        case .datePicker: DatePickerProps.self
         }
     }
 
@@ -299,6 +308,9 @@ package struct AtomCommon: AtomPropsCodable, Equatable {
     /// Keep its natural size: a tight row neither wraps nor truncates it, and
     /// squeezes its other children instead (a badge beside a name).
     package var fixedSize: Bool?
+    /// Preserves the full height of content while allowing it to wrap horizontally.
+    package var scale: Double? = nil
+    package var fixedHeight: Bool? = nil
     package var padding: Double?
     /// Extra horizontal padding, inside `padding`.
     package var paddingX: Double?
@@ -308,14 +320,39 @@ package struct AtomCommon: AtomPropsCodable, Equatable {
     package var opacity: Double?
     /// Let clicks through to whatever is behind (the card's open button).
     package var passThrough: Bool?
+    /// Extra padding on one edge, inside `padding` and beside `paddingX` and `paddingY`.
+    package var paddingTop: Double?
+    package var paddingBottom: Double?
+    package var paddingLeading: Double?
+    package var paddingTrailing: Double?
+    /// The widest and tallest it grows, in points: it takes the size it is
+    /// offered up to these (`fillWidth` and `fillHeight` with no cap).
+    package var maxWidth: Double?
+    package var maxHeight: Double?
+    /// Stretch to the available height.
+    package var fillHeight: Bool?
+    /// Where its content sits when its frame (`width`, `height`, `fillWidth`,
+    /// `fillHeight`, `maxWidth`, `maxHeight`) is larger: center, leading,
+    /// trailing, top, bottom, topLeading, topTrailing, bottomLeading or
+    /// bottomTrailing. Unset, `fillWidth` and `fillHeight` keep it at the
+    /// leading edge and top, and a fixed size centers it.
+    package var frameAlign: String?
+    /// Hidden from accessibility: a decorative atom (a status dot, a divider).
+    package var decorative: Bool?
+    /// Which of a row's children keeps its size when the row is tight: the
+    /// highest first (0 default).
+    package var layoutPriority: Double?
 
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case testID, label, value, hint, help, width, height, minWidth, minHeight, fillWidth, fixedSize, padding, paddingX, paddingY, opacity, passThrough
+        case paddingTop, paddingBottom, paddingLeading, paddingTrailing, maxWidth, maxHeight, fillHeight, frameAlign, decorative, layoutPriority
     }
 
     package static let keys = Set(CodingKeys.allCases.map(\.stringValue))
 
-    package init(testID: String? = nil, label: String? = nil, value: String? = nil, hint: String? = nil, help: String? = nil, width: Double? = nil, height: Double? = nil, minWidth: Double? = nil, minHeight: Double? = nil, fillWidth: Bool? = nil, fixedSize: Bool? = nil, padding: Double? = nil, paddingX: Double? = nil, paddingY: Double? = nil, opacity: Double? = nil, passThrough: Bool? = nil) {
+    package init(testID: String? = nil, label: String? = nil, value: String? = nil, hint: String? = nil, help: String? = nil, width: Double? = nil, height: Double? = nil, minWidth: Double? = nil, minHeight: Double? = nil, maxWidth: Double? = nil, maxHeight: Double? = nil, fillWidth: Bool? = nil, fillHeight: Bool? = nil, frameAlign: String? = nil, fixedSize: Bool? = nil, layoutPriority: Double? = nil, padding: Double? = nil, paddingX: Double? = nil, paddingY: Double? = nil, paddingTop: Double? = nil, paddingBottom: Double? = nil, paddingLeading: Double? = nil, paddingTrailing: Double? = nil, opacity: Double? = nil, passThrough: Bool? = nil, decorative: Bool? = nil, fixedHeight: Bool? = nil, scale: Double? = nil) {
+        self.scale = scale
+        self.fixedHeight = fixedHeight
         self.testID = testID
         self.label = label
         self.value = value
@@ -332,12 +369,28 @@ package struct AtomCommon: AtomPropsCodable, Equatable {
         self.paddingY = paddingY
         self.opacity = opacity
         self.passThrough = passThrough
+        self.paddingTop = paddingTop
+        self.paddingBottom = paddingBottom
+        self.paddingLeading = paddingLeading
+        self.paddingTrailing = paddingTrailing
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
+        self.fillHeight = fillHeight
+        self.frameAlign = frameAlign
+        self.decorative = decorative
+        self.layoutPriority = layoutPriority
     }
+
+    /// Whether it pads one edge more than the others.
+    package var hasEdgePadding: Bool { paddingTop != nil || paddingBottom != nil || paddingLeading != nil || paddingTrailing != nil }
 }
 
-/// A row or column. `axis` is "h" or "v" (default); `align` is leading,
-/// center or trailing for a column and top, center, bottom or baseline (the
-/// first line of text) for a row.
+/// A row, column or layers. `axis` is "h", "v" (default) or "z" (children
+/// drawn over each other, sized to the largest); `align` is leading, center
+/// or trailing for a column, top, center, bottom or baseline (the first line
+/// of text) for a row, and any `AtomAlignment` name (center default) for
+/// layers. With a handler, `onHover(isHovering)` is raised as the pointer
+/// enters and leaves it.
 /// `scrollID` names it as a place a Scroll around it can scroll to (`scrollTo`).
 /// `group` makes it one accessibility container for its children; `combine`
 /// makes it one accessibility element whose label joins theirs; `summary`
@@ -358,6 +411,8 @@ package struct AtomCommon: AtomPropsCodable, Equatable {
 /// `align` center or unset (a Stack's default), centered both ways, also when
 /// `fillWidth` stretches it. A fixed `width` or `height` centers them, as it
 /// centers any atom's content. A color name it doesn't know draws primary.
+/// `material` puts a translucent material behind the fill, `clip` clips the
+/// children to the shape, and `shadow` casts a shadow; each is a surface prop.
 package struct StackProps: AtomProps {
     package static let atomType = AtomType.stack
 
@@ -376,9 +431,32 @@ package struct StackProps: AtomProps {
     package var dash: [Double]?
     package var summary: Bool?
     package var scrollID: String?
+    /// Includes empty space inside the surface in hit testing.
+    package var hitSurface: Bool? = nil
+    /// Inherited typography for children that do not set their own.
+    package var textSize: Double? = nil
+    package var textColor: String? = nil
+    /// A platform form section heading, used with axis "section".
+    package var sectionTitle: String? = nil
+    /// Rounds just the top corners of the surface.
+    package var topCorners: Bool? = nil
+    package var lazy: Bool? = nil
+    package var layout: String? = nil
+    package var collapsed: Bool? = nil
+    /// A translucent material behind its fill: regular, ultraThin or bar.
+    package var material: String?
+    /// Clips its children to its shape.
+    package var clip: Bool?
+    /// A black shadow behind it, blurred by `shadow` points, at
+    /// `shadowOpacity` (0.33 default), moved by `shadowX` and `shadowY`.
+    package var shadow: Double?
+    package var shadowOpacity: Double?
+    package var shadowX: Double?
+    package var shadowY: Double?
 
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case axis, spacing, align, group, combine, summary, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash, scrollID
+        case material, clip, shadow, shadowOpacity, shadowX, shadowY
     }
 
     /// Whether it fills its shape.
@@ -386,9 +464,23 @@ package struct StackProps: AtomProps {
     /// Whether it draws a border.
     package var hasStroke: Bool { stroke != nil || strokeOpacity != nil || strokeWidth != nil || dash != nil }
     /// Whether it draws a surface, and so lays its children out inside it.
-    package var hasSurface: Bool { hasFill || hasStroke || cornerRadius != nil || capsule != nil }
+    package var hasSurface: Bool { hasFill || hasStroke || cornerRadius != nil || capsule != nil || material != nil || clip != nil || shadow != nil }
 
-    package init(axis: String? = nil, spacing: Double? = nil, align: String? = nil, group: Bool? = nil, combine: Bool? = nil, fill: String? = nil, fillOpacity: Double? = nil, cornerRadius: Double? = nil, capsule: Bool? = nil, stroke: String? = nil, strokeOpacity: Double? = nil, strokeWidth: Double? = nil, dash: [Double]? = nil, summary: Bool? = nil, scrollID: String? = nil) {
+    package init(axis: String? = nil, spacing: Double? = nil, align: String? = nil, group: Bool? = nil, combine: Bool? = nil, fill: String? = nil, fillOpacity: Double? = nil, cornerRadius: Double? = nil, capsule: Bool? = nil, stroke: String? = nil, strokeOpacity: Double? = nil, strokeWidth: Double? = nil, dash: [Double]? = nil, material: String? = nil, clip: Bool? = nil, shadow: Double? = nil, shadowOpacity: Double? = nil, shadowX: Double? = nil, shadowY: Double? = nil, summary: Bool? = nil, scrollID: String? = nil, hitSurface: Bool? = nil, textSize: Double? = nil, textColor: String? = nil, sectionTitle: String? = nil, topCorners: Bool? = nil, lazy: Bool? = nil, layout: String? = nil, collapsed: Bool? = nil) {
+        self.layout = layout
+        self.collapsed = collapsed
+        self.lazy = lazy
+        self.topCorners = topCorners
+        self.sectionTitle = sectionTitle
+        self.hitSurface = hitSurface
+        self.textSize = textSize
+        self.textColor = textColor
+        self.material = material
+        self.clip = clip
+        self.shadow = shadow
+        self.shadowOpacity = shadowOpacity
+        self.shadowX = shadowX
+        self.shadowY = shadowY
         self.axis = axis
         self.spacing = spacing
         self.align = align
@@ -430,12 +522,18 @@ package struct TextProps: AtomProps {
     package var monospacedDigits: Bool?
     /// How wrapped lines line up: leading (default), center or trailing.
     package var align: String?
+    /// Lets the reader select and copy the text.
+    package var selectable: Bool?
+
+    package var textStyle: String? = nil
 
     package enum CodingKeys: String, CodingKey, CaseIterable {
-        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits, align
+        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits, align, selectable
     }
 
-    package init(text: String? = nil, size: Double? = nil, weight: String? = nil, design: String? = nil, color: String? = nil, lineLimit: Int? = nil, tracking: Double? = nil, lineSpacing: Double? = nil, wrap: Bool? = nil, numeric: Bool? = nil, truncation: String? = nil, monospacedDigits: Bool? = nil, align: String? = nil) {
+    package init(text: String? = nil, size: Double? = nil, weight: String? = nil, design: String? = nil, color: String? = nil, lineLimit: Int? = nil, tracking: Double? = nil, lineSpacing: Double? = nil, wrap: Bool? = nil, numeric: Bool? = nil, truncation: String? = nil, monospacedDigits: Bool? = nil, align: String? = nil, selectable: Bool? = nil, textStyle: String? = nil) {
+        self.textStyle = textStyle
+        self.selectable = selectable
         self.text = text
         self.size = size
         self.weight = weight
@@ -504,9 +602,17 @@ package struct IconProps: AtomProps {
     package var color: String?
     package var original: Bool?
 
+    package var textStyle: String? = nil
+    /// Additional palette color for symbols with more than one layer.
+    package var secondaryColor: String? = nil
+    package var secondaryOpacity: Double? = nil
+
     package enum CodingKeys: String, CodingKey, CaseIterable { case name, asset, size, weight, color, original }
 
-    package init(name: String? = nil, asset: String? = nil, size: Double? = nil, weight: String? = nil, color: String? = nil, original: Bool? = nil) {
+    package init(name: String? = nil, asset: String? = nil, size: Double? = nil, weight: String? = nil, color: String? = nil, original: Bool? = nil, textStyle: String? = nil, secondaryColor: String? = nil, secondaryOpacity: Double? = nil) {
+        self.secondaryColor = secondaryColor
+        self.secondaryOpacity = secondaryOpacity
+        self.textStyle = textStyle
         self.name = name
         self.asset = asset
         self.size = size
@@ -580,10 +686,12 @@ package struct LabelProps: AtomProps {
     package var size: Double?
     package var weight: String?
     package var color: String?
+    package var lineLimit: Int? = nil
 
     package enum CodingKeys: String, CodingKey, CaseIterable { case text, icon, size, weight, color }
 
-    package init(text: String, icon: String, size: Double? = nil, weight: String? = nil, color: String? = nil) {
+    package init(text: String, icon: String, size: Double? = nil, weight: String? = nil, color: String? = nil, lineLimit: Int? = nil) {
+        self.lineLimit = lineLimit
         self.text = text
         self.icon = icon
         self.size = size
@@ -616,10 +724,13 @@ package struct ButtonProps: AtomProps {
     package var shortcut: String?
     package var destructive: Bool?
     package var selected: Bool?
+    /// The native command title for a menu item.
+    package var title: String? = nil
 
     package enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive, selected }
 
-    package init(style: String? = nil, emphasis: Double? = nil, overhang: Bool? = nil, disabled: Bool? = nil, controlSize: String? = nil, shortcut: String? = nil, destructive: Bool? = nil, selected: Bool? = nil) {
+    package init(style: String? = nil, emphasis: Double? = nil, overhang: Bool? = nil, disabled: Bool? = nil, controlSize: String? = nil, shortcut: String? = nil, destructive: Bool? = nil, selected: Bool? = nil, title: String? = nil) {
+        self.title = title
         self.style = style
         self.emphasis = emphasis
         self.overhang = overhang
@@ -870,9 +981,16 @@ package struct ScrollProps: AtomProps {
     package var scrollTo: String?
     package var scrollRequest: Int?
 
+    /// A horizontal or two-axis scroll surface. The default is vertical.
+    package var axis: String? = nil
+    /// Lay out the supplied content directly, preserving a caller's custom layout.
+    package var directContent: Bool? = nil
+
     package enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight, inset, lazy, scrollTo, scrollRequest }
 
-    package init(spacing: Double? = nil, maxHeight: Double? = nil, inset: Double? = nil, lazy: Bool? = nil, scrollTo: String? = nil, scrollRequest: Int? = nil) {
+    package init(spacing: Double? = nil, maxHeight: Double? = nil, inset: Double? = nil, lazy: Bool? = nil, scrollTo: String? = nil, scrollRequest: Int? = nil, axis: String? = nil, directContent: Bool? = nil) {
+        self.axis = axis
+        self.directContent = directContent
         self.spacing = spacing
         self.maxHeight = maxHeight
         self.inset = inset
@@ -928,9 +1046,14 @@ package struct ToggleProps: AtomProps {
     package var size: String?
     package var disabled: Bool?
 
+    package var showsLabel: Bool? = nil
+    package var style: String? = nil
+
     package enum CodingKeys: String, CodingKey, CaseIterable { case isOn, size, disabled }
 
-    package init(isOn: Bool, size: String? = nil, disabled: Bool? = nil) {
+    package init(isOn: Bool, size: String? = nil, disabled: Bool? = nil, showsLabel: Bool? = nil, style: String? = nil) {
+        self.showsLabel = showsLabel
+        self.style = style
         self.isOn = isOn
         self.size = size
         self.disabled = disabled
@@ -945,6 +1068,11 @@ package struct ToggleProps: AtomProps {
 /// `onArrow` with "up" or "down" instead of moving the caret. `style`
 /// `plain` drops the rounded border, for a field inside a decorated `Stack`
 /// (the Done archive's search); `rounded` is the default.
+///
+/// `secure` hides what is typed (a password); `multiline` lets it wrap and
+/// grow down as the text does; `size` and `design` set its font; each new
+/// `focusRequest` moves the keyboard into it once. With a handler, Escape
+/// calls `onEscape`.
 package struct TextFieldProps: AtomProps {
     package static let atomType = AtomType.textField
 
@@ -952,21 +1080,38 @@ package struct TextFieldProps: AtomProps {
     package var placeholder: String?
     package var autoFocus: Bool?
     package var style: String?
+    package var secure: Bool?
+    package var multiline: Bool?
+    package var size: Double?
+    package var design: String?
+    package var focusRequest: Int?
 
-    package enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder, autoFocus, style }
+    package var controlSize: String? = nil
+    package var lineLimit: Int? = nil
 
-    package init(text: String, placeholder: String? = nil, autoFocus: Bool? = nil, style: String? = nil) {
+    package enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder, autoFocus, style, secure, multiline, size, design, focusRequest }
+
+    package init(text: String, placeholder: String? = nil, autoFocus: Bool? = nil, style: String? = nil, secure: Bool? = nil, multiline: Bool? = nil, size: Double? = nil, design: String? = nil, focusRequest: Int? = nil, controlSize: String? = nil, lineLimit: Int? = nil) {
+        self.controlSize = controlSize
+        self.lineLimit = lineLimit
         self.text = text
         self.placeholder = placeholder
         self.autoFocus = autoFocus
         self.style = style
+        self.secure = secure
+        self.multiline = multiline
+        self.size = size
+        self.design = design
+        self.focusRequest = focusRequest
     }
 }
 
 /// A segmented control (the Skills page's Skills | Rules | MCP and source
 /// pickers). It is controlled: `selected` is what it shows, and choosing a
 /// segment calls `onChange` with its value. Without a `width` it is as wide
-/// as its segments.
+/// as its segments. `style` shows the same choice as `segmented` (default),
+/// `menu` (a pop-up button showing the selected option) or `radio` (a
+/// column of radio buttons).
 package struct SegmentedProps: AtomProps {
     package static let atomType = AtomType.segmented
 
@@ -983,13 +1128,21 @@ package struct SegmentedProps: AtomProps {
     package var options: [Option]
     package var selected: String
     package var disabled: Bool?
+    package var style: String?
 
-    package enum CodingKeys: String, CodingKey, CaseIterable { case options, selected, disabled }
+    package var showsLabel: Bool? = nil
+    /// Native forms can let the picker stretch for the platform's label column.
+    package var fitContent: Bool? = nil
 
-    package init(options: [Option], selected: String, disabled: Bool? = nil) {
+    package enum CodingKeys: String, CodingKey, CaseIterable { case options, selected, disabled, style }
+
+    package init(options: [Option], selected: String, disabled: Bool? = nil, style: String? = nil, showsLabel: Bool? = nil, fitContent: Bool? = nil) {
+        self.fitContent = fitContent
+        self.showsLabel = showsLabel
         self.options = options
         self.selected = selected
         self.disabled = disabled
+        self.style = style
     }
 }
 
@@ -1013,8 +1166,14 @@ package struct MenuProps: AtomProps {
         package var icon: String?
         /// Shown dimmed and can't be chosen.
         package var disabled: Bool?
+        package var informational: Bool? = nil
 
-        package init(id: String, title: String, destructive: Bool? = nil, help: String? = nil, testID: String? = nil, checked: Bool? = nil, icon: String? = nil, disabled: Bool? = nil) {
+        private enum CodingKeys: String, CodingKey {
+            case id, title, destructive, help, testID, checked, icon, disabled
+        }
+
+        package init(id: String, title: String, destructive: Bool? = nil, help: String? = nil, testID: String? = nil, checked: Bool? = nil, icon: String? = nil, disabled: Bool? = nil, informational: Bool? = nil) {
+            self.informational = informational
             self.id = id
             self.title = title
             self.destructive = destructive
@@ -1040,12 +1199,14 @@ package struct MenuProps: AtomProps {
     package var indicator: Bool?
     package var disabled: Bool?
     package var items: [[Item]]
+    package var style: String? = nil
 
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case icon, size, weight, color, text, textSize, textWeight, badgeIcon, indicator, disabled, items
     }
 
-    package init(icon: String? = nil, size: Double? = nil, weight: String? = nil, color: String? = nil, text: String? = nil, textSize: Double? = nil, textWeight: String? = nil, badgeIcon: String? = nil, indicator: Bool? = nil, disabled: Bool? = nil, items: [[Item]]) {
+    package init(icon: String? = nil, size: Double? = nil, weight: String? = nil, color: String? = nil, text: String? = nil, textSize: Double? = nil, textWeight: String? = nil, badgeIcon: String? = nil, indicator: Bool? = nil, disabled: Bool? = nil, items: [[Item]], style: String? = nil) {
+        self.style = style
         self.icon = icon
         self.size = size
         self.weight = weight
@@ -1094,9 +1255,14 @@ package struct OverlayProps: AtomProps {
     package var offsetY: Double?
     package var revealOnHover: Bool?
 
+    package var behind: Bool? = nil
+    package var group: Bool? = nil
+
     package enum CodingKeys: String, CodingKey, CaseIterable { case align, offsetX, offsetY, revealOnHover }
 
-    package init(align: String? = nil, offsetX: Double? = nil, offsetY: Double? = nil, revealOnHover: Bool? = nil) {
+    package init(align: String? = nil, offsetX: Double? = nil, offsetY: Double? = nil, revealOnHover: Bool? = nil, behind: Bool? = nil, group: Bool? = nil) {
+        self.behind = behind
+        self.group = group
         self.align = align
         self.offsetX = offsetX
         self.offsetY = offsetY
@@ -1305,5 +1471,44 @@ package struct SidePanelProps: AtomProps {
         self.isPresented = isPresented
         self.edge = edge
         self.width = width
+    }
+}
+
+/// An invisible strip to drag a border by (the terminal panel's and the chat
+/// sidebar's edges). The pointer shows the resize cursor over it and keeps it
+/// for the whole drag, so the pointer can leave the strip. `axis` "h" (the
+/// default) drags left and right, "v" up and down. Its common `width` (or
+/// `height` for "v") is the strip's grab area; draw the border itself with a
+/// `Stack` beside or under it.
+package struct ResizeHandleProps: AtomProps {
+    package static let atomType = AtomType.resizeHandle
+
+    package var axis: String?
+
+    package enum CodingKeys: String, CodingKey, CaseIterable { case axis }
+
+    package init(axis: String? = nil) {
+        self.axis = axis
+    }
+}
+
+/// A date or time field the reader edits with the keyboard or the arrows.
+/// It is controlled: `date` (seconds since 1970) is what it shows, and each
+/// edit calls `onChange` with the new date. `components` is `dateTime`
+/// (default), `date` or `time`; `min` (seconds since 1970) is the earliest it
+/// takes.
+package struct DatePickerProps: AtomProps {
+    package static let atomType = AtomType.datePicker
+
+    package var date: Double
+    package var components: String?
+    package var min: Double?
+
+    package enum CodingKeys: String, CodingKey, CaseIterable { case date, components, min }
+
+    package init(date: Double, components: String? = nil, min: Double? = nil) {
+        self.date = date
+        self.components = components
+        self.min = min
     }
 }

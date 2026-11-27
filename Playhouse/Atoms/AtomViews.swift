@@ -7,11 +7,14 @@ import PlayhouseUI
 // Stats modal, the Skills page, the repository chips and picker) build them directly with the same props
 // structs, so both share one implementation.
 
-/// Colors a prop may name: primary, secondary, tertiary, accent, text (the
-/// conversation text color), panel and window (the workspace's panel and
-/// window backgrounds), white, red, green, orange, blue, purple, or #RRGGBB.
+/// Colors a prop may name: primary, secondary, tertiary, accent, themeAccent
+/// (the workspace's own blue), text (the conversation text color), panel,
+/// window and input (the workspace's panel, window and text field
+/// backgrounds), control (the system control background), clear, white,
+/// black, gray, red, green, orange, yellow, blue, purple, or #RRGGBB.
 package enum AtomColor {
-    package static func style(_ name: String?) -> PHAnyShapeStyle? {
+    package static func style(_ name: String?, opacity: Double? = nil) -> PHAnyShapeStyle? {
+        if let opacity, let value = color(name) { return PHAnyShapeStyle(value.opacity(opacity)) }
         switch name {
         case "primary": return PHAnyShapeStyle(.primary)
         case "secondary": return PHAnyShapeStyle(.secondary)
@@ -39,6 +42,13 @@ package enum AtomColor {
         case "text": return WorkspaceTheme.conversationText
         case "panel": return WorkspaceTheme.panelBackground
         case "window": return WorkspaceTheme.windowBackground
+        case "input": return WorkspaceTheme.inputBackground
+        case "control": return PHColor(platformColor: .controlBackgroundColor)
+        case "themeAccent": return WorkspaceTheme.accent
+        case "clear": return PHColor.clear
+        case "black": return PHColor.black
+        case "gray": return PHColor.gray
+        case "yellow": return PHColor.yellow
         case "white": return PHColor.white
         case "red": return PHColor.red
         case "green": return PHColor.green
@@ -64,12 +74,41 @@ package enum AtomColor {
     }
 }
 
+/// An alignment a prop names: center, leading, trailing, top, bottom,
+/// topLeading, topTrailing, bottomLeading or bottomTrailing.
+package enum AtomAlignment {
+    package static func alignment(_ name: String?) -> PHAlignment? {
+        switch name {
+        case "center": .center
+        case "leading": .leading
+        case "trailing": .trailing
+        case "top": .top
+        case "bottom": .bottom
+        case "topLeading": .topLeading
+        case "topTrailing": .topTrailing
+        case "bottomLeading": .bottomLeading
+        case "bottomTrailing": .bottomTrailing
+        default: nil
+        }
+    }
+}
+
 package enum AtomFont {
-    package static func font(size: Double?, weight: String?, design: String? = nil, monospacedDigits: Bool = false) -> PHFont? {
+    package static func font(size: Double?, weight: String?, design: String? = nil, monospacedDigits: Bool = false, textStyle: String? = nil) -> PHFont? {
+        if let textStyle, let style = styles[textStyle] {
+            let font = PHFont.system(style, design: self.design(design), weight: weight.map(self.weight))
+            return monospacedDigits ? font.monospacedDigit() : font
+        }
         guard size != nil || weight != nil || design != nil || monospacedDigits else { return nil }
         let font = PHFont.system(size: size ?? PHPlatformFont.systemFontSize, weight: self.weight(weight), design: self.design(design))
         return monospacedDigits ? font.monospacedDigit() : font
     }
+
+    private static let styles: [String: PHFont.TextStyle] = [
+        "largeTitle": .largeTitle, "title": .title, "title2": .title2, "title3": .title3,
+        "headline": .headline, "subheadline": .subheadline, "body": .body, "callout": .callout,
+        "footnote": .footnote, "caption": .caption, "caption2": .caption2,
+    ]
 
     private static func design(_ name: String?) -> PHFont.Design {
         switch name {
@@ -110,6 +149,7 @@ package struct AtomCommonModifier: PHViewModifier {
             .allowsHitTesting(common.passThrough != true)
             .modifier(AtomAccessibility(common: common, group: group, combine: combine, summary: summary))
             .atomHighlight(atom)
+            .modifier(Applied(when: common.layoutPriority != nil) { $0.layoutPriority(common.layoutPriority ?? 0) })
     }
 
     package init(common: AtomCommon, atom: AtomType, group: Bool = false, combine: Bool = false, summary: Bool = false, frame: Bool = true) {
@@ -151,6 +191,7 @@ package struct AtomAccessibility: PHViewModifier {
             .modifier(Applied(when: common.value != nil) { $0.accessibilityValue(common.value ?? "") })
             .modifier(Applied(when: common.hint != nil) { $0.accessibilityHint(common.hint ?? "") })
             .modifier(Applied(when: common.testID != nil) { $0.accessibilityIdentifier(common.testID ?? "") })
+            .modifier(Applied(when: common.decorative == true) { $0.accessibilityHidden(true) })
     }
 
     package init(common: AtomCommon, group: Bool, combine: Bool, summary: Bool = false) {
@@ -185,19 +226,40 @@ extension PHView {
     /// row at exactly the width the row fitted, and a row placed that way gives
     /// a nested stack one spacing too little, so its text wraps or truncates
     /// (the task item's time showed "…"). Min sizes go through `AtomMinSize`.
-    package func atomFrame(_ common: AtomCommon) -> some PHView {
-        self
+    /// `stretchAlignment` places the content of a `fillWidth`, `fillHeight`,
+    /// `maxWidth` or `maxHeight` frame when `frameAlign` is unset (a surfaced
+    /// Stack passes where its children sit).
+    package func atomFrame(_ common: AtomCommon, stretchAlignment: PHAlignment? = nil) -> some PHView {
+        let named = AtomAlignment.alignment(common.frameAlign)
+        let stretches = common.fillWidth == true || common.fillHeight == true || common.maxWidth != nil || common.maxHeight != nil
+        let padded = self
             .modifier(Applied(when: common.paddingX != nil) { $0.padding(.horizontal, CGFloat(common.paddingX ?? 0)) })
             .modifier(Applied(when: common.paddingY != nil) { $0.padding(.vertical, CGFloat(common.paddingY ?? 0)) })
+            .modifier(Applied(when: common.hasEdgePadding) {
+                $0.padding(PHEdgeInsets(
+                    top: CGFloat(common.paddingTop ?? 0), leading: CGFloat(common.paddingLeading ?? 0),
+                    bottom: CGFloat(common.paddingBottom ?? 0), trailing: CGFloat(common.paddingTrailing ?? 0)
+                ))
+            })
+        let framed = padded
             .modifier(Applied(when: common.width != nil || common.height != nil) {
-                $0.frame(width: common.width.map { CGFloat($0) }, height: common.height.map { CGFloat($0) })
+                $0.frame(width: common.width.map { CGFloat($0) }, height: common.height.map { CGFloat($0) }, alignment: named ?? .center)
             })
             .modifier(Applied(when: common.minWidth != nil || common.minHeight != nil) { content in
                 AtomMinSize(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) }) { content }
             })
-            .modifier(Applied(when: common.fillWidth == true) { $0.frame(maxWidth: .infinity, alignment: .leading) })
+            .modifier(Applied(when: stretches) {
+                $0.frame(
+                    maxWidth: common.maxWidth.map { CGFloat($0) } ?? (common.fillWidth == true ? .infinity : nil),
+                    maxHeight: common.maxHeight.map { CGFloat($0) } ?? (common.fillHeight == true ? .infinity : nil),
+                    alignment: named ?? stretchAlignment ?? PHAlignment(horizontal: common.fillWidth == true ? .leading : .center, vertical: .center)
+                )
+            })
+        return framed
             .modifier(Applied(when: common.padding != nil) { $0.padding(CGFloat(common.padding ?? 0)) })
             .modifier(Applied(when: common.opacity != nil) { $0.opacity(common.opacity ?? 1) })
+            .modifier(Applied(when: common.fixedHeight == true) { $0.fixedSize(horizontal: false, vertical: true) })
+            .modifier(Applied(when: common.scale != nil) { $0.scaleEffect(CGFloat(common.scale ?? 1)) })
             .modifier(Applied(when: common.fixedSize == true) { $0.fixedSize() })
     }
 

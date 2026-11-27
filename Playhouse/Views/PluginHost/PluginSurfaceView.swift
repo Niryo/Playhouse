@@ -23,30 +23,24 @@ package struct PluginSurfaceView: PHView {
     @PHState private var loadError: String?
 
     package var body: some PHView {
-        let inset = plugin.surfaceInset
-        PHVStack(alignment: .leading, spacing: 0) {
+        let inset = Double(plugin.surfaceInset)
+        AtomStack(props: StackProps(spacing: 0, align: "leading", group: true), common: AtomCommon(testID: "plugin-surface-\(plugin.id)")) {
             if plugin.presentationKind.isInPlace {
                 // A section of its sidebar: no header, and the sidebar's own room
                 // instead of a scroll view, so the plugin can scroll its own lists.
-                content.padding(.horizontal, inset)
+                content(AtomCommon(fillWidth: true, paddingX: inset))
             } else {
-                AtomModalHeader(
-                    title: plugin.name, icon: plugin.icon, titleSize: plugin.presentationKind == .popover ? 15 : 19,
-                    idPrefix: "plugin-surface", onClose: actions.close
-                )
-                .padding([.horizontal, .top], inset)
-                .padding(.bottom, 4)
-                PHScrollView {
-                    content
-                        .padding(.horizontal, inset)
-                        .padding(.top, inset / 2)
-                        .padding(.bottom, inset)
-                        .hoverRevealScrollers()
+                AtomStack(common: AtomCommon(paddingTop: inset, paddingBottom: 4, paddingLeading: inset, paddingTrailing: inset)) {
+                    AtomModalHeader(
+                        title: plugin.name, icon: plugin.icon, titleSize: plugin.presentationKind == .popover ? 15 : 19,
+                        idPrefix: "plugin-surface", onClose: actions.close
+                    )
+                }
+                AtomScroll {
+                    content(AtomCommon(fillWidth: true, paddingX: inset, paddingTop: inset / 2, paddingBottom: inset))
                 }
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("plugin-surface-\(plugin.id)")
         // A section with nothing to show hides, header included.
         .preference(key: PluginSectionContentKey.self, value: hasContent)
         .task(id: plugin.entryPath) { load() }
@@ -84,8 +78,8 @@ package struct PluginSurfaceView: PHView {
         return events
     }
 
-    private var content: some PHView {
-        PHVStack(alignment: .leading, spacing: 12) {
+    private func content(_ common: AtomCommon) -> some PHView {
+        AtomStack(props: StackProps(spacing: 12, align: "leading"), common: common) {
             if let runtime {
                 PHForEach(runtime.tree.root.children) { node in
                     PluginNodeView(node: node, events: runtime)
@@ -95,7 +89,6 @@ package struct PluginSurfaceView: PHView {
                 errors([loadError])
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var hasContent: Bool {
@@ -107,11 +100,7 @@ package struct PluginSurfaceView: PHView {
 
     private func errors(_ errors: [String]) -> some PHView {
         PHForEach(Array(errors.enumerated()), id: \.offset) { _, error in
-            PHText(error)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.red)
-                .textSelection(.enabled)
-                .accessibilityIdentifier("plugin-error")
+            AtomText(props: TextProps(text: error, size: 11, design: "monospaced", color: "red", selectable: true), common: AtomCommon(testID: "plugin-error"))
         }
     }
 

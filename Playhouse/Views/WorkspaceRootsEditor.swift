@@ -20,12 +20,9 @@ package struct WorkspaceRootsEditor: PHView {
     }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 16) {
-            PHText("Edit working folders")
-                .font(.system(size: 19, weight: .semibold, design: .rounded))
-            PHText("Changes apply to the next Codex turn. The first folder is used as the working directory.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+        AtomStack(props: StackProps(spacing: 16, align: "leading"), common: AtomCommon(width: 560, height: 620, paddingX: 24, paddingY: 24)) {
+            AtomText(props: TextProps(text: "Edit working folders", size: 19, weight: "semibold", design: "rounded"))
+            AtomText(props: TextProps(text: "Changes apply to the next Codex turn. The first folder is used as the working directory.", size: 12, color: "secondary"))
             WorkspaceRootSelector(
                 parentFolderURL: parentFolderURL,
                 roots: $roots,
@@ -33,27 +30,30 @@ package struct WorkspaceRootsEditor: PHView {
                     ($0.worktreePath, "\(URL(fileURLWithPath: $0.repositoryPath).lastPathComponent) · \($0.branch)")
                 })
             )
-            PHLabel("Codex has full machine and network access; this list sets task context only.", icon: .exclamationmarkTriangleFill)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            PHHStack {
-                PHSpacer()
-                PHButton("Cancel") { dismiss() }
-                    .buttonHoverPointer()
-                    .shortcutHelp("Cancel folder changes", shortcut: "cancel")
-                PHButton("Save folders") {
-                    onSave(roots)
-                    dismiss()
+            AtomLabel(props: LabelProps(
+                text: "Codex has full machine and network access; this list sets task context only.",
+                icon: PHIcon.exclamationmarkTriangleFill.name, size: 11, weight: "medium", color: "orange"
+            ))
+            AtomStack(props: StackProps(axis: "h")) {
+                AtomSpacer()
+                AtomButton(
+                    props: ButtonProps(style: "automatic", shortcut: "cancel"),
+                    common: AtomCommon(help: "Cancel folder changes"),
+                    action: { dismiss() }
+                ) {
+                    AtomText(props: TextProps(text: "Cancel"))
                 }
-                .buttonHoverPointer()
-                .nativeHelp("Save working folders")
-                .buttonStyle(.borderedProminent)
-                .disabled(roots.isEmpty)
-                .accessibilityIdentifier("save-workspace-roots-button")
+                AtomButton(
+                    props: ButtonProps(style: "prominent", disabled: roots.isEmpty),
+                    common: AtomCommon(testID: "save-workspace-roots-button", help: "Save working folders"),
+                    action: {
+                        onSave(roots)
+                        dismiss()
+                    }
+                ) {
+                    AtomText(props: TextProps(text: "Save folders"))
+                }
             }
         }
-        .padding(24)
-        .frame(width: 560, height: 620)
     }
 }

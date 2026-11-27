@@ -14,37 +14,29 @@ package struct PluginCreationSetup: PHView {
     @PHFocusState private var nameFocused: Bool
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 20) {
-            PHButton("Back", action: onCancel)
-                .buttonHoverPointer().nativeHelp("Cancel plugin creation")
+        AtomStack(props: StackProps(axis: "v", spacing: 20, align: "leading"), common: AtomCommon(maxWidth: 420, fillWidth: true, fillHeight: true, frameAlign: "leading")) {
+            AtomButton(props: ButtonProps(style: "automatic"), common: AtomCommon(help: "Cancel plugin creation"), action: onCancel) { AtomText(props: TextProps(text: "Back")) }
                 .accessibilityIdentifier("plugin-creation-back")
-            PHText(hasName ? "How should it open?" : "Name your plugin")
-                .font(.title.bold())
-            PHText(hasName ? "Choose how \(name) appears when opened." : "Give your plugin a name to get started.")
-                .foregroundStyle(.secondary)
+            AtomText(props: TextProps(text: hasName ? "How should it open?" : "Name your plugin", weight: "bold", textStyle: "title"))
+            AtomText(props: TextProps(text: hasName ? "Choose how \(name) appears when opened." : "Give your plugin a name to get started.", color: "secondary"))
             if hasName {
-                PHPicker("How should it open?", selection: $presentation) {
-                    PHForEach([PluginPresentation.popover, .modal, .sidebar, .page], id: \.self) { option in
-                        PHText(option.title).tag(option)
-                    }
-                }
-                .buttonHoverPointer()
-                .pickerStyle(.radioGroup)
-                .accessibilityIdentifier("plugin-creation-presentation")
-                PHHStack {
-                    PHButton("Back") { hasName = false }
-                        .buttonHoverPointer().nativeHelp("Change plugin name")
-                    PHButton("Start creating") { onStart(name.trimmingCharacters(in: .whitespacesAndNewlines), presentation) }
-                        .disabled(isStarting)
-                        .buttonHoverPointer().nativeHelp("Start creating this plugin")
+                AtomSegmented(
+                    style: "radio", showsLabel: true, selection: $presentation,
+                    options: [.popover, .modal, .sidebar, .page], label: { $0.title },
+                    common: AtomCommon(testID: "plugin-creation-presentation", label: "How should it open?")
+                )
+                AtomStack(props: StackProps(axis: "h")) {
+                    AtomButton(props: ButtonProps(style: "automatic"), common: AtomCommon(help: "Change plugin name"), action: { hasName = false }) { AtomText(props: TextProps(text: "Back")) }
+                    AtomButton(props: ButtonProps(style: "automatic", disabled: isStarting), common: AtomCommon(help: "Start creating this plugin"), action: { onStart(name.trimmingCharacters(in: .whitespacesAndNewlines), presentation) }) { AtomText(props: TextProps(text: "Start creating")) }
                         .accessibilityIdentifier("plugin-creation-start")
                 }
             } else {
-                PHTextField("Plugin name", text: $name)
-                    .focused($nameFocused)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("plugin-creation-name")
-                PHButton("Continue") {
+                AtomTextField(
+                    props: TextFieldProps(text: name, placeholder: "Plugin name"),
+                    common: AtomCommon(testID: "plugin-creation-name"),
+                    onChange: { name = $0 }, focus: $nameFocused
+                )
+                AtomButton(props: ButtonProps(style: "automatic", disabled: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStarting), common: AtomCommon(help: placement == .mainSidebarBottom ? "Start creating this plugin" : "Choose how the plugin opens"), action: {
                     nameFocused = false
                     // A plugin at the sidebar's bottom always opens as a collapsible section.
                     if placement == .mainSidebarBottom {
@@ -52,14 +44,10 @@ package struct PluginCreationSetup: PHView {
                     } else {
                         phWithAnimation { hasName = true }
                     }
-                }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStarting)
-                    .buttonHoverPointer().nativeHelp(placement == .mainSidebarBottom ? "Start creating this plugin" : "Choose how the plugin opens")
+                }) { AtomText(props: TextProps(text: "Continue")) }
                     .accessibilityIdentifier("plugin-creation-continue")
             }
         }
-        .frame(maxWidth: 420, alignment: .leading)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { nameFocused = true }
         .onChange(of: hasName) { _, hasName in
             if !hasName { nameFocused = true }
@@ -95,30 +83,31 @@ package struct PluginAuthoringPreview: PHView {
     @PHEnvironment(\.colorScheme) private var colorScheme
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
-            PHHStack {
-                PHText("Preview").font(.headline)
-                PHSpacer()
-                if let plugin { PHText("Version \(plugin.version)").foregroundStyle(.secondary) }
-                PHMenu("Restore version") {
-                    PHForEach(versions, id: \.self) { version in
-                        PHButton("Version \(version)") { perform("plugin.restore", version: version) }
-                            .help("Restore this plugin version")
+        AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading")) {
+            AtomStack(props: StackProps(axis: "h"), common: AtomCommon(padding: 16)) {
+                AtomText(props: TextProps(text: "Preview", textStyle: "headline"))
+                AtomSpacer()
+                if let plugin { AtomText(props: TextProps(text: "Version \(plugin.version)", color: "secondary")) }
+                AtomMenu(
+                    props: MenuProps(
+                        text: "Restore version",
+                        indicator: true, disabled: versions.isEmpty,
+                        items: [versions.map { .init(id: String($0), title: "Version \($0)", help: "Restore this plugin version") }],
+                        style: "automatic"
+                    ),
+                    common: AtomCommon(help: "Restore an earlier saved version of this plugin")
+                ) { version in
+                    if let version = versions.first(where: { String($0) == version }) {
+                        perform("plugin.restore", version: version)
                     }
                 }
-                .disabled(versions.isEmpty)
-                .buttonHoverPointer()
-                .nativeHelp("Restore an earlier saved version of this plugin")
                 // A plugin that was never saved is itself unpublished, so it can always be discarded.
                 if !isSaved || hasChanges {
-                    PHButton("Discard changes") { confirmDiscard = true }
-                        .buttonHoverPointer().nativeHelp(isSaved ? "Reset the draft to the published plugin" : "Delete this unsaved plugin and its conversation")
+                    AtomButton(props: ButtonProps(style: "automatic"), common: AtomCommon(help: isSaved ? "Reset the draft to the published plugin" : "Delete this unsaved plugin and its conversation"), action: { confirmDiscard = true }) { AtomText(props: TextProps(text: "Discard changes")) }
                 }
-                PHButton("Publish") { perform("plugin.save") }
-                    .disabled(!hasChanges)
-                    .buttonHoverPointer().shortcutHelp(hasChanges ? "Publish this plugin draft" : "No unpublished changes", shortcut: AppShortcut.save)
-            }.padding()
-            PHDivider()
+                AtomButton(props: ButtonProps(style: "automatic", disabled: !hasChanges), action: { perform("plugin.save") }) { AtomText(props: TextProps(text: "Publish")) }.shortcutHelp(hasChanges ? "Publish this plugin draft" : "No unpublished changes", shortcut: AppShortcut.save)
+            }
+            AtomDivider()
             if let plugin, plugin.valid {
                 PluginSurfaceView(plugin: plugin, props: PluginContext.props(
                     plugin: plugin, appearance: colorScheme == .dark ? "dark" : "light",
@@ -126,30 +115,30 @@ package struct PluginAuthoringPreview: PHView {
                     actions: PluginUIActions(composer: applyComposerEdit))
                     .id(revision)
                 if plugin.placement == PluginPlacement.composerActions.rawValue {
-                    PHNativeChatEditor(text: PHBinding(get: { previewDraft }, set: { value in
-                                         DispatchQueue.main.async { previewDraft = value }
-                                     }), height: $previewComposerHeight,
-                                     isFocused: $previewComposerFocused, focusRequest: previewFocusRequest,
-                                     isEnabled: true, autofocusOnAppear: false, accessibilityHelp: "Preview composer",
-                                     inputTestID: "plugin-preview-composer", inputLabel: "Preview message",
-                                     onSubmit: {}, onSteerSubmit: {}, onPasteImage: { _ in },
-                                     onSelectionChange: { selection in
-                                         DispatchQueue.main.async { previewSelection = selection }
-                                     },
-                                     mentions: ChatEditorMentions(edit: previewEdit))
-                        .frame(height: max(36, previewComposerHeight)).padding()
-                }
-            } else {
-                PHVStack(spacing: 10) {
-                    PHImage(icon: .squareOnSquare) .font(.largeTitle)
-                    PHText("Your plugin preview will appear here") .font(.headline)
-                    if let plugin, !plugin.errors.isEmpty {
-                        PHText(plugin.errors.joined(separator: "\n")).font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        PHText("Describe your plugin in the conversation to get started.").foregroundStyle(.secondary)
+                    AtomStack(common: AtomCommon(height: Double(max(36, previewComposerHeight)), padding: 16)) {
+                        PHNativeChatEditor(text: PHBinding(get: { previewDraft }, set: { value in
+                                             DispatchQueue.main.async { previewDraft = value }
+                                         }), height: $previewComposerHeight,
+                                         isFocused: $previewComposerFocused, focusRequest: previewFocusRequest,
+                                         isEnabled: true, autofocusOnAppear: false, accessibilityHelp: "Preview composer",
+                                         inputTestID: "plugin-preview-composer", inputLabel: "Preview message",
+                                         onSubmit: {}, onSteerSubmit: {}, onPasteImage: { _ in },
+                                         onSelectionChange: { selection in
+                                             DispatchQueue.main.async { previewSelection = selection }
+                                         },
+                                         mentions: ChatEditorMentions(edit: previewEdit))
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                AtomStack(props: StackProps(axis: "v", spacing: 10), common: AtomCommon(fillWidth: true, fillHeight: true)) {
+                    AtomIcon(props: IconProps(name: PHIcon.squareOnSquare.name, textStyle: "largeTitle"))
+                    AtomText(props: TextProps(text: "Your plugin preview will appear here", textStyle: "headline"))
+                    if let plugin, !plugin.errors.isEmpty {
+                        AtomText(props: TextProps(text: plugin.errors.joined(separator: "\n"), color: "secondary", textStyle: "caption"))
+                    } else {
+                        AtomText(props: TextProps(text: "Describe your plugin in the conversation to get started.", color: "secondary"))
+                    }
+                }
             }
         }
         .alert(isSaved ? "Discard changes?" : "Discard plugin?", isPresented: $confirmDiscard) {

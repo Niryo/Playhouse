@@ -21,34 +21,30 @@ extension TaskConversationView {
     }
 
     package func activityDisclosureContents(workingFor: String? = nil, workedFor: String? = nil) -> some PHView {
-        return PHHStack(spacing: 7) {
+        return AtomStack(props: StackProps(axis: "h", spacing: 7, hitSurface: true), common: AtomCommon(fillWidth: true)) {
             if let workingFor {
-                PHText("Working for \(workingFor)")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(PHColor.accentColor)
-                    .accessibilityIdentifier("codex-working-duration")
+                AtomText(
+                    props: TextProps(text: "Working for \(workingFor)", size: 12, weight: "medium", color: "accent"),
+                    common: AtomCommon(testID: "codex-working-duration")
+                )
             } else if let workedFor {
-                PHText(workedFor.isEmpty ? "Worked for" : "Worked for \(workedFor)")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("codex-worked-duration")
+                AtomText(
+                    props: TextProps(text: workedFor.isEmpty ? "Worked for" : "Worked for \(workedFor)", size: 12, weight: "medium", color: "secondary"),
+                    common: AtomCommon(testID: "codex-worked-duration")
+                )
             } else {
-                PHText("Codex activity")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                AtomText(props: TextProps(text: "Codex activity", size: 12, weight: "medium", color: "secondary"))
             }
-            PHImage(icon: isActivityExpanded ? .chevronDown : .chevronRight)
-                .font(.system(size: 9, weight: .semibold))
-                .accessibilityIdentifier("codex-activity-chevron")
+            AtomIcon(
+                props: IconProps(name: (isActivityExpanded ? PHIcon.chevronDown : PHIcon.chevronRight).name, size: 9, weight: "semibold"),
+                common: AtomCommon(testID: "codex-activity-chevron")
+            )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // After the frame, so the whole row the button spans takes the click.
-        .contentShape(PHRectangle())
     }
 
     @PHViewBuilder
     package func messageBubble(_ message: ConversationMessage) -> some PHView {
-        PHHStack(alignment: .top, spacing: 0) {
+        AtomStack(props: StackProps(axis: "h", spacing: 0, align: "top"), common: AtomCommon(fillWidth: true, frameAlign: "center")) {
             if message.role == .assistant {
                 if message.asyncQuestions == nil &&
                     Self.displayableAssistantText(message.text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
@@ -60,13 +56,12 @@ extension TaskConversationView {
                 }
                 // The standalone chat's replies run to the edge its questions end at; the
                 // room that leaves beside the transcript holds the chat's page labels.
-                PHSpacer(minLength: task.isStandaloneChat ? 0 : 70)
+                AtomSpacer(props: SpacerProps(minLength: task.isStandaloneChat ? 0 : 70))
             } else {
-                PHSpacer(minLength: task.isStandaloneChat ? 40 : 70)
+                AtomSpacer(props: SpacerProps(minLength: task.isStandaloneChat ? 40 : 70))
                 userBubble(message)
             }
         }
-        .frame(maxWidth: .infinity)
     }
 
     package func asyncQuestionKey(messageID: String, index: Int) -> String {
@@ -81,74 +76,67 @@ extension TaskConversationView {
     package func asyncQuestionBubble(_ message: ConversationMessage) -> some PHView {
         let questions = message.asyncQuestions ?? []
         let answered = asyncQuestionWasAnswered(message)
-        return PHVStack(alignment: .leading, spacing: 12) {
-            PHText(assistantLabel(for: message))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+        let hasEmptyAnswer = questions.enumerated().contains { index, _ in
+            let key = asyncQuestionKey(messageID: message.id, index: index)
+            return (asyncQuestionAnswers[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return AtomStack(
+            props: StackProps(spacing: 12, align: "leading", group: true, fill: "panel", cornerRadius: 17),
+            common: AtomCommon(testID: "async-question-\(message.id)", maxWidth: 620, frameAlign: "leading", paddingX: 15, paddingY: 15)
+        ) {
+            AtomText(props: TextProps(text: assistantLabel(for: message), size: 11, weight: "semibold", color: "secondary"))
             PHForEach(Array(questions.enumerated()), id: \.offset) { index, question in
                 let answerKey = asyncQuestionKey(messageID: message.id, index: index)
-                PHVStack(alignment: .leading, spacing: 8) {
-                    PHText(question.title)
-                        .font(.system(size: 15, weight: .semibold))
+                AtomStack(props: StackProps(spacing: 8, align: "leading")) {
+                    AtomText(props: TextProps(text: question.title, size: 15, weight: "semibold"))
                     if let options = question.options, !options.isEmpty {
                         if !answered && !isReadOnly {
                             PHForEach(Array(options.enumerated()), id: \.offset) { optionIndex, option in
-                                PHButton {
-                                    asyncQuestionAnswers[answerKey] = option
-                                } label: {
-                                    PHLabel(option, icon: asyncQuestionAnswers[answerKey] == option ? .largecircleFillCircle : .circle)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                let isChosen = asyncQuestionAnswers[answerKey] == option
+                                AtomButton(
+                                    common: AtomCommon(
+                                        testID: "async-question-option-\(message.id)-\(index)-\(optionIndex)",
+                                        value: isChosen ? "selected" : "not selected",
+                                        help: "Choose this answer for \(question.title)",
+                                        fillWidth: true
+                                    ),
+                                    action: { asyncQuestionAnswers[answerKey] = option }
+                                ) {
+                                    AtomLabel(props: LabelProps(text: option, icon: (isChosen ? PHIcon.largecircleFillCircle : PHIcon.circle).name))
                                 }
-                                .buttonStyle(.plain)
-                                .plainButtonHoverPointer()
-                                .nativeHelp("Choose this answer for \(question.title)")
-                                .accessibilityIdentifier("async-question-option-\(message.id)-\(index)-\(optionIndex)")
-                                .accessibilityValue(asyncQuestionAnswers[answerKey] == option ? "selected" : "not selected")
                             }
-                            PHTextField("Other answer", text: PHBinding(
-                                get: {
-                                    let answer = asyncQuestionAnswers[answerKey] ?? ""
-                                    return options.contains(answer) ? "" : answer
-                                },
-                                set: { asyncQuestionAnswers[answerKey] = $0 }
-                            ))
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityIdentifier("async-question-other-\(message.id)-\(index)")
+                            let answer = asyncQuestionAnswers[answerKey] ?? ""
+                            AtomTextField(
+                                props: TextFieldProps(text: options.contains(answer) ? "" : answer, placeholder: "Other answer"),
+                                common: AtomCommon(testID: "async-question-other-\(message.id)-\(index)"),
+                                onChange: { asyncQuestionAnswers[answerKey] = $0 }
+                            )
                         } else {
                             PHForEach(Array(options.enumerated()), id: \.offset) { _, option in
-                                PHText(option).font(.system(size: 13)).foregroundStyle(.secondary)
+                                AtomText(props: TextProps(text: option, size: 13, color: "secondary"))
                             }
                         }
                     } else if !answered && !isReadOnly {
-                        PHTextField("Your answer", text: PHBinding(
-                                get: { asyncQuestionAnswers[answerKey] ?? "" },
-                                set: { asyncQuestionAnswers[answerKey] = $0 }
-                            ))
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("async-question-answer-\(message.id)-\(index)")
+                        AtomTextField(
+                            props: TextFieldProps(text: asyncQuestionAnswers[answerKey] ?? "", placeholder: "Your answer"),
+                            common: AtomCommon(testID: "async-question-answer-\(message.id)-\(index)"),
+                            onChange: { asyncQuestionAnswers[answerKey] = $0 }
+                        )
                     }
                 }
             }
             if answered {
-                PHText(answeredAsyncQuestionIDs.contains(message.id) ? "Answered" : "Pending")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                AtomText(props: TextProps(text: answeredAsyncQuestionIDs.contains(message.id) ? "Answered" : "Pending", size: 12, color: "secondary"))
             } else if !isReadOnly {
-                PHButton("Send answers") { submitAsyncQuestions(message) }
-                    .buttonStyle(.borderedProminent)
-                    .buttonHoverPointer()
-                    .nativeHelp("Send your answers to \(provider.displayName)")
-                    .disabled(isSubmittingLiveMessage || isLoadingHistory || questions.enumerated().contains { index, _ in
-                        let key = asyncQuestionKey(messageID: message.id, index: index)
-                        return (asyncQuestionAnswers[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    })
-                    .accessibilityIdentifier("submit-async-questions-\(message.id)")
+                AtomButton(
+                    props: ButtonProps(style: "prominent", disabled: isSubmittingLiveMessage || isLoadingHistory || hasEmptyAnswer),
+                    common: AtomCommon(testID: "submit-async-questions-\(message.id)", help: "Send your answers to \(provider.displayName)"),
+                    action: { submitAsyncQuestions(message) }
+                ) {
+                    AtomText(props: TextProps(text: "Send answers"))
+                }
             }
         }
-        .padding(15)
-        .frame(maxWidth: 620, alignment: .leading)
-        .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle(cornerRadius: 17))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("async-question-\(message.id)")
     }
 
     package func submitAsyncQuestions(_ message: ConversationMessage) {
@@ -206,18 +194,15 @@ extension TaskConversationView {
             : "Response from \((message.provider ?? provider).displayName)"
         let responseAnnotations = responseAnnotationReferences(for: message)
         return AssistantReplyHoverScope { isHovering in
-            PHVStack(alignment: .leading, spacing: 6) {
-                PHHStack(spacing: 6) {
+            AtomStack(props: StackProps(spacing: 6, align: "leading"), common: AtomCommon(maxWidth: 620, frameAlign: "leading")) {
+                AtomStack(props: StackProps(axis: "h", spacing: 6)) {
                     if let createdAt = message.createdAt {
-                        PHText(createdAt, format: .dateTime.hour().minute())
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .accessibilityIdentifier("message-time-\(message.id)")
+                        messageTime(createdAt, messageID: message.id)
                     }
-                    PHText(assistantLabel(for: message))
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("assistant-provider-\(message.id)")
+                    AtomText(
+                        props: TextProps(text: assistantLabel(for: message), size: 11, weight: "semibold", color: "secondary"),
+                        common: AtomCommon(testID: "assistant-provider-\(message.id)")
+                    )
                     if !displayText.isEmpty {
                         CopyMessageButton(markdown: displayText, messageID: message.id, isRevealed: isHovering)
                     }
@@ -226,30 +211,39 @@ extension TaskConversationView {
                 deferredImagesPlaceholder(for: message)
                 PHForEach(Array(transcriptImageDataURLs(for: message).enumerated()), id: \.offset) { index, dataURL in
                     if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
-                        PHButton { selectedChatImage = image } label: {
-                            PHImage(platformImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
-                                .clipShape(PHRoundedRectangle(cornerRadius: 12))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Open attached image")
-                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
-                        .plainButtonHoverPointer()
-                        .nativeHelp("Open image at full size")
+                        chatImageButton(image, messageID: message.id, index: index, maxWidth: 520, maxHeight: 420)
                     }
                 }
                 if !displayText.isEmpty {
-                    assistantMarkdown(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(WorkspaceTheme.conversationText)
-                        .padding(.horizontal, 15)
-                        .padding(.vertical, 11)
-                        .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle.phContinuous(cornerRadius: 17))
-                        .accessibilityElement(children: .contain)
-                        .accessibilityLabel(accessibilityText)
-                        .accessibilityIdentifier("assistant-message-\(message.id)")
+                    AtomStack(
+                        props: StackProps(align: "leading", group: true, fill: "panel", cornerRadius: 17, textSize: 16, textColor: "text"),
+                        common: AtomCommon(testID: "assistant-message-\(message.id)", label: accessibilityText, paddingX: 15, paddingY: 11)
+                    ) {
+                        assistantMarkdown(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
+                    }
                 }
             }
-            .frame(maxWidth: 620, alignment: .leading)
+        }
+    }
+
+    /// A message's send time, under a user bubble and before an assistant's provider label.
+    private func messageTime(_ createdAt: Date, messageID: String) -> some PHView {
+        AtomText(
+            props: TextProps(text: createdAt.formatted(.dateTime.hour().minute()), size: 10, color: "tertiary"),
+            common: AtomCommon(testID: "message-time-\(messageID)")
+        )
+    }
+
+    /// An attached image, which opens at full size.
+    private func chatImageButton(_ image: PHPlatformImage, messageID: String, index: Int, maxWidth: Double, maxHeight: Double) -> some PHView {
+        AtomButton(
+            common: AtomCommon(testID: "chat-image-\(messageID)-\(index)", label: "Open attached image", help: "Open image at full size"),
+            action: { selectedChatImage = image }
+        ) {
+            AtomImage(
+                platformImage: image, cornerRadius: 12,
+                common: AtomCommon(maxWidth: maxWidth, maxHeight: maxHeight)
+            )
         }
     }
 
@@ -268,17 +262,13 @@ extension TaskConversationView {
     package func deferredImagesPlaceholder(for message: ConversationMessage) -> some PHView {
         if message.imageDataURLs.isEmpty, message.imagesDeferred == true,
            deferredMessageImages[Self.deferredImageKey(message)] == nil {
-            PHHStack(spacing: 8) {
-                PHProgressView().controlSize(.small)
-                PHText("Loading image…")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+            AtomStack(
+                props: StackProps(axis: "h", spacing: 8, fill: "panel", cornerRadius: 12, summary: true),
+                common: AtomCommon(testID: "deferred-chat-image-\(message.id)", label: "Loading attached image", width: 220, height: 96)
+            ) {
+                AtomSpinner(props: SpinnerProps(size: "small"))
+                AtomText(props: TextProps(text: "Loading image…", size: 12, color: "secondary"))
             }
-            .frame(width: 220, height: 96)
-            .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle(cornerRadius: 12))
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading attached image")
-            .accessibilityIdentifier("deferred-chat-image-\(message.id)")
             .onAppear { requestDeferredImages(for: message) }
         }
     }
@@ -320,28 +310,27 @@ extension TaskConversationView {
     package func userBubble(_ message: ConversationMessage) -> some PHView {
         let isPlayhouseSent = message.isPlayhouseSent
         let accessibleText = isPlayhouseSent ? PlayhouseSentMessage.displayText(message.text) : Self.displayableUserText(message.text)
-        return PHZStack(alignment: .topLeading) {
-            PHVStack(alignment: .trailing, spacing: 8) {
+        return AtomStack(props: StackProps(axis: "z", align: "topLeading")) {
+            AtomStack(
+                props: StackProps(spacing: 8, align: "trailing", group: true),
+                common: AtomCommon(
+                    testID: isPlayhouseSent ? "playhouse-message-\(message.id)" : "user-message-\(message.id)",
+                    label: accessibleText.isEmpty ? "Attached image" : accessibleText,
+                    maxWidth: 620, frameAlign: "trailing"
+                )
+            ) {
                 deferredImagesPlaceholder(for: message)
                 PHForEach(Array(transcriptImageDataURLs(for: message).enumerated()), id: \.offset) { index, dataURL in
                     if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
-                        PHButton { selectedChatImage = image } label: {
-                            PHImage(platformImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
-                                .clipShape(PHRoundedRectangle(cornerRadius: 12))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Open attached image")
-                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
-                        .plainButtonHoverPointer()
-                        .nativeHelp("Open image at full size")
+                        chatImageButton(image, messageID: message.id, index: index, maxWidth: 260, maxHeight: 220)
                     }
                 }
                 let visibleText = accessibleText
                 if isPlayhouseSent {
-                    PHLabel(PlayhouseSentMessage.senderLabel(message.text), icon: .gearshapeTwo)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("playhouse-message-label-\(message.id)")
+                    AtomLabel(
+                        props: LabelProps(text: PlayhouseSentMessage.senderLabel(message.text), icon: PHIcon.gearshapeTwo.name, size: 10, weight: "medium", color: "secondary"),
+                        common: AtomCommon(testID: "playhouse-message-label-\(message.id)")
+                    )
                 }
                 let mentions = isPlayhouseSent ? [] : messageMentions(message, visibleText: visibleText)
                 if !visibleText.isEmpty {
@@ -351,73 +340,64 @@ extension TaskConversationView {
                     }
                     let highlightedRanges = annotations.filter { $0.messageID == message.id }.compactMap { userMessageRange($0.source) }
                     let chatRanges = sideChatRanges(messageID: message.id, rangeOf: userMessageRange)
-                    let fullText = PHNativeSelectableText(
-                        text: visibleText,
-                        highlightedRanges: highlightedRanges,
-                        mentionRanges: mentions.map(\.range),
-                        chatRanges: chatRanges,
-                        onHighlightClick: { range, bounds in
-                            reopenHighlight(range, bounds: bounds, messageID: message.id, anchorID: 0, rangeOf: userMessageRange)
-                        },
-                        textColor: isPlayhouseSent ? .secondaryLabelColor : .labelColor,
-                        onSelection: { range, selectedText, bounds in
-                            currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
-                                messageID: message.id, anchorID: 0, blockID: 0, startOffset: range.location,
-                                endBlockID: 0, endOffset: NSMaxRange(range), text: selectedText, bounds: bounds
-                            )
-                        }
-                    )
-                        .fixedSize(horizontal: false, vertical: true)
-                    PHGroup {
-                        // The preview cannot draw comments or side chats, so a message carrying
-                        // either always shows the selectable text that does.
-                        if isPlayhouseSent && highlightedRanges.isEmpty && chatRanges.isEmpty {
-                            CollapsibleAutomaticMessageText(
-                                text: visibleText,
-                                messageID: message.id,
-                                isExpanded: PHBinding(
-                                    get: { expandedAutomaticMessageTexts.contains(message.text) },
-                                    set: { expanded in
-                                        if expanded { expandedAutomaticMessageTexts.insert(message.text) }
-                                        else { expandedAutomaticMessageTexts.remove(message.text) }
-                                    }
-                                ),
-                                fullText: fullText
-                            )
-                        } else {
-                            fullText
-                        }
+                    let fullText = AtomStack(common: AtomCommon(fixedHeight: true)) {
+                        PHNativeSelectableText(
+                            text: visibleText,
+                            highlightedRanges: highlightedRanges,
+                            mentionRanges: mentions.map(\.range),
+                            chatRanges: chatRanges,
+                            onHighlightClick: { range, bounds in
+                                reopenHighlight(range, bounds: bounds, messageID: message.id, anchorID: 0, rangeOf: userMessageRange)
+                            },
+                            textColor: isPlayhouseSent ? .secondaryLabelColor : .labelColor,
+                            onSelection: { range, selectedText, bounds in
+                                currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
+                                    messageID: message.id, anchorID: 0, blockID: 0, startOffset: range.location,
+                                    endBlockID: 0, endOffset: NSMaxRange(range), text: selectedText, bounds: bounds
+                                )
+                            }
+                        )
                     }
+                    // The border never takes clicks, so the selection hint above stays clickable.
+                    AtomStack(
+                        props: StackProps(
+                            fill: isPlayhouseSent ? "primary" : "input", fillOpacity: isPlayhouseSent ? 0.04 : nil, cornerRadius: 10,
+                            stroke: "primary", strokeOpacity: isPlayhouseSent ? 0.18 : 0.2, strokeWidth: 1, dash: isPlayhouseSent ? [4, 3] : nil
+                        ),
+                        common: AtomCommon(paddingX: 16, paddingY: 11)
+                    ) {
                         // Anchored on the text like assistant blocks; as a ZStack sibling of the
                         // bubble the hint's popover ignored clicks on its controls.
-                        .overlay(alignment: .topLeading) {
+                        AtomOverlay(props: OverlayProps(align: "topLeading")) {
+                            PHGroup {
+                                // The preview cannot draw comments or side chats, so a message carrying
+                                // either always shows the selectable text that does.
+                                if isPlayhouseSent && highlightedRanges.isEmpty && chatRanges.isEmpty {
+                                    CollapsibleAutomaticMessageText(
+                                        text: visibleText,
+                                        messageID: message.id,
+                                        isExpanded: PHBinding(
+                                            get: { expandedAutomaticMessageTexts.contains(message.text) },
+                                            set: { expanded in
+                                                if expanded { expandedAutomaticMessageTexts.insert(message.text) }
+                                                else { expandedAutomaticMessageTexts.remove(message.text) }
+                                            }
+                                        ),
+                                        fullText: fullText
+                                    )
+                                } else {
+                                    fullText
+                                }
+                            }
+                        } overlay: {
                             selectionHint(messageID: message.id, anchorID: 0, raisedBy: 16)
                         }
-                        .padding(.horizontal, 16).padding(.vertical, 11)
-                        // The border is part of the background so the selection hint above stays clickable.
-                        .background {
-                            PHRoundedRectangle.phContinuous(cornerRadius: 10)
-                                .fill(isPlayhouseSent ? PHColor.primary.opacity(0.04) : WorkspaceTheme.inputBackground)
-                                .overlay(
-                                    PHRoundedRectangle.phContinuous(cornerRadius: 10)
-                                        .strokeBorder(
-                                            PHColor.primary.opacity(isPlayhouseSent ? 0.18 : 0.2),
-                                            style: PHStrokeStyle(lineWidth: 1, dash: isPlayhouseSent ? [4, 3] : [])
-                                        )
-                                )
-                        }
+                    }
                 }
                 if let createdAt = message.createdAt {
-                    PHText(createdAt, format: .dateTime.hour().minute())
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityIdentifier("message-time-\(message.id)")
+                    messageTime(createdAt, messageID: message.id)
                 }
             }
-            .frame(maxWidth: 620, alignment: .trailing)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(accessibleText.isEmpty ? "Attached image" : accessibleText)
-            .accessibilityIdentifier(isPlayhouseSent ? "playhouse-message-\(message.id)" : "user-message-\(message.id)")
         }
     }
 
@@ -522,11 +502,12 @@ extension TaskConversationView {
                         selection.bounds.maxY + 22
                     )
                     if !isOpen {
-                        SelectionActionsPill(
-                            comment: { openSelectionPopover(selection, action: .comment) },
-                            sideChat: { openSelectionPopover(selection, action: .sideChat) }
-                        )
-                        .frame(width: SelectionActionsPill.width, height: SelectionActionsPill.height)
+                        AtomStack(common: AtomCommon(width: Double(SelectionActionsPill.width), height: Double(SelectionActionsPill.height))) {
+                            SelectionActionsPill(
+                                comment: { openSelectionPopover(selection, action: .comment) },
+                                sideChat: { openSelectionPopover(selection, action: .sideChat) }
+                            )
+                        }
                         .position(
                             x: min(max(selection.bounds.midX, SelectionActionsPill.width / 2), max(SelectionActionsPill.width / 2, geometry.size.width - SelectionActionsPill.width / 2)),
                             y: pillY
@@ -539,10 +520,12 @@ extension TaskConversationView {
     }
 
     private func selectionAnchor(_ selection: AnnotationSelection, in size: CGSize) -> some PHView {
-        PHColor.clear
-            .frame(width: max(1, min(selection.bounds.width, size.width)), height: max(1, selection.bounds.height))
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
+        AtomStack(common: AtomCommon(
+            width: Double(max(1, min(selection.bounds.width, size.width))), height: Double(max(1, selection.bounds.height)),
+            passThrough: true, decorative: true
+        )) {
+            PHEmptyView()
+        }
     }
 
     private func selectionPopoverBinding(_ selection: AnnotationSelection) -> PHBinding<Bool> {
@@ -771,58 +754,57 @@ package struct CollapsibleAutomaticMessageText<FullText: PHView>: PHView {
     }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 4) {
-            PHGroup {
-                if isExpanded || isTruncated == false {
-                    fullText
-                } else {
-                    styledText
-                        .lineLimit(Self.previewLineLimit)
-                        .truncationMode(.tail)
-                        // The selectable text's container inset, so a short message keeps its height.
-                        .padding(.vertical, 5)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityIdentifier("automatic-message-preview-\(messageID)")
+        AtomStack(props: StackProps(spacing: 4, align: "leading")) {
+            // The measuring layouts lie under the shown text, which they never resize.
+            AtomOverlay(props: OverlayProps(align: "topLeading")) {
+                PHGroup {
+                    if isExpanded || isTruncated == false {
+                        fullText
+                    } else {
+                        // The selectable text's container inset (paddingY), so a short message keeps its height.
+                        styledText(
+                            lineLimit: Self.previewLineLimit, wrap: false,
+                            common: AtomCommon(testID: "automatic-message-preview-\(messageID)", fillWidth: true, paddingY: 5)
+                        )
+                    }
                 }
-            }
-            .background(alignment: .topLeading) {
+            } overlay: {
                 // Both layouts at the shown width; only their heights matter.
-                PHZStack(alignment: .topLeading) {
-                    styledText
-                        .lineLimit(Self.previewLineLimit)
-                        .fixedSize(horizontal: false, vertical: true)
+                AtomStack(props: StackProps(axis: "z", align: "topLeading"), common: AtomCommon(decorative: true)) {
+                    styledText(lineLimit: Self.previewLineLimit, wrap: true)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { previewHeight = $0 }
-                    styledText
-                        .fixedSize(horizontal: false, vertical: true)
+                    styledText(lineLimit: nil, wrap: true)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { wholeHeight = $0 }
                 }
                 .hidden()
-                .accessibilityHidden(true)
             }
             if isTruncated == true {
-                PHButton {
-                    isExpanded.toggle()
-                } label: {
-                    PHLabel(isExpanded ? "Show less" : "Show more", icon: isExpanded ? .chevronUp : .chevronDown)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .contentShape(PHRectangle())
+                AtomButton(
+                    common: AtomCommon(
+                        testID: "automatic-message-toggle-\(messageID)",
+                        label: isExpanded ? "Collapse automatic message" : "Expand automatic message to show all text",
+                        value: isExpanded ? "expanded" : "collapsed",
+                        help: isExpanded ? "Show only the start of this automatic message" : "Show the whole automatic message"
+                    ),
+                    action: { isExpanded.toggle() }
+                ) {
+                    AtomLabel(props: LabelProps(
+                        text: isExpanded ? "Show less" : "Show more",
+                        icon: (isExpanded ? PHIcon.chevronUp : PHIcon.chevronDown).name,
+                        size: 11, weight: "medium", color: "secondary"
+                    ))
                 }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .nativeHelp(isExpanded ? "Show only the start of this automatic message" : "Show the whole automatic message")
-                .accessibilityLabel(isExpanded ? "Collapse automatic message" : "Expand automatic message to show all text")
-                .accessibilityValue(isExpanded ? "expanded" : "collapsed")
-                .accessibilityIdentifier("automatic-message-toggle-\(messageID)")
             }
         }
     }
 
-    private var styledText: some PHView {
-        PHText(text)
-            .font(.system(size: 16))
-            .lineSpacing(4)
-            .foregroundStyle(PHColor(platformColor: .secondaryLabelColor))
+    /// The message at the transcript's size in the secondary label color; `wrap` grows it to its
+    /// whole height instead of truncating it.
+    private func styledText(lineLimit: Int?, wrap: Bool, common: AtomCommon = AtomCommon()) -> some PHView {
+        AtomText(
+            props: TextProps(text: text, size: 16, color: "secondary", lineLimit: lineLimit, lineSpacing: 4, wrap: wrap, truncation: "tail"),
+            common: common
+        )
     }
 
     package init(text: String, messageID: String, isExpanded: PHBinding<Bool>, fullText: FullText) {

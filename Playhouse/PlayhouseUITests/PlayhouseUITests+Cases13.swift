@@ -1115,7 +1115,6 @@ extension PlayhouseUITests {
         let chatComposer = element("message-composer")
         XCTAssertTrue(chatComposer.waitToExist(timeout: 5))
         chatComposer.click()
-        let earlyReplyFrame = earlyReply.frame
         let chatFrame = chatSidebar.frame
         attachAppWindowScreenshot(named: "Chat scrolled up to its earliest page, composer focused")
         let historyBeforeOpeningTask = try chatHistoryReads()
@@ -1124,6 +1123,8 @@ extension PlayhouseUITests {
 
         let card = element("task-card-\(taskID.uppercased())")
         XCTAssertTrue(card.waitToExist(timeout: 10), "The task shows on the board beside the chat.")
+        // Read the settled position immediately before navigation, relative to the scroll viewport.
+        let earlyReplyOffset = earlyReply.frame.minY - transcript.frame.minY
         clickTaskCardTitle(card)
         XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Opening a task shows its conversation view.")
         XCTAssertTrue(waitUntil({ !chatSidebar.exists }, timeout: 5), "The hidden chat is out of accessibility.")
@@ -1152,7 +1153,8 @@ extension PlayhouseUITests {
         XCTAssertEqual(transcriptValue(), loadedValue, "The chat shows the same rendered messages, without loading again.")
         XCTAssertEqual(chatSidebar.descendants(matching: .progressIndicator).count, 0, "No loading indicator shows in the chat.")
         XCTAssertTrue(earlyReply.exists, "The earlier messages are still rendered.")
-        XCTAssertEqual(earlyReply.frame.minY, earlyReplyFrame.minY, accuracy: 2, "The chat keeps its scroll position.")
+        let restoredReplyOffset = earlyReply.frame.minY - transcript.frame.minY
+        XCTAssertEqual(restoredReplyOffset, earlyReplyOffset, accuracy: 2, "The chat keeps its scroll position within its viewport.")
         let chatDraft = chatComposer.value as? String ?? ""
         XCTAssertFalse(chatDraft.contains("Typed into the task."), "No typing reached the hidden chat: \(chatDraft)")
         XCTAssertEqual(try chatHistoryReads().count, historyBeforeOpeningTask.count, "Switching to a task and back issues no chat history request.")

@@ -209,11 +209,17 @@ def list_items(runtime, _session_state, message):
                 {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "inProgress", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}},
                 {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"}},
             ])
-        _session_state.contents.append({
-            "id": "item_fixture_active_long_command", "type": "commandExecution",
-            "command": "long-command-name " + "argument-" * 40, "cwd": "/tmp/playhouse-fixture",
-            **({"status": "completed", "durationMs": 37} if latest_completed else {"status": "inProgress"}),
-        })
+        # The UI can hold the command start while it opens Working for. A
+        # concurrent history read during that pause must omit the future item.
+        command_start = str(runtime.sys.argv[0]) + ".tool-command-start"
+        command_held = runtime.Path(command_start + "-pause").is_file()
+        command_emitted = runtime.Path(str(runtime.sys.argv[0]) + ".tool-ready").is_file()
+        if latest_completed or command_emitted or not command_held:
+            _session_state.contents.append({
+                "id": "item_fixture_active_long_command", "type": "commandExecution",
+                "command": "long-command-name " + "argument-" * 40, "cwd": "/tmp/playhouse-fixture",
+                **({"status": "completed", "durationMs": 37} if latest_completed else {"status": "inProgress"}),
+            })
     if _session_state.mode.endswith("-markdown"):
         _session_state.saved_history = runtime.json.loads(_session_state.history_path.read_text(encoding="utf-8")) if _session_state.history_path.is_file() else {}
         _session_state.contents = [

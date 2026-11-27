@@ -629,13 +629,18 @@ extension PlayhouseUITests {
         let doneTarget = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5)).withOffset(CGVector(dx: -48, dy: 0))
         source.press(forDuration: 0.5, thenDragTo: doneTarget, withVelocity: .default, thenHoldForDuration: 1.5)
     }
-    /// Starts a full-screen capture that fires while a following blocking gesture is still
+    /// Starts a capture that fires while a following blocking gesture is still
     /// in progress, so a mid-drag state can be attached once the gesture returns.
-    func startDelayedScreenCapture(afterSeconds delay: Int) -> (process: Process, file: URL)? {
+    func startDelayedScreenCapture(afterSeconds delay: Int, region: CGRect? = nil) -> (process: Process, file: URL)? {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("playhouse-capture-\(UUID().uuidString).png")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-x", "-T", "\(delay)", file.path]
+        var arguments = ["-x", "-T", "\(delay)"]
+        if let region {
+            let bounds = region.integral
+            arguments.append("-R\(Int(bounds.minX)),\(Int(bounds.minY)),\(Int(bounds.width)),\(Int(bounds.height))")
+        }
+        process.arguments = arguments + [file.path]
         do {
             try process.run()
             return (process, file)

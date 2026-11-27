@@ -238,103 +238,108 @@ struct PluginsMenuContent: View {
     @AppStorage(WorkspaceSettings.pluginAddModeKey, store: WorkspaceSettings.preferencesStore) private var isAddModeOn = false
 
     var body: some View {
-        Toggle("Add Plugin Mode", isOn: Binding(get: { isAddModeOn }, set: { PluginRegistry.setAddMode($0) }))
-            .help("Show where a new plugin's button can go")
-        Button("Plugin Catalog") { openWindow(id: "plugin-catalog") }
-            .help("Open the Plugin Catalog")
+        AtomToggle(
+            props: ToggleProps(isOn: isAddModeOn, style: "menuItem"),
+            common: AtomCommon(label: "Add Plugin Mode", help: "Show where a new plugin's button can go"),
+            onToggle: { PluginRegistry.setAddMode(!isAddModeOn) }
+        )
+        AtomButton(
+            props: ButtonProps(style: "menuItem", title: "Plugin Catalog"),
+            common: AtomCommon(help: "Open the Plugin Catalog"),
+            action: { openWindow(id: "plugin-catalog") }
+        ) { EmptyView() }
         if !registry.builtInPlugins.isEmpty {
-            Divider()
-            Section("Built-in Plugins") {
+            AtomDivider()
+            AtomStack(props: StackProps(sectionTitle: "Built-in Plugins", layout: "section")) {
                 ForEach(registry.builtInPlugins) { plugin in
-                    Menu {
-                        enableButton(plugin)
-                    } label: {
-                        pluginLabel(plugin)
-                    }
-                        // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
-                        // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
+                    pluginMenu(plugin, installed: false)
                 }
             }
         }
         if !registry.installedPlugins.isEmpty {
-            Divider()
-            Section("Installed Plugins") {
+            AtomDivider()
+            AtomStack(props: StackProps(sectionTitle: "Installed Plugins", layout: "section")) {
                 ForEach(registry.installedPlugins) { plugin in
-                    Menu {
-                        if let problem = plugin.errors.first {
-                            Text(problem)
-                        }
-                        enableButton(plugin)
-                        Button("Edit…") { edit(plugin.id) }
-                            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                            .help("Open this plugin's editor")
-                        Button("Delete…") { confirmDelete(plugin.id, name: plugin.name, detail: "Its folder is removed: \(plugin.folder)") }
-                            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                            .help("Delete this plugin's folder")
-                        Button("Settings…") {}
-                            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                            .disabled(true)
-                            .help("Plugin settings are not available yet")
-                    } label: {
-                        pluginLabel(plugin)
-                    }
-                        // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
-                        // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
+                    pluginMenu(plugin, installed: true)
                 }
             }
         }
-        // A plugin being authored that was never saved has an editor conversation but no folder.
+        // An unfinished authoring session has a conversation and no plugin folder.
         let unsaved = registry.authoringSessions.filter { session in
             session.authoredPluginID.map { id in !registry.plugins.contains { $0.id == id } } ?? false
         }
         if !unsaved.isEmpty {
-            Divider()
-            Section("Unsaved Plugins") {
+            AtomDivider()
+            AtomStack(props: StackProps(sectionTitle: "Unsaved Plugins", layout: "section")) {
                 ForEach(unsaved, id: \.id) { session in
                     if let pluginID = session.authoredPluginID {
-                        Menu {
-                            Button("Edit…") { edit(pluginID) }
-                                // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                                .help("Open this plugin's editor")
-                            Button("Delete…") {
+                        let placement = session.pluginPlacement.flatMap(PluginPlacement.init(rawValue:))?.title ?? session.pluginPlacement ?? ""
+                        AtomMenu(props: MenuProps(
+                            icon: PHIcon.squareDashed.name, text: "\(session.title) — \(placement) (Unsaved)",
+                            items: [[
+                                .init(id: "edit", title: "Edit…", help: "Open this plugin's editor"),
+                                .init(id: "delete", title: "Delete…", help: "Delete this unsaved plugin and its conversation"),
+                            ]],
+                            style: "submenu"
+                        )) { action in
+                            if action == "edit" {
+                                edit(pluginID)
+                            } else if action == "delete" {
                                 confirmDelete(pluginID, name: session.title, detail: "It was never saved. Its draft and editor conversation are removed.")
                             }
-                                // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                                .help("Delete this unsaved plugin and its conversation")
-                        } label: {
-                            let placement = session.pluginPlacement.flatMap(PluginPlacement.init(rawValue:))?.title ?? session.pluginPlacement ?? ""
-                            Label("\(session.title) — \(placement) (Unsaved)", systemImage: "square.dashed")
                         }
-                            // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
-                            // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
                     }
                 }
             }
         }
-        Divider()
-        Button("Reload Plugins") { Task { await registry.reload() } }
-            .help("Read the plugins folder again")
+        AtomDivider()
+        AtomButton(
+            props: ButtonProps(style: "menuItem", title: "Reload Plugins"),
+            common: AtomCommon(help: "Read the plugins folder again"),
+            action: { Task { await registry.reload() } }
+        ) { EmptyView() }
     }
 
-    private func pluginLabel(_ plugin: PluginRecord) -> some View {
+    private func pluginMenu(_ plugin: PluginRecord, installed: Bool) -> some View {
         let placement = plugin.hasSurface ? PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement : PluginPresentation.headless.title
-        return Label("\(plugin.name) — \(placement)\(plugin.enabled ? "" : " (Disabled)")",
-                     systemImage: plugin.valid ? plugin.icon : "exclamationmark.triangle")
-    }
-
-    /// A disabled plugin is hidden from every placement and never runs until it's enabled again.
-    private func enableButton(_ plugin: PluginRecord) -> some View {
-        Button(plugin.enabled ? "Disable" : "Enable") {
-            Task { @MainActor in
-                do {
-                    try await registry.setEnabled(plugin.id, !plugin.enabled)
-                } catch {
-                    NSAlert(error: error).runModal()
+        var items: [MenuProps.Item] = []
+        if installed, let problem = plugin.errors.first {
+            items.append(.init(id: "error", title: problem, informational: true))
+        }
+        items.append(.init(
+            id: "enable",
+            title: plugin.enabled ? "Disable" : "Enable",
+            help: plugin.enabled ? "Hide this plugin and stop running it" : "Show and run this plugin again"
+        ))
+        if installed {
+            items += [
+                .init(id: "edit", title: "Edit…", help: "Open this plugin's editor"),
+                .init(id: "delete", title: "Delete…", help: "Delete this plugin's folder"),
+                .init(id: "settings", title: "Settings…", help: "Plugin settings are not available yet", disabled: true),
+            ]
+        }
+        return AtomMenu(props: MenuProps(
+            icon: plugin.valid ? plugin.icon : PHIcon.exclamationmarkTriangle.name,
+            text: "\(plugin.name) — \(placement)\(plugin.enabled ? "" : " (Disabled)")",
+            items: [items], style: "submenu"
+        )) { action in
+            switch action {
+            case "enable":
+                Task { @MainActor in
+                    do {
+                        try await registry.setEnabled(plugin.id, !plugin.enabled)
+                    } catch {
+                        NSAlert(error: error).runModal()
+                    }
                 }
+            case "edit":
+                edit(plugin.id)
+            case "delete":
+                confirmDelete(plugin.id, name: plugin.name, detail: "Its folder is removed: \(plugin.folder)")
+            default:
+                break
             }
         }
-            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-            .help(plugin.enabled ? "Hide this plugin and stop running it" : "Show and run this plugin again")
     }
 
     private func edit(_ pluginID: String) {

@@ -97,20 +97,21 @@ package struct SkillsPageView: PHView {
     }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
-            SkillsPageHeader(model: model, actions: actions)
-            PHDivider()
-            switch kind {
-            case .skills: skillsBody
-            case .rules: RulesSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingRulePanel, onFixTask: onFixTask)
-            case .mcp:
-                McpServersSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingMcpPanel, onFixTask: onFixTask, focus: focus)
+        AtomOverlay(props: OverlayProps(group: false)) {
+            AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading", fill: "window")) {
+                SkillsPageHeader(model: model, actions: actions)
+                AtomDivider()
+                switch kind {
+                case .skills: skillsBody
+                case .rules: RulesSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingRulePanel, onFixTask: onFixTask)
+                case .mcp:
+                    McpServersSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingMcpPanel, onFixTask: onFixTask, focus: focus)
+                }
             }
+        } overlay: {
+            // A closed panel's removal transition must not catch clicks.
+            if kind == .skills { panels.allowsHitTesting(isPresentingPanel) }
         }
-        .background(WorkspaceTheme.windowBackground)
-        // A closed panel's removal transition can leave the overlay catching clicks, so it
-        // takes hits only while a panel is open (see McpServersSectionView).
-        .overlay { if kind == .skills { panels.allowsHitTesting(isPresentingPanel) } }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("skills-page")
     }
@@ -206,37 +207,40 @@ package struct SkillsPageView: PHView {
 
     /// The editor and New Skill panels slide up over the gallery as modals.
     private var panels: some PHView {
-        PHZStack {
+        AtomStack(props: StackProps(axis: "z")) {
             if isPresentingPanel {
                 // Blocks clicks on the gallery under the panel's margins.
-                PHColor.black.opacity(0.18)
+                AtomStack(
+                    props: StackProps(fill: "black", fillOpacity: 0.18),
+                    common: AtomCommon(fillWidth: true, fillHeight: true)
+                ) {}
                     .ignoresSafeArea()
                     .transition(.opacity)
                     .zIndex(0)
             }
             switch panel {
             case .editing(let editing):
-                SkillEditorPanel(editing: editing, onClose: closePanel) { content in
-                    let record = try await manager.updateSkillContent(taskID: task.id, skillID: editing.skill.id, content: content)
-                    catalog = catalog?.replacing(record)
-                    await reload()
+                AtomStack(common: AtomCommon(paddingX: 20, paddingTop: 20)) {
+                    SkillEditorPanel(editing: editing, onClose: closePanel) { content in
+                        let record = try await manager.updateSkillContent(taskID: task.id, skillID: editing.skill.id, content: content)
+                        catalog = catalog?.replacing(record)
+                        await reload()
+                    }
+                    .id(editing.id)
                 }
-                .id(editing.id)
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
                 .transition(.move(edge: .bottom))
                 .zIndex(1)
             case .creating:
-                NewSkillPanel(roots: catalog?.repositories ?? [], onClose: closePanel) { manifest, scope, root in
-                    let record = try await manager.createSkill(
-                        taskID: task.id, name: manifest.name, description: manifest.description, body: manifest.body,
-                        fields: [:], scope: scope, root: root
-                    )
-                    jump(record.scope == .global ? "global" : "repo")
-                    await reload()
+                AtomStack(common: AtomCommon(paddingX: 20, paddingTop: 20)) {
+                    NewSkillPanel(roots: catalog?.repositories ?? [], onClose: closePanel) { manifest, scope, root in
+                        let record = try await manager.createSkill(
+                            taskID: task.id, name: manifest.name, description: manifest.description, body: manifest.body,
+                            fields: [:], scope: scope, root: root
+                        )
+                        jump(record.scope == .global ? "global" : "repo")
+                        await reload()
+                    }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
                 .transition(.move(edge: .bottom))
                 .zIndex(1)
             case nil:
@@ -389,24 +393,22 @@ package struct SkillPanel<Header: PHView, Content: PHView, Footer: PHView>: PHVi
     @PHViewBuilder package let footer: Footer
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
-            header
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(WorkspaceTheme.panelBackground)
-            PHDivider()
-            content
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
-            PHDivider()
-            footer
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+        AtomStack(
+            props: StackProps(
+                axis: "v", spacing: 0, align: "leading", fill: "window", cornerRadius: 14,
+                clip: true, shadow: 18, shadowOpacity: 0.25, shadowY: -2, topCorners: true
+            ),
+            common: AtomCommon(fillWidth: true, fillHeight: true)
+        ) {
+            AtomStack(
+                props: StackProps(fill: "panel"),
+                common: AtomCommon(fillWidth: true, frameAlign: "leading", padding: 20)
+            ) { header }
+            AtomDivider()
+            AtomStack(common: AtomCommon(paddingX: 20, paddingY: 14)) { content }
+            AtomDivider()
+            AtomStack(common: AtomCommon(paddingX: 20, paddingY: 12)) { footer }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WorkspaceTheme.windowBackground)
-        .clipShape(PHUnevenRoundedRectangle(topLeadingRadius: 14, topTrailingRadius: 14))
-        .phShadow(color: .black.opacity(0.25), radius: 18, y: -2)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(identifier)
     }
@@ -431,15 +433,10 @@ package struct SkillDocumentTabPicker: PHView {
     package let identifier: String
 
     package var body: some PHView {
-        PHPicker("View", selection: $tab) {
-            PHForEach(SkillDocumentTab.allCases) { tab in PHText(tab.rawValue).tag(tab) }
-        }
-        .buttonHoverPointer()
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
-        .nativeHelp("Edit the Markdown, or preview how it reads")
-        .accessibilityIdentifier(identifier)
+        AtomSegmented(
+            selection: $tab, options: SkillDocumentTab.allCases, label: { $0.rawValue },
+            common: AtomCommon(testID: identifier, label: "View", help: "Edit the Markdown, or preview how it reads")
+        )
     }
 
     package init(tab: PHBinding<SkillDocumentTab>, identifier: String) {
@@ -470,25 +467,17 @@ private struct SkillEditorPanel: PHView {
 
     var body: some PHView {
         SkillPanel(identifier: "skill-editor-panel") {
-            PHHStack(alignment: .center, spacing: 10) {
-                PHImage(icon: .sparkles)
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                PHVStack(alignment: .leading, spacing: 2) {
-                    PHText(skill.name)
-                        .font(.title2.weight(.semibold))
+            AtomStack(props: StackProps(axis: "h", spacing: 10, align: "center")) {
+                AtomIcon(props: IconProps(name: PHIcon.sparkles.name, color: "accent", textStyle: "title2"))
+                AtomStack(props: StackProps(axis: "v", spacing: 2, align: "leading")) {
+                    AtomText(props: TextProps(text: skill.name, weight: "semibold", textStyle: "title2"))
                         .accessibilityIdentifier("skill-editor-name")
                     if let folder = skill.folderPath {
-                        PHText(folder + "/SKILL.md")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
+                        AtomText(props: TextProps(text: folder + "/SKILL.md", color: "secondary", lineLimit: 1, truncation: "middle", selectable: true, textStyle: "caption"))
                             .accessibilityIdentifier("skill-editor-location")
                     }
                 }
-                PHSpacer()
+                AtomSpacer()
                 SkillDocumentTabPicker(tab: $tab, identifier: "skill-editor-tab-picker")
             }
         } content: {
@@ -499,22 +488,18 @@ private struct SkillEditorPanel: PHView {
                 SkillMarkdownPreview(markdown: content, identifier: "skill-editor-preview")
             }
         } footer: {
-            PHHStack {
+            AtomStack(props: StackProps(axis: "h")) {
                 if let errorMessage {
-                    PHText(errorMessage).foregroundStyle(.red).font(.callout).accessibilityIdentifier("skill-editor-error")
+                    AtomText(props: TextProps(text: errorMessage, color: "red", textStyle: "callout")).accessibilityIdentifier("skill-editor-error")
                 } else if readOnly {
-                    PHText("\(skill.name) comes with its provider and is read-only.").font(.callout).foregroundStyle(.secondary)
+                    AtomText(props: TextProps(text: "\(skill.name) comes with its provider and is read-only.", color: "secondary", textStyle: "callout"))
                 }
-                PHSpacer()
-                PHButton(readOnly ? "Close" : "Cancel", action: onClose)
-                    .buttonHoverPointer()
+                AtomSpacer()
+                AtomButton(props: ButtonProps(style: "automatic"), action: onClose) { AtomText(props: TextProps(text: readOnly ? "Close" : "Cancel")) }
                     .shortcutHelp(readOnly ? "Close the skill" : "Discard changes", shortcut: "cancel")
                     .accessibilityIdentifier("skill-editor-cancel")
                 if !readOnly {
-                    PHButton("Save") { save() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSaving)
-                        .buttonHoverPointer()
+                    AtomButton(props: ButtonProps(style: "prominent", disabled: isSaving), action: { save() }) { AtomText(props: TextProps(text: "Save")) }
                         .shortcutHelp("Save SKILL.md", shortcut: AppShortcut.save)
                         .accessibilityIdentifier("skill-editor-save")
                 }
@@ -551,47 +536,48 @@ private struct NewSkillPanel: PHView {
 
     var body: some PHView {
         SkillPanel(identifier: "new-skill-panel") {
-            PHVStack(alignment: .leading, spacing: 12) {
-                PHText("New Skill").font(.headline)
+            AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+                AtomText(props: TextProps(text: "New Skill", textStyle: "headline"))
                 // Save to and the Private switch each get their own row so the panel fits the narrow modal.
-                PHVStack(alignment: .leading, spacing: 8) {
-                    PHPicker("Save to", selection: $destination) {
-                        PHText("Global (~/.agents/skills)").tag("global")
-                        PHForEach(roots, id: \.rootPath) { root in PHText(root.name).tag(root.rootPath) }
-                    }
-                    .buttonHoverPointer()
-                    .fixedSize()
-                    .accessibilityIdentifier("new-skill-scope")
+                AtomStack(props: StackProps(axis: "v", spacing: 8, align: "leading")) {
+                    AtomSegmented(
+                        style: "menu", showsLabel: true, selection: $destination,
+                        options: ["global"] + roots.map(\.rootPath),
+                        label: { path in roots.first(where: { $0.rootPath == path })?.name ?? "Global (~/.agents/skills)" },
+                        common: AtomCommon(testID: "new-skill-scope", label: "Save to")
+                    )
                     if destination != "global" {
-                        PHToggle("Private", isOn: $isPrivate)
-                            .buttonHoverPointer()
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .nativeHelp("Keep the skill out of the repository: Playhouse stores it and shares it only with this repository's sessions")
-                            .accessibilityIdentifier("new-skill-private")
+                        AtomToggle(
+                            props: ToggleProps(isOn: isPrivate, size: "small", showsLabel: true),
+                            common: AtomCommon(
+                                testID: "new-skill-private", label: "Private",
+                                help: "Keep the skill out of the repository: Playhouse stores it and shares it only with this repository's sessions"
+                            ),
+                            onToggle: { isPrivate.toggle() }
+                        )
                     }
                 }
-                PHText(destination != "global" && isPrivate
+                AtomText(props: TextProps(text: destination != "global" && isPrivate
                      ? "Private: Playhouse stores the skill itself and writes nothing into the repository or its worktrees. Claude and Codex sessions on this repository use it like any other skill. The name uses lowercase letters, digits, and hyphens."
-                     : "Saved in the open Agent Skills layout (.agents/skills). Playhouse shares it with both Claude and Codex. The name uses lowercase letters, digits, and hyphens.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                     : "Saved in the open Agent Skills layout (.agents/skills). Playhouse shares it with both Claude and Codex. The name uses lowercase letters, digits, and hyphens.", color: "secondary", wrap: true, textStyle: "callout"))
                     .accessibilityIdentifier("new-skill-destination-note")
-                PHTextField("skill-name", text: $manifest.name)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Name")
-                    .accessibilityIdentifier("new-skill-name")
-                PHTextField("When should the agent use this skill?", text: $manifest.description, axis: .vertical)
-                    .lineLimit(1...3)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Description")
-                    .accessibilityIdentifier("new-skill-description")
+                AtomTextField(
+                    props: TextFieldProps(text: manifest.name, placeholder: "skill-name"),
+                    common: AtomCommon(testID: "new-skill-name", label: "Name"), onChange: { manifest.name = $0 }
+                )
+                AtomTextField(
+                    props: TextFieldProps(
+                        text: manifest.description, placeholder: "When should the agent use this skill?",
+                        multiline: true, lineLimit: 3
+                    ),
+                    common: AtomCommon(testID: "new-skill-description", label: "Description"), onChange: { manifest.description = $0 }
+                )
             }
         } content: {
-            PHVStack(alignment: .leading, spacing: 6) {
-                PHHStack {
-                    PHText("Instructions").font(.subheadline.weight(.semibold))
-                    PHSpacer()
+            AtomStack(props: StackProps(axis: "v", spacing: 6, align: "leading")) {
+                AtomStack(props: StackProps(axis: "h")) {
+                    AtomText(props: TextProps(text: "Instructions", weight: "semibold", textStyle: "subheadline"))
+                    AtomSpacer()
                     SkillDocumentTabPicker(tab: $tab, identifier: "new-skill-tab-picker")
                 }
                 switch tab {
@@ -602,19 +588,15 @@ private struct NewSkillPanel: PHView {
                 }
             }
         } footer: {
-            PHHStack {
+            AtomStack(props: StackProps(axis: "h")) {
                 if let errorMessage {
-                    PHText(errorMessage).foregroundStyle(.red).font(.callout).accessibilityIdentifier("new-skill-error")
+                    AtomText(props: TextProps(text: errorMessage, color: "red", textStyle: "callout")).accessibilityIdentifier("new-skill-error")
                 }
-                PHSpacer()
-                PHButton("Cancel", action: onClose)
-                    .buttonHoverPointer()
+                AtomSpacer()
+                AtomButton(props: ButtonProps(style: "automatic"), action: onClose) { AtomText(props: TextProps(text: "Cancel")) }
                     .shortcutHelp("Close without creating a skill", shortcut: "cancel")
                     .accessibilityIdentifier("new-skill-cancel")
-                PHButton("Create") { create() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isSaving)
-                    .buttonHoverPointer()
+                AtomButton(props: ButtonProps(style: "prominent", disabled: isSaving), action: { create() }) { AtomText(props: TextProps(text: "Create")) }
                     .shortcutHelp("Create the skill", shortcut: AppShortcut.save)
                     .accessibilityIdentifier("new-skill-create")
             }
@@ -645,14 +627,17 @@ package struct SkillMarkdownPreview: PHView {
     package let identifier: String
 
     package var body: some PHView {
-        AtomScroll(props: ScrollProps(inset: 16)) {
-            AtomMarkdown(
-                props: MarkdownProps(text: markdown, selectable: true, frontmatter: "table"),
-                common: AtomCommon(testID: identifier, fillWidth: true)
-            )
+        AtomStack(
+            props: StackProps(fill: "panel", cornerRadius: 6),
+            common: AtomCommon(fillWidth: true, fillHeight: true)
+        ) {
+            AtomScroll(props: ScrollProps(inset: 16)) {
+                AtomMarkdown(
+                    props: MarkdownProps(text: markdown, selectable: true, frontmatter: "table"),
+                    common: AtomCommon(testID: identifier, fillWidth: true)
+                )
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle(cornerRadius: 6))
     }
 
     package init(markdown: String, identifier: String) {

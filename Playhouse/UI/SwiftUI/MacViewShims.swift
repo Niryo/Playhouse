@@ -330,9 +330,11 @@ package struct PHSheetOutsideClickDismissal: NSViewRepresentable {
 }
 
 package struct PHEscapeKeyMonitor: NSViewRepresentable {
+    let windowScoped: Bool
     let onEscape: () -> Void
 
-    package init(onEscape: @escaping () -> Void) {
+    package init(windowScoped: Bool = false, onEscape: @escaping () -> Void) {
+        self.windowScoped = windowScoped
         self.onEscape = onEscape
     }
 
@@ -342,7 +344,7 @@ package struct PHEscapeKeyMonitor: NSViewRepresentable {
 
     package func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
-        context.coordinator.startMonitoring()
+        context.coordinator.startMonitoring(in: windowScoped ? view : nil)
         return view
     }
 
@@ -362,10 +364,14 @@ package struct PHEscapeKeyMonitor: NSViewRepresentable {
             self.onEscape = onEscape
         }
 
-        func startMonitoring() {
+        func startMonitoring(in view: NSView?) {
             guard eventMonitor == nil else { return }
-            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let windowScoped = view != nil
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak view] event in
                 guard event.keyCode == 53, let self else { return event }
+                if windowScoped {
+                    guard let anchorWindow = view?.window, event.window === anchorWindow else { return event }
+                }
                 self.onEscape()
                 return nil
             }

@@ -158,27 +158,24 @@ package struct RawInputSheet: PHView {
     }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 12) {
-            PHHStack(alignment: .firstTextBaseline) {
-                PHVStack(alignment: .leading, spacing: 4) {
-                    PHText("Raw input")
-                        .font(.system(size: 19, weight: .semibold, design: .rounded))
-                    PHText(taskTitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+        // The fixed size holds the 20 pt padding, so the content gets 40 pt less.
+        AtomStack(
+            props: StackProps(spacing: 12, align: "leading"),
+            common: AtomCommon(width: Self.size.width - 40, height: Self.size.height - 40, padding: 20)
+        ) {
+            AtomStack(props: StackProps(axis: "h", align: "baseline")) {
+                AtomStack(props: StackProps(spacing: 4, align: "leading")) {
+                    AtomText(props: TextProps(text: "Raw input", size: 19, weight: "semibold", design: "rounded"))
+                    AtomText(props: TextProps(text: taskTitle, size: 12, color: "secondary", lineLimit: 1))
                 }
-                PHSpacer()
+                AtomSpacer()
                 if let page {
-                    PHVStack(alignment: .trailing, spacing: 2) {
-                        PHText("\(page.total) \(page.total == 1 ? "item" : "items") · \(page.totalTokens.formatted(Self.number)) tokens")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("raw-input-summary")
-                        PHText("\(rows.count) of \(page.total) loaded")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .accessibilityIdentifier("raw-input-loaded-rows")
+                    AtomStack(props: StackProps(spacing: 2, align: "trailing")) {
+                        AtomText(
+                            props: TextProps(text: "\(page.total) \(page.total == 1 ? "item" : "items") · \(page.totalTokens.formatted(Self.number)) tokens", size: 12, color: "secondary"),
+                            common: AtomCommon(testID: "raw-input-summary")
+                        )
+                        AtomText(props: TextProps(text: "\(rows.count) of \(page.total) loaded", size: 10, color: "tertiary"), common: AtomCommon(testID: "raw-input-loaded-rows"))
                     }
                 }
             }
@@ -186,36 +183,34 @@ package struct RawInputSheet: PHView {
             if scope == .request, let request = page?.request {
                 requestBar(request)
             }
-            PHHStack(alignment: .top, spacing: 0) {
-                list
-                    .frame(width: min(460, Self.size.width * 0.42))
-                PHDivider()
-                PHGroup {
+            AtomStack(props: StackProps(axis: "h", spacing: 0, align: "top"), common: AtomCommon(fillHeight: true)) {
+                AtomStack(common: AtomCommon(width: min(460, Self.size.width * 0.42))) {
+                    list
+                }
+                AtomDivider()
+                AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) {
                     if let selected {
                         RawInputTextPane(taskID: taskID, turnID: turnID, modelContext: modelContext, agent: page?.agent ?? agent, item: selected)
                             .id("\(page?.agent ?? agent ?? "")#\(selected)")
                     } else {
-                        PHText("Select an item to read the full text the model received.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .accessibilityIdentifier("raw-input-no-selection")
+                        AtomText(
+                            props: TextProps(text: "Select an item to read the full text the model received.", size: 12, color: "secondary"),
+                            common: AtomCommon(testID: "raw-input-no-selection", fillWidth: true, fillHeight: true, frameAlign: "center")
+                        )
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxHeight: .infinity)
-            PHHStack {
-                PHSpacer()
-                PHButton("Done") { dismiss() }
-                    .buttonHoverPointer()
-                    .shortcutHelp("Done", shortcut: "default")
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("close-raw-input-button")
+            AtomStack(props: StackProps(axis: "h")) {
+                AtomSpacer()
+                AtomButton(
+                    props: ButtonProps(style: "prominent", shortcut: "default"),
+                    common: AtomCommon(testID: "close-raw-input-button", help: "Done"),
+                    action: { dismiss() }
+                ) {
+                    AtomText(props: TextProps(text: "Done"))
+                }
             }
         }
-        .padding(20)
-        .frame(width: Self.size.width, height: Self.size.height)
         .task(id: reloadKey) { await reload() }
         // Item IDs belong to one agent's log; another agent's item with the same ID is unrelated.
         .onChange(of: agent) {
@@ -231,14 +226,15 @@ package struct RawInputSheet: PHView {
     }
 
     private var controls: some PHView {
-        PHHStack(spacing: 10) {
+        AtomStack(props: StackProps(axis: "h", spacing: 10)) {
             if let page, page.agents.count > 1 {
-                PHPicker("Agent", selection: PHBinding(get: { agent ?? page.agent ?? "" }, set: { agent = $0 })) {
-                    PHForEach(page.agents) { PHText($0.label).tag($0.id) }
-                }
-                .buttonHoverPointer()
-                .frame(width: 240)
-                .accessibilityIdentifier("raw-input-agent-picker")
+                LabeledMenuPicker(
+                    title: "Agent",
+                    options: page.agents.map { .init(value: $0.id, label: $0.label) },
+                    selected: agent ?? page.agent ?? "",
+                    testID: "raw-input-agent-picker",
+                    width: 240
+                ) { agent = $0 }
             }
             ChoiceBar(
                 choices: [
@@ -248,56 +244,56 @@ package struct RawInputSheet: PHView {
                 ],
                 selection: $scope
             )
-            PHPicker("Order", selection: $order) {
-                PHText("Transcript order").tag(TaskRawInputOrder.transcript)
-                PHText("Largest first").tag(TaskRawInputOrder.size)
-                PHText("Most tokens carried").tag(TaskRawInputOrder.rent)
-            }
-            .buttonHoverPointer()
-            .frame(width: 220)
-            .accessibilityIdentifier("raw-input-order-picker")
-            PHTextField("Search the full text", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { submittedQuery = query }
-                .accessibilityIdentifier("raw-input-search-field")
+            LabeledMenuPicker(
+                title: "Order",
+                options: [
+                    .init(value: TaskRawInputOrder.transcript.rawValue, label: "Transcript order"),
+                    .init(value: TaskRawInputOrder.size.rawValue, label: "Largest first"),
+                    .init(value: TaskRawInputOrder.rent.rawValue, label: "Most tokens carried"),
+                ],
+                selected: order.rawValue,
+                testID: "raw-input-order-picker",
+                width: 220
+            ) { if let chosen = TaskRawInputOrder(rawValue: $0) { order = chosen } }
+            AtomTextField(
+                props: TextFieldProps(text: query, placeholder: "Search the full text"),
+                common: AtomCommon(testID: "raw-input-search-field"),
+                onChange: { query = $0 },
+                onSubmit: { submittedQuery = query }
+            )
         }
     }
 
     private var list: some PHView {
         PHScrollViewReader { proxy in
-            PHScrollView {
-                PHLazyVStack(alignment: .leading, spacing: 2) {
-                    PHForEach(rows, id: \.listKey) { row in
-                        RawInputRowView(
-                            row: row, maxTokens: page?.maxTokens ?? 0,
-                            isSelected: row.position.map { $0 == selectedPosition } ?? (row.id == selected)
-                        )
-                        .id(row.listKey)
-                        .contentShape(PHRectangle())
-                        .onTapGesture {
-                            selected = row.id
-                            selectedPosition = row.position
+            AtomScroll(props: ScrollProps(directContent: true)) {
+                AtomStack(common: AtomCommon(paddingTrailing: 8)) {
+                    AtomStack(props: StackProps(spacing: 2, align: "leading", lazy: true)) {
+                        PHForEach(rows, id: \.listKey) { row in
+                            RawInputRowView(
+                                row: row, maxTokens: page?.maxTokens ?? 0,
+                                isSelected: row.position.map { $0 == selectedPosition } ?? (row.id == selected)
+                            )
+                            .id(row.listKey)
+                            .onTapGesture {
+                                selected = row.id
+                                selectedPosition = row.position
+                            }
+                            // no-pointer: selecting a list row, which keeps the arrow like other macOS lists.
+                            .onAppear {
+                                if row.listKey == rows.last?.listKey { Task { await loadMore() } }
+                            }
                         }
-                        // no-pointer: selecting a list row, which keeps the arrow like other macOS lists.
-                        .onAppear {
-                            if row.listKey == rows.last?.listKey { Task { await loadMore() } }
+                        if hasMore {
+                            AtomSpinner(common: AtomCommon(testID: "raw-input-loading-more", fillWidth: true, frameAlign: "center", padding: 8))
+                        } else if page != nil, rows.isEmpty {
+                            AtomText(
+                                props: TextProps(text: submittedQuery.isEmpty ? "Nothing was sent yet." : "No item contains “\(submittedQuery)”.", size: 12, color: "secondary"),
+                                common: AtomCommon(testID: "raw-input-empty", padding: 12)
+                            )
                         }
-                    }
-                    if hasMore {
-                        PHProgressView()
-                            .controlSize(.small)
-                            .frame(maxWidth: .infinity)
-                            .padding(8)
-                            .accessibilityIdentifier("raw-input-loading-more")
-                    } else if page != nil, rows.isEmpty {
-                        PHText(submittedQuery.isEmpty ? "Nothing was sent yet." : "No item contains “\(submittedQuery)”.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .padding(12)
-                            .accessibilityIdentifier("raw-input-empty")
                     }
                 }
-                .padding(.trailing, 8)
                 .hoverRevealScrollers()
             }
             .accessibilityIdentifier("raw-input-list")
@@ -319,55 +315,55 @@ package struct RawInputSheet: PHView {
     /// Which request is shown, how the provider measured it, how exact the
     /// rebuild is, and the whole request's export.
     private func requestBar(_ request: TaskRawInputPage.Request) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 4) {
-            PHHStack(spacing: 8) {
-                PHButton("Previous request", icon: .chevronLeft) { requestNumber = request.number - 1 }
-                    .labelStyle(.iconOnly)
-                    .buttonHoverPointer()
-                    .nativeHelp("Show the request before this one")
-                    .disabled(request.number <= 1)
-                    .accessibilityIdentifier("raw-input-request-previous")
-                PHText("Request \(request.number) of \(request.count)")
-                    .font(.system(size: 12, weight: .semibold))
-                    .monospacedDigit()
-                    .accessibilityIdentifier("raw-input-request-number")
-                PHButton("Next request", icon: .chevronRight) { requestNumber = request.number + 1 }
-                    .labelStyle(.iconOnly)
-                    .buttonHoverPointer()
-                    .nativeHelp("Show the request after this one")
-                    .disabled(request.number >= request.count)
-                    .accessibilityIdentifier("raw-input-request-next")
-                PHTextField("Go to #", text: $requestField)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 70)
-                    .onSubmit {
+        let exactness = request.exact ? "green" : "orange"
+        return AtomStack(props: StackProps(spacing: 4, align: "leading", fill: "primary", fillOpacity: 0.04, cornerRadius: 7), common: AtomCommon(padding: 8)) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomButton(
+                    props: ButtonProps(style: "automatic", disabled: request.number <= 1),
+                    common: AtomCommon(testID: "raw-input-request-previous", label: "Previous request", help: "Show the request before this one"),
+                    action: { requestNumber = request.number - 1 }
+                ) {
+                    AtomIcon(props: IconProps(name: PHIcon.chevronLeft.name))
+                }
+                AtomText(
+                    props: TextProps(text: "Request \(request.number) of \(request.count)", size: 12, weight: "semibold", monospacedDigits: true),
+                    common: AtomCommon(testID: "raw-input-request-number")
+                )
+                AtomButton(
+                    props: ButtonProps(style: "automatic", disabled: request.number >= request.count),
+                    common: AtomCommon(testID: "raw-input-request-next", label: "Next request", help: "Show the request after this one"),
+                    action: { requestNumber = request.number + 1 }
+                ) {
+                    AtomIcon(props: IconProps(name: PHIcon.chevronRight.name))
+                }
+                AtomTextField(
+                    props: TextFieldProps(text: requestField, placeholder: "Go to #"),
+                    common: AtomCommon(testID: "raw-input-request-field", width: 70),
+                    onChange: { requestField = $0 },
+                    onSubmit: {
                         if let number = Int(requestField.trimmingCharacters(in: .whitespaces)) {
                             requestNumber = min(max(1, number), request.count)
                         }
                         requestField = ""
                     }
-                    .accessibilityIdentifier("raw-input-request-field")
-                PHButton("Latest") { requestNumber = nil }
-                    .buttonHoverPointer()
-                    .nativeHelp("Show the request the final transcript was read from")
-                    .controlSize(.small)
-                    .disabled(request.number == request.latest)
-                    .accessibilityIdentifier("raw-input-request-latest")
-                PHText(request.exact ? "Exact" : "Reconstructed")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(request.exact ? PHColor.green : PHColor.orange)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(PHCapsule().fill((request.exact ? PHColor.green : PHColor.orange).opacity(0.15)))
-                    .nativeHelp(request.note)
-                    .accessibilityIdentifier("raw-input-request-exactness")
-                if let timestamp = request.timestamp {
-                    PHText(Self.displayTime(timestamp))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityIdentifier("raw-input-request-time")
+                )
+                AtomButton(
+                    props: ButtonProps(style: "automatic", disabled: request.number == request.latest, controlSize: "small"),
+                    common: AtomCommon(testID: "raw-input-request-latest", help: "Show the request the final transcript was read from"),
+                    action: { requestNumber = nil }
+                ) {
+                    AtomText(props: TextProps(text: "Latest"))
                 }
-                PHSpacer(minLength: 8)
+                AtomStack(props: StackProps(fill: exactness, fillOpacity: 0.15, capsule: true), common: AtomCommon(help: request.note, paddingX: 5, paddingY: 1)) {
+                    AtomText(
+                        props: TextProps(text: request.exact ? "Exact" : "Reconstructed", size: 9, weight: "semibold", color: exactness),
+                        common: AtomCommon(testID: "raw-input-request-exactness")
+                    )
+                }
+                if let timestamp = request.timestamp {
+                    AtomText(props: TextProps(text: Self.displayTime(timestamp), size: 10, color: "tertiary"), common: AtomCommon(testID: "raw-input-request-time"))
+                }
+                AtomSpacer(props: SpacerProps(minLength: 8))
                 ChoiceBar(
                     choices: [
                         (TaskRawInputExportFormat.text, "Text", "raw-input-export-format-text"),
@@ -375,43 +371,40 @@ package struct RawInputSheet: PHView {
                     ],
                     selection: $exportFormat
                 )
-                PHButton("Copy all", icon: .docOnDoc) { Task { await exportRequest(request, open: false) } }
-                    .buttonHoverPointer()
-                    .nativeHelp("Copy this whole request, every item in order")
-                    .controlSize(.small)
-                    .accessibilityIdentifier("raw-input-request-copy-button")
-                PHButton("Open in editor", icon: .squareAndPencil) { Task { await exportRequest(request, open: true) } }
-                    .buttonHoverPointer()
-                    .nativeHelp("Write this whole request to a file and open it")
-                    .controlSize(.small)
-                    .accessibilityIdentifier("raw-input-request-open-editor-button")
+                AtomButton(
+                    props: ButtonProps(style: "automatic", controlSize: "small"),
+                    common: AtomCommon(testID: "raw-input-request-copy-button", help: "Copy this whole request, every item in order"),
+                    action: { Task { await exportRequest(request, open: false) } }
+                ) {
+                    AtomLabel(props: LabelProps(text: "Copy all", icon: PHIcon.docOnDoc.name))
+                }
+                AtomButton(
+                    props: ButtonProps(style: "automatic", controlSize: "small"),
+                    common: AtomCommon(testID: "raw-input-request-open-editor-button", help: "Write this whole request to a file and open it"),
+                    action: { Task { await exportRequest(request, open: true) } }
+                ) {
+                    AtomLabel(props: LabelProps(text: "Open in editor", icon: PHIcon.squareAndPencil.name))
+                }
             }
             // The bar keeps one height whatever it shows: a bar that grows
             // resizes the lazy list below it while it lays out its rows.
-            PHHStack(spacing: 8) {
-                PHText(Self.usageLine(request))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                    .accessibilityIdentifier("raw-input-request-usage")
-                PHSpacer(minLength: 8)
-                PHText(exportStatus ?? "")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .accessibilityIdentifier("raw-input-request-export-status")
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomText(
+                    props: TextProps(text: Self.usageLine(request), size: 11, color: "secondary", lineLimit: 1, monospacedDigits: true),
+                    common: AtomCommon(testID: "raw-input-request-usage", layoutPriority: 1)
+                )
+                AtomSpacer(props: SpacerProps(minLength: 8))
+                AtomText(props: TextProps(text: exportStatus ?? "", size: 10, color: "secondary", lineLimit: 1), common: AtomCommon(testID: "raw-input-request-export-status"))
             }
-            PHText("\(request.note) \(request.tokenNote)")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .lineLimit(2, reservesSpace: true)
-                .nativeHelp("\(request.note) \(request.tokenNote)")
-                .accessibilityIdentifier("raw-input-request-note")
+            // Two lines are always reserved: an invisible two-line text under the note.
+            AtomStack(props: StackProps(axis: "z", align: "topLeading")) {
+                AtomText(props: TextProps(text: " \n ", size: 10, lineLimit: 2), common: AtomCommon(opacity: 0, decorative: true))
+                AtomText(
+                    props: TextProps(text: "\(request.note) \(request.tokenNote)", size: 10, color: "tertiary", lineLimit: 2),
+                    common: AtomCommon(testID: "raw-input-request-note", help: "\(request.note) \(request.tokenNote)")
+                )
+            }
         }
-        .padding(8)
-        .background(PHRoundedRectangle(cornerRadius: 7).fill(PHColor.primary.opacity(0.04)))
     }
 
     private static func usageLine(_ request: TaskRawInputPage.Request) -> String {
@@ -495,71 +488,57 @@ private struct RawInputRowView: PHView {
     private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
 
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 3) {
-            PHHStack(spacing: 6) {
-                PHText(contextKindName(row.kind))
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(PHCapsule().fill(PHColor.primary.opacity(0.07)))
+        // The hover handler gives the whole row, padding included, the hit
+        // shape, so a click anywhere on it selects it.
+        AtomStack(
+            props: StackProps(spacing: 3, align: "leading", group: true, fill: fill.color, fillOpacity: fill.opacity, cornerRadius: 6),
+            common: AtomCommon(testID: row.accessibilityID, paddingX: 8, paddingY: 5),
+            onHover: { _ in }
+        ) {
+            AtomStack(props: StackProps(axis: "h", spacing: 6)) {
+                AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07, capsule: true), common: AtomCommon(paddingX: 5, paddingY: 1)) {
+                    AtomText(props: TextProps(text: contextKindName(row.kind), size: 9, weight: "semibold", color: "secondary"))
+                }
                 if let position = row.position {
-                    PHText("#\(position + 1)")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
+                    AtomText(props: TextProps(text: "#\(position + 1)", size: 9, color: "tertiary", monospacedDigits: true))
                 }
-                PHText(row.label)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                    .accessibilityIdentifier("\(row.accessibilityID)-label")
+                AtomText(props: TextProps(text: row.label, size: 11, weight: "medium", lineLimit: 1), common: AtomCommon(testID: "\(row.accessibilityID)-label"))
                 if !row.inFinalTranscript {
-                    PHText("removed")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.orange)
+                    AtomText(props: TextProps(text: "removed", size: 9, color: "orange"))
                 }
-                PHSpacer(minLength: 6)
-                PHText("×\(row.requests)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                PHText(row.tokens.formatted(Self.number))
-                    .font(.system(size: 11, weight: .medium))
-                    .monospacedDigit()
-                    .accessibilityIdentifier("\(row.accessibilityID)-tokens")
+                AtomSpacer(props: SpacerProps(minLength: 6))
+                AtomText(props: TextProps(text: "×\(row.requests)", size: 10, color: "tertiary"))
+                AtomText(
+                    props: TextProps(text: row.tokens.formatted(Self.number), size: 11, weight: "medium", monospacedDigits: true),
+                    common: AtomCommon(testID: "\(row.accessibilityID)-tokens")
+                )
             }
-            PHHStack(spacing: 6) {
+            AtomStack(props: StackProps(axis: "h", spacing: 6)) {
                 TokenShareBar(bar: TokenStatsModel.bar(row.tokens, largest: maxTokens))
-                PHText(row.preview)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                AtomText(props: TextProps(text: row.preview, size: 10, design: "monospaced", color: "secondary", lineLimit: 1))
             }
             // Every row of a single request keeps this line, flagged or not: rows
             // of one height keep the lazy list's placement from oscillating.
             if row.position != nil {
                 if let repeated = row.repeated {
-                    PHText("Duplicate \(repeated.copy) of \(repeated.copies)\(repeated.copy > 1 ? " · first at #\(repeated.first + 1)" : "")")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(PHColor.red)
-                        .lineLimit(1)
-                        .accessibilityIdentifier("\(row.accessibilityID)-repeat")
+                    AtomText(
+                        props: TextProps(
+                            text: "Duplicate \(repeated.copy) of \(repeated.copies)\(repeated.copy > 1 ? " · first at #\(repeated.first + 1)" : "")",
+                            size: 9, weight: "semibold", color: "red", lineLimit: 1
+                        ),
+                        common: AtomCommon(testID: "\(row.accessibilityID)-repeat")
+                    )
                 } else {
-                    PHText(" ")
-                        .font(.system(size: 9, weight: .semibold))
-                        .accessibilityHidden(true)
+                    AtomText(props: TextProps(text: " ", size: 9, weight: "semibold"), common: AtomCommon(decorative: true))
                 }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(PHRoundedRectangle(cornerRadius: 6).fill(background))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(row.accessibilityID)
     }
 
-    private var background: PHColor {
-        if isSelected { return PHColor.accentColor.opacity(0.18) }
-        return row.repeated == nil ? .clear : PHColor.red.opacity(0.08)
+    /// Selected rows take the accent, repeated ones a red tint, the rest nothing.
+    private var fill: (color: String, opacity: Double) {
+        if isSelected { return ("accent", 0.18) }
+        return row.repeated == nil ? ("clear", 1) : ("red", 0.08)
     }
 }
 
@@ -592,76 +571,75 @@ private struct RawInputTextPane: PHView {
     private static let segmentLength = 2_000
 
     var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 8) {
+        AtomStack(props: StackProps(spacing: 8, align: "leading"), common: AtomCommon(paddingLeading: 12)) {
             if let header {
-                PHHStack(alignment: .firstTextBaseline, spacing: 8) {
-                    PHText(header.label)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("raw-input-text-label")
-                    PHText(contextKindName(header.kind))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                    PHSpacer()
-                    PHButton("Copy all", icon: .docOnDoc) { Task { await copyAll() } }
-                        .buttonHoverPointer()
-                        .nativeHelp("Copy this item's full text")
-                        .controlSize(.small)
-                        .accessibilityIdentifier("raw-input-copy-button")
-                    PHButton("Open in editor", icon: .squareAndPencil) { Task { await openInEditor() } }
-                        .buttonHoverPointer()
-                        .nativeHelp("Write this item's full text to a file and open it")
-                        .controlSize(.small)
-                        .accessibilityIdentifier("raw-input-open-editor-button")
+                AtomStack(props: StackProps(axis: "h", spacing: 8, align: "baseline")) {
+                    AtomText(props: TextProps(text: header.label, size: 13, weight: "semibold", lineLimit: 1), common: AtomCommon(testID: "raw-input-text-label"))
+                    AtomText(props: TextProps(text: contextKindName(header.kind), size: 10, color: "tertiary"))
+                    AtomSpacer()
+                    AtomButton(
+                        props: ButtonProps(style: "automatic", controlSize: "small"),
+                        common: AtomCommon(testID: "raw-input-copy-button", help: "Copy this item's full text"),
+                        action: { Task { await copyAll() } }
+                    ) {
+                        AtomLabel(props: LabelProps(text: "Copy all", icon: PHIcon.docOnDoc.name))
+                    }
+                    AtomButton(
+                        props: ButtonProps(style: "automatic", controlSize: "small"),
+                        common: AtomCommon(testID: "raw-input-open-editor-button", help: "Write this item's full text to a file and open it"),
+                        action: { Task { await openInEditor() } }
+                    ) {
+                        AtomLabel(props: LabelProps(text: "Open in editor", icon: PHIcon.squareAndPencil.name))
+                    }
                 }
-                PHText("\(header.tokens.formatted(Self.number)) tokens · carried in \(header.requests) \(header.requests == 1 ? "request" : "requests") · \(header.totalLength.formatted(Self.number)) characters")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("raw-input-text-size")
-                PHText("\(loadedLength.formatted(Self.number)) of \(header.totalLength.formatted(Self.number)) characters loaded")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityIdentifier("raw-input-text-loaded")
+                AtomText(
+                    props: TextProps(
+                        text: "\(header.tokens.formatted(Self.number)) tokens · carried in \(header.requests) \(header.requests == 1 ? "request" : "requests") · \(header.totalLength.formatted(Self.number)) characters",
+                        size: 11, color: "secondary"
+                    ),
+                    common: AtomCommon(testID: "raw-input-text-size")
+                )
+                AtomText(
+                    props: TextProps(text: "\(loadedLength.formatted(Self.number)) of \(header.totalLength.formatted(Self.number)) characters loaded", size: 10, color: "tertiary"),
+                    common: AtomCommon(testID: "raw-input-text-loaded")
+                )
                 if let call = header.call {
-                    PHText("Called as \(call)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("raw-input-text-call")
+                    AtomText(
+                        props: TextProps(text: "Called as \(call)", size: 10, design: "monospaced", color: "secondary", lineLimit: 3, selectable: true),
+                        common: AtomCommon(testID: "raw-input-text-call")
+                    )
                 }
-                PHDivider()
+                AtomDivider()
             } else if let failure {
-                PHText(failure)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("raw-input-text-failure")
+                AtomText(props: TextProps(text: failure, size: 12, color: "secondary"), common: AtomCommon(testID: "raw-input-text-failure"))
             }
-            PHScrollView {
-                PHLazyVStack(alignment: .leading, spacing: 0) {
-                    PHForEach(lines) { line in
-                        PHHStack(alignment: .top, spacing: 10) {
-                            PHText(line.number.map(String.init) ?? "")
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 52, alignment: .trailing)
-                            PHText(line.text.isEmpty ? " " : line.text)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .font(.system(size: 11, design: .monospaced))
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier(line.number.map { "raw-input-text-line-\($0)" } ?? "")
-                        .onAppear {
-                            if line.id == lines.last?.id { Task { await loadNextChunk() } }
+            AtomScroll(props: ScrollProps(directContent: true)) {
+                AtomStack(common: AtomCommon(paddingTrailing: 8)) {
+                    AtomStack(props: StackProps(spacing: 0, align: "leading", lazy: true)) {
+                        PHForEach(lines) { line in
+                            AtomStack(
+                                props: StackProps(axis: "h", spacing: 10, align: "top", combine: true),
+                                common: AtomCommon(testID: line.number.map { "raw-input-text-line-\($0)" })
+                            ) {
+                                AtomText(
+                                    props: TextProps(text: line.number.map(String.init) ?? "", size: 11, design: "monospaced", color: "tertiary"),
+                                    common: AtomCommon(width: 52, frameAlign: "trailing")
+                                )
+                                AtomText(
+                                    props: TextProps(text: line.text.isEmpty ? " " : line.text, size: 11, design: "monospaced", selectable: true),
+                                    common: AtomCommon(fillWidth: true)
+                                )
+                            }
+                            .onAppear {
+                                if line.id == lines.last?.id { Task { await loadNextChunk() } }
+                            }
                         }
                     }
                 }
-                .padding(.trailing, 8)
                 .hoverRevealScrollers()
             }
             .accessibilityIdentifier("raw-input-text")
         }
-        .padding(.leading, 12)
         .task { await loadNextChunk() }
     }
 
@@ -720,5 +698,41 @@ private struct RawInputTextPane: PHView {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("playhouse-raw-input-\(item).txt")
         guard (try? text.write(to: file, atomically: true, encoding: .utf8)) != nil else { return }
         Platform.services.open(file)
+    }
+}
+
+/// A pop-up picker with its title beside it, the way a macOS `Picker` shows
+/// one, in a fixed width the pop-up stretches to fill.
+private struct LabeledMenuPicker: PHView {
+    let title: String
+    let options: [SegmentedProps.Option]
+    let selected: String
+    let testID: String
+    let width: Double
+    let onChange: (String) -> Void
+    /// What the title leaves the pop-up, measured once it lays out.
+    @PHState private var menuWidth: Double?
+
+    var body: some PHView {
+        AtomStack(props: StackProps(axis: "h"), common: AtomCommon(width: width)) {
+            AtomText(props: TextProps(text: title), common: AtomCommon(decorative: true))
+            AtomStack(common: AtomCommon(fillWidth: true)) {
+                AtomSegmented(
+                    props: SegmentedProps(options: options, selected: selected, style: "menu"),
+                    common: AtomCommon(testID: testID, label: title, width: menuWidth),
+                    onChange: onChange
+                )
+            }
+            .onGeometryChange(for: Double.self, of: { Double($0.size.width) }, action: { menuWidth = $0 })
+        }
+    }
+
+    init(title: String, options: [SegmentedProps.Option], selected: String, testID: String, width: Double, onChange: @escaping (String) -> Void) {
+        self.title = title
+        self.options = options
+        self.selected = selected
+        self.testID = testID
+        self.width = width
+        self.onChange = onChange
     }
 }

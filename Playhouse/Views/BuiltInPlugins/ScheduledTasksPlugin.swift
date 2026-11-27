@@ -29,7 +29,7 @@ package struct ScheduledTasksPlugin: PHView {
         let decoded = scheduledTasks
         let tasks = (try? decoded.get()) ?? []
         let decodeError = { if case .failure(let error) = decoded { return "Couldn't read the scheduled tasks: \(error.localizedDescription)" } else { return nil } }() as String?
-        PHVStack(alignment: .leading, spacing: 0) {
+        AtomStack(props: StackProps(spacing: 0, align: "leading"), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
             header
             AtomDivider()
             if let errorMessage = errorMessage ?? decodeError {
@@ -39,7 +39,7 @@ package struct ScheduledTasksPlugin: PHView {
                 )
             }
             if schedules["needsLoginItemsApproval"]?.bool == true {
-                AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(paddingX: 16)) {
+                AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(paddingX: 16, paddingTop: 10)) {
                     AtomText(props: TextProps(text: "Allow Playhouse in Login Items so scheduled tasks run while it's closed.", size: 10, color: "secondary"))
                     AtomButton(
                         props: ButtonProps(style: "link"),
@@ -49,24 +49,23 @@ package struct ScheduledTasksPlugin: PHView {
                         AtomText(props: TextProps(text: "Open Settings", size: 10))
                     }
                 }
-                .padding(.top, 10)
             }
             if tasks.isEmpty {
-                AtomStack(props: StackProps(spacing: 6, group: true), common: AtomCommon(testID: "scheduled-tasks-empty")) {
+                AtomStack(props: StackProps(spacing: 6, group: true), common: AtomCommon(testID: "scheduled-tasks-empty", fillWidth: true, fillHeight: true, frameAlign: "center")) {
                     AtomStack(props: StackProps(spacing: 6, combine: true)) {
                         AtomText(props: TextProps(text: "No scheduled tasks", size: 13, weight: "semibold"))
                         AtomText(props: TextProps(text: "Write a task, then use the clock beside Send to schedule it.", size: 12, color: "secondary"))
                     }
-                    AtomButton(
-                        props: ButtonProps(style: "automatic", controlSize: "large"),
-                        common: AtomCommon(testID: "scheduled-tasks-empty-new-task-button", help: "Write a task and choose when it runs"),
-                        action: newTask
-                    ) {
-                        AtomLabel(props: LabelProps(text: "New Task", icon: PHIcon.plus.name))
+                    AtomStack(common: AtomCommon(paddingTop: 8)) {
+                        AtomButton(
+                            props: ButtonProps(style: "automatic", controlSize: "large"),
+                            common: AtomCommon(testID: "scheduled-tasks-empty-new-task-button", help: "Write a task and choose when it runs"),
+                            action: newTask
+                        ) {
+                            AtomLabel(props: LabelProps(text: "New Task", icon: PHIcon.plus.name))
+                        }
                     }
-                    .padding(.top, 8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 AtomScroll(props: ScrollProps(spacing: 8, inset: 16, lazy: true), common: AtomCommon(testID: "scheduled-tasks-list")) {
                     // `schedule.list` is already soonest first.
@@ -75,7 +74,6 @@ package struct ScheduledTasksPlugin: PHView {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var header: some PHView {
@@ -97,8 +95,9 @@ package struct ScheduledTasksPlugin: PHView {
     @PHViewBuilder
     private func section(_ title: String, tasks: [BoardTaskRecord], identifier: String) -> some PHView {
         if !tasks.isEmpty {
-            AtomText(props: TextProps(text: title.uppercased(), size: 10, weight: "semibold", color: "secondary"), common: AtomCommon(testID: identifier))
-                .padding(.top, 6)
+            AtomStack(common: AtomCommon(paddingTop: 6)) {
+                AtomText(props: TextProps(text: title.uppercased(), size: 10, weight: "semibold", color: "secondary"), common: AtomCommon(testID: identifier))
+            }
             PHForEach(tasks) { row($0) }
         }
     }

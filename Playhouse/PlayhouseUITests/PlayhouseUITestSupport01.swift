@@ -1418,7 +1418,10 @@ extension PlayhouseUITests {
     /// A Plugin Catalog sidebar row, scrolled into view: the sidebar lists more
     /// atoms and examples than fit, and a row scrolled away has no frame to click.
     /// The sidebar is the scroll view holding the atom rows.
-    func catalogSidebarRow(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+    func catalogSidebarRow(
+        _ identifier: String, underDebugOutlines: Bool = false,
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> XCUIElement {
         let row = element(identifier)
         let sidebar = app.scrollViews.containing(NSPredicate(format: "identifier BEGINSWITH %@", "plugin-catalog-atom-")).firstMatch
         XCTAssertTrue(sidebar.waitToExist(timeout: 10), "The Plugin Catalog shows its sidebar.", file: file, line: line)
@@ -1426,7 +1429,15 @@ extension PlayhouseUITests {
         // but a click lands on the titlebar, so the row's center must sit below it.
         let window = app.windows.containing(.any, identifier: identifier).firstMatch
         func clickable() -> Bool {
-            row.exists && row.isHittable && row.frame.midY > window.frame.minY + 52
+            guard row.exists else { return false }
+            let frame = row.frame
+            guard frame.midY > window.frame.minY + 52 else { return false }
+            if underDebugOutlines {
+                // The visible debug overlay is an AX element and can make isHittable
+                // false even though the pointer still reaches the sidebar button.
+                return sidebar.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
+            }
+            return row.isHittable
         }
         // One check per scroll: up first, then down past where it started.
         var scrolls = 0

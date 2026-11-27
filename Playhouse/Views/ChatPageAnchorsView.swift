@@ -204,10 +204,12 @@ package struct ChatPageAnchorsPushedRows: PHViewModifier, PHAnimatable {
     }
 
     package func body(content: Content) -> some PHView {
-        content
-            .padding(.leading, push)
-            .padding(.horizontal, ChatPageAnchorsLayout.transcriptPadding)
-            .frame(maxWidth: ChatPageAnchorsLayout.transcriptMaxWidth + push)
+        AtomStack(common: AtomCommon(
+            maxWidth: ChatPageAnchorsLayout.transcriptMaxWidth + push, frameAlign: "center",
+            paddingX: ChatPageAnchorsLayout.transcriptPadding, paddingLeading: push
+        )) {
+            content
+        }
     }
 
     package init(push: CGFloat) {
@@ -229,26 +231,14 @@ package struct ChatPageAnchorsColumnInset: PHViewModifier, PHAnimatable {
 
     package func body(content: Content) -> some PHView {
         // The handle's own target spans `handleInset`, reaching the column's edge.
-        content.padding(.leading, ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth, push: push))
+        AtomStack(common: AtomCommon(paddingLeading: ChatPageAnchorsLayout.columnLeading(transcriptWidth: transcriptWidth, push: push))) {
+            content
+        }
     }
 
     package init(push: CGFloat, transcriptWidth: CGFloat) {
         self.push = push
         self.transcriptWidth = transcriptWidth
-    }
-}
-
-/// The marker above the oldest label read so far: how many labels were read when it was placed,
-/// and where it ends in the labels' scroll view.
-private struct ChatPageAnchorsOlderEdge: Equatable {
-    let labelCount: Int
-    let maxY: CGFloat
-}
-
-private struct ChatPageAnchorsOlderEdgeKey: PHPreferenceKey {
-    static let defaultValue: ChatPageAnchorsOlderEdge? = nil
-    static func reduce(value: inout ChatPageAnchorsOlderEdge?, nextValue: () -> ChatPageAnchorsOlderEdge?) {
-        value = value ?? nextValue()
     }
 }
 
@@ -276,53 +266,65 @@ package struct ChatPageAnchorsView: PHView {
     }
 
     package var body: some PHView {
+        // The search and the arrow hang above and below the labels, so the labels themselves
+        // stay centered on the transcript: each sits its own height and its gap past their edge.
+        AtomOverlay(props: OverlayProps(align: "bottom", offsetY: ChatPageAnchorsLayout.labelHeight + 4 + ChatPageAnchorsLayout.jumpToBottomSpacing)) {
+            AtomOverlay(props: OverlayProps(align: "top", offsetY: -(ChatPageAnchorsLayout.searchHeight + ChatPageAnchorsLayout.searchSpacing))) {
+                AtomStack(common: AtomCommon(
+                    width: width, maxHeight: ChatPageAnchorsLayout.labelsHeight(count: model.shownPages.count), frameAlign: "leading"
+                )) {
+                    labels
+                }
+            } overlay: {
+                ChatPageAnchorsSearchField(model: model, focusChanged: searchFocusChanged)
+            }
+        } overlay: {
+            ChatJumpToBottomButton(action: jumpToBottom)
+        }
+    }
+
+    private var labels: some PHView {
         PHScrollViewReader { proxy in
-            PHScrollView {
-                PHLazyVStack(alignment: .leading, spacing: ChatPageAnchorsLayout.labelSpacing) {
-                    if model.hasOlderShownPages {
-                        // Scrolling up to the oldest label read so far reads the ones before it.
-                        PHColor.clear
-                            .frame(height: 1)
-                            .id("older-\(model.shownPages.count)")
-                            .background(PHGeometryReader { geometry in
-                                PHColor.clear.preference(
-                                    key: ChatPageAnchorsOlderEdgeKey.self,
-                                    value: ChatPageAnchorsOlderEdge(
-                                        labelCount: model.shownPages.count,
-                                        maxY: geometry.frame(in: .named(Self.scrollSpace)).maxY
-                                    )
-                                )
-                            })
-                    }
-                    PHForEach(model.shownPages, id: \.id) { page in
-                        ChatPageAnchorLabel(
-                            page: page,
-                            isCurrent: page.id == model.currentPageID,
-                            isLoading: page.id == model.loadingPageID,
-                            action: { jump(page) }
-                        )
-                        .id(page.id)
-                    }
-                    if model.shownPages.isEmpty {
-                        PHText("No matching pages")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .frame(height: ChatPageAnchorsLayout.labelHeight)
-                            .accessibilityIdentifier("chat-page-anchors-no-matches")
+            AtomScroll(props: ScrollProps(directContent: true)) {
+                AtomStack(common: AtomCommon(fillWidth: true, paddingY: ChatPageAnchorsLayout.labelsVerticalPadding)) {
+                    AtomStack(props: StackProps(spacing: Double(ChatPageAnchorsLayout.labelSpacing), align: "leading", lazy: true)) {
+                        if model.hasOlderShownPages {
+                            // Scrolling up to the oldest label read so far reads the ones before it.
+                            // The marker's place, not its appearing: the stack builds rows just outside the
+                            // column, so the marker can appear while the reader is still at the newest labels.
+                            let labelCount = model.shownPages.count
+                            AtomStack(common: AtomCommon(height: 1, fillWidth: true)) { PHEmptyView() }
+                                .id("older-\(labelCount)")
+                                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.scrollSpace)).maxY } action: { maxY in
+                                    olderEdgeMoved(labelCountInView: maxY > 0 ? labelCount : nil, proxy)
+                                }
+                                // A marker leaving the stack no longer counts as in view, unless the
+                                // marker that replaced it already took its place.
+                                .onDisappear {
+                                    if olderEdge.labelCountInView == labelCount { olderEdgeMoved(labelCountInView: nil, proxy) }
+                                }
+                        }
+                        PHForEach(model.shownPages, id: \.id) { page in
+                            ChatPageAnchorLabel(
+                                page: page,
+                                isCurrent: page.id == model.currentPageID,
+                                isLoading: page.id == model.loadingPageID,
+                                action: { jump(page) }
+                            )
+                            .id(page.id)
+                        }
+                        if model.shownPages.isEmpty {
+                            AtomText(
+                                props: TextProps(text: "No matching pages", size: 11, color: "tertiary", lineLimit: 1),
+                                common: AtomCommon(testID: "chat-page-anchors-no-matches", height: ChatPageAnchorsLayout.labelHeight)
+                            )
+                        }
                     }
                 }
-                .padding(.vertical, ChatPageAnchorsLayout.labelsVerticalPadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             // `.hidden` still shows a bar when the system always shows scroll bars.
             .scrollIndicators(.never)
             .coordinateSpace(name: Self.scrollSpace)
-            // The marker's place, not its appearing: the stack builds rows just outside the
-            // column, so the marker can appear while the reader is still at the newest labels.
-            .onPreferenceChange(ChatPageAnchorsOlderEdgeKey.self) { edge in
-                olderEdgeMoved(labelCountInView: edge.flatMap { $0.maxY > 0 ? $0.labelCount : nil }, proxy)
-            }
             .defaultScrollAnchor(.bottom)
             .accessibilityLabel("Chat pages")
             .accessibilityValue("\(model.shownPages.count) pages\(model.hasOlderShownPages ? ", older pages above" : "")")
@@ -337,18 +339,6 @@ package struct ChatPageAnchorsView: PHView {
                 guard let newestMatchID else { return }
                 proxy.scrollTo(newestMatchID, anchor: .bottom)
             }
-        }
-        .frame(width: width, alignment: .leading)
-        .frame(maxHeight: ChatPageAnchorsLayout.labelsHeight(count: model.shownPages.count))
-        // The search and the arrow hang above and below the labels, so the labels themselves
-        // stay centered on the transcript.
-        .overlay(alignment: .top) {
-            ChatPageAnchorsSearchField(model: model, focusChanged: searchFocusChanged)
-                .alignmentGuide(.top) { $0[.bottom] + ChatPageAnchorsLayout.searchSpacing }
-        }
-        .overlay(alignment: .bottom) {
-            ChatJumpToBottomButton(action: jumpToBottom)
-                .alignmentGuide(.bottom) { $0[.top] - ChatPageAnchorsLayout.jumpToBottomSpacing }
         }
     }
 
@@ -398,34 +388,25 @@ private struct ChatPageAnchorsSearchField: PHView {
     @PHFocusState private var isFocused: Bool
 
     var body: some PHView {
-        PHHStack(spacing: 4) {
-            PHImage(icon: .magnifyingglass)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-            PHTextField("Search pages", text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 11))
-                .focused($isFocused)
-                .onExitCommand { clear() }
-                .accessibilityLabel("Search chat pages")
-                .accessibilityIdentifier("chat-page-anchors-search")
+        AtomStack(
+            props: StackProps(axis: "h", spacing: 4, fill: "primary", fillOpacity: isFocused ? 0.09 : 0.05, cornerRadius: 5),
+            common: AtomCommon(height: ChatPageAnchorsLayout.searchHeight, paddingX: 6)
+        ) {
+            AtomIcon(props: IconProps(name: PHIcon.magnifyingglass.name, size: 9, weight: "semibold", color: "secondary"))
+            AtomTextField(
+                props: TextFieldProps(text: text, placeholder: "Search pages", style: "plain", size: 11),
+                common: AtomCommon(testID: "chat-page-anchors-search", label: "Search chat pages"),
+                onChange: { text = $0 }, onEscape: clear, focus: $isFocused
+            )
             if !text.isEmpty {
-                PHButton(action: clear) {
-                    PHImage(icon: .xmarkCircleFill)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .contentShape(PHRectangle())
+                AtomButton(
+                    common: AtomCommon(testID: "chat-page-anchors-search-clear", label: "Clear chat page search", help: "Clear the search"),
+                    action: clear
+                ) {
+                    AtomIcon(props: IconProps(name: PHIcon.xmarkCircleFill.name, size: 10, color: "secondary"))
                 }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .nativeHelp("Clear the search")
-                .accessibilityLabel("Clear chat page search")
-                .accessibilityIdentifier("chat-page-anchors-search-clear")
             }
         }
-        .padding(.horizontal, 6)
-        .frame(height: ChatPageAnchorsLayout.searchHeight)
-        .background(PHRoundedRectangle(cornerRadius: 5).fill(PHColor.primary.opacity(isFocused ? 0.09 : 0.05)))
         .onAppear { text = model.searchText }
         .onChange(of: text) { _, edited in model.search(edited) }
         .onChange(of: isFocused) { _, focused in focusChanged(focused) }
@@ -445,29 +426,31 @@ private struct ChatPageAnchorLabel: PHView {
     @PHState private var isHovering = false
 
     var body: some PHView {
-        PHButton(action: action) {
-            PHHStack(spacing: 6) {
-                PHCapsule()
-                    .fill(isCurrent ? PHColor.accentColor : PHColor.primary.opacity(isHovering ? 0.35 : 0.16))
-                    .frame(width: 2, height: 12)
-                PHText(page.title)
-                    .font(.system(size: 11, weight: isCurrent ? .semibold : .regular))
-                    .foregroundStyle(isCurrent || isHovering ? PHColor.primary : PHColor.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .opacity(isLoading ? 0.5 : 1)
+        AtomButton(
+            common: AtomCommon(
+                testID: "chat-page-anchor-\(page.id)", label: page.title,
+                value: isLoading ? "loading" : isCurrent ? "current" : "", help: page.title
+            ),
+            action: action
+        ) {
+            AtomStack(
+                props: StackProps(axis: "h", spacing: 6),
+                common: AtomCommon(height: ChatPageAnchorsLayout.labelHeight, fillWidth: true),
+                onHover: { isHovering = $0 }
+            ) {
+                AtomStack(
+                    props: StackProps(fill: isCurrent ? "accent" : "primary", fillOpacity: isCurrent ? 1 : (isHovering ? 0.35 : 0.16), capsule: true),
+                    common: AtomCommon(width: 2, height: 12)
+                ) { PHEmptyView() }
+                AtomText(
+                    props: TextProps(
+                        text: page.title, size: 11, weight: isCurrent ? "semibold" : "regular",
+                        color: isCurrent || isHovering ? "primary" : "secondary", lineLimit: 1
+                    ),
+                    common: AtomCommon(opacity: isLoading ? 0.5 : 1)
+                )
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: ChatPageAnchorsLayout.labelHeight)
-            .contentShape(PHRectangle())
         }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .phOnHover { isHovering = $0 }
-        .nativeHelp(page.title)
-        .accessibilityLabel(page.title)
-        .accessibilityValue(isLoading ? "loading" : isCurrent ? "current" : "")
-        .accessibilityIdentifier("chat-page-anchor-\(page.id)")
     }
 }
 
@@ -478,19 +461,14 @@ private struct ChatJumpToBottomButton: PHView {
     @PHState private var isHovering = false
 
     var body: some PHView {
-        PHButton(action: action) {
-            PHImage(icon: .arrowDownToLine)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(isHovering ? PHColor.primary : PHColor.secondary)
-                .frame(width: 24, height: ChatPageAnchorsLayout.labelHeight + 4)
-                .contentShape(PHRectangle())
+        AtomButton(
+            common: AtomCommon(testID: "chat-page-anchors-jump-to-bottom", label: "Jump to bottom of chat", help: "Jump to the bottom of the chat"),
+            action: action
+        ) {
+            AtomStack(common: AtomCommon(width: 24, height: ChatPageAnchorsLayout.labelHeight + 4), onHover: { isHovering = $0 }) {
+                AtomIcon(props: IconProps(name: PHIcon.arrowDownToLine.name, size: 11, weight: "semibold", color: isHovering ? "primary" : "secondary"))
+            }
         }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .phOnHover { isHovering = $0 }
-        .nativeHelp("Jump to the bottom of the chat")
-        .accessibilityLabel("Jump to bottom of chat")
-        .accessibilityIdentifier("chat-page-anchors-jump-to-bottom")
     }
 }
 
@@ -514,50 +492,56 @@ package struct ChatPageAnchorsHandle: PHView {
     @PHState private var isHovering = false
 
     package var body: some PHView {
-        PHButton(action: toggleLock) {
-            PHCapsule()
-                .fill(fill)
-                .frame(width: isOpen || isLocked ? 5 : 3, height: 64)
+        // Above the line, inside the handle's target, so hovering or clicking it is the handle's.
+        // Laid over the button, so it is its own element.
+        AtomOverlay(props: OverlayProps(align: "topTrailing")) {
+            AtomButton(
+                common: AtomCommon(
+                    testID: "chat-page-anchors-handle", label: isLocked ? "Unlock chat pages" : "Lock chat pages open",
+                    value: isLocked ? "locked" : isOpen ? "open" : "folded",
+                    help: isLocked ? "Unlock the chat's pages, so they fold away when the pointer leaves" : "Lock the chat's pages open"
+                ),
+                action: toggleLock
+            ) {
                 // A wider, taller target than the line itself, so it is easy to find, reaching
                 // left to the transcript column's edge, which is the window's edge when the chat
                 // is against it.
-                .frame(width: ChatPageAnchorsLayout.handleWidth, height: 108)
-                .padding(.leading, ChatPageAnchorsLayout.handleInset)
-                .contentShape(PHRectangle())
-        }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .nativeHelp(isLocked ? "Unlock the chat's pages, so they fold away when the pointer leaves" : "Lock the chat's pages open")
-        .phOnHover {
-            isHovering = $0
-            hover($0)
-        }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
-        .accessibilityLabel(isLocked ? "Unlock chat pages" : "Lock chat pages open")
-        .accessibilityValue(isLocked ? "locked" : isOpen ? "open" : "folded")
-        .accessibilityIdentifier("chat-page-anchors-handle")
-        // Above the line, inside the handle's target, so hovering or clicking it is the handle's.
-        // Laid over the button after its accessibility modifiers, so it is its own element.
-        .overlay(alignment: .topTrailing) {
+                AtomStack(common: AtomCommon(paddingLeading: ChatPageAnchorsLayout.handleInset), onHover: {
+                    isHovering = $0
+                    hover($0)
+                }) {
+                    AtomStack(common: AtomCommon(width: ChatPageAnchorsLayout.handleWidth, height: 108)) {
+                        AtomStack(
+                            props: StackProps(fill: "primary", fillOpacity: fillOpacity, capsule: true),
+                            common: AtomCommon(width: isOpen || isLocked ? 5 : 3, height: 64)
+                        ) { PHEmptyView() }
+                    }
+                }
+            }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+        } overlay: {
             if isOpen || isLocked {
-                PHImage(icon: isLocked ? .lockFill : .lockOpen)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(isLocked || isHovering ? PHColor.primary : PHColor.secondary)
-                    .frame(width: ChatPageAnchorsLayout.handleWidth, height: 14)
-                    .padding(.top, 5)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-                    .accessibilityLabel(isLocked ? "Chat pages locked" : "Chat pages unlocked")
-                    .accessibilityValue(isLocked ? "locked" : "unlocked")
-                    .accessibilityIdentifier("chat-page-anchors-lock")
+                AtomStack(common: AtomCommon(paddingTop: 5, passThrough: true)) {
+                    AtomIcon(
+                        props: IconProps(
+                            name: isLocked ? PHIcon.lockFill.name : PHIcon.lockOpen.name, size: 9, weight: "semibold",
+                            color: isLocked || isHovering ? "primary" : "secondary"
+                        ),
+                        common: AtomCommon(
+                            testID: "chat-page-anchors-lock", label: isLocked ? "Chat pages locked" : "Chat pages unlocked",
+                            value: isLocked ? "locked" : "unlocked", width: ChatPageAnchorsLayout.handleWidth, height: 14
+                        )
+                    )
+                }
+                .transition(.opacity)
             }
         }
     }
 
-    private var fill: PHColor {
+    private var fillOpacity: Double {
         // The lock above it shows whether the labels are locked; the line looks the same either way.
-        if isOpen || isLocked { return PHColor.primary.opacity(isHovering ? 0.5 : 0.34) }
-        return PHColor.primary.opacity(isHovering ? 0.32 : 0.16)
+        if isOpen || isLocked { return isHovering ? 0.5 : 0.34 }
+        return isHovering ? 0.32 : 0.16
     }
 
     package init(isOpen: Bool, isLocked: Bool, toggleLock: @escaping () -> Void, hover: @escaping (Bool) -> Void) {

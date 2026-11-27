@@ -273,107 +273,87 @@ extension TaskConversationView {
     /// scheduled, Done saves the edited schedule at once.
     package var scheduleHint: some PHView {
         let validation = scheduleDraft.validationMessage()
-        return PHVStack(alignment: .leading, spacing: 12) {
+        return AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading"), common: AtomCommon(width: 300, paddingX: 18, paddingY: 13)) {
             if !isExistingConversation {
-                PHPicker("Schedule", selection: PHBinding(
-                    get: { scheduleDraft.kind },
-                    set: { kind in
-                        scheduleDraft.kind = kind
-                        if kind == .recurring, scheduleDraft.title.isEmpty, !Self.placeholderTitles.contains(task.title) {
-                            scheduleDraft.title = task.title
+                AtomSegmented(
+                    fitContent: false,
+                    selection: PHBinding(
+                        get: { scheduleDraft.kind },
+                        set: { kind in
+                            scheduleDraft.kind = kind
+                            if kind == .recurring, scheduleDraft.title.isEmpty, !Self.placeholderTitles.contains(task.title) {
+                                scheduleDraft.title = task.title
+                            }
                         }
-                    }
-                )) {
-                    PHText("Once").tag(TaskScheduleKind.once)
-                    PHText("Recurring").tag(TaskScheduleKind.recurring)
-                }
-                .buttonHoverPointer()
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .accessibilityIdentifier("schedule-kind-picker")
+                    ),
+                    options: [.once, .recurring], label: { $0 == .once ? "Once" : "Recurring" },
+                    common: AtomCommon(testID: "schedule-kind-picker", label: "Schedule")
+                )
             } else {
-                PHText("One-time message")
-                    .font(.caption.weight(.medium))
-                    .accessibilityIdentifier("schedule-one-time-only")
+                AtomText(
+                    props: TextProps(text: "One-time message", weight: "medium", textStyle: "caption"),
+                    common: AtomCommon(testID: "schedule-one-time-only")
+                )
             }
 
             if scheduleDraft.kind == .recurring && !isExistingConversation {
-                PHTextField("Title", text: $scheduleDraft.title)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($isScheduleTitleFocused)
-                    .onSubmit(confirmScheduleHint)
-                    .accessibilityIdentifier("schedule-title-field")
-                PHHStack(spacing: 8) {
-                    PHPicker("Repeat", selection: $scheduleDraft.preset) {
-                        PHForEach(TaskRecurrence.Preset.allCases, id: \.self) { preset in
-                            PHText(preset.label).tag(preset)
-                        }
-                    }
-                    .buttonHoverPointer()
-                    .labelsHidden()
-                    .fixedSize()
-                    .accessibilityIdentifier("schedule-repeat-picker")
+                AtomTextField(
+                    props: TextFieldProps(text: scheduleDraft.title, placeholder: "Title"),
+                    common: AtomCommon(testID: "schedule-title-field"),
+                    onChange: { scheduleDraft.title = $0 }, onSubmit: confirmScheduleHint, focus: $isScheduleTitleFocused
+                )
+                AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                    AtomSegmented(
+                        style: "menu", selection: $scheduleDraft.preset,
+                        options: TaskRecurrence.Preset.allCases, label: { $0.label },
+                        common: AtomCommon(testID: "schedule-repeat-picker", label: "Repeat")
+                    )
                     if scheduleDraft.preset == .weekly {
-                        PHPicker("Day", selection: $scheduleDraft.weekday) {
-                            PHForEach(1...7, id: \.self) { day in
-                                PHText(Calendar.current.weekdaySymbols[day - 1]).tag(day)
-                            }
-                        }
-                        .buttonHoverPointer()
-                        .labelsHidden()
-                        .fixedSize()
-                        .accessibilityIdentifier("schedule-weekday-picker")
+                        AtomSegmented(
+                            style: "menu", selection: $scheduleDraft.weekday,
+                            options: Array(1...7), label: { Calendar.current.weekdaySymbols[$0 - 1] },
+                            common: AtomCommon(testID: "schedule-weekday-picker", label: "Day")
+                        )
                     }
-                    PHSpacer(minLength: 0)
+                    AtomSpacer(props: SpacerProps(minLength: 0))
                     if scheduleDraft.preset == .hourly {
-                        PHPicker("Minute", selection: $scheduleDraft.minute) {
-                            PHForEach([0, 15, 30, 45], id: \.self) { minute in
-                                PHText(String(format: ":%02d", minute)).tag(minute)
-                            }
-                        }
-                        .buttonHoverPointer()
-                        .labelsHidden()
-                        .fixedSize()
-                        .accessibilityIdentifier("schedule-minute-picker")
+                        AtomSegmented(
+                            style: "menu", selection: $scheduleDraft.minute,
+                            options: [0, 15, 30, 45], label: { String(format: ":%02d", $0) },
+                            common: AtomCommon(testID: "schedule-minute-picker", label: "Minute")
+                        )
                     } else {
-                        PHDatePicker("Time", selection: $scheduleDraft.time, displayedComponents: .hourAndMinute)
-                            .datePickerStyle(.field)
-                            .labelsHidden()
-                            .fixedSize()
-                            .accessibilityIdentifier("schedule-time-picker")
+                        AtomDatePicker(
+                            props: DatePickerProps(date: scheduleDraft.time.timeIntervalSince1970, components: "time"),
+                            common: AtomCommon(testID: "schedule-time-picker", label: "Time", fixedSize: true),
+                            onChange: { scheduleDraft.time = Date(timeIntervalSince1970: $0) }
+                        )
                     }
                 }
             } else {
-                PHDatePicker("Run at", selection: $scheduleDraft.fireAt, in: Date.now..., displayedComponents: [.date, .hourAndMinute])
-                    .datePickerStyle(.field)
-                    .labelsHidden()
-                    .accessibilityIdentifier("schedule-date-picker")
+                AtomDatePicker(
+                    props: DatePickerProps(date: scheduleDraft.fireAt.timeIntervalSince1970, min: Date.now.timeIntervalSince1970),
+                    common: AtomCommon(testID: "schedule-date-picker", label: "Run at"),
+                    onChange: { scheduleDraft.fireAt = Date(timeIntervalSince1970: $0) }
+                )
             }
 
-            PHText(validation ?? scheduleDraft.summary())
-                .font(.caption)
-                .foregroundStyle(validation == nil ? PHColor.secondary : PHColor.red)
-                .accessibilityIdentifier("schedule-summary")
+            AtomText(
+                props: TextProps(text: validation ?? scheduleDraft.summary(), color: validation == nil ? "secondary" : "red", textStyle: "caption"),
+                common: AtomCommon(testID: "schedule-summary")
+            )
 
-            PHHStack {
+            AtomStack(props: StackProps(axis: "h")) {
                 if composerSchedule != nil || savedSchedule != nil {
-                    PHButton("Remove", action: removeSchedule)
-                    .buttonHoverPointer()
-                    .nativeHelp(isExistingConversation ? "Cancel the scheduled message; it stays in the composer" : "Stop scheduling; Send runs the task now")
+                    AtomButton(props: ButtonProps(style: "automatic"), common: AtomCommon(help: isExistingConversation ? "Cancel the scheduled message; it stays in the composer" : "Stop scheduling; Send runs the task now"), action: removeSchedule) { AtomText(props: TextProps(text: "Remove")) }
                     .accessibilityIdentifier("schedule-remove-button")
                 }
-                PHSpacer()
-                PHButton("Done", action: confirmScheduleHint)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(validation != nil)
-                    .buttonHoverPointer()
+                AtomSpacer()
+                AtomButton(props: ButtonProps(style: "prominent", disabled: validation != nil), action: confirmScheduleHint) { AtomText(props: TextProps(text: "Done")) }
                     .shortcutHelp(savedSchedule != nil ? "Save this schedule" : "Use this schedule; Send then schedules the task", shortcut: "default")
                     .accessibilityIdentifier("schedule-done-button")
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 13)
-        .frame(width: 300)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("schedule-hint")
         .onAppear {
@@ -400,36 +380,38 @@ extension TaskConversationView {
     package var skillsPage: some PHView {
         SkillsPageWindowFrame {
             PHGeometryReader { geometry in
-                PHZStack {
+                AtomStack(props: StackProps(axis: "z"), common: AtomCommon(width: Double(geometry.size.width), height: Double(geometry.size.height))) {
                     if isShowingSkills {
-                        PHColor.black.opacity(0.28)
-                            .contentShape(PHRectangle())
+                        AtomStack(
+                            props: StackProps(fill: "black", fillOpacity: 0.28, hitSurface: true),
+                            common: AtomCommon(fillWidth: true, fillHeight: true, decorative: true)
+                        ) {}
                             .onTapGesture {}
-                            // no-pointer: the backdrop only swallows clicks; it is not a control.
-                            .accessibilityHidden(true)
+                            // no-pointer: the modal backdrop only blocks clicks.
                             .transition(.opacity)
-                        SkillsPageView(
-                            task: task, manager: conversationManager, focus: skillsFocus, onUse: useSkill,
-                            onFixTask: { taskID, prompt in
-                                isShowingSkills = false
-                                onOpenTask(taskID, prompt)
-                            }
+                        AtomStack(
+                            props: StackProps(cornerRadius: 14, stroke: "primary", strokeOpacity: 0.1,
+                                              clip: true, shadow: 28, shadowOpacity: 0.3, shadowY: 10),
+                            common: AtomCommon(
+                                width: Double(max(0, min(Self.skillsPageWidth, geometry.size.width - 48))),
+                                height: Double(max(0, min(Self.skillsPageMaxHeight, geometry.size.height - 64)))
+                            )
                         ) {
-                            isShowingSkills = false
-                            composerDraft.focusRequest += 1
+                            SkillsPageView(
+                                task: task, manager: conversationManager, focus: skillsFocus, onUse: useSkill,
+                                onFixTask: { taskID, prompt in
+                                    isShowingSkills = false
+                                    onOpenTask(taskID, prompt)
+                                }
+                            ) {
+                                isShowingSkills = false
+                                composerDraft.focusRequest += 1
+                            }
+                            .id(skillsPresentation)
                         }
-                        .id(skillsPresentation)
-                        .frame(
-                            width: max(0, min(Self.skillsPageWidth, geometry.size.width - 48)),
-                            height: max(0, min(Self.skillsPageMaxHeight, geometry.size.height - 64))
-                        )
-                        .clipShape(PHRoundedRectangle.phContinuous(cornerRadius: 14))
-                        .overlay(PHRoundedRectangle.phContinuous(cornerRadius: 14).strokeBorder(PHColor.primary.opacity(0.1)))
-                        .phShadow(color: .black.opacity(0.3), radius: 28, y: 10)
                         .transition(.scale(scale: 0.96).combined(with: .opacity))
                     }
                 }
-                .frame(width: geometry.size.width, height: geometry.size.height)
             }
         }
         .allowsHitTesting(isShowingSkills)
