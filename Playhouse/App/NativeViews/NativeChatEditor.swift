@@ -103,6 +103,17 @@ struct NativeChatEditor: NSViewRepresentable {
     func updateNSView(_ scroll: ChatEditorScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? ChatEditorTextView else { return }
+        // Hidden behind other content (the standalone chat behind an open task), the editor gives
+        // up the keyboard and neither autofocus nor a focus request moves it back until it shows.
+        let isHidden = context.environment.isKeptAliveHidden
+        let isEnabled = isEnabled && !isHidden
+        if isHidden, editor.window?.firstResponder === editor {
+            DispatchQueue.main.async { [weak editor] in
+                guard let editor, !editor.isSelectable,
+                      editor.window?.firstResponder === editor else { return }
+                editor.window?.makeFirstResponder(nil)
+            }
+        }
         editor.onSubmit = onSubmit
         editor.onSteerSubmit = onSteerSubmit
         editor.onPasteImage = onPasteImage
@@ -136,7 +147,7 @@ struct NativeChatEditor: NSViewRepresentable {
                     guard let editor,
                           let coordinator,
                           coordinator.parent.isFocused,
-                          coordinator.parent.isEnabled else { return }
+                          editor.isEditable else { return }
                     editor.window?.makeFirstResponder(editor)
                 }
             }
@@ -146,7 +157,8 @@ struct NativeChatEditor: NSViewRepresentable {
             context.coordinator.handledFocusRequest = focusRequest
             // After this update, so a view that covered the editor has gone.
             DispatchQueue.main.async { [weak editor] in
-                guard let editor, editor.window?.makeFirstResponder(editor) == true else { return }
+                guard let editor, editor.isEditable,
+                      editor.window?.makeFirstResponder(editor) == true else { return }
                 editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
             }
         }

@@ -393,8 +393,6 @@ package struct KanbanBoardView: PHView {
                     }
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
-            } else if let selectedTask {
-                conversationView(for: selectedTask)
             } else {
                 boardContent
                     .modifier(DeleteTaskErrorAlert(message: $deleteError))
@@ -566,7 +564,7 @@ package struct KanbanBoardView: PHView {
                 PHEmptyView()
             }
             .pluginPresentation(
-                $openTaskItemPlugin,
+                boardOnly($openTaskItemPlugin),
                 props: { PluginContext.props(plugin: $0, appearance: appearance, task: openTaskItemPluginTask.map { PluginTaskContext(task: $0) }, composer: nil) },
                 actions: taskItemPluginActions
             )
@@ -598,98 +596,44 @@ package struct KanbanBoardView: PHView {
         }
     }
 
-    /// The board's header, sidebar and columns, with the chat, its bubbles and the search bar over
-    /// them, and the archive and main sidebar plugins presented over all of it.
+    /// The board or open task, with a mounted chat that preserves its history while a task is open.
     private var boardLayers: some PHView {
         AtomStack(props: StackProps(axis: "z", align: "topLeading"), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
-            // Measured only while the chat is open, so resizing the window without it doesn't re-run the board.
-            if isShowingChatSidebar {
-                AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true)) {
-                    PHEmptyView()
-                }
-                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { boardContentWidth = $0 }
-            }
-
-            AtomStack(props: StackProps(spacing: 0)) {
-                AtomStack(props: StackProps(spacing: 0)) {
-                    boardHeader
-
-                    AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(height: 1, fillWidth: true)) {
-                        PHEmptyView()
-                    }
-                }
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { boardBodyTop = $0 }
-
-                AtomStack(props: StackProps(axis: "h", spacing: 0)) {
-                    boardSidebar
-
-                    AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(width: 1, fillHeight: true)) {
-                        PHEmptyView()
-                    }
-
-                    if isChatOverlayVisible {
-                        AtomStack(common: AtomCommon(width: Double(chatSidebarShownWidth), fillHeight: true, decorative: true)) {
+            AtomOverlay(props: OverlayProps(align: "topLeading", group: false)) {
+                AtomStack(props: StackProps(axis: "z", align: "topLeading"), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
+                    // Measured only while chat is open.
+                    if isShowingChatSidebar {
+                        AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true)) {
                             PHEmptyView()
                         }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { boardContentWidth = $0 }
                     }
 
-                    AtomStack(props: StackProps(spacing: 0)) {
-                        if let lifecycleResetNotice {
-                            lifecycleResetBanner(lifecycleResetNotice)
-                        }
-
-                        AtomStack(props: StackProps(axis: "h", spacing: 0)) {
-                            // The board pins its columns to the top, just under the header, centers them
-                            // across its width with its own viewport-sized frame, and keeps the scroll
-                            // view's clip origin at zero. Left to itself, the two-axis scroll view centers
-                            // narrower content by giving AppKit's clip view a negative bounds origin, and
-                            // after a horizontal scroll nudge followed by a content-height change, SwiftUI's
-                            // hit testing lost that offset: the board drew centered while clicks resolved as
-                            // if it were flush left, so buttons stopped responding until the window was resized.
-                            // The board's scrollers always float over the content (see HoverRevealScrollers),
-                            // so the visible area is the reader's full frame.
-                            PHGeometryReader { viewport in
-                                // The drawer floats over the scroll view's trailing edge rather than
-                                // beside it, so the vertical scroller sits at the window edge with the
-                                // drawer to its left, and the drawer stays put while scrolling.
-                                AtomStack(props: StackProps(axis: "z", align: "trailing", fill: "window")) {
-                                    AtomScroll(props: ScrollProps(axis: "both")) {
-                                        boardColumns(viewport: viewport.size)
-                                    }
-                                    .modifier(TopLeadingScrollAlignment())
-                                    .scrollContentBackground(.hidden)
-                                    .accessibilityIdentifier("board-columns-scroll-view")
-
-                                    AtomStack(common: AtomCommon(paddingTrailing: Double(HoverRevealScrollers.scrollerWidth))) {
-                                        DoneDropDrawer(
-                                            isOpen: draggedTaskStatus.map(TaskStatus.manualDoneSources.contains) ?? false,
-                                            isActive: $isDoneTargetActive,
-                                            onDrop: { moveTask(id: $0, to: .done) }
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                    if let selectedTask {
+                        conversationView(for: selectedTask)
+                    } else {
+                        boardBody
                     }
                 }
-            }
+            } overlay: {
+                // The chat keeps its viewport while a task opens, without affecting the task's size.
+                AtomStack(props: StackProps(axis: "z", align: "topLeading")) {
+                    AtomStack(common: AtomCommon(paddingTop: Double(boardBodyTop), paddingLeading: Double(ChatSidebarLayout.chatLeadingEdge))) {
+                        AtomStack(props: StackProps(align: "leading", clip: true), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
+                            standaloneChatOverlay
+                        }
+                    }
 
-            // The chat opens beside the board sidebar, aligned with its top under the header, and
-            // slides out from the sidebar's edge rather than over the sidebar or the header.
-            AtomStack(common: AtomCommon(paddingTop: Double(boardBodyTop), paddingLeading: Double(ChatSidebarLayout.chatLeadingEdge))) {
-                AtomStack(props: StackProps(align: "leading", clip: true), common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topLeading")) {
-                    standaloneChatOverlay
+                    // Bubbles float from the chat's right edge, below the header.
+                    AtomStack(common: AtomCommon(paddingTop: Double(boardBodyTop))) {
+                        parallelChatBubblesOverlay
+                    }
                 }
-            }
-
-            // Bubbles float from the chat's right edge, below the header.
-            AtomStack(common: AtomCommon(paddingTop: Double(boardBodyTop))) {
-                parallelChatBubblesOverlay
             }
 
             // The search bar floats over the board's top trailing corner.
             AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "topTrailing")) {
-                if isShowingBoardSearch {
+                if isShowingBoardSearch, selectedTask == nil {
                     AtomStack(common: AtomCommon(paddingTop: 16, paddingTrailing: 20)) {
                         AtomStack(common: AtomCommon(width: 360)) {
                             boardSearchBar
@@ -725,16 +669,88 @@ package struct KanbanBoardView: PHView {
         // The archive is a SidePanel atom over the board; the main sidebar's
         // page, modal and side panel plugins present over it too.
         .atomSidePanel(
-            SidePanelProps(isPresented: isShowingDoneArchive, width: 340),
+            SidePanelProps(isPresented: isShowingDoneArchive && selectedTask == nil, width: 340),
             common: AtomCommon(testID: "done-archive-panel")
         ) {
             doneArchivePanel
         }
         .pluginPresentation(
-            $openBoardPlugin,
+            boardOnly($openBoardPlugin),
             props: mainSidebarPluginProps,
             actions: boardPluginActions
         )
+    }
+
+    /// The board's header, sidebar and columns.
+    private var boardBody: some PHView {
+        AtomStack(props: StackProps(spacing: 0)) {
+            AtomStack(props: StackProps(spacing: 0)) {
+                boardHeader
+
+                AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(height: 1, fillWidth: true)) {
+                    PHEmptyView()
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { boardBodyTop = $0 }
+
+            AtomStack(props: StackProps(axis: "h", spacing: 0)) {
+                boardSidebar
+
+                AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(width: 1, fillHeight: true)) {
+                    PHEmptyView()
+                }
+
+                if isChatOverlayVisible {
+                    AtomStack(common: AtomCommon(width: Double(chatSidebarShownWidth), fillHeight: true, decorative: true)) {
+                        PHEmptyView()
+                    }
+                }
+
+                AtomStack(props: StackProps(spacing: 0)) {
+                    if let lifecycleResetNotice {
+                        lifecycleResetBanner(lifecycleResetNotice)
+                    }
+
+                    AtomStack(props: StackProps(axis: "h", spacing: 0)) {
+                        // The board pins its columns to the top, just under the header, centers them
+                        // across its width with its own viewport-sized frame, and keeps the scroll
+                        // view's clip origin at zero. Left to itself, the two-axis scroll view centers
+                        // narrower content by giving AppKit's clip view a negative bounds origin, and
+                        // after a horizontal scroll nudge followed by a content-height change, SwiftUI's
+                        // hit testing lost that offset: the board drew centered while clicks resolved as
+                        // if it were flush left, so buttons stopped responding until the window was resized.
+                        // The board's scrollers always float over the content (see HoverRevealScrollers),
+                        // so the visible area is the reader's full frame.
+                        PHGeometryReader { viewport in
+                            // The drawer floats over the scroll view's trailing edge rather than
+                            // beside it, so the vertical scroller sits at the window edge with the
+                            // drawer to its left, and the drawer stays put while scrolling.
+                            AtomStack(props: StackProps(axis: "z", align: "trailing", fill: "window")) {
+                                AtomScroll(props: ScrollProps(axis: "both")) {
+                                    boardColumns(viewport: viewport.size)
+                                }
+                                .modifier(TopLeadingScrollAlignment())
+                                .scrollContentBackground(.hidden)
+                                .accessibilityIdentifier("board-columns-scroll-view")
+
+                                AtomStack(common: AtomCommon(paddingTrailing: Double(HoverRevealScrollers.scrollerWidth))) {
+                                    DoneDropDrawer(
+                                        isOpen: draggedTaskStatus.map(TaskStatus.manualDoneSources.contains) ?? false,
+                                        isActive: $isDoneTargetActive,
+                                        onDrop: { moveTask(id: $0, to: .done) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Board plugin surfaces reappear when the open task closes.
+    private func boardOnly(_ plugin: PHBinding<PluginRecord?>) -> PHBinding<PluginRecord?> {
+        PHBinding(get: { selectedTask == nil ? plugin.wrappedValue : nil }, set: { plugin.wrappedValue = $0 })
     }
 
     /// The columns, pinned to the top of the board's scroll view and centered across the viewport.
@@ -810,10 +826,14 @@ package struct KanbanBoardView: PHView {
 
     package var standaloneChatOverlay: some PHView {
         PHGroup {
-            if isShowingChatSidebar, selectedTask == nil, let chatTask {
+            // Keep the sidebar mounted so its scroll position and streaming reply survive opening a task.
+            if isShowingChatSidebar, let chatTask {
                 // The Overlay is the accessibility container the identifier needs: without one,
                 // it replaces the conversation controls' own.
-                AtomOverlay(props: OverlayProps(align: "trailing"), common: AtomCommon(testID: "chat-sidebar")) {
+                AtomOverlay(
+                    props: OverlayProps(align: "trailing"),
+                    common: AtomCommon(testID: "chat-sidebar", opacity: selectedTask == nil ? 1 : 0)
+                ) {
                     AtomStack(props: StackProps(align: "leading"), common: AtomCommon(fillHeight: true, frameAlign: "topLeading")) {
                         // While the edge moves, the chat keeps the width it was last laid out at, and the panel
                         // clips or reveals the rest; it reflows when the edge rests and when the drag ends.
@@ -838,6 +858,10 @@ package struct KanbanBoardView: PHView {
                 }
                 .transition(.move(edge: .leading).combined(with: .opacity))
                 .id(chatTask.id)
+                .allowsHitTesting(selectedTask == nil)
+                .accessibilityHidden(selectedTask != nil)
+                .disabled(selectedTask != nil)
+                .environment(\.isKeptAliveHidden, selectedTask != nil)
             }
         }
     }
@@ -857,7 +881,7 @@ package struct KanbanBoardView: PHView {
             guard push != chatPageAnchorsPush else { return }
             phWithAnimation(ChatPageAnchorsLayout.slideAnimation) { chatPageAnchorsPush = push }
         }
-        // Opening a task from the page removes the chat without a closing preference change.
+        // Closing the sidebar can remove the chat without a closing preference change.
         .onDisappear {
             isChatSkillsPageShowing = false
             chatPageAnchorsPush = 0

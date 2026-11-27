@@ -18,7 +18,7 @@ Playhouse (macOS app target, Playhouse/App)
 
 | Module | May import | Holds |
 | --- | --- | --- |
-| PlayhouseCore | Foundation, FoundationNetworking, Dispatch, Observation, GRDB. CryptoKit, JavaScriptCore, Security, CoreServices, OSLog and notify only under `#if canImport(...)`. The C library only in `Core/Platform/POSIX.swift`. | Board and task models, the GRDB store and SwiftData migration, the bridge and CLI command catalog, the Claude/Codex/OpenCode providers, the plugin runtime and services, `PlatformServices`, `POSIX`, `Hashing` |
+| PlayhouseCore | Foundation, FoundationNetworking, Dispatch, Observation, GRDB. CryptoKit, JavaScriptCore, Security, CoreServices, OSLog and notify only under `#if canImport(...)`. The C library only in `Core/Platform/POSIX.swift`. | Board and task models, the GRDB store, the bridge and CLI command catalog, the Claude/Codex/OpenCode providers, the plugin runtime and services, `PlatformServices`, `POSIX`, `Hashing` |
 | PlayhouseUI | Foundation, Observation, PlayhouseCore. SwiftUI, AppKit and their helpers only inside `#if canImport(SwiftUI)` / `#if os(macOS)` (all of `UI/SwiftUI`). | `PH…` typealiases (`PlayhouseUITypes.swift`), shims for what SwiftCrossUI lacks (`PlayhouseUIShims.swift`, `MacViewShims.swift`, `MacInteractionShims.swift`), platform text types, `PHScrollSurface`, and the neutral `PHIcon` and `PHMaterial` (`UI/Neutral`, which also build on Linux) |
 | PlayhouseAtoms | Foundation, Observation, PlayhouseCore, PlayhouseUI | The atom views, `AtomRegistry`, Markdown rendering, and `NativeViews` |
 | PlayhouseViews | The same, plus PlayhouseAtoms | Every composite: the task card, Kanban board and columns, Done archive, composer, task conversation and transcript, Agents info, Token Stats, settings, skills, rules and MCP pages, repository chips, plugin host and built-in plugins, Plugin Catalog |
@@ -51,13 +51,7 @@ Playhouse (macOS app target, Playhouse/App)
 
 The app and the bridge daemon share the store file `Playhouse-v3.sqlite`. Each signals the other through `StoreChangeSignal`, a Darwin notification named after the store path; the receiver then calls `refreshFromStore()`.
 
-**Migration from SwiftData** (`Core/Storage/SwiftDataStoreMigration.swift`) runs once, when there is no `Playhouse-v3.sqlite` yet:
-
-- It reads the newest existing SwiftData store directly as SQLite. That is `Playhouse-v2.store`, or else the legacy `Playhouse.store`.
-- It reads its Core Data tables from a snapshot copy, so the original store is never changed.
-- It writes every task and standalone chat into a staged file, then moves the file into place.
-
-Tests cover the migration against real SwiftData stores that the previous release wrote: `Playhouse/CoreTests/Fixtures/swiftdata-stores` and the bridge cases `test_task_store_migrates_current_swiftdata_store` and `test_task_store_migrates_legacy_swiftdata_store`.
+**No SwiftData import.** Playhouse no longer reads the SwiftData stores of earlier releases (`Playhouse-v2.store`, `Playhouse.store`). A data directory with no `Playhouse-v3.sqlite` starts with an empty store, and any SwiftData files beside it are never read, changed or deleted. The bridge case `test_legacy_swiftdata_store_is_left_untouched` covers this.
 
 ### PlatformServices
 

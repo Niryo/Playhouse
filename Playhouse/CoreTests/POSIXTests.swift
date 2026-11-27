@@ -28,7 +28,7 @@ final class POSIXTests: XCTestCase {
         defer { try? FileManager.default.removeItem(atPath: path) }
         XCTAssertEqual(try POSIX.withExclusiveFileLock(at: path) { 7 }, 7)
         XCTAssertEqual(try POSIX.withExclusiveFileLock(at: path) { 8 }, 8)
-        XCTAssertTrue(POSIX.isRegularFile(path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
         XCTAssertFalse(POSIX.isSymbolicLink(path))
     }
 

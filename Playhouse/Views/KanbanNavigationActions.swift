@@ -165,7 +165,6 @@ extension KanbanBoardView {
                 if let task = try? manager.taskModel(id) {
                     // A plugin's openTask shows the task without sending anything.
                     skillFixPrompts[id] = prompt.isEmpty ? nil : prompt
-                    setChatSidebarVisible(false)
                     isSelectedTaskNew = false
                     phWithAnimation(.easeInOut(duration: 0.3)) {
                         selectedTask = task

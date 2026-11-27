@@ -121,6 +121,7 @@ extension TaskConversationView {
                             layoutTop: Self.conversationVerticalPadding,
                             latestTurnMargin: Self.latestTurnTopMargin,
                             rendersTranscriptEnd: !isBrowsingEarlier,
+                            isKeptAliveHidden: isKeptAliveHidden,
                             handlers: transcriptScrollHandlers
                         )
                     }
@@ -605,7 +606,7 @@ extension TaskConversationView {
             AtomOverlay(props: OverlayProps(align: "top", group: false)) {
                 ComposerView(model: composerModel, actions: composerActions, header: {
             recalledChatPageChips
-            let pendingCommentCount = annotations.filter(\.pending).count
+            let pendingCommentCount = unsentAnnotations.count
             if pendingCommentCount > 0 {
                 AtomOverlay(props: OverlayProps(align: "topTrailing", offsetX: 6, offsetY: -6, group: false)) {
                     AtomPanel(

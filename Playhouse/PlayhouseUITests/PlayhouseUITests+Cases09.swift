@@ -131,7 +131,7 @@ extension PlayhouseUITests {
         let legacyID = try seedLegacyStandaloneChatTask()
         launchApp(defaultParent: fixture.parent.path)
 
-        // The board renders from its own SwiftData query, so this is where a leftover hidden
+        // The board renders from its own task-store query, so this is where a leftover hidden
         // task would actually surface as a card.
         XCTAssertFalse(
             element("task-card-\(legacyID)").waitToExist(timeout: 3),

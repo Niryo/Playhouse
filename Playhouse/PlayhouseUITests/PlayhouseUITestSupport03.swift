@@ -469,7 +469,7 @@ extension PlayhouseUITests {
     }
     func seedTaskPullRequest(taskID: String, number: Int, url: String, repositoryIndex: Int = 0) throws {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled SwiftData fixture seeder should be executable.")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled task-store fixture seeder should be executable.")
 
         let seed = Process()
         seed.executableURL = seeder
@@ -481,12 +481,12 @@ extension PlayhouseUITests {
         try seed.run()
         seed.waitUntilExit()
         let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task record should be seeded: \(seedText)")
+        XCTAssertEqual(seed.terminationStatus, 0, "The isolated task record should be seeded: \(seedText)")
         XCTAssertTrue(seedText.contains("Seeded linked PR #\(number)"), seedText)
     }
     func clearTaskProviderSession(taskID: String) throws {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled SwiftData fixture seeder should be executable.")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled task-store fixture seeder should be executable.")
 
         let seed = Process()
         seed.executableURL = seeder
@@ -497,7 +497,7 @@ extension PlayhouseUITests {
         try seed.run()
         seed.waitUntilExit()
         let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task session should be cleared: \(seedText)")
+        XCTAssertEqual(seed.terminationStatus, 0, "The isolated task session should be cleared: \(seedText)")
         XCTAssertTrue(seedText.contains("Cleared provider sessions"), seedText)
     }
     /// A nil `expectedStatus` accepts any exit, for polls that may run while no daemon answers.

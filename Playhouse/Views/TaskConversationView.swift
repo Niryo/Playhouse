@@ -11,6 +11,8 @@ import PlayhouseUI
 /// the width its text was just laid out for, and drawing reuses that layout.
 
 package struct TaskConversationView: PHView {
+    @PHEnvironment(\.isKeptAliveHidden) package var isKeptAliveHidden
+
     package struct PendingImage: Identifiable {
         package let id = UUID()
         package let dataURL: String
@@ -383,8 +385,18 @@ package struct TaskConversationView: PHView {
     @PHFocusState package var focusedRepositoryField: String?
     @PHFocusState package var isComposerFocused: Bool
 
+    /// The comments still waiting in the composer: a pending comment the running turn already
+    /// carries stays pending only until that turn ends, and is no longer the composer's to send.
+    package var unsentAnnotations: [ConversationAnnotation] {
+        annotations.filter(isUnsent)
+    }
+
+    package func isUnsent(_ annotation: ConversationAnnotation) -> Bool {
+        annotation.pending && !inFlightAnnotationIDs.contains(annotation.id)
+    }
+
     package var isSendDisabled: Bool {
-        isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isStopLandingOnOwnSend || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
+        isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && unsentAnnotations.isEmpty && !isEnteringGoal) || isDisplayingActiveResponse || isStopLandingOnOwnSend || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
     }
 
     /// A new task can use either schedule, and a recurring template can be edited; an existing

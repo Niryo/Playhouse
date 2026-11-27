@@ -2,117 +2,32 @@ from test_bridge_support import *
 from test_bridge_support import __file__
 
 class BridgeTestCases04:
-    # case-contract: test_legacy_store_import_failure_preserves_original | An invalid legacy database fails import without changing the source or publishing a destination or partial snapshot; the normal isolated board remains usable.
-    def test_legacy_store_import_failure_preserves_original(self):
-        self.assert_success(self.call_cli("task", "create", "--title", "Healthy board", "--prompt", "Fixture task description.", "--root", self.primary)[0])
-        failure = self.data_directory / "invalid-legacy"
-        failure.mkdir()
-        source = failure / "Playhouse.store"
-        contents = b"Not a SQLite database"
-        source.write_bytes(contents)
-        response, _ = self.call_cli("task", "list", expected_status=1, extra_environment={"PLAYHOUSE_DATA_DIRECTORY": str(failure)})
-        self.assertFalse(response["ok"])
-        self.assertEqual(source.read_bytes(), contents)
-        self.assertFalse((failure / TASK_STORE_FILE).exists())
-        self.assertFalse([path.name for path in failure.iterdir() if path.name.startswith((".store-migration-", ".swiftdata-"))])
-        self.assertEqual(self.assert_success(self.call_cli("task", "list")[0])["tasks"][0]["title"], "Healthy board")
-    # case-contract: test_task_store_migrates_legacy_swiftdata_store | A real legacy SwiftData task store from before submitted prompts and drafts, with committed WAL-only data, is moved once into the GRDB task store while a concurrent CLI/XPC read waits on the held schema lock; the task keeps its title and saved prompt, which a store from before drafts were flagged does not restore as a draft, and its elapsed time stays zero. The legacy file stays unchanged and is never read again: the visible app opens the migrated store with an empty composer, a later edited draft survives restarts, and the migration is recorded once.
-    def test_task_store_migrates_legacy_swiftdata_store(self):
-        task_id = "948A506B-0AE6-47E4-A99E-EAE60CDDDAFB"
-        legacy_store = self.data_directory / "Playhouse.store"
-        shutil.copyfile(SWIFTDATA_FIXTURES / "legacy-pending-prompt" / "Playhouse.store", legacy_store)
-        # The store predates the chat split and drafts but not the v2 lifecycle reset.
-        (self.data_directory / "task-lifecycle-v2-reset").write_text("1\n", encoding="utf-8")
-        with sqlite3.connect(legacy_store) as database:
-            columns = {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")}
-            self.assertNotIn("ZPENDINGSUBMITTEDPROMPT", columns)
-            self.assertNotIn("ZHASUNSENTDRAFT", columns)
-            self.assertTrue({"ZINPROGRESSSTARTEDAT", "ZTOTALINPROGRESSSECONDS"} <= columns)
-            self.assertEqual(database.execute("SELECT count(*) FROM ZBOARDTASK").fetchone()[0], 1)
-
-        wal = sqlite3.connect(legacy_store)
-        self.addCleanup(wal.close)
-        wal.execute("PRAGMA journal_mode=WAL")
-        wal.execute("PRAGMA wal_autocheckpoint=0")
-        draft = "Committed WAL draft must survive import."
-        wal.execute("UPDATE ZBOARDTASK SET ZSAVEDPROMPT = ?", (draft,))
-        wal.commit()
-        self.assertGreater(Path(str(legacy_store) + "-wal").stat().st_size, 0)
-        legacy_bytes = legacy_store.read_bytes()
-        legacy_wal_bytes = Path(str(legacy_store) + "-wal").read_bytes()
-        barrier = TaskStoreSchemaLockBarrier(self.data_directory)
-        try:
-            waiting = self.start_cli("task", "get", task_id)
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline and not any(
-                event.get("event") == "persistence.store.swiftdata_migration.waiting_for_schema_lock"
-                for event in self.diagnostic_events()
-            ):
-                time.sleep(0.05)
-            self.assertTrue(any(
-                event.get("event") == "persistence.store.swiftdata_migration.waiting_for_schema_lock"
-                for event in self.diagnostic_events()
-            ), "Opening a data directory with a SwiftData store should wait for the real schema lock.")
-            self.assertIsNone(waiting.poll(), "The XPC read must not bypass the held migration lock.")
-            self.assertFalse((self.data_directory / TASK_STORE_FILE).exists(), "Nothing is migrated while another process holds the lock.")
-        finally:
-            barrier.release()
-        reopened, _ = self.finish_cli(waiting, ("task", "get", task_id))
-        self.assertEqual(self.assert_success(reopened)["savedPrompt"], draft)
-        self.assertFalse(self.assert_success(reopened)["hasUnsentDraft"], "A pre-flag saved prompt is not restored as a draft.")
-        self.assertEqual(self.assert_success(reopened)["title"], "Legacy pending prompt store")
-        migrations = [event for event in self.diagnostic_events() if event.get("event") == "persistence.store.swiftdata_migrated"]
-        self.assertEqual(len(migrations), 1)
-        self.assertEqual((migrations[0]["boardTaskCount"], migrations[0]["standaloneChatCount"], migrations[0]["skippedRowCount"]), ("1", "0", "0"))
-        self.assertEqual(migrations[0]["sourcePath"], str(legacy_store))
-        store = self.data_directory / TASK_STORE_FILE
-        self.assertEqual(stat.S_IMODE(store.stat().st_mode), 0o600)
-        with sqlite3.connect(store) as database:
-            self.assertEqual(database.execute("PRAGMA quick_check").fetchone()[0], "ok")
-            self.assertEqual(
-                database.execute("SELECT savedPrompt, pendingSubmittedPrompt, totalInProgressSeconds, hasUnsentDraft FROM board_tasks").fetchall(),
-                [(draft, None, 0, 0)],
-            )
-        listed, _ = self.call_cli("board", "list")
-        self.assertEqual([item["id"] for item in self.assert_success(listed)["tasks"]], [task_id])
-        self.assertFalse(list(self.data_directory.glob("Playhouse-v2.store*")), "The migration writes no intermediate SwiftData store.")
-        self.assertFalse([path.name for path in self.data_directory.iterdir() if path.name.startswith((".store-migration-", ".swiftdata-"))])
-
-        self.assert_success(self.call_cli("task", "prompt", task_id, "--text", "Edited after import", "--status", "Backlog")[0])
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["savedPrompt"], "Edited after import")
-        self.assertEqual(legacy_store.read_bytes(), legacy_bytes, "The SwiftData store stays as it was, as a backup.")
-        self.assertEqual(Path(str(legacy_store) + "-wal").read_bytes(), legacy_wal_bytes)
-        self.assertEqual(len([e for e in self.diagnostic_events() if e.get("event") == "persistence.store.swiftdata_migrated"]), 1)
-    # case-contract: test_task_store_migrates_current_swiftdata_store | A real SwiftData task store written by the last SwiftData build, with tasks in every column, a repository, a context folder, an unsent draft with an image, call usage, pending comments, a past pull request, one-time and paused recurring schedules, the standalone chat, a plugin editor and a parallel bubble, is moved into the GRDB task store with every stored column value intact; CLI/XPC reads return exactly what that build returned, the SwiftData file stays unchanged, and the visible app shows the migrated tasks in their columns with the draft in its composer.
-    def test_task_store_migrates_current_swiftdata_store(self):
-        fixture = SWIFTDATA_FIXTURES / "current"
-        source = self.data_directory / "Playhouse-v2.store"
-        shutil.copyfile(fixture / "Playhouse-v2.store", source)
-        (self.data_directory / "task-lifecycle-v2-reset").write_text("1\n", encoding="utf-8")
-        source_bytes = source.read_bytes()
-        expected = json.loads((fixture / "expected.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(self.assert_success(self.call_cli("board", "list")[0]), expected["board"])
-        for task_id, record in expected["tasks"].items():
-            self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0]), record, f"{record['title']} reads as before.")
-        self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0]), expected["schedules"])
-        self.assertEqual(self.assert_success(self.call_cli("chat", "open")[0]), expected["chat"])
-
-        migrated = self.data_directory / TASK_STORE_FILE
-        for table, entity in (("ZBOARDTASK", "board_tasks"), ("ZSTANDALONECHAT", "standalone_chats")):
-            legacy_rows = core_data_column_values(source, table)
-            with sqlite3.connect(migrated) as database:
-                database.row_factory = sqlite3.Row
-                migrated_rows = {row["id"]: {key.lower(): row[key] for key in row.keys()} for row in database.execute(f"SELECT * FROM {entity}")}
-            self.assertEqual(set(migrated_rows), set(legacy_rows), f"Every {entity} row moves.")
-            for row_id, values in legacy_rows.items():
-                for column, value in values.items():
-                    self.assertIn(column, migrated_rows[row_id], f"{entity}.{column} has a column in the new store.")
-                    self.assertEqual(migrated_rows[row_id][column], value, f"{entity} {row_id} keeps {column}.")
-        self.assertEqual(source.read_bytes(), source_bytes, "The SwiftData store stays as it was, as a backup.")
-        migrations = [event for event in self.diagnostic_events() if event.get("event") == "persistence.store.swiftdata_migrated"]
-        self.assertEqual(len(migrations), 1)
-        self.assertEqual((migrations[0]["boardTaskCount"], migrations[0]["standaloneChatCount"]), ("8", "3"))
+    # case-contract: test_legacy_swiftdata_store_is_left_untouched | A data directory holding only SwiftData stores of earlier releases (Playhouse-v2.store with its WAL and the older Playhouse.store) opens as an empty GRDB task store: CLI/XPC reads list no tasks, a new task saves to Playhouse-v3.sqlite, the SwiftData files stay byte-for-byte unchanged and no import snapshot is written; the visible app opens such a directory on an empty board and saves a new task there.
+    def test_legacy_swiftdata_store_is_left_untouched(self):
+        legacy = self.data_directory / "swiftdata-only"
+        legacy.mkdir()
+        legacy_files = {
+            legacy / "Playhouse-v2.store": b"SwiftData store of an earlier release",
+            legacy / "Playhouse-v2.store-wal": b"Its write-ahead log",
+            legacy / "Playhouse.store": b"The older SwiftData store",
+        }
+        for path, contents in legacy_files.items():
+            path.write_bytes(contents)
+        environment = {"PLAYHOUSE_DATA_DIRECTORY": str(legacy)}
+        self.assertEqual(self.assert_success(self.call_cli("task", "list", extra_environment=environment)[0])["tasks"], [])
+        self.assertTrue((legacy / TASK_STORE_FILE).is_file(), "The directory gets a new, empty GRDB task store.")
+        created = self.assert_success(self.call_cli(
+            "task", "create", "--title", "First GRDB task", "--prompt", "Fixture task description.", "--root", self.primary,
+            extra_environment=environment,
+        )[0])
+        tasks = self.assert_success(self.call_cli("task", "list", extra_environment=environment)[0])["tasks"]
+        self.assertEqual([(task["id"], task["title"]) for task in tasks], [(created["id"], "First GRDB task")])
+        with sqlite3.connect(f"file:{legacy / TASK_STORE_FILE}?mode=ro", uri=True) as database:
+            self.assertEqual(database.execute("SELECT title FROM board_tasks").fetchall(), [("First GRDB task",)])
+        for path, contents in legacy_files.items():
+            self.assertEqual(path.read_bytes(), contents, f"{path.name} stays as it was.")
+        self.assertFalse([path.name for path in legacy.iterdir() if path.name.startswith((".store-migration-", ".swiftdata-"))])
+        self.assertEqual(self.assert_success(self.call_cli("task", "list")[0])["tasks"], [], "The case's own board is a separate store.")
     # case-contract: test_test_bundle_rejects_unisolated_data_directory | A test-built Playhouse service rejects a data directory outside the temporary test area and a linked store inside it before creating or opening either store; the visible app remains on its isolated board and can still read its tasks.
     def test_test_bundle_rejects_unisolated_data_directory(self):
         unsafe = Path.home() / "Library" / "Caches" / f"Playhouse-bridge-guard-{uuid.uuid4()}"

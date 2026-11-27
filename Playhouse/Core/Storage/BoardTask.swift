@@ -228,8 +228,7 @@ package final class BoardTask: PersistentModel {
     package var pullRequestAutopilotLastFixSignature: String?
     /// Legacy marker from when the standalone chat was a hidden board task. Nothing reads it
     /// for behavior; it exists so `migrateLegacyStandaloneChatTasks()` can find those rows and
-    /// convert them to `StandaloneChat`. The original column name is preserved so the migration
-    /// can still see data written before the split.
+    /// convert them to `StandaloneChat` in stores still holding rows written before the split.
     package var legacyStandaloneChatMarker: Bool = false
     /// Nil for an ordinary task; otherwise a `TaskScheduleKind`. A one-time schedule is a
     /// Backlog task whose first prompt is sent at `scheduledAt`. A recurring schedule is a
@@ -352,7 +351,7 @@ package final class BoardTask: PersistentModel {
         PersistedProperty("pullRequestAutoMerge", \.pullRequestAutoMerge),
         PersistedProperty("pullRequestAutopilotFixAttempts", \.pullRequestAutopilotFixAttempts),
         PersistedProperty("pullRequestAutopilotLastFixSignature", \.pullRequestAutopilotLastFixSignature),
-        PersistedProperty("legacyStandaloneChatMarker", \.legacyStandaloneChatMarker, coreDataNames: ["isStandaloneChat"]),
+        PersistedProperty("legacyStandaloneChatMarker", \.legacyStandaloneChatMarker),
         PersistedProperty("scheduleKindRawValue", \.scheduleKindRawValue),
         PersistedProperty("scheduledAt", \.scheduledAt),
         PersistedProperty("scheduleRecurrenceData", \.scheduleRecurrenceData),

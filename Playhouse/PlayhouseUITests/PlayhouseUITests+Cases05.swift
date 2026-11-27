@@ -288,7 +288,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Task shows PR numbers for both repositories")
 
         app.terminate()
-        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the archived store.")
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its task store before seeding the archived store.")
         let activePRURL = "https://github.com/playhouse-test/fixture/pull/1234"
         try seedTaskPullRequest(taskID: activeTaskID, number: 1234, url: activePRURL)
         let prURL = "https://github.com/playhouse-test/fixture/pull/1234"

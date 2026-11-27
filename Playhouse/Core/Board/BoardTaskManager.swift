@@ -395,7 +395,7 @@ package final class BoardTaskManager {
                 try await worktreeService.removeAfterConfirmation(worktree)
                 PlayhouseDiagnostics.record("task.delete.worktree_removal_succeeded", fields: fields)
             }
-            phase = "swiftdata-save"
+            phase = "store-save"
             let taskID = task.id
             let openCodeSessionID = task.openCodeSessionID
             let storeDirectory = modelContext.storeURL.deletingLastPathComponent()

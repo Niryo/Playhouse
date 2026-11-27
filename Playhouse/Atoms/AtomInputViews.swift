@@ -466,6 +466,8 @@ extension AtomCommon {
 /// A popover over its anchor, open while `props.isPresented`. Native owners
 /// give any SwiftUI content; a plugin's is every child after the anchor.
 package struct AtomPopover<PHAnchor: PHView, Content: PHView>: PHView {
+    @PHEnvironment(\.isEnabled) private var isEnabled
+    @PHEnvironment(\.isKeptAliveHidden) private var isKeptAliveHidden
     package var props: PopoverProps
     package var common = AtomCommon()
     package let onDismiss: () -> Void
@@ -485,11 +487,26 @@ package struct AtomPopover<PHAnchor: PHView, Content: PHView>: PHView {
                 .atomCommon(layoutOnly, atom: .popover)
         } else {
             anchor()
-                .popover(isPresented: PHBinding(get: { props.isPresented }, set: { if !$0 && props.isPresented { onDismiss() } }), arrowEdge: edge) {
+                .background {
+                    if isPresentationVisible, isEnabled {
+                        // A text-only popover can leave keyboard focus in the anchor's window.
+                        PHEscapeKeyMonitor(windowScoped: true, onEscape: onDismiss)
+                            .frame(width: 0, height: 0)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .popover(isPresented: PHBinding(get: { isPresentationVisible }, set: { if !$0 && isPresentationVisible { onDismiss() } }), arrowEdge: edge) {
                     paddedContent
+                        .onExitCommand {
+                            if isEnabled { onDismiss() }
+                        }
                 }
                 .atomCommon(layoutOnly, atom: .popover)
         }
+    }
+
+    private var isPresentationVisible: Bool {
+        props.isPresented && !isKeptAliveHidden
     }
 
     private var paddedContent: some PHView {
