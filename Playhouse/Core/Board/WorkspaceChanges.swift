@@ -1,0 +1,887 @@
+import Foundation
+#if canImport(CoreServices)
+import CoreServices
+#endif
+
+/// Watches a task's workspace for file changes. On macOS it follows an FSEvents stream; on a
+/// platform without FSEvents it never fires yet (a Linux port watches with inotify here), and
+/// the changes list refreshes when it is opened.
+package final class WorkspaceChangeWatcher {
+    private let paths: [String]
+    private let onChange: () -> Void
+    #if canImport(CoreServices)
+    private var stream: FSEventStreamRef?
+    #endif
+    private var pendingRefresh: DispatchWorkItem?
+
+    package init(paths: [String], onChange: @escaping () -> Void) {
+        self.paths = paths
+        self.onChange = onChange
+    }
+
+    package static func watchPaths(workspaceRoots: [String]) async -> [String] {
+        await Task.detached(priority: .utility) {
+            var paths = Set(workspaceRoots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path })
+            for rootPath in workspaceRoots {
+                let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+                for repository in RepositoryScanner.scanSynchronously(parent: root) {
+                    let marker = repository.appendingPathComponent(".git")
+                    guard let contents = try? String(contentsOf: marker, encoding: .utf8),
+                          contents.hasPrefix("gitdir: ") else { continue }
+                    let reference = contents.dropFirst("gitdir: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let gitDirectory = URL(fileURLWithPath: reference, relativeTo: repository).standardizedFileURL
+                    if WorkspaceSettings.validDirectoryURL(for: gitDirectory.path) != nil {
+                        paths.insert(gitDirectory.path)
+                    }
+                }
+            }
+            return paths.sorted()
+        }.value
+    }
+
+    package func start() {
+        #if canImport(CoreServices)
+        guard stream == nil, !paths.isEmpty else { return }
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+            guard let info else { return }
+            Unmanaged<WorkspaceChangeWatcher>.fromOpaque(info).takeUnretainedValue().scheduleRefresh()
+        }
+        guard let stream = FSEventStreamCreate(
+            kCFAllocatorDefault,
+            callback,
+            &context,
+            paths as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.1,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot)
+        ) else { return }
+        FSEventStreamSetDispatchQueue(stream, .main)
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            return
+        }
+        self.stream = stream
+        #endif
+    }
+
+    package func stop() {
+        pendingRefresh?.cancel()
+        pendingRefresh = nil
+        #if canImport(CoreServices)
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+        #endif
+    }
+
+    private func scheduleRefresh() {
+        pendingRefresh?.cancel()
+        let refresh = DispatchWorkItem { [weak self] in self?.onChange() }
+        pendingRefresh = refresh
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: refresh)
+    }
+
+    deinit { stop() }
+}
+
+package enum WorkspaceChangeGroup: String, Codable, CaseIterable {
+    case unviewed
+    case viewed
+
+    /// The raw value is the stable CLI/XPC term; this is what people read.
+    package var displayName: String {
+        self == .viewed ? "reviewed" : "pending"
+    }
+}
+
+package struct WorkspaceViewedChange: Codable, Equatable, Identifiable {
+    package let repository: String
+    package let path: String
+    package let isPresent: Bool
+    package let contents: Data
+    package var id: String { "\(repository):\(path)" }
+
+    package init(repository: String, path: String, isPresent: Bool, contents: Data) {
+        self.repository = repository
+        self.path = path
+        self.isPresent = isPresent
+        self.contents = contents
+    }
+}
+
+extension BoardTask {
+    package var viewedWorkspaceChanges: [WorkspaceViewedChange] {
+        get {
+            guard let viewedWorkspaceChangesData else { return [] }
+            return (try? JSONDecoder().decode([WorkspaceViewedChange].self, from: viewedWorkspaceChangesData)) ?? []
+        }
+        set { viewedWorkspaceChangesData = try? JSONEncoder().encode(newValue) }
+    }
+}
+
+package struct WorkspaceChangeEntry: Codable, Equatable, Identifiable {
+    package let repository: String
+    package let path: String
+    package let originalPath: String?
+    package let status: String
+    package let statusCode: String
+    package let group: WorkspaceChangeGroup
+    package let isUncommitted: Bool
+    package let hasViewedSnapshot: Bool
+
+    /// A file can be listed in both sections at once, so the group is part of its identity.
+    package var id: String {
+        "\(group.rawValue):\(repository):\(path)"
+    }
+
+    package init(repository: String, path: String, originalPath: String?, status: String, statusCode: String, group: WorkspaceChangeGroup, isUncommitted: Bool, hasViewedSnapshot: Bool) {
+        self.repository = repository
+        self.path = path
+        self.originalPath = originalPath
+        self.status = status
+        self.statusCode = statusCode
+        self.group = group
+        self.isUncommitted = isUncommitted
+        self.hasViewedSnapshot = hasViewedSnapshot
+    }
+}
+
+package struct WorkspaceChangeInventory: Codable, Equatable {
+    package let unviewed: [WorkspaceChangeEntry]
+    package let viewed: [WorkspaceChangeEntry]
+    /// Repositories with a merge still open; their files are left out until it is committed or aborted.
+    package let mergingRepositories: [String]
+
+    package var isEmpty: Bool { unviewed.isEmpty && viewed.isEmpty }
+    package var count: Int { unviewed.count + viewed.count }
+
+    package init(unviewed: [WorkspaceChangeEntry], viewed: [WorkspaceChangeEntry], mergingRepositories: [String]) {
+        self.unviewed = unviewed
+        self.viewed = viewed
+        self.mergingRepositories = mergingRepositories
+    }
+}
+
+/// How a changed file and its repository are shown, shared by the Changes
+/// sidebar and the window's diff.
+package enum WorkspaceChangeStyle {
+    package struct RepositoryGroup {
+        package let repository: String
+        package let entries: [WorkspaceChangeEntry]
+
+        package init(repository: String, entries: [WorkspaceChangeEntry]) {
+            self.repository = repository
+            self.entries = entries
+        }
+    }
+
+    package static func repositoryGroups(_ entries: [WorkspaceChangeEntry]) -> [RepositoryGroup] {
+        Dictionary(grouping: entries, by: \.repository)
+            .keys
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { repository in RepositoryGroup(repository: repository, entries: entries.filter { $0.repository == repository }) }
+    }
+
+    package static func repositoryLabel(_ path: String) -> String {
+        URL(fileURLWithPath: path).pathComponents.suffix(2).joined(separator: "/")
+    }
+
+    package static func badge(for entry: WorkspaceChangeEntry) -> String {
+        if entry.statusCode == "??" { return "U" }
+        if entry.statusCode.contains("R") { return "R" }
+        if entry.statusCode.contains("A") { return "A" }
+        if entry.statusCode.contains("D") { return "D" }
+        if entry.status == "conflict" { return "!" }
+        return "M"
+    }
+
+    /// An SF Symbol name.
+    package static func symbol(for status: String) -> String {
+        switch status {
+        case "added", "untracked": "plus.square.fill"
+        case "deleted": "minus.square.fill"
+        case "renamed", "copied": "arrow.turn.up.right"
+        case "conflict": "exclamationmark.triangle.fill"
+        default: "doc.text"
+        }
+    }
+
+    /// An atom color name.
+    package static func colorName(for status: String) -> String {
+        switch status {
+        case "added", "untracked": "green"
+        case "deleted", "conflict": "red"
+        case "renamed", "copied": "orange"
+        default: "secondary"
+        }
+    }
+}
+
+/// Whether a planned conversation can hand off to a Code-mode implementation turn.
+package enum PlanImplementationHandoff {
+    /// Why a task's Start Implementing is unavailable, or nil when the task has somewhere to
+    /// implement: a repository worktree or a working folder. Planning needs neither, so a plan
+    /// can exist before the task has a place to change.
+    package static func unavailableReason(workspaceRootPaths: [String]) -> String? {
+        workspaceRootPaths.isEmpty ? "Add a repository to this task to start implementing." : nil
+    }
+}
+
+/// How a task's terminal panel starts its shells. `environment` holds only the variables
+/// Playhouse sets on top of the app's own environment.
+package struct TaskTerminalLaunch: Codable, Equatable {
+    package let taskID: UUID
+    /// The first pane's folder, where a single-repository task's one shell runs.
+    package let directory: String
+    package let shell: String
+    /// The shell runs as a login shell, as Terminal.app starts it, so the user's profile applies.
+    package let arguments: [String]
+    package let environment: [String: String]
+    /// One shell per created worktree, in the task's repository order; a task with several
+    /// repositories opens them as a split view, each shell in its own worktree.
+    package let panes: [Pane]
+
+    package struct Pane: Codable, Equatable {
+        package let repositoryPath: String
+        /// The source repository's folder name, which labels the pane.
+        package let name: String
+        package let directory: String
+
+        package init(repositoryPath: String, name: String, directory: String) {
+            self.repositoryPath = repositoryPath
+            self.name = name
+            self.directory = directory
+        }
+    }
+
+    /// Why a task can't open a terminal yet, or nil when it has a created worktree. The terminal
+    /// only runs in a worktree, and opening it never creates one: a pending worktree is named
+    /// and created when the task starts, so the terminal waits for that.
+    package static func unavailableReason(for records: [RepositoryWorktreeRecord]) -> String? {
+        if records.isEmpty {
+            return "Add a repository to this task to open a terminal in its worktree."
+        }
+        if records.allSatisfy(\.isPending) {
+            return "The terminal opens once the task's worktree is created, when the task starts."
+        }
+        return nil
+    }
+
+    /// The account's login shell, falling back to `$SHELL` and then zsh.
+    package static func loginShell() -> String {
+        var candidates: [String] = []
+        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell {
+            candidates.append(String(cString: shell))
+        }
+        if let shell = ProcessInfo.processInfo.environment["SHELL"] { candidates.append(shell) }
+        return candidates.first { !$0.isEmpty && FileManager.default.isExecutableFile(atPath: $0) } ?? "/bin/zsh"
+    }
+
+    package static func environment(taskID: UUID) -> [String: String] {
+        var environment = [
+            "TERM": "xterm-256color",
+            "COLORTERM": "truecolor",
+            "TERM_PROGRAM": "Playhouse",
+            "PLAYHOUSE_TASK_ID": taskID.uuidString
+        ]
+        // Apps launched from Finder get no locale, which leaves shells and CLIs in ASCII mode.
+        if ProcessInfo.processInfo.environment["LANG"] == nil { environment["LANG"] = "en_US.UTF-8" }
+        return environment
+    }
+
+    package init(taskID: UUID, directory: String, shell: String, arguments: [String], environment: [String: String], panes: [Pane]) {
+        self.taskID = taskID
+        self.directory = directory
+        self.shell = shell
+        self.arguments = arguments
+        self.environment = environment
+        self.panes = panes
+    }
+}
+
+package struct WorkspaceFileDiff: Codable, Equatable {
+    package let repository: String
+    package let path: String
+    package let group: WorkspaceChangeGroup
+    package let original: String?
+    package let modified: String?
+    package let isText: Bool
+    package let message: String?
+
+    package init(repository: String, path: String, group: WorkspaceChangeGroup, original: String?, modified: String?, isText: Bool, message: String?) {
+        self.repository = repository
+        self.path = path
+        self.group = group
+        self.original = original
+        self.modified = modified
+        self.isText = isText
+        self.message = message
+    }
+}
+
+package enum WorkspaceChangeScanner {
+    private struct StatusRecord {
+        let indexStatus: UInt8
+        let worktreeStatus: UInt8
+        let path: String
+        let originalPath: String?
+    }
+
+    private struct RepositoryInventory {
+        let repositories: [URL]
+        let changes: WorkspaceChangeInventory
+    }
+
+    private struct GitResult {
+        let status: Int32
+        let output: Data
+        let error: String
+    }
+
+    private final class OutputBox {
+        private let lock = NSLock()
+        private var storedOutput = Data()
+        private var storedError = Data()
+
+        func setOutput(_ data: Data) {
+            lock.lock()
+            storedOutput = data
+            lock.unlock()
+        }
+
+        func setError(_ data: Data) {
+            lock.lock()
+            storedError = data
+            lock.unlock()
+        }
+
+        func values() -> (Data, Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (storedOutput, storedError)
+        }
+    }
+
+    @MainActor
+    package static func inventory(workspaceRoots: [String], branchFromByRepository: [String: String] = [:], viewedChanges: [WorkspaceViewedChange] = []) async throws -> WorkspaceChangeInventory {
+        let operationID = UUID().uuidString
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        PlayhouseDiagnostics.record("workspace.files.inventory.started", fields: [
+            "operationID": operationID,
+            "workspaceRoots": workspaceRoots.joined(separator: "\n"),
+            "workspaceRootCount": String(workspaceRoots.count)
+        ])
+        do {
+            let inventory = try await PlayhouseBackgroundOperation.run {
+                try inventorySynchronously(workspaceRoots: workspaceRoots, branchFromByRepository: branchFromByRepository, viewedChanges: viewedChanges).changes
+            }
+            PlayhouseDiagnostics.record("workspace.files.inventory.succeeded", fields: [
+                "operationID": operationID,
+                "unviewedCount": String(inventory.unviewed.count),
+                "viewedCount": String(inventory.viewed.count),
+                "mergingRepositoryCount": String(inventory.mergingRepositories.count),
+                "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            ])
+            return inventory
+        } catch {
+            var fields = PlayhouseDiagnostics.errorFields(error)
+            fields["operationID"] = operationID
+            fields["workspaceRoots"] = workspaceRoots.joined(separator: "\n")
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            PlayhouseDiagnostics.record("workspace.files.inventory.failed", fields: fields)
+            throw error
+        }
+    }
+
+    @MainActor
+    package static func diff(
+        workspaceRoots: [String],
+        repositoryPath: String,
+        relativePath: String,
+        group: WorkspaceChangeGroup,
+        branchFrom: String = "HEAD",
+        viewedChanges: [WorkspaceViewedChange] = []
+    ) async throws -> WorkspaceFileDiff {
+        let operationID = UUID().uuidString
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let fields = [
+            "operationID": operationID,
+            "repositoryPath": repositoryPath,
+            "path": relativePath,
+            "group": group.rawValue,
+            "workspaceRoots": workspaceRoots.joined(separator: "\n")
+        ]
+        PlayhouseDiagnostics.record("workspace.file.read.started", fields: fields)
+        do {
+            let diff = try await PlayhouseBackgroundOperation.run {
+                try diffSynchronously(
+                    workspaceRoots: workspaceRoots,
+                    repositoryPath: repositoryPath,
+                    relativePath: relativePath,
+                    group: group,
+                    branchFrom: branchFrom,
+                    viewedChanges: viewedChanges
+                )
+            }
+            PlayhouseDiagnostics.record("workspace.file.read.succeeded", fields: fields.merging([
+                "originalBytes": String(diff.original?.utf8.count ?? 0),
+                "modifiedBytes": String(diff.modified?.utf8.count ?? 0),
+                "isText": String(diff.isText),
+                "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            ]) { _, new in new })
+            return diff
+        } catch {
+            var failureFields = fields
+            failureFields.merge(PlayhouseDiagnostics.errorFields(error)) { _, new in new }
+            failureFields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            PlayhouseDiagnostics.record("workspace.file.read.failed", fields: failureFields)
+            throw error
+        }
+    }
+
+    @MainActor
+    package static func captureViewedChange(workspaceRoots: [String], repositoryPath: String, relativePath: String) async throws -> WorkspaceViewedChange {
+        try await captureViewedChanges(workspaceRoots: workspaceRoots, files: [(repositoryPath, relativePath)])[0]
+    }
+
+    /// Snapshots and stages each file, reading the task's repositories once for the whole batch.
+    @MainActor
+    package static func captureViewedChanges(workspaceRoots: [String], files: [(repository: String, path: String)]) async throws -> [WorkspaceViewedChange] {
+        try await PlayhouseBackgroundOperation.run {
+            guard files.allSatisfy({ isSafeRelativePath($0.path) }) else {
+                throw BridgeCommandError(code: "invalid_argument", message: "The changed file path must be relative to its repository.")
+            }
+            let inventory = try inventorySynchronously(workspaceRoots: workspaceRoots)
+            return try files.map { file in
+                let repository = URL(fileURLWithPath: file.repository, isDirectory: true).standardizedFileURL
+                guard inventory.repositories.contains(repository) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "The repository isn't inside this task's working folders.")
+                }
+                let fileURL = repository.appendingPathComponent(file.path).standardizedFileURL
+                let isPresent = FileManager.default.fileExists(atPath: fileURL.path)
+                let contents = isPresent ? try worktreeBytes(repository: repository, path: file.path) : Data()
+                try stageViewedChange(repository: repository, path: file.path)
+                return WorkspaceViewedChange(repository: URL(fileURLWithPath: file.repository).standardizedFileURL.path, path: file.path, isPresent: isPresent, contents: contents)
+            }
+        }
+    }
+
+    /// Records the file in the Git index when it is marked viewed, so later edits to a formerly
+    /// untracked file are reported as ordinary worktree changes against a staged baseline.
+    /// A missing file is recorded as a deletion with `rm --cached`, which also accepts a deletion
+    /// that is already staged; `add` rejects that path because it matches nothing left to add.
+    private static func stageViewedChange(repository: URL, path: String) throws {
+        // `attributesOfItem` doesn't follow symlinks, so a dangling link still counts as present.
+        let isPresent = (try? FileManager.default.attributesOfItem(atPath: repository.appendingPathComponent(path).path)) != nil
+        let arguments = isPresent
+            ? ["add", "--all", "--", path]
+            : ["rm", "--cached", "--ignore-unmatch", "--force", "--quiet", "--", path]
+        let result = try runGit(repository: repository, arguments: arguments)
+        guard result.status == 0 else {
+            throw BridgeCommandError(
+                code: "operation_failed",
+                message: "Git couldn't stage \(path): \(result.error.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+    }
+
+    private static func inventorySynchronously(
+        workspaceRoots: [String],
+        branchFromByRepository: [String: String] = [:],
+        viewedChanges: [WorkspaceViewedChange] = []
+    ) throws -> RepositoryInventory {
+        var repositoriesByPath: [String: URL] = [:]
+        for rootPath in workspaceRoots {
+            let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+            guard WorkspaceSettings.validDirectoryURL(for: root.path) != nil else {
+                throw BridgeCommandError(code: "invalid_argument", message: "The working folder is unavailable: \(root.path)")
+            }
+            for repository in RepositoryScanner.scanSynchronously(parent: root) {
+                let normalizedRepository = repository.standardizedFileURL
+                guard isPath(normalizedRepository.path, inside: root.path) else { continue }
+                repositoriesByPath[normalizedRepository.path] = normalizedRepository
+            }
+        }
+        let repositories = repositoriesByPath.values.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        let snapshots = Dictionary(grouping: viewedChanges, by: \.repository).mapValues { Dictionary($0.map { ($0.path, $0) }) { _, latest in latest } }
+        var unviewed: [WorkspaceChangeEntry] = []
+        var viewed: [WorkspaceChangeEntry] = []
+        var mergingRepositories: [String] = []
+        for repository in repositories {
+            // An open merge stages everything the merged branch brought in, which isn't the task's work.
+            if try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).status == 0 {
+                mergingRepositories.append(repository.path)
+                continue
+            }
+            let statusResult = try runGit(repository: repository, arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+            guard statusResult.status == 0 else {
+                throw BridgeCommandError(code: "operation_failed", message: "Git couldn't read changes in \(repository.path): \(statusResult.error.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+            let statusRecords = try parseStatus(statusResult.output)
+            // A path can appear twice when a staged deletion is followed by an untracked recreation;
+            // the tracked record carries the meaningful index state, so it wins.
+            let statusByPath = Dictionary(statusRecords.map { ($0.path, $0) }) { existing, candidate in
+                existing.indexStatus == 63 && existing.worktreeStatus == 63 ? candidate : existing
+            }
+            let baseRef = try comparisonBase(repository: repository, branchFrom: branchFromByRepository[repository.path] ?? "HEAD")
+            let mergeBaseResult = try runGit(repository: repository, arguments: ["merge-base", baseRef, "HEAD"])
+            guard mergeBaseResult.status == 0, let mergeBase = String(data: mergeBaseResult.output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !mergeBase.isEmpty else {
+                throw BridgeCommandError(code: "operation_failed", message: "Git couldn't find the common ancestor of \(baseRef) and the current branch in \(repository.path).")
+            }
+            let branchDiff = try runGit(repository: repository, arguments: ["diff", "--name-only", "-z", "--find-renames", mergeBase, "--"])
+            guard branchDiff.status == 0 else {
+                throw BridgeCommandError(code: "operation_failed", message: "Git couldn't compare the task branch with \(baseRef) in \(repository.path).")
+            }
+            let committedPaths = branchDiff.output.split(separator: 0).compactMap { String(data: Data($0), encoding: .utf8) }
+            let viewedPaths = snapshots[repository.path].map { Array($0.keys) } ?? []
+            let paths = Set(committedPaths + statusRecords.map(\.path) + viewedPaths)
+            for path in paths.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
+                let statusRecord = statusByPath[path]
+                let isUntracked = statusRecord?.indexStatus == 63 && statusRecord?.worktreeStatus == 63
+                let isUncommitted = statusRecord != nil
+                let snapshot = snapshots[repository.path]?[path]
+                let fileURL = repository.appendingPathComponent(path).standardizedFileURL
+                let fileExists = FileManager.default.fileExists(atPath: fileURL.path)
+                let code = statusRecord.map { String(decoding: [$0.indexStatus, $0.worktreeStatus], as: UTF8.self) } ?? "M "
+                if let snapshot {
+                    // The Viewed entry keeps showing what was already reviewed: branch base to snapshot.
+                    let baseBytes = try gitBlob(repository: repository, revision: mergeBase, path: path, missingAllowed: true)
+                    // A path with no content in the branch base, no current file, and a snapshot
+                    // that already recorded its absence nets to zero change (for example a file
+                    // created, later renamed away by a tool rather than `git mv`, and whose
+                    // resulting deletion has itself since been reviewed). A stale snapshot like
+                    // that is noise, not a change worth pinning; a deletion that hasn't been
+                    // reviewed yet still needs to surface as a change to review.
+                    guard baseBytes != nil || fileExists || snapshot.isPresent else { continue }
+                    let viewedStatus: String
+                    if !snapshot.isPresent { viewedStatus = "deleted" }
+                    else if baseBytes == nil { viewedStatus = "added" }
+                    else { viewedStatus = "modified" }
+                    viewed.append(WorkspaceChangeEntry(
+                        repository: repository.path,
+                        path: path,
+                        originalPath: statusRecord?.originalPath,
+                        status: viewedStatus,
+                        statusCode: porcelainCode(for: viewedStatus),
+                        group: .viewed,
+                        isUncommitted: isUncommitted,
+                        hasViewedSnapshot: true
+                    ))
+                    // Anything done since then is listed separately, as a change still to review.
+                    let currentBytes = fileExists ? try worktreeBytes(repository: repository, path: path) : Data()
+                    guard snapshot.isPresent != fileExists || currentBytes != snapshot.contents else { continue }
+                    let pendingStatus: String
+                    if !fileExists { pendingStatus = "deleted" }
+                    else if snapshot.isPresent { pendingStatus = "modified" }
+                    else { pendingStatus = "added" }
+                    unviewed.append(WorkspaceChangeEntry(
+                        repository: repository.path,
+                        path: path,
+                        originalPath: statusRecord?.originalPath,
+                        status: pendingStatus,
+                        statusCode: porcelainCode(for: pendingStatus),
+                        group: .unviewed,
+                        isUncommitted: isUncommitted,
+                        hasViewedSnapshot: true
+                    ))
+                    continue
+                }
+                let isBranchChange = committedPaths.contains(path)
+                guard isBranchChange || isUncommitted else { continue }
+                let status: String
+                if isUntracked { status = "untracked" }
+                else if !fileExists { status = "deleted" }
+                else if let statusRecord {
+                    let name = statusName(index: statusRecord.indexStatus, worktree: statusRecord.worktreeStatus)
+                    // A staged deletion whose file was recreated still exists on disk.
+                    status = name == "deleted" ? "modified" : name
+                }
+                else { status = "modified" }
+                unviewed.append(WorkspaceChangeEntry(repository: repository.path, path: path, originalPath: statusRecord?.originalPath, status: status, statusCode: code, group: .unviewed, isUncommitted: isUncommitted, hasViewedSnapshot: false))
+            }
+        }
+        func sort(_ entries: [WorkspaceChangeEntry]) -> [WorkspaceChangeEntry] {
+            entries.sorted { $0.repository == $1.repository ? $0.path.localizedStandardCompare($1.path) == .orderedAscending : $0.repository.localizedStandardCompare($1.repository) == .orderedAscending }
+        }
+        return RepositoryInventory(repositories: repositories, changes: WorkspaceChangeInventory(unviewed: sort(unviewed), viewed: sort(viewed), mergingRepositories: mergingRepositories))
+    }
+
+    private static func diffSynchronously(
+        workspaceRoots: [String],
+        repositoryPath: String,
+        relativePath: String,
+        group: WorkspaceChangeGroup,
+        branchFrom: String = "HEAD",
+        viewedChanges: [WorkspaceViewedChange] = []
+    ) throws -> WorkspaceFileDiff {
+        guard isSafeRelativePath(relativePath) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The changed file path must be relative to its repository.")
+        }
+        let repository = URL(fileURLWithPath: repositoryPath, isDirectory: true).standardizedFileURL.path
+        let inventory = try inventorySynchronously(workspaceRoots: workspaceRoots, branchFromByRepository: [repository: branchFrom], viewedChanges: viewedChanges)
+        guard inventory.repositories.contains(where: { $0.path == repository }) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The repository isn't inside this task's working folders.")
+        }
+        let entries = group == .viewed ? inventory.changes.viewed : inventory.changes.unviewed
+        if entries.contains(where: { $0.repository == repository && $0.path == relativePath && $0.status == "conflict" }) {
+            return WorkspaceFileDiff(
+                repository: repository,
+                path: relativePath,
+                group: group,
+                original: nil,
+                modified: nil,
+                isText: false,
+                message: "Resolve the merge conflict before previewing this file."
+            )
+        }
+        guard entries.contains(where: { $0.repository == repository && $0.path == relativePath }) else {
+            throw BridgeCommandError(code: "not_found", message: "The file no longer has a \(group.displayName) change.")
+        }
+        let repositoryURL = URL(fileURLWithPath: repository, isDirectory: true)
+        let snapshot = viewedChanges.first { $0.repository == repository && $0.path == relativePath }
+        func branchBaseBytes() throws -> Data {
+            let baseRef = try comparisonBase(repository: repositoryURL, branchFrom: branchFrom)
+            let mergeBase = try runGit(repository: repositoryURL, arguments: ["merge-base", baseRef, "HEAD"])
+            guard mergeBase.status == 0, let revision = String(data: mergeBase.output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw BridgeCommandError(code: "operation_failed", message: "Git couldn't find the branch comparison point.")
+            }
+            return try gitBlob(repository: repositoryURL, revision: revision, path: relativePath, missingAllowed: true) ?? Data()
+        }
+        let originalBytes: Data
+        let modifiedBytes: Data
+        if group == .viewed {
+            // Viewed keeps showing the already-reviewed work: branch base to the saved snapshot.
+            guard let snapshot else {
+                throw BridgeCommandError(code: "not_found", message: "The viewed snapshot no longer exists.")
+            }
+            originalBytes = try branchBaseBytes()
+            modifiedBytes = snapshot.isPresent ? snapshot.contents : Data()
+        } else {
+            let modifiedURL = repositoryURL.appendingPathComponent(relativePath).standardizedFileURL
+            modifiedBytes = FileManager.default.fileExists(atPath: modifiedURL.path)
+                ? try worktreeBytes(repository: repositoryURL, path: relativePath)
+                : Data()
+            if let snapshot {
+                originalBytes = snapshot.isPresent ? snapshot.contents : Data()
+            } else {
+                originalBytes = try branchBaseBytes()
+            }
+        }
+        guard let original = text(originalBytes), let modified = text(modifiedBytes) else {
+            return WorkspaceFileDiff(repository: repository, path: relativePath, group: group, original: nil, modified: nil, isText: false, message: "This binary or non-UTF-8 file can't be shown as a text diff.")
+        }
+        return WorkspaceFileDiff(repository: repository, path: relativePath, group: group, original: original, modified: modified, isText: true, message: nil)
+    }
+
+    /// The ref a task's changes are measured against. A local branch such as `master` is rarely
+    /// fetched, so when its remote-tracking counterpart is at or ahead of it, measure against that
+    /// instead; otherwise every commit that landed upstream since the local branch was last
+    /// updated shows up as the task's own change. A local branch that is ahead of or diverged from
+    /// its remote holds work the task was started from, so it stays the base.
+    private static func comparisonBase(repository: URL, branchFrom: String) throws -> String {
+        // A base that is already a remote-tracking branch (origin/main) is its own upstream.
+        if try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "refs/remotes/\(branchFrom)^{commit}"]).status == 0 {
+            return branchFrom
+        }
+        let remoteRef = "refs/remotes/origin/\(branchFrom)"
+        guard try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "\(remoteRef)^{commit}"]).status == 0,
+              try runGit(repository: repository, arguments: ["merge-base", "--is-ancestor", branchFrom, remoteRef]).status == 0 else {
+            return branchFrom
+        }
+        return remoteRef
+    }
+
+    private static func parseStatus(_ data: Data) throws -> [StatusRecord] {
+        let bytes = Array(data)
+        var result: [StatusRecord] = []
+        var start = 0
+
+        func pathString(_ range: Range<Int>) throws -> String {
+            guard let path = String(bytes: bytes[range], encoding: .utf8) else {
+                throw BridgeCommandError(code: "operation_failed", message: "Git returned a path that isn't valid UTF-8.")
+            }
+            return path
+        }
+
+        while start < bytes.count {
+            guard let end = bytes[start...].firstIndex(of: 0) else {
+                throw BridgeCommandError(code: "operation_failed", message: "Git returned an incomplete change list.")
+            }
+            let token = bytes[start..<end]
+            guard token.count >= 4, token[token.startIndex + 2] == 32 else {
+                throw BridgeCommandError(code: "operation_failed", message: "Git returned an invalid change-list entry.")
+            }
+            let indexStatus = token[token.startIndex]
+            let worktreeStatus = token[token.startIndex + 1]
+            let path = try pathString((start + 3)..<end)
+            start = end + 1
+
+            var originalPath: String?
+            if indexStatus == 82 || indexStatus == 67 || worktreeStatus == 82 || worktreeStatus == 67 {
+                guard start < bytes.count,
+                      let originalEnd = bytes[start...].firstIndex(of: 0) else {
+                    throw BridgeCommandError(code: "operation_failed", message: "Git returned an incomplete rename entry.")
+                }
+                originalPath = try pathString(start..<originalEnd)
+                start = originalEnd + 1
+            }
+
+            result.append(StatusRecord(
+                indexStatus: indexStatus,
+                worktreeStatus: worktreeStatus,
+                path: path,
+                originalPath: originalPath
+            ))
+        }
+        return result
+    }
+
+    /// Snapshot-based rows are measured against a saved baseline rather than the index,
+    /// so their badge comes from the row's own status instead of Git's porcelain code.
+    private static func porcelainCode(for status: String) -> String {
+        switch status {
+        case "deleted": return "D "
+        case "added": return "A "
+        default: return "M "
+        }
+    }
+
+    private static func statusName(index: UInt8, worktree: UInt8) -> String {
+        if index == 85 || worktree == 85 || (index == 68 && worktree == 68) { return "conflict" }
+        let status = worktree != 32 && worktree != 63 ? worktree : index
+        if status == 82 { return "renamed" }
+        if status == 67 { return "copied" }
+        if status == 68 { return "deleted" }
+        if index == 63 && worktree == 63 { return "untracked" }
+        if status == 65 { return "added" }
+        return "modified"
+    }
+
+    private static func gitBlob(
+        repository: URL,
+        revision: String,
+        path: String,
+        missingAllowed: Bool
+    ) throws -> Data? {
+        let object = revision.isEmpty ? ":\(path)" : "\(revision):\(path)"
+        let result = try runGit(repository: repository, arguments: ["show", "--no-ext-diff", "--format=", object])
+        if result.status == 0 { return result.output }
+        if missingAllowed { return nil }
+        throw BridgeCommandError(
+            code: "not_found",
+            message: "Git couldn't read the selected version of \(path): \(result.error.trimmingCharacters(in: .whitespacesAndNewlines))"
+        )
+    }
+
+    private static func worktreeBytes(repository: URL, path: String) throws -> Data {
+        let fileURL = repository.appendingPathComponent(path).standardizedFileURL
+        guard isPath(fileURL.path, inside: repository.standardizedFileURL.path) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The changed file is outside its repository.")
+        }
+
+        var currentURL = repository.standardizedFileURL
+        let components = path.split(separator: "/").map(String.init)
+        for (index, component) in components.enumerated() {
+            currentURL.appendPathComponent(component)
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: currentURL.path) else {
+                throw BridgeCommandError(code: "not_found", message: "The changed file no longer exists: \(path)")
+            }
+            if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                guard index == components.count - 1 else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "A changed file can't be read through a symbolic-link directory.")
+                }
+                let destination = try FileManager.default.destinationOfSymbolicLink(atPath: currentURL.path)
+                return Data("link \(destination)\n".utf8)
+            }
+        }
+
+        do {
+            return try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        } catch {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't read \(path): \(error.localizedDescription)")
+        }
+    }
+
+    private static func text(_ data: Data) -> String? {
+        guard !data.contains(0) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func isSafeRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.hasPrefix("~") else { return false }
+        return !path.split(separator: "/", omittingEmptySubsequences: false).contains { $0 == ".." || $0.isEmpty }
+    }
+
+    private static func isPath(_ candidate: String, inside root: String) -> Bool {
+        candidate == root || candidate.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+    }
+
+    private static func gitExecutable() throws -> URL {
+        let environmentPaths = (PlayhouseProcessEnvironment.current["PATH"] ?? "")
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0), isDirectory: true).appendingPathComponent("git").path }
+        let candidates = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"] + environmentPaths
+        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw BridgeCommandError(code: "operation_failed", message: "Git isn't installed or couldn't be found.")
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    private static func runGit(repository: URL, arguments: [String]) throws -> GitResult {
+        let process = Process()
+        process.executableURL = try gitExecutable()
+        process.arguments = ["-c", "core.fsmonitor=false", "-C", repository.path] + arguments
+
+        var environment = PlayhouseProcessEnvironment.current
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["GIT_PAGER"] = "cat"
+        environment["LC_ALL"] = "C"
+        process.environment = environment
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let outputBox = OutputBox()
+        let readers = DispatchGroup()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+        } catch {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't start Git: \(error.localizedDescription)")
+        }
+        try? outputPipe.fileHandleForWriting.close()
+        try? errorPipe.fileHandleForWriting.close()
+
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outputBox.setOutput(outputPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outputBox.setError(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+
+        process.waitUntilExit()
+        readers.wait()
+        let (output, errorData) = outputBox.values()
+        return GitResult(
+            status: process.terminationStatus,
+            output: output,
+            error: String(decoding: errorData, as: UTF8.self)
+        )
+    }
+}

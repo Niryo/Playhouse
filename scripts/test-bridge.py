@@ -42,7 +42,6 @@ parser.add_argument("--cli", required=True, type=Path)
 parser.add_argument("--fixture-root", required=True, type=Path)
 parser.add_argument("--data-root", required=True, type=Path)
 parser.add_argument("--service-name", required=True)
-parser.add_argument("--legacy-store-seeder", required=True, type=Path)
 parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "Playhouse/BridgeTests/BridgeTestContracts.json"
@@ -144,7 +143,8 @@ class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases
         # An absolute path keeps the isolated preferences file in this case's
         # data directory instead of ~/Library/Preferences.
         self.defaults_suite = str(self.data_directory / "preferences")
-        if self._testMethodName != "test_task_store_repairs_missing_pending_prompt_column":
+        # The store migration cases start from a data directory holding only a SwiftData store.
+        if self._testMethodName not in ("test_task_store_migrates_legacy_swiftdata_store", "test_task_store_migrates_current_swiftdata_store"):
             self.assert_success(self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")[0])
 
     def tearDown(self):

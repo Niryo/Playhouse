@@ -1,0 +1,1034 @@
+import Foundation
+
+/// Native capabilities a provider reports for a workspace, shown when a task
+/// switches providers. Playhouse reads each provider's own configuration and
+/// never copies settings or credentials between them.
+package struct ConversationProviderCapabilities: Codable, Equatable {
+    package struct MCPServer: Codable, Equatable {
+        package let name: String
+        package let status: String
+
+        package init(name: String, status: String) {
+            self.name = name
+            self.status = status
+        }
+    }
+
+    package let provider: ConversationProvider
+    package var isAvailable: Bool
+    package var version: String?
+    package var skills: [String] = []
+    package var subagents: [String] = []
+    package var mcpServers: [MCPServer] = []
+    package var supportsGoals: Bool
+    package var notes: [String] = []
+    package var error: String?
+
+    package init(provider: ConversationProvider, isAvailable: Bool, version: String? = nil, skills: [String] = [], subagents: [String] = [], mcpServers: [MCPServer] = [], supportsGoals: Bool, notes: [String] = [], error: String? = nil) {
+        self.provider = provider
+        self.isAvailable = isAvailable
+        self.version = version
+        self.skills = skills
+        self.subagents = subagents
+        self.mcpServers = mcpServers
+        self.supportsGoals = supportsGoals
+        self.notes = notes
+        self.error = error
+    }
+}
+
+/// One `claude -p` process with file-backed stdio that outlives the daemon that started it.
+/// Its stdin is a FIFO the process itself also holds open, so it never reads end of input while
+/// no daemon is writing; stdout and stderr go to append-only files the daemon tails. The run's
+/// manifest records how far the log was handled and which requests were answered, so the next
+/// daemon of the service picks the turn up where this one left it.
+
+/// Owns the Claude Code CLI process for one turn of one session.
+///
+/// Claude Code starts a fresh process per turn and resumes a conversation by
+/// session ID, so every Playhouse conversation can run its own process with its
+/// own worktree as the working directory. All per-turn protocol state lives
+/// here rather than on the client, which is what lets separate conversations
+/// run at the same time without a shared turn slot.
+
+/// Runs Claude Code turns through the installed `claude` executable using its
+/// documented streaming JSON protocol (`--input-format stream-json` /
+/// `--output-format stream-json`), the same transport the Claude Agent SDK
+/// wraps.
+///
+/// Each conversation gets its own `ClaudeSessionRunner`, so turns for different
+/// conversations run as independent CLI processes in their own worktrees at the
+/// same time. The client only routes by session ID and publishes aggregate
+/// state for the UI; it never serializes turns.
+@MainActor
+package final class ClaudeCodeClient: ConversationProviderClient {
+    package nonisolated static let defaultModelID = "default"
+    /// The model family Playhouse prefers when the user hasn't picked one, so new
+    /// conversations default to Sonnet rather than whatever Claude Code's own
+    /// account-level default currently resolves to.
+    package nonisolated static let preferredDefaultModelID = "sonnet"
+    package nonisolated static let titleModelID = "haiku"
+    /// The first Claude Code release Playhouse verified for active-turn steering
+    /// (`priority: "next"`) and command lifecycle events.
+    package nonisolated static let minimumVersion = "2.1.296"
+    package nonisolated static let executionInstruction = """
+        Run shell commands in the foreground or with the Bash tool's run_in_background, and run Agent/Task calls in the foreground or in the background, whichever suits the work. Never detach a process with & or nohup: Playhouse tracks background work only through the Bash and Agent tools. Playhouse keeps the task running while background shells or agents are outstanding and you are woken when each one finishes, so after launching them you can end your response instead of waiting; never poll or loop on a condition that cannot become true. Report the task outcome only after you have handled every background result.
+        """
+
+    package let provider = ConversationProvider.claude
+    package static var processActiveSessionIDs = Set<String>()
+    /// Session-to-runner routing for this process, so steering, interrupts, and
+    /// answers reach the right turn no matter which client started it.
+    package static var activeRunnersBySessionID: [String: ClaudeSessionRunner] = [:]
+    package static var sharedPrimaryClients: [String: ClaudeCodeClient] = [:]
+
+    package var isTurnActive = false
+    /// Every conversation with a running turn. A view observes this instead of
+    /// `isTurnActive` so one conversation's turn ending is still an observable
+    /// change while another conversation keeps running.
+    package var activeThreadIDs: Set<String> = []
+    package var pendingUserInputRequest: ConversationUserInputRequest?
+
+    package var isPreparingForApplicationTermination = false
+
+    package enum ClientError: LocalizedError {
+        case cliNotFound
+        case processStart(String)
+        case processExited(String)
+        case protocolFailure(String)
+        case authentication(String)
+        case unsupportedVersion(String)
+        case turnFailed(String)
+        case sessionNotFound
+
+        package var errorDescription: String? {
+            switch self {
+            case .cliNotFound:
+                "Claude Code wasn't found. Install Claude Code or add `claude` to PATH, then restart Playhouse."
+            case .processStart(let detail):
+                "Playhouse couldn't start Claude Code: \(detail)"
+            case .processExited(let detail):
+                "Claude Code stopped unexpectedly. \(detail)"
+            case .protocolFailure(let detail):
+                "Playhouse couldn't communicate with Claude Code: \(detail)"
+            case .authentication(let detail):
+                "Claude Code needs a valid sign-in. Run `claude` in Terminal and sign in, then try again. \(detail)"
+            case .unsupportedVersion(let version):
+                "Claude Code \(version) is too old for Playhouse. Update to \(ClaudeCodeClient.minimumVersion) or later (`claude update`), then try again."
+            case .turnFailed(let detail):
+                detail
+            case .sessionNotFound:
+                "Claude Code couldn't find this conversation's session."
+            }
+        }
+    }
+
+    /// The test harness's executable as given; `executableOverride` resolves it on each read,
+    /// so a CLI installed while Playhouse runs is found without a restart.
+    package let executableOverrideSetting: String?
+    package var executableOverride: String? {
+        ConversationProviderFixture.currentExecutable(executableOverrideSetting, providerMarker: Self.fixtureMarker)
+    }
+    package static let fixtureMarker = (name: ".playhouse-claude-fixture-owner", value: "Playhouse test owns this Claude Code protocol fixture (v1).\n")
+    package var loginProcess: Process?
+    package let configDirectoryOverride: String?
+    package let persistsSessions: Bool
+    /// This instance's own resolved data directory, fixed at construction time
+    /// (debug/test builds only; always `nil` in production). Forwarded by each
+    /// `ClaudeSessionRunner` into its own child process instead of an ambient
+    /// global, so a different client instance's concurrently-resolved
+    /// directory can never leak into this one's child process environment.
+    package let dataDirectoryOverride: String?
+    /// The data directory this client serves (debug/test isolation); nil in production.
+    package var runtimeScope: String? { dataDirectoryOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } }
+    package var runners: [String: ClaudeSessionRunner] = [:]
+    package var runsDirectory: URL?
+    package var newSessionIDs = Set<String>()
+    package var forkSourceSessionIDs: [String: String] = [:]
+    /// The trigger of the `/compact` turn `compactSession` is about to run, by session.
+    package var requestedCompactionTriggers: [String: ContextCompactionTrigger] = [:]
+    package var startingSessionIDs = Set<String>()
+    package var interruptedThreadIDs = Set<String>()
+    /// The staged stopping outcome of each session's running turn, as its owner exposes it.
+    package var stoppingOutcomeProbes: [String: ProviderStoppingOutcomeProbe] = [:]
+    /// The process and turn identity each conversation last ran under, so a
+    /// failure recorded after the runner is torn down still names its own turn.
+    package var lastTurnDiagnosticsByThread: [String: [String: String]] = [:]
+    package var activityDurationsByThread: [String: [String: Int]] = [:]
+    package var lastFinishedThreadID: String?
+    package var conversationOperationsInFlight = 0
+    package static let bundledSkillsLifetime: TimeInterval = 10 * 60
+    package var bundledSkillsCache: (readAt: Date, skills: [(name: String, description: String)])?
+    /// The plan usage read in flight, and whether another was asked for meanwhile.
+    package var planUsageRead: Task<Void, Never>?
+    package var planUsageReadQueued = false
+    package static let planUsageReadTimeout: Duration = .seconds(15)
+
+    /// `dataDirectory` only ever varies across calls in debug/test builds (via
+    /// `BridgeRequest.dataDirectory`); production always passes `nil`, so one
+    /// real app only ever has one entry here. It's part of the cache key so
+    /// that the bridge daemon — now a single long-lived process that can serve
+    /// many isolated test data directories in sequence or concurrently — gives
+    /// each one its own client (and thus its own child process with correctly
+    /// scoped environment forwarding) instead of silently sharing one across
+    /// directories that happen to share a process.
+    /// Where Claude Code keeps its sessions: the override Playhouse launches it
+    /// with, else the user's own configuration directory.
+    package var configDirectory: String {
+        Self.configDirectory(override: configDirectoryOverride)
+    }
+
+    package static func configDirectory(override: String?) -> String {
+        override
+            ?? PlayhouseProcessEnvironment.current["CLAUDE_CONFIG_DIR"]
+            ?? NSHomeDirectory() + "/.claude"
+    }
+
+    package static func sharedPrimaryClient(executableOverride: String?, configDirectoryOverride: String? = nil, dataDirectory: String? = nil, runDirectory: URL? = nil) -> ClaudeCodeClient {
+        let key = [
+            executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__",
+            dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "",
+            configDirectoryOverride ?? "",
+        ].joined(separator: "\u{1}")
+        if let client = sharedPrimaryClients[key] { return client }
+        let client = ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, dataDirectory: dataDirectory)
+        // A daemon's shared client runs each turn with file-backed stdio beside its store, so the
+        // turn outlives the daemon. Other clients keep piped children that end with them.
+        client.runsDirectory = runDirectory.map { ClaudeRunFiles.runsDirectory(dataDirectory: $0) }
+        sharedPrimaryClients[key] = client
+        return client
+    }
+
+    package init(
+        executableOverride: String? = nil,
+        configDirectoryOverride: String? = nil,
+        persistsSessions: Bool = true,
+        dataDirectory: String? = nil
+    ) {
+        self.executableOverrideSetting = executableOverride
+        self.configDirectoryOverride = configDirectoryOverride
+        self.persistsSessions = persistsSessions
+        self.dataDirectoryOverride = dataDirectory
+    }
+
+    package static func markProcessActive(sessionID: String) { processActiveSessionIDs.insert(sessionID) }
+
+    package static func clearProcessActive(sessionID: String) { processActiveSessionIDs.remove(sessionID) }
+
+    /// Republishes the state the UI observes after any runner changes.
+    package func runnerStateChanged(_ runner: ClaudeSessionRunner) {
+        let active = runners.values.filter { $0.isTurnActive }
+        activeThreadIDs = Set(active.map(\.sessionID))
+        isTurnActive = !active.isEmpty
+        pendingUserInputRequest = runners.values.compactMap(\.pendingUserInputRequest).first
+    }
+
+    /// Client-wide fields only. With parallel turns there is no single active
+    /// process or turn to report; `diagnosticFields(forThread:)` describes one.
+    package func diagnosticFields(_ additionalFields: [String: String]) -> [String: String] {
+        var fields = additionalFields
+        fields["provider"] = provider.rawValue
+        fields["clientPID"] = String(ProcessInfo.processInfo.processIdentifier)
+        fields["isTurnActive"] = String(isTurnActive)
+        fields["activeTurnCount"] = String(activeThreadIDs.count)
+        return fields
+    }
+
+    /// Describes the conversation's own turn, so a failure record never carries
+    /// another conversation's process or turn identity. A turn that has already
+    /// torn down its process is described by the identity it ran under, which is
+    /// what a failure record needs.
+    package func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String] {
+        var fields = diagnosticFields(additionalFields)
+        guard let turnFields = runners[threadID]?.diagnosticFields([:]) ?? lastTurnDiagnosticsByThread[threadID] else {
+            return fields
+        }
+        fields.merge(turnFields) { _, new in new }
+        return fields
+    }
+
+    /// Claude Code creates a session on its first message, so a new session is
+    /// only an ID that the first turn passes as `--session-id`.
+    package func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String {
+        guard executablePath != nil else { throw ClientError.cliNotFound }
+        let sessionID = UUID().uuidString.lowercased()
+        newSessionIDs.insert(sessionID)
+        return sessionID
+    }
+
+    /// A fork is a new session ID too; its first turn resumes the source session with
+    /// `--fork-session`, so Claude Code copies that context under the new ID and the
+    /// source session never gains the fork's turns.
+    package func forkThread(sourceThreadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String {
+        let sessionID = try await startThread(workspace: workspace, modelID: modelID, developerInstructions: developerInstructions)
+        forkSourceSessionIDs[sessionID] = sourceThreadID
+        return sessionID
+    }
+
+    /// The session a new session's first turn forks, until Claude Code has accepted it.
+    package func forkSourceSessionID(for sessionID: String) -> String? { forkSourceSessionIDs[sessionID] }
+
+    package func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
+        let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
+        // Claude Code announces its newest release of a family only through the bare
+        // alias (`opus` resolving to `claude-opus-5-5`); there is no entry whose value
+        // is the concrete ID. Keying the option on `resolvedModel` gives that entry a
+        // parseable version, so the newest release is no longer discarded as an
+        // unversioned alias in favour of an older concrete model.
+        //
+        // The resolved name is also what `--model` receives. Claude Code accepts it even
+        // though it never offers it as a `value`: verified against CLI 2.1.309, where
+        // `--model claude-haiku-5-5` reported `canonicalModel: claude-haiku-5-5`.
+        var seenIDs = Set<String>()
+        let models = (response.initialize["models"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
+            guard let value = item["value"] as? String, !value.isEmpty else { return nil }
+            let resolved = (item["resolvedModel"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // "default" stays a placeholder rather than a model, so the picker still drops
+            // it. Keying it on its own value also keeps it out of the dedup below, where it
+            // would otherwise claim the resolved ID and evict the real entry for it.
+            let id = value == Self.defaultModelID ? value : (resolved ?? value)
+            // An alias and a concrete entry can resolve to the same model. Keep whichever
+            // arrives first, which carries Claude Code's own display name for the release.
+            guard seenIDs.insert(id).inserted else { return nil }
+            let isPreferredDefault = value == Self.defaultModelID || value.lowercased().contains(Self.preferredDefaultModelID)
+            return ConversationModelOption(id: id, name: item["displayName"] as? String ?? id, isDefault: isPreferredDefault)
+        }
+        return models.isEmpty ? [ConversationModelOption(id: Self.defaultModelID, name: "Default", isDefault: true)] : models
+    }
+
+    /// Reads Claude Code's own skills, subagents, and MCP servers for the workspace
+    /// without starting a model turn.
+    package func capabilities(workspace: ConversationWorkspaceContext) async -> ConversationProviderCapabilities {
+        var capabilities = ConversationProviderCapabilities(provider: .claude, isAvailable: false, supportsGoals: false)
+        do {
+            let response = try await withMetadataSession(workspace: workspace) { runner in
+                try await runner.controlRequest(["subtype": "mcp_status"])
+            }
+            capabilities.isAvailable = true
+            capabilities.version = response.initialize["claude_code_version"] as? String
+            capabilities.skills = (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+            capabilities.subagents = (response.initialize["agents"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+            capabilities.mcpServers = (response.extra["mcpServers"] as? [[String: Any]] ?? []).compactMap { server in
+                guard let name = server["name"] as? String else { return nil }
+                return .init(name: name, status: server["status"] as? String ?? "unknown")
+            }
+            capabilities.notes = ["Uses your Claude Code settings, skills, hooks, and MCP servers."]
+        } catch {
+            capabilities.error = error.localizedDescription
+        }
+        return capabilities
+    }
+
+    /// A sign-in in progress for one MCP server. Claude Code listens for the
+    /// browser's redirect inside its own process, so that process stays up until
+    /// the sign-in finishes, fails, or times out.
+    package final class McpLoginSession {
+        package let runner: ClaudeSessionRunner
+        package var task: Task<McpLoginResult, Never>?
+        /// A newer sign-in to the same server replaced this one.
+        package var superseded = false
+        package init(runner: ClaudeSessionRunner) { self.runner = runner }
+    }
+
+    package var mcpLogins: [String: McpLoginSession] = [:]
+
+    /// The session `callMcpTool` keeps warm between calls, and the start in flight.
+    package var mcpCallSession: McpCallSession?
+    package var mcpCallSessionStart: Task<McpCallSession, Error>?
+
+    /// Asks Claude Code to start the OAuth sign-in of an MCP server and returns
+    /// the link to open in the browser. Claude Code is told not to open it itself.
+    ///
+    /// This uses Claude Code's `mcp_authenticate` control request, which its own
+    /// remote UI uses but which isn't part of its documented interface: a failure
+    /// surfaces as an error here, and a missing redirect as the sign-in's timeout.
+    /// The sign-in counts as background work while it waits, so the bridge daemon
+    /// doesn't idle-exit and take the process, and its callback port, with it.
+    package func startMcpLogin(name: String, workspace: ConversationWorkspaceContext) async throws -> String {
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let runner = ClaudeSessionRunner(
+            sessionID: UUID().uuidString.lowercased(),
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: false,
+            owner: nil
+        )
+        let reply: [String: Any]
+        do {
+            _ = try await runner.launch(
+                resume: false, mode: .code, modelID: Self.defaultModelID, effort: nil,
+                workspace: workspace, developerInstructions: nil
+            )
+            reply = try await runner.controlRequest(["subtype": "mcp_authenticate", "serverName": name])
+        } catch {
+            runner.shutdown()
+            throw error
+        }
+        guard reply["requiresUserAction"] as? Bool != false, let link = reply["authUrl"] as? String, !link.isEmpty else {
+            runner.shutdown()
+            throw BridgeCommandError(code: "invalid_argument", message: "Claude Code doesn't need you to sign in to \(name).")
+        }
+        let session = McpLoginSession(runner: runner)
+        let timeout = McpLogin.timeout
+        BridgeBackgroundWork.onBegin?()
+        session.task = Task { @MainActor [session] in
+            defer {
+                runner.shutdown()
+                BridgeBackgroundWork.onEnd?()
+            }
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: timeout)
+            while clock.now < deadline, !Task.isCancelled {
+                try? await Task.sleep(for: McpLogin.pollInterval(for: timeout))
+                guard let status = try? await runner.controlRequest(["subtype": "mcp_status"]) else {
+                    return McpLoginResult(provider: .claude, name: name, signedIn: false, error: "Claude Code stopped before the sign-in finished.")
+                }
+                let servers = status["mcpServers"] as? [[String: Any]] ?? []
+                switch servers.first(where: { $0["name"] as? String == name })?["status"] as? String {
+                case "connected":
+                    return McpLoginResult(provider: .claude, name: name, signedIn: true, error: nil)
+                case "failed":
+                    return McpLoginResult(provider: .claude, name: name, signedIn: false, error: "Claude Code couldn't connect to \(name) after the sign-in.")
+                default:
+                    continue
+                }
+            }
+            if session.superseded {
+                return McpLoginResult(provider: .claude, name: name, signedIn: false, error: "A newer sign-in to \(name) replaced this one.")
+            }
+            return McpLogin.timedOut(provider: .claude, name: name)
+        }
+        // Replaced only now, after the awaits, so overlapping starts for one
+        // server can't each leave a process behind.
+        if let previous = mcpLogins.removeValue(forKey: name) {
+            previous.superseded = true
+            previous.task?.cancel()
+            previous.runner.shutdown()
+        }
+        mcpLogins[name] = session
+        PlayhouseDiagnostics.record("mcp.login.started", fields: ["provider": "claude"])
+        return link
+    }
+
+    /// Waits for the sign-in started for `name` to finish.
+    package func waitForMcpLogin(name: String) async -> McpLoginResult {
+        guard let session = mcpLogins[name], let task = session.task else { return McpLogin.notStarted(provider: .claude, name: name) }
+        let result = await task.value
+        // A finished sign-in is reported once; a newer one for the same server stays.
+        if mcpLogins[name] === session { mcpLogins[name] = nil }
+        PlayhouseDiagnostics.record("mcp.login.finished", fields: ["provider": "claude", "signedIn": String(result.signedIn)])
+        return result
+    }
+
+    /// The skills and commands built into Claude Code itself, which have no
+    /// folder on disk, read without starting a model turn.
+    /// Claude Code's built-in skills and commands. They come with the binary
+    /// rather than the workspace, so one metadata session's answer is reused
+    /// for a while instead of starting a session on every Skills page read.
+    package func bundledSkills(workspace: ConversationWorkspaceContext) async throws -> [(name: String, description: String)] {
+        if let cached = bundledSkillsCache, Date().timeIntervalSince(cached.readAt) < Self.bundledSkillsLifetime {
+            return cached.skills
+        }
+        let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
+        let skills: [(name: String, description: String)] = (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { command in
+            guard command["builtin"] as? Bool == true, let name = command["name"] as? String, !name.hasPrefix("_") else { return nil }
+            return (name, command["description"] as? String ?? "")
+        }
+        bundledSkillsCache = (Date(), skills)
+        return skills
+    }
+
+    package func sendMessage(
+        _ text: String,
+        imageDataURLs: [String] = [],
+        mode: ConversationMode,
+        modelID: String,
+        effort: ConversationEffort,
+        threadID: String,
+        workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
+        developerInstructions: String? = nil,
+        onDelta: @escaping (String) -> Void,
+        onFinalMessage: @escaping (String) -> Void,
+        onActivity: @escaping (ConversationActivity) -> Void,
+        onDiff: @escaping (ConversationTurnDiff) -> Void,
+        onHistory: @escaping (ConversationHistory) -> Void,
+        onActionRequest: @escaping () -> Void,
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
+        onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
+        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
+        onMessageTimestamp: @escaping (String, Date) -> Void = { _, _ in },
+        onTurnStarted: @escaping (String) -> Void,
+        onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in },
+        onRecordedFinalMessage: ((String, String) -> Void)? = nil,
+        sensitiveUserInputAnswerValues: [String] = [],
+        hideSensitiveRecoveryPrompt: Bool = false
+    ) async throws {
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let sessionID = threadID
+        // Separate conversations run in parallel; only the same conversation is
+        // single-flight, because a session's transcript can take one writer.
+        guard Self.activeRunnersBySessionID[sessionID] == nil else {
+            PlayhouseDiagnostics.record("claude.turn.rejected", fields: diagnosticFields([
+                "requestedThreadID": sessionID,
+                "reason": "session_turn_already_active"
+            ]))
+            throw ClientError.protocolFailure("Another Claude Code turn is already running for this conversation.")
+        }
+
+        let runner = ClaudeSessionRunner(
+            sessionID: sessionID,
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: persistsSessions,
+            owner: self,
+            runsDirectory: runsDirectory
+        )
+        runner.deltaHandler = onDelta
+        runner.finalMessageHandler = onFinalMessage
+        runner.recordedFinalHandler = onRecordedFinalMessage
+        runner.progressMessageHandler = onProgressMessage
+        runner.steerMessageHandler = onSteerMessage
+        runner.turnStartedHandler = onTurnStarted
+        runner.activityHandler = onActivity
+        runner.actionRequestHandler = onActionRequest
+        runner.userInputHandler = onUserInput
+        runner.tokenUsageHandler = onTokenUsage
+        runner.compactionTrigger = requestedCompactionTriggers.removeValue(forKey: sessionID)
+        runners[sessionID] = runner
+        Self.activeRunnersBySessionID[sessionID] = runner
+        // A new turn supersedes a stop another client recorded for this session.
+        for client in Self.allSharedPrimaryClients { client.interruptedThreadIDs.remove(sessionID) }
+        interruptedThreadIDs.remove(sessionID)
+        activityDurationsByThread[sessionID] = [:]
+        lastFinishedThreadID = sessionID
+        defer {
+            // A session Claude Code accepted is no longer new, whether or not the
+            // turn succeeded. Keeping the marker past a failed first turn would
+            // claim the ID again on the retry and fail with "already in use",
+            // leaving the conversation unresumable.
+            if runner.sessionExists {
+                newSessionIDs.remove(sessionID)
+                forkSourceSessionIDs.removeValue(forKey: sessionID)
+            }
+            // The identity only; the client reports whether a turn is still active.
+            lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
+                .filter { $0.key != "isTurnActive" }
+            runner.finishTurnCleanup()
+            stoppingOutcomeProbes.removeValue(forKey: sessionID)
+            interruptedThreadIDs.formUnion(runner.wasInterrupted ? [sessionID] : [])
+            activityDurationsByThread[sessionID] = runner.activityDurations
+            lastFinishedThreadID = sessionID
+            if Self.activeRunnersBySessionID[sessionID] === runner {
+                Self.activeRunnersBySessionID.removeValue(forKey: sessionID)
+            }
+            if runners[sessionID] === runner { runners.removeValue(forKey: sessionID) }
+            runnerStateChanged(runner)
+            // The turn spent plan usage that its stream does not report.
+            Task { await self.readPlanUsage() }
+        }
+
+        let isNewSession = newSessionIDs.contains(sessionID)
+        try await runner.runTurn(
+            text: text,
+            imageDataURLs: imageDataURLs,
+            mode: mode,
+            modelID: modelID,
+            effort: effort,
+            workspace: workspace,
+            isNewSession: isNewSession,
+            sessionRecoveryContext: sessionRecoveryContext,
+            developerInstructions: developerInstructions,
+            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+            hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
+        )
+    }
+
+    /// Compacts an existing session's context with Claude Code's own
+    /// `/compact`, as a turn of its own: its compaction row is labelled with
+    /// `trigger`, and it writes no answer. `modelID` should be the model whose
+    /// prompt cache holds the context, so the summary reads it from the cache.
+    package func compactSession(
+        trigger: ContextCompactionTrigger,
+        threadID: String,
+        modelID: String,
+        effort: ConversationEffort,
+        workspace: ConversationWorkspaceContext,
+        developerInstructions: String?,
+        callbacks: ConversationTurnCallbacks
+    ) async throws {
+        requestedCompactionTriggers[threadID] = trigger
+        defer { requestedCompactionTriggers.removeValue(forKey: threadID) }
+        try await sendMessage(
+            "/compact",
+            mode: .code,
+            modelID: modelID,
+            effort: effort,
+            threadID: threadID,
+            workspace: workspace,
+            developerInstructions: developerInstructions,
+            onDelta: { _ in },
+            onFinalMessage: { _ in },
+            onActivity: callbacks.onActivity,
+            onDiff: { _ in },
+            onHistory: { _ in },
+            onActionRequest: callbacks.onActionRequest,
+            onUserInput: { request in
+                self.rejectUserInput(requestID: request.id, threadID: request.threadID, message: "This is Playhouse's automatic context compaction; there is nobody to answer.")
+            },
+            onProgressMessage: { _ in },
+            onTurnStarted: { _ in },
+            onTokenUsage: callbacks.onTokenUsage
+        )
+    }
+
+    package func followReattachedTurn(
+        threadID: String,
+        workspace: ConversationWorkspaceContext,
+        callbacks: ConversationTurnCallbacks,
+        onAttached: @escaping () -> Void
+    ) async throws -> ConversationReattachResult {
+        guard let runsDirectory, let executable = executablePath else { return .agentGone }
+        let sessionID = threadID
+        guard Self.activeRunnersBySessionID[sessionID] == nil else { return .notRunning }
+        let candidates = ClaudeRunFiles.runs(in: runsDirectory)
+            .filter { $0.manifest.sessionID == sessionID }
+            .sorted { $0.manifest.createdAt < $1.manifest.createdAt }
+        guard let newest = candidates.last, let run = ClaudeAgentRun.attach(directory: newest.directory) else { return .agentGone }
+        // An older run of the session can only be one its daemon never finished stopping.
+        for stale in candidates.dropLast() {
+            await ClaudeAgentRun.attach(directory: stale.directory)?.terminateAndRemove()
+        }
+        let runner = ClaudeSessionRunner(
+            sessionID: sessionID,
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: persistsSessions,
+            owner: self,
+            runsDirectory: runsDirectory
+        )
+        runner.deltaHandler = callbacks.onDelta
+        runner.finalMessageHandler = callbacks.onFinalMessage
+        runner.recordedFinalHandler = callbacks.onRecordedFinalMessage
+        runner.progressMessageHandler = callbacks.onProgressMessage
+        runner.steerMessageHandler = callbacks.onSteerMessage
+        runner.activityHandler = callbacks.onActivity
+        runner.actionRequestHandler = callbacks.onActionRequest
+        runner.userInputHandler = callbacks.onUserInput
+        runner.tokenUsageHandler = callbacks.onTokenUsage
+        runners[sessionID] = runner
+        Self.activeRunnersBySessionID[sessionID] = runner
+        newSessionIDs.remove(sessionID)
+        activityDurationsByThread[sessionID] = [:]
+        lastFinishedThreadID = sessionID
+        defer {
+            lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
+                .filter { $0.key != "isTurnActive" }
+            runner.finishTurnCleanup()
+            stoppingOutcomeProbes.removeValue(forKey: sessionID)
+            interruptedThreadIDs.formUnion(runner.wasInterrupted ? [sessionID] : [])
+            activityDurationsByThread[sessionID] = runner.activityDurations
+            lastFinishedThreadID = sessionID
+            if Self.activeRunnersBySessionID[sessionID] === runner {
+                Self.activeRunnersBySessionID.removeValue(forKey: sessionID)
+            }
+            if runners[sessionID] === runner { runners.removeValue(forKey: sessionID) }
+            runnerStateChanged(runner)
+        }
+        return try await runner.reattach(run, onAttached: onAttached)
+    }
+
+    package static func hasActiveRunner(sessionID: String) -> Bool { activeRunnersBySessionID[sessionID] != nil }
+
+    /// Before an idle daemon exits: a run left after its turn ended has nothing more to do.
+    package static func stopRunsBeforeExit() async {
+        for client in allSharedPrimaryClients {
+            for runner in client.runners.values where !runner.isTurnActive { runner.shutdown() }
+        }
+    }
+
+    package func interruptActiveTurn(threadID: String) async throws -> Bool {
+        guard let runner = runners[threadID], runner.canInterrupt else {
+            // Another Playhouse process may own the turn.
+            guard Self.activeRunnersBySessionID[threadID] == nil else { return false }
+            return try await ConversationSteerMailbox.requestInterrupt(threadID: threadID)
+        }
+        let interrupted = try await runner.interrupt()
+        if interrupted { interruptedThreadIDs.insert(threadID) }
+        return interrupted
+    }
+
+    package func hasBackgroundWorkToStop(threadID: String) async -> Bool {
+        guard let runner = runners[threadID] ?? Self.activeRunnersBySessionID[threadID] else { return false }
+        if !runner.outstandingBackgroundTaskIDs.isEmpty { return true }
+        let root = runner.processIdentifier
+        return root > 0 && !childProcessIDs(of: root).isEmpty
+    }
+
+    package func forceStopActiveTurn(threadID: String, interruptProvider _: Bool) async -> Bool {
+        guard let runner = runners[threadID] ?? Self.activeRunnersBySessionID[threadID] else { return false }
+        let stopped = runner.isTurnActive || runner.activeTurnID != nil || runner.pendingQuestion != nil
+        runner.wasInterrupted = true
+        interruptedThreadIDs.insert(threadID)
+        let identity = runner.agentRun?.identity
+            ?? AgentProcessIdentity.current(pid: runner.processIdentifier)
+        if let identity, identity.isAlive {
+            let descendants = descendantProcessIDs(of: identity.pid).compactMap { AgentProcessIdentity.current(pid: $0) }
+            AgentRunHost.killProcessTree(identity, descendants: descendants)
+        }
+        for activity in runner.toolActivities.values where activity.isActive {
+            let interrupted = ConversationActivity(
+                id: activity.id, title: activity.title, detail: activity.detail, status: "interrupted",
+                childThreadID: activity.childThreadID, agentPath: activity.agentPath, model: activity.model,
+                toolKind: activity.toolKind, server: activity.server, tool: activity.tool, turnID: activity.turnID,
+                backgroundTaskID: activity.backgroundTaskID
+            ).preservingTimelineFields(of: activity)
+            runner.activityHandler?(interrupted)
+        }
+        runner.shutdown()
+        return stopped
+    }
+
+    package func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
+        guard let runner = Self.activeRunnersBySessionID[threadID] else {
+            return try await ConversationSteerMailbox.requestSteer(threadID: threadID, text: normalized, imageDataURLs: imageDataURLs)
+        }
+        let accepted = try await runner.sendSteerInput(text: normalized, imageDataURLs: imageDataURLs)
+        // The turn's own stream shows and records the steer, whoever sent it.
+        if accepted { runner.steerMessageHandler?(normalized, imageDataURLs) }
+        return accepted
+    }
+
+    package func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {
+        guard let runner = runner(for: threadID) else { return false }
+        return runner.answerUserInput(requestID: requestID, answers: answers)
+    }
+
+    package func rejectUserInput(requestID: String, threadID: String, message: String) {
+        runner(for: threadID)?.rejectUserInput(requestID: requestID, message: message)
+    }
+
+    package func isTurnActive(threadID: String) -> Bool {
+        if startingSessionIDs.contains(threadID) { return true }
+        guard let runner = runners[threadID] else { return false }
+        return runner.activeTurnID != nil || runner.pendingQuestion != nil
+    }
+
+    package func isTurnActiveInProcess(threadID: String) -> Bool {
+        Self.processActiveSessionIDs.contains(threadID)
+    }
+
+    /// Every session with a running turn, a turn that is starting, or a
+    /// question waiting for an answer.
+    package var activeThreadIDsSnapshot: Set<String> {
+        Set(runners.keys.filter { isTurnActive(threadID: $0) }).union(startingSessionIDs)
+    }
+
+    package var pendingUserInputsSnapshot: [String: ConversationUserInputRequest] {
+        runners.compactMapValues(\.pendingUserInputRequest)
+    }
+
+    /// Process IDs of every turn-active session's own Claude Code process,
+    /// keyed by thread/session ID. Used to attribute CPU usage per task;
+    /// idle sessions are excluded since there's nothing meaningful to sample.
+    package var activeProcessIdentifiersByThreadID: [String: pid_t] {
+        var result: [String: pid_t] = [:]
+        for (threadID, runner) in runners where isTurnActive(threadID: threadID) {
+            let pid = runner.processIdentifier
+            if pid > 0 { result[threadID] = pid }
+        }
+        return result
+    }
+
+    package var interruptedThreadIDsSnapshot: Set<String> { interruptedThreadIDs }
+
+    /// Every client this process has created through `sharedPrimaryClient`.
+    package static var allSharedPrimaryClients: [ClaudeCodeClient] { Array(sharedPrimaryClients.values) }
+
+    package func setStoppingOutcomeProbe(_ probe: ProviderStoppingOutcomeProbe?, threadID: String) {
+        stoppingOutcomeProbes[threadID] = probe
+    }
+
+    package func canInterruptActiveTurn(threadID: String) -> Bool {
+        runners[threadID]?.canInterrupt == true
+    }
+
+    package func activeTurnOwnerProcessID(threadID: String) -> Int32? {
+        if Self.activeRunnersBySessionID[threadID] != nil {
+            return Int32(ProcessInfo.processInfo.processIdentifier)
+        }
+        return ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: threadID)
+    }
+
+    package func markTurnStarting(threadID: String) {
+        startingSessionIDs.insert(threadID)
+    }
+
+    package func clearTurnStarting(threadID: String) {
+        startingSessionIDs.remove(threadID)
+    }
+
+    package func beginConversationOperation() { conversationOperationsInFlight += 1 }
+
+    package func finishConversationOperation() { conversationOperationsInFlight = max(0, conversationOperationsInFlight - 1) }
+
+    package func prepareForApplicationTermination() async {
+        isPreparingForApplicationTermination = true
+        for runner in runners.values where runner.isTurnActive {
+            _ = try? await runner.interrupt()
+        }
+        let deadline = ContinuousClock.now + .seconds(4)
+        while conversationOperationsInFlight > 0, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        shutdown()
+    }
+
+    package func shutdown() {
+        for runner in runners.values { runner.shutdown() }
+    }
+
+    package func isProviderUnavailable(_ error: Error) -> Bool {
+        switch error as? ClientError {
+        case .cliNotFound, .processStart, .authentication, .unsupportedVersion: true
+        default: false
+        }
+    }
+
+    package func makeAuxiliaryClient() -> ConversationProviderClient {
+        ClaudeCodeClient(executableOverride: executableOverrideSetting, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
+    }
+
+    // MARK: - Per-conversation turn results
+
+    /// Whether the conversation's own most recent turn ended because the user
+    /// stopped it. Parallel turns each keep their own answer.
+    package func wasLastTurnInterrupted(threadID: String) -> Bool {
+        interruptedThreadIDs.contains(threadID)
+    }
+
+    package func lastTurnActivityDurations(threadID: String) -> [String: Int] {
+        activityDurationsByThread[threadID] ?? [:]
+    }
+
+    package func pendingUserInputRequest(forThread threadID: String) -> ConversationUserInputRequest? {
+        runners[threadID]?.pendingUserInputRequest
+    }
+
+    package var wasLastTurnInterrupted: Bool {
+        lastFinishedThreadID.map { interruptedThreadIDs.contains($0) } ?? false
+    }
+
+    package var lastTurnActivityDurations: [String: Int] {
+        lastFinishedThreadID.flatMap { activityDurationsByThread[$0] } ?? [:]
+    }
+
+    package func runner(for threadID: String) -> ClaudeSessionRunner? {
+        runners[threadID] ?? Self.activeRunnersBySessionID[threadID]
+    }
+
+    // MARK: - Metadata
+
+    package struct MetadataResponse {
+        package let initialize: [String: Any]
+        package let extra: [String: Any]
+
+        package init(initialize: [String: Any], extra: [String: Any]) {
+            self.initialize = initialize
+            self.extra = extra
+        }
+    }
+
+    /// Starts a short-lived process that never receives a prompt, so no model
+    /// request is made, and reads its initialize response plus one extra query.
+    package func withMetadataSession(
+        workspace: ConversationWorkspaceContext,
+        _ query: (ClaudeSessionRunner) async throws -> [String: Any]
+    ) async throws -> MetadataResponse {
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let runner = ClaudeSessionRunner(
+            sessionID: UUID().uuidString.lowercased(),
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: false,
+            owner: nil
+        )
+        defer { runner.shutdown() }
+        let initialize = try await runner.launch(
+            resume: false, mode: .code, modelID: Self.defaultModelID, effort: nil,
+            workspace: workspace, developerInstructions: nil
+        )
+        return MetadataResponse(initialize: initialize, extra: try await query(runner))
+    }
+
+    /// The environment every Claude Code process Playhouse starts runs with.
+    package static func childEnvironment(dataDirectoryOverride: String?, configDirectoryOverride: String?) -> [String: String] {
+        var environment = PlayhouseProcessEnvironment.current
+        environment["PATH"] = expandedSearchPath(environment["PATH"])
+        ConversationProcessEnvironment.forwardPlayhouseBridgeEnvironment(&environment, dataDirectoryOverride: dataDirectoryOverride)
+        // Claude Code finds its keychain sign-in by user name; services started by
+        // launchd are not guaranteed a login environment.
+        environment["HOME"] = environment["HOME"] ?? NSHomeDirectory()
+        environment["USER"] = environment["USER"] ?? NSUserName()
+        environment["LOGNAME"] = environment["LOGNAME"] ?? NSUserName()
+        if let configDirectoryOverride { environment["CLAUDE_CONFIG_DIR"] = configDirectoryOverride }
+        // The CLI is a child of Playhouse, not an IDE integration or nested session.
+        environment.removeValue(forKey: "CLAUDECODE")
+        environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
+        return environment
+    }
+
+    // MARK: - Direct MCP tool calls
+
+    /// One Claude Code process that answers `mcp_call` requests with no model
+    /// turn. It stays up `McpCallSession.idleLifetime` after its last call, so a
+    /// burst of calls (a plugin refreshing a list) starts Claude Code once.
+    package final class McpCallSession {
+        package let runner: ClaudeSessionRunner
+        /// Claude Code advertised `mcp_call_result_not_for_model_v1` when it initialized.
+        package let supported: Bool
+        package var inFlight = 0
+        package var idle: Task<Void, Never>?
+        package init(runner: ClaudeSessionRunner, supported: Bool) {
+            self.runner = runner
+            self.supported = supported
+        }
+
+        package static let capability = "mcp_call_result_not_for_model_v1"
+        /// 60 seconds; tests shorten it with `PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS`.
+        package static var idleLifetime: Duration {
+            .seconds(PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_MCP_SESSION_IDLE_SECONDS"].flatMap(Double.init) ?? 60)
+        }
+    }
+
+    /// Calls an MCP tool Claude Code is connected to, such as
+    /// `mcp__claude_ai_Slack__slack_read_channel`, with no model turn and no
+    /// tokens, and returns its `{content, structuredContent?, isError?}`.
+    ///
+    /// This uses Claude Code's `mcp_call` control request, which its own hosts
+    /// use but which isn't part of its documented interface, so support is read
+    /// from the capabilities Claude Code reports when it initializes.
+    package func callMcpTool(_ tool: String, arguments: [String: Any], workspace: ConversationWorkspaceContext, timeout: Duration) async throws -> [String: Any] {
+        let session = try await warmMcpCallSession(workspace: workspace)
+        guard session.supported else {
+            throw McpToolCallError.unsupported("This Claude Code release can't call MCP tools directly; update Claude Code (`claude update`).")
+        }
+        session.inFlight += 1
+        session.idle?.cancel()
+        defer {
+            session.inFlight -= 1
+            scheduleIdleShutdown(session)
+        }
+        var timedOut = false
+        let timer = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            timedOut = true
+            self?.dropMcpCallSession(session)
+        }
+        defer { timer.cancel() }
+        do {
+            return try await session.runner.controlRequest([
+                "subtype": "mcp_call", "tool": tool, "arguments": arguments, "result_not_for_model": true
+            ])
+        } catch ClientError.protocolFailure(let message) where !timedOut {
+            // Claude Code answered with an error: the tool, its server or its name.
+            throw McpToolCallError.toolFailed(message)
+        } catch {
+            if timedOut { throw McpToolCallError.timedOut(Int(timeout.components.seconds)) }
+            dropMcpCallSession(session)
+            throw error
+        }
+    }
+
+    private func warmMcpCallSession(workspace: ConversationWorkspaceContext) async throws -> McpCallSession {
+        if let session = mcpCallSession, session.runner.process != nil { return session }
+        if let start = mcpCallSessionStart { return try await start.value }
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let configDirectoryOverride = configDirectoryOverride
+        let start = Task { @MainActor () throws -> McpCallSession in
+            let runner = ClaudeSessionRunner(
+                sessionID: UUID().uuidString.lowercased(), executable: executable,
+                configDirectoryOverride: configDirectoryOverride, persistsSessions: false, owner: nil
+            )
+            do {
+                let initialize = try await runner.launch(
+                    resume: false, mode: .code, modelID: Self.defaultModelID, effort: nil,
+                    workspace: workspace, developerInstructions: nil
+                )
+                let capabilities = initialize["capabilities"] as? [String] ?? []
+                return McpCallSession(runner: runner, supported: capabilities.contains(McpCallSession.capability))
+            } catch {
+                runner.shutdown()
+                throw error
+            }
+        }
+        mcpCallSessionStart = start
+        defer { mcpCallSessionStart = nil }
+        let session = try await start.value
+        mcpCallSession = session
+        PlayhouseDiagnostics.record("mcp.call.session.started", fields: ["supported": String(session.supported)])
+        scheduleIdleShutdown(session)
+        return session
+    }
+
+    private func scheduleIdleShutdown(_ session: McpCallSession) {
+        guard session.inFlight == 0 else { return }
+        session.idle?.cancel()
+        let lifetime = McpCallSession.idleLifetime
+        session.idle = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: lifetime)
+            guard !Task.isCancelled, session.inFlight == 0 else { return }
+            self?.dropMcpCallSession(session)
+        }
+    }
+
+    private func dropMcpCallSession(_ session: McpCallSession) {
+        session.idle?.cancel()
+        if mcpCallSession === session { mcpCallSession = nil }
+        session.runner.shutdown()
+        PlayhouseDiagnostics.record("mcp.call.session.stopped", fields: [:])
+    }
+
+    // MARK: - Mapping
+}
+
+/// Why a direct MCP tool call (`mcp.call`) failed, from either provider.
+package enum McpToolCallError: LocalizedError {
+    /// The provider's release can't call tools directly.
+    case unsupported(String)
+    case timedOut(Int)
+    /// The provider answered with an error: the tool, its server or its name.
+    case toolFailed(String)
+
+    package var errorDescription: String? {
+        switch self {
+        case .unsupported(let message): message
+        case .timedOut(let seconds): "The MCP tool didn't answer within \(seconds) seconds."
+        case .toolFailed(let message): message
+        }
+    }
+
+    /// `mcp__<server>__<tool>` split into its server and the tool's own name.
+    package static func split(_ qualified: String) -> (server: String, tool: String)? {
+        guard qualified.hasPrefix("mcp__") else { return nil }
+        let rest = qualified.dropFirst(5)
+        guard let separator = rest.range(of: "__") else { return nil }
+        let server = String(rest[..<separator.lowerBound]), tool = String(rest[separator.upperBound...])
+        return server.isEmpty || tool.isEmpty ? nil : (server, tool)
+    }
+}
+
+
+// MARK: - Account and usage
+
+
+/// Reads a Claude Code session's per-call usage back from its own files.
+///
+/// The stream's `result` message sums a turn for the main agent only; the
+/// session files hold every model call, the main agent's in
+/// `<session>.jsonl` and each subagent's in `<session>/subagents/agent-*.jsonl`.
+/// A call is written once per content block, all lines sharing the call's
+/// message ID, so a call is counted by ID and the last line's usage wins.

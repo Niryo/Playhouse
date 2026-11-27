@@ -13,12 +13,12 @@ class BridgeTestCases13:
         self.assertTrue(all(model.get("id") and model.get("name") for model in models))
         selected_model_id = models[0]["id"]
         legacy_data = json.dumps({"codex": selected_model_id}).encode("utf-8")
-        with sqlite3.connect(self.data_directory / "Playhouse-v2.store") as database:
+        with sqlite3.connect(self.data_directory / "Playhouse-v3.sqlite") as database:
             seeded = database.execute(
-                "UPDATE ZBOARDTASK SET ZCONVERSATIONMODELIDSDATA = ? WHERE ZTITLE = ?",
+                "UPDATE board_tasks SET conversationModelIDsData = ? WHERE title = ?",
                 (legacy_data, title),
             )
-            self.assertEqual(seeded.rowcount, 1, "Seed the real SwiftData row with its pre-global provider model.")
+            self.assertEqual(seeded.rowcount, 1, "Seed the real stored row with its pre-global provider model.")
         self.assertEqual(
             self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"],
             selected_model_id,
@@ -707,43 +707,16 @@ class BridgeTestCases13:
         # then read the durable result through the real bundled CLI/XPC.
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
-        core = [
-            'BoardTask', 'ConversationSubject', 'WorkspaceSupport', 'HoverRevealScrollers',
-            'WorkspaceChanges', 'CodexAppServerClient', 'CodexBackgroundJobs', 'CodexSocketConnection', 'ConversationModel',
-            'ClaudeCodeClient', 'ProviderRequestLog', 'ProcessCPUSampler', 'AgentRunHost',
-            'ContextCompaction', 'AgentUsage', 'AgentUsageStore', 'ConversationTranscriptStore',
-            'StandaloneChatStore', 'SkillCatalog', 'RuleCatalog', 'MentionCatalog', 'SlashCommandCatalog',
-            'McpCatalog', 'CodexConfigTOML', 'BridgeCore', 'BoundedWaits', 'TaskSchedule',
-            'BoardConversationStorage', 'BoardLifecycleStatus', 'BoardOperationLocks', 'BoardPromptPersistence',
-            'BoardPullRequestLifecycle', 'BoardRepositoryLifecycle', 'BoardScheduling', 'BoardTaskCRUD',
-            'BoardTaskManager', 'BoardUsageReporting', 'ClaudeAccountUsage', 'ClaudeClientMapping',
-            'ClaudeOutputHandling', 'ClaudeProcessLifecycle', 'ClaudeProcessProtocol', 'ClaudeSessionRunner',
-            'ClaudeSessionSupport', 'ClaudeTurnControl', 'ClaudeTurnReporting', 'CodexAccountUsage',
-            'OpenCodeAccountUsage', 'OpenCodeClient', 'OpenCodeMcp', 'OpenCodeRequestLog', 'OpenCodeServer', 'OpenCodeTurn',
-            'CodexMessageConversion', 'CodexServerEvents', 'CodexServerTransport', 'CodexSharedServer',
-            'CodexTaskInstructions', 'CodexThreadLifecycle', 'CodexTurnRecovery', 'CodexTurnSending',
-            'ConversationCompaction', 'ConversationHistory', 'ConversationManager', 'ConversationMessages', 'ParallelChatBubbles',
-            'ConversationProviderSelection', 'ConversationStandaloneAutomation', 'ConversationTranscriptRecording', 'ConversationTurnControl',
-            'ConversationTurnExecution', 'ConversationTurnRecovery', 'McpCatalogModels', 'PlayhouseBridgeConversationFlow',
-            'PlayhouseBridgeConversationOperations', 'PlayhouseBridgeOverview', 'PlayhouseBridgePullRequests', 'PlayhouseBridgeRequestDiagnostics',
-            'PlayhouseBridgeRuntime', 'PlayhouseBridgeSettings', 'PlayhouseBridgeTaskWorkspace', 'PlayhouseDiagnostics',
-            'PlayhouseStore', 'PlayhouseWorktreeServices', 'ProviderTokenMap', 'PullRequestServices',
-            'SkillCatalogModels', 'SkillManifest', 'WorkspaceActivity', 'WorkspaceTaskManagers', 'UpdateManager',
-        ]
-        command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
-        for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
+        # The probe is compiled with all of PlayhouseCore, as one module, the way the daemon links it.
+        command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone",
+                   "-package-name", "playhouse"]
+        for framework in ("Foundation", "JavaScriptCore"):
             command.extend(["-framework", framework])
         grdb = subprocess.run([str(root / "scripts/build-grdb.sh")], capture_output=True, text=True, timeout=600)
         self.assertEqual(grdb.returncode, 0, grdb.stderr)
         grdb_module = grdb.stdout.strip().splitlines()[-1]
         command.extend(["-I", grdb_module, "-I", str(root / "Vendor/GRDB.swift/Sources/GRDBSQLite"), "-L", grdb_module, "-lGRDB"])
-        command.extend(str(root / "Playhouse" / "App" / f"{name}.swift") for name in core)
-        # BridgeCore's plugin.render uses the plugin core, as build-bridge.sh compiles it for the daemon.
-        command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Core").glob("*.swift")))
-        # Its plugin services (the pull-request-mode plugin's), which the daemon runs too.
-        command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Services").glob("*.swift")))
-        # The daemon's update commands, as build-bridge.sh compiles them for the daemon.
-        command.extend(str(root / "Playhouse/Bridge" / f"{name}.swift") for name in ("BridgeContract", "CLICommandCatalog", "BridgeSocket", "UpdateCore", "ReleaseSigningKey"))
+        command.extend(sorted(str(path) for path in (root / "Playhouse/Core").rglob("*.swift")))
         command.extend([str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
         compiled = subprocess.run(command, capture_output=True, text=True, timeout=180)
         self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)

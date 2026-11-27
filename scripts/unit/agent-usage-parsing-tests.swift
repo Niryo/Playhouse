@@ -1,7 +1,7 @@
 import Foundation
 
 // Pure-logic checks of the usage payload parsing and reset rules in
-// Playhouse/App/AgentUsage.swift, compiled with it and run by
+// Playhouse/Core/Providers/AgentUsage.swift, compiled with it and run by
 // scripts/test-e2e.sh before the bridge suite. The bridge case
 // `test_agents_info_shows_provider_usage_and_accounts` covers the same payloads end to end.
 

@@ -647,12 +647,14 @@ class BridgeTestHelpers01:
     def seed_legacy_standalone_chat_task(self, session_id="legacy-chat-session"):
         """Recreate a standalone chat stored as a hidden board task, as before the split."""
         repository_root = Path(__file__).resolve().parent.parent
+        # The seeder writes into the store a Playhouse process has opened. Listing tasks with
+        # none stored yet migrates nothing.
+        self.assert_success(self.call_cli("task", "list")[0])
         executable = self.data_directory / "seed-legacy-standalone-chat-task"
         subprocess.run(
             [
-                # Self-contained: it declares the pre-split BoardTask itself, so compiling it
-                # against the current models would redeclare the entity.
                 "xcrun", "swiftc", "-parse-as-library", "-swift-version", "5", "-O",
+                str(repository_root / "scripts" / "task-store-seeding.swift"),
                 str(repository_root / "scripts" / "seed-legacy-standalone-chat-task.swift"),
                 "-o", str(executable),
             ],
@@ -672,9 +674,8 @@ class BridgeTestHelpers01:
         executable = self.data_directory / "seed-task-pr-link"
         subprocess.run(
             [
-                "xcrun", "swiftc", "-module-name", "Playhouse",
-                str(repository_root / "Playhouse" / "App" / "BoardTask.swift"),
-                str(repository_root / "Playhouse" / "App" / "ConversationSubject.swift"),
+                "xcrun", "swiftc", "-parse-as-library", "-swift-version", "5", "-O",
+                str(repository_root / "scripts" / "task-store-seeding.swift"),
                 str(repository_root / "scripts" / "seed-task-pr-link.swift"),
                 "-o", str(executable),
             ],
@@ -700,9 +701,8 @@ class BridgeTestHelpers01:
             repository_root = Path(__file__).resolve().parent.parent
             subprocess.run(
                 [
-                    "xcrun", "swiftc", "-module-name", "Playhouse",
-                    str(repository_root / "Playhouse" / "App" / "BoardTask.swift"),
-                    str(repository_root / "Playhouse" / "App" / "ConversationSubject.swift"),
+                    "xcrun", "swiftc", "-parse-as-library", "-swift-version", "5", "-O",
+                    str(repository_root / "scripts" / "task-store-seeding.swift"),
                     str(repository_root / "scripts" / "seed-task-pr-link.swift"),
                     "-o", str(executable),
                 ],

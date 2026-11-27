@@ -93,11 +93,10 @@ fi
 # new build is ready, so the app is unavailable just for the restart itself.
 # This single stop also covers a bridge daemon an agent turn or CLI call
 # started on demand from the previous build during the build: that old daemon
-# reopens the task store for each request, and SwiftData would migrate the
-# store back to the old model, dropping any column the new build added, so the
-# new window would fail every read of that column with "The file
-# “Playhouse-v2.store” couldn’t be opened." Stopping every instance of this
-# worktree right before the launch lets the new app and daemon share one model.
+# reopens the task store for each request with the old build's model, so it
+# would miss columns the new build added, or keep writing a store the new build
+# has moved away from. Stopping every instance of this worktree right before
+# the launch lets the new app and daemon share one model.
 terminate_running_playhouse "now that the new build is ready"
 playhouse_clear_inherited_bridge_overrides
 open -n \

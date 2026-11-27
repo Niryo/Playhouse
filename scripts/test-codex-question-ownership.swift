@@ -1,5 +1,4 @@
 import Foundation
-import SwiftData
 
 // Supplemental assertion for the paired CLI/XPC question case. Compile this
 // with the same production core as the XPC service; no replacement managers.
@@ -24,9 +23,7 @@ struct CodexQuestionOwnershipProbe {
         guard let originalID = UUID(uuidString: arguments[3]), let parallelID = UUID(uuidString: arguments[4]) else {
             throw NSError(domain: "CodexQuestionOwnershipProbe", code: 2)
         }
-        let schema = Schema([BoardTask.self, StandaloneChat.self])
-        let configuration = ModelConfiguration(schema: schema, url: directory.appendingPathComponent("Playhouse-v2.store"))
-        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let container = try PlayhouseModelContainer(storeURL: directory.appendingPathComponent(PlayhouseStore.storeFileName))
         let tasks = BoardTaskManager(modelContext: container.mainContext)
         let codex = CodexAppServerClient(codexExecutableOverride: arguments[2])
         defer { codex.shutdown() }

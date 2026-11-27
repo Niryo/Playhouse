@@ -1,11 +1,14 @@
 import AppKit
-import SwiftData
 import SwiftUI
+import PlayhouseCore
+import PlayhouseViews
+import PlayhouseAtoms
+import PlayhouseUI
 
 @main
 struct PlayhouseApp: App {
     @NSApplicationDelegateAdaptor(PlayhouseApplicationDelegate.self) private var applicationDelegate
-    private let modelContainer: ModelContainer
+    private let modelContainer: PlayhouseModelContainer
     private let appPreferences: UserDefaults
     // Held, not observed: each change of an object the app observes rebuilds the scene's menu
     // bar, closing a submenu open under the pointer, and these change on every runtime and CPU
@@ -26,6 +29,8 @@ struct PlayhouseApp: App {
     }
 
     init() {
+        Platform.services = MacPlatformServices()
+        NativeViews.factory = MacNativeViews()
         let environment = ProcessInfo.processInfo.environment
         let runtime = ConversationRuntimeModel(client: DaemonClient())
         _conversationRuntime = State(initialValue: runtime)
@@ -112,7 +117,7 @@ struct PlayhouseApp: App {
 
         Settings {
             WorkspaceSettingsView()
-                .environmentObject(updateController)
+                .environment(updateController)
                 .defaultAppStorage(appPreferences)
         }
     }
@@ -120,20 +125,16 @@ struct PlayhouseApp: App {
     private var mainWindowContent: some View {
         MainWindowView()
             .modelContainer(modelContainer)
-            .environmentObject(conversationRuntime)
-            .environment(\.conversationRuntimeModel, conversationRuntime)
-            .environmentObject(cpuUsageModel)
-            .environmentObject(agentUsageModel)
-            .environmentObject(updateController)
+            .environment(conversationRuntime)
+            .environment(cpuUsageModel)
+            .environment(agentUsageModel)
+            .environment(updateController)
             .environment(pluginRegistry)
             .atomHighlightRoot()
             .defaultAppStorage(appPreferences)
     }
 }
 
-extension Notification.Name {
-    static let playhouseShowBoardSearch = Notification.Name("playhouseShowBoardSearch")
-}
 
 @MainActor
 private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegate {
@@ -172,9 +173,9 @@ private struct MainWindowView: View {
     @AppStorage(WorkspaceSettings.pluginsRevisionKey, store: WorkspaceSettings.preferencesStore) private var pluginsRevision = 0
     @Environment(PluginRegistry.self) private var pluginRegistry
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
-    @EnvironmentObject private var cpuUsageModel: TaskCPUUsageModel
-    @EnvironmentObject private var updateController: UpdateController
+    @Environment(ConversationRuntimeModel.self) private var conversationRuntime
+    @Environment(TaskCPUUsageModel.self) private var cpuUsageModel
+    @Environment(UpdateController.self) private var updateController
     @State private var lifecycleError: String?
     @State private var isLifecycleReady = false
 
@@ -344,69 +345,9 @@ struct PluginsMenuContent: View {
         PluginManagement.confirmDelete(pluginID, name: name, detail: detail, registry: registry)
     }
 }
-
-/// Editing and deleting a plugin, shared by the Plugins menu and the composer's `/plugin` list.
-@MainActor
-enum PluginManagement {
-    /// Opens the plugin's editor conversation, creating it the first time.
-    ///
-    /// An existing editor opens at once, so a turn running in it shows live; the bridge call
-    /// that refreshes its draft follows and may wait behind a Save or Discard of the plugin.
-    static func edit(_ pluginID: String, registry: PluginRegistry) {
-        let existing = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID })?.id
-        if let existing { NotificationCenter.default.post(name: .playhouseEditPlugin, object: existing) }
-        Task { @MainActor in
-            do {
-                let id = try await registry.edit(pluginID)
-                if id != existing { NotificationCenter.default.post(name: .playhouseEditPlugin, object: id) }
-            } catch {
-                NSAlert(error: error).runModal()
-            }
-        }
-    }
-
-    /// A plugin's `ui.confirm` as an alert over the window.
-    static func confirm(_ question: PluginConfirmation) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = question.title
-        alert.informativeText = question.message
-        alert.addButton(withTitle: question.confirm)
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = question.destructive
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
-    /// Lets the plugin's editor conversation, if one is open, let go of its folder before it is deleted.
-    static func prepareDelete(_ pluginID: String, registry: PluginRegistry) async {
-        guard let session = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) else { return }
-        NotificationCenter.default.post(name: .playhousePreparePluginDelete, object: session.id)
-        await Task.yield()
-    }
-
-    /// Asks first, then deletes the plugin's folder and its editor conversation.
-    static func confirmDelete(_ pluginID: String, name: String, detail: String, registry: PluginRegistry) {
-        let alert = NSAlert()
-        alert.messageText = "Delete the plugin \(name)?"
-        alert.informativeText = detail
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        Task { @MainActor in
-            do {
-                await prepareDelete(pluginID, registry: registry)
-                try await registry.delete(pluginID)
-            } catch {
-                let failure = NSAlert(error: error)
-                failure.runModal()
-            }
-        }
-    }
-}
-
 /// The app menu's Check for Updates… item.
 struct CheckForUpdatesMenuItem: View {
-    @ObservedObject var updates: UpdateController
+    var updates: UpdateController
 
     var body: some View {
         Button("Check for Updates…") { Task { await updates.checkNow() } }

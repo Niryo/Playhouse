@@ -7,7 +7,7 @@
 #   - "Playhouse Release Manifest Key", the Ed25519 private key that signs each
 #     release's playhouse-release.json.
 # and writes the manifest key's public half into
-# Playhouse/Bridge/ReleaseSigningKey.swift, which you then commit.
+# Playhouse/Core/Bridge/ReleaseSigningKey.swift, which you then commit.
 #
 # Running it again reuses whatever already exists. Back up both items (Keychain
 # Access → Export): losing either means installed copies can't verify updates
@@ -18,7 +18,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 certificate_name="Playhouse Release Signing"
 manifest_key_service="Playhouse Release Manifest Key"
 manifest_key_account="playhouse-release"
-key_file="${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"
+key_file="${repository_root}/Playhouse/Core/Bridge/ReleaseSigningKey.swift"
 keychain="$(security default-keychain -d user | tr -d ' "')"
 
 if security find-identity -v -p codesigning | grep -q "\"${certificate_name}\""; then

@@ -19,9 +19,9 @@ Commands:
 Examples:
 
 ```sh
-scripts/swift-nav.py outline Playhouse/App/BridgeCore.swift --depth 2
-scripts/swift-nav.py show Playhouse/App/BridgeCore.swift BridgeRequest.requiredInt
-scripts/swift-nav.py show Playhouse/App/TaskConversationView.swift TaskConversationView.body
+scripts/swift-nav.py outline Playhouse/Core/Bridge/BridgeCore.swift --depth 2
+scripts/swift-nav.py show Playhouse/Core/Bridge/BridgeCore.swift BridgeRequest.requiredInt
+scripts/swift-nav.py show Playhouse/Views/TaskConversationView.swift TaskConversationView.body
 scripts/swift-nav.py refs ConversationManager
 ```
 

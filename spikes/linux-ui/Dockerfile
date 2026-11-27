@@ -25,7 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # The 24.04 toolchain links libxml2.so.2 (25.10 moved to libxml2.so.16):
 # unpack noble's libxml2 and the ICU it needs beside the system libraries.
-RUN echo "deb http://ports.ubuntu.com/ubuntu-ports noble main" > /etc/apt/sources.list.d/noble.list \
+# x86-64 packages live on archive.ubuntu.com; ports.ubuntu.com serves only the other architectures.
+RUN MIRROR=$([ "$(uname -m)" = "x86_64" ] && echo "http://archive.ubuntu.com/ubuntu" || echo "http://ports.ubuntu.com/ubuntu-ports") \
+    && echo "deb $MIRROR noble main" > /etc/apt/sources.list.d/noble.list \
     && apt-get update && cd /tmp && apt-get download libxml2/noble libicu74/noble \
     && for deb in /tmp/*.deb; do dpkg -x "$deb" /; done \
     && rm -f /tmp/*.deb /etc/apt/sources.list.d/noble.list && rm -rf /var/lib/apt/lists/* && ldconfig

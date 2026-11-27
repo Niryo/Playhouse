@@ -6,16 +6,29 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "Playhouse" / "App"
-FILES = tuple(sorted(APP.rglob("*.swift")))
+SOURCES = ROOT / "Playhouse"
+# The app target and the shared view modules: every file that builds window controls.
+FOLDERS = ("App", "Views", "Atoms", "UI")
+FILES = tuple(sorted(path for folder in FOLDERS for path in (SOURCES / folder).rglob("*.swift")))
+# PlayhouseUI's macOS pointer and tooltip shims (moved there from the app's WorkspaceSupport.swift).
+SHIMS = SOURCES / "UI" / "SwiftUI" / "MacInteractionShims.swift"
+
+
+def display_name(path: Path) -> str:
+    """The path within its module folder, as the menu-bar file names are written."""
+    for folder in FOLDERS:
+        base = SOURCES / folder
+        if base in path.parents:
+            return path.relative_to(base).as_posix()
+    return path.name
 # Files whose controls are menu-bar commands rather than views in the window. Menu-bar content
 # (`CommandMenu`/`CommandGroup` bodies and the views they use) must stay in these files, or its
 # items fall under the window-control rules (a menu-bar control kept elsewhere, like the Debug
 # menu's AtomHighlightMenuItem, says so with a `// no-pointer:` opt-out).
 MENU_BAR_FILES = {"PlayhouseApp.swift", "DebugConversationImport/DebugConversationImport.swift"}
-CONTROL = re.compile(r"\b(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*[{(]))")
+CONTROL = re.compile(r"\b(?:PH)?(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*[{(]))")
 # Selection controls AppKit draws: they need the pointing hand too, and keep their label as the hint.
-SELECTION = re.compile(r"\b(Picker|Toggle)(?=\s*\()")
+SELECTION = re.compile(r"\b(?:PH)?(Picker|Toggle)(?=\s*\()")
 
 
 def matching(source: str, opening: str, closing: str, start: int) -> int | None:
@@ -127,7 +140,7 @@ def modifier_chain(source: str, end: int, declaration_indent: int) -> str:
 def menu_content_ranges(source: str) -> list[tuple[int, int]]:
     """Spans of `Menu { ... }`, `Menu("Title") { ... }` and `.contextMenu { ... }` content, whose buttons become menu items."""
     ranges = []
-    for match in re.finditer(r"(?<![A-Za-z])Menu\s*(?:\([^{}()]*\))?\s*\{|\.contextMenu\s*\{", source):
+    for match in re.finditer(r"(?<![A-Za-z])(?:PH)?Menu\s*(?:\([^{}()]*\))?\s*\{|\.(?:ph)?[cC]ontextMenu\s*\{", source):
         opening = match.end() - 1
         closing = matching(source, "{", "}", opening)
         if closing is not None:
@@ -139,7 +152,7 @@ def main() -> int:
     errors: list[str] = []
     controls_seen = 0
     for path in FILES:
-        name = path.relative_to(APP).as_posix()
+        name = display_name(path)
         source = path.read_text(encoding="utf-8")
         menus = menu_content_ranges(source)
         for match in CONTROL.finditer(source):
@@ -220,7 +233,7 @@ def main() -> int:
             if ".plainButtonHoverPointer()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
                 errors.append(f"{location}: onTapGesture is missing plainButtonHoverPointer()")
 
-    support = (APP / "WorkspaceSupport.swift").read_text(encoding="utf-8")
+    support = SHIMS.read_text(encoding="utf-8")
     # Buttons get the pointing hand from a cursor the system re-applies (SwiftUI's pointer style,
     # or an AppKit cursor rect before macOS 15). A cursor pushed from `onHover` is replaced by the
     # arrow whenever AppKit re-evaluates the window's cursor, so the hover handler must never push.
@@ -230,7 +243,7 @@ def main() -> int:
         errors.append("buttonHoverPointer() and plainButtonHoverPointer() must use the shared hover cursor with .pointingHand")
     hover = re.search(r"func hoverCursor\(_ kind: HoverCursorKind\?, overAppKitControl: Bool = false\)[^{]*\{(.*?)\n    \}", support, re.S)
     if not hover:
-        errors.append("WorkspaceSupport.swift does not define hoverCursor(_ kind: HoverCursorKind?, overAppKitControl:)")
+        errors.append("MacInteractionShims.swift does not define hoverCursor(_ kind: HoverCursorKind?, overAppKitControl:)")
     elif hover.group(1).count("pointerStyle(kind?.pointerStyle)") != 2 or hover.group(1).count("overlay(HoverCursorArea(") != 2:
         errors.append("hoverCursor() must use SwiftUI's pointer style, with the cursor-update overlay over AppKit controls and before macOS 15")
     if "case .pointingHand: .link" not in support or "addCursorRect(bounds, cursor: cursor)" not in support:
@@ -238,7 +251,7 @@ def main() -> int:
     if "override func cursorUpdate(with event: NSEvent)" not in support or "event.type == .cursorUpdate, event.window === window" not in support:
         errors.append("HoverCursorArea must take the window's cursor updates, and only those, as the hit view")
     if re.search(r"\.onHover[^\n]*\n(?:[^\n]*\n){0,6}?[^\n]*\.push\(\)", support):
-        errors.append("WorkspaceSupport.swift must not push a cursor on hover; a pushed cursor is lost on cursor updates")
+        errors.append("MacInteractionShims.swift must not push a cursor on hover; a pushed cursor is lost on cursor updates")
 
     if errors:
         print("Button feedback check failed:", file=sys.stderr)

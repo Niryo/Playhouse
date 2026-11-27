@@ -417,6 +417,9 @@ extension PlayhouseUITests {
     func seedLegacyStandaloneChatTask(sessionID: String = "legacy-chat-session") throws -> String {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-legacy-standalone-chat-task")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled legacy chat seeder should be executable.")
+        // The seeder writes into the store a Playhouse process has opened. Listing tasks with
+        // none stored yet migrates nothing.
+        _ = try runCLI(["task", "list"])
 
         let seed = Process()
         seed.executableURL = seeder

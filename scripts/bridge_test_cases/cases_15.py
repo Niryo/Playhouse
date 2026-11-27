@@ -414,7 +414,7 @@ class BridgeTestCases15:
             if event.get("event") == "conversation.send.failed" and event.get("taskID") == task_id
         )
         self.assertEqual(send_failure["phase"], "codex-turn")
-        self.assertEqual(send_failure["storePath"], str(self.data_directory / "Playhouse-v2.store"))
+        self.assertEqual(send_failure["storePath"], str(self.data_directory / "Playhouse-v3.sqlite"))
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-retry")
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")

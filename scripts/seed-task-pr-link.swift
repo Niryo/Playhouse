@@ -1,9 +1,8 @@
 import Foundation
 import SQLite3
-import SwiftData
 
+// Compiled with scripts/task-store-seeding.swift.
 @main
-@MainActor
 struct SeedTaskPullRequestLink {
     static func main() throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
@@ -12,25 +11,18 @@ struct SeedTaskPullRequestLink {
         }
 
         let dataDirectory = URL(fileURLWithPath: arguments[0], isDirectory: true)
-        let storeURL = dataDirectory.appendingPathComponent("Playhouse-v2.store")
-        let schema = Schema([BoardTask.self, StandaloneChat.self])
-        let configuration = ModelConfiguration(
-            "Playhouse",
-            schema: schema,
-            url: storeURL,
-            cloudKitDatabase: .none
-        )
-        let container = try ModelContainer(for: schema, configurations: [configuration])
-        let context = ModelContext(container)
-        let descriptor = FetchDescriptor<BoardTask>(predicate: #Predicate { $0.id == taskID })
-        guard let task = try context.fetch(descriptor).first else {
+        let store = try TaskStoreSeeding(dataDirectory: dataDirectory)
+        guard try store.queryInt("SELECT count(*) FROM board_tasks WHERE id = ?", [taskID.uuidString]) == 1 else {
             throw SeedError.taskUnavailable
         }
 
         if arguments.count == 3, arguments[2] == "--clear-provider-session" {
-            task.codexThreadID = nil
-            task.claudeSessionID = nil
-            try context.save()
+            try store.write { revision in
+                try store.execute(
+                    "UPDATE board_tasks SET codexThreadID = NULL, claudeSessionID = NULL, revision = ? WHERE id = ?",
+                    [revision, taskID.uuidString]
+                )
+            }
             // Playhouse keeps the transcript itself, so a task without a provider
             // session also starts without a conversation.
             try clearTranscript(dataDirectory.appendingPathComponent("Conversations-v1.sqlite"), taskID: taskID.uuidString)
@@ -38,19 +30,25 @@ struct SeedTaskPullRequestLink {
             return
         }
 
+        let stored = try store.queryData("SELECT repositoryWorktreesData FROM board_tasks WHERE id = ?", [taskID.uuidString])
+        var worktrees = (stored.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [[String: Any]]) ?? []
         guard (4...5).contains(arguments.count),
               let number = Int(arguments[2]), number > 0,
               let repositoryIndex = arguments.count == 5 ? Int(arguments[4]) : 0,
               let url = URL(string: arguments[3]), url.scheme == "https", url.host != nil,
-              task.repositoryWorktrees.indices.contains(repositoryIndex) else {
+              worktrees.indices.contains(repositoryIndex) else {
             throw SeedError.usage
         }
 
-        var worktrees = task.repositoryWorktrees
-        worktrees[repositoryIndex].pullRequestNumber = number
-        worktrees[repositoryIndex].pullRequestURL = url.absoluteString
-        task.repositoryWorktrees = worktrees
-        try context.save()
+        worktrees[repositoryIndex]["pullRequestNumber"] = number
+        worktrees[repositoryIndex]["pullRequestURL"] = url.absoluteString
+        let data = try JSONSerialization.data(withJSONObject: worktrees, options: [.sortedKeys])
+        try store.write { revision in
+            try store.execute(
+                "UPDATE board_tasks SET repositoryWorktreesData = ?, revision = ? WHERE id = ?",
+                [data, revision, taskID.uuidString]
+            )
+        }
         print("Seeded linked PR #\(number) for task \(taskID).")
     }
 }

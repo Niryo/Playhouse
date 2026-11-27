@@ -363,7 +363,7 @@ class BridgeTestCases03:
             "task", "prompt", task["id"], "--text", "Keep this draft after restart.", "--status", "Backlog",
         )[0])
         self.assertEqual(saved["savedPrompt"], "Keep this draft after restart.")
-        self.assertTrue((self.data_directory / "Playhouse-v2.store").is_file())
+        self.assertTrue((self.data_directory / "Playhouse-v3.sqlite").is_file())
         reopened = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(reopened["title"], "Profile restart")
         self.assertEqual(reopened["savedPrompt"], "Keep this draft after restart.")
@@ -756,7 +756,7 @@ class BridgeTestCases03:
         ]
         self.assertTrue(store_write_events, "The final task save should log when its shared store lock is acquired.")
         waited_write = next(event for event in store_write_events if int(event.get("lockWaitMilliseconds", "0")) > 0)
-        self.assertEqual(waited_write["storePath"], str(self.data_directory / "Playhouse-v2.store"))
+        self.assertEqual(waited_write["storePath"], str(self.data_directory / "Playhouse-v3.sqlite"))
         matching_success = next(
             json.loads(line) for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
             if (event := json.loads(line)).get("taskID") == task["id"]
@@ -778,7 +778,7 @@ class BridgeTestCases03:
             event for event in read_events
             if event["event"] == "persistence.read.started" and event.get("readID") == read_id
         )
-        expected_store_path = str(self.data_directory / "Playhouse-v2.store")
+        expected_store_path = str(self.data_directory / "Playhouse-v3.sqlite")
         snapshot_prefixes = ("storeDirectory", "storeFile", "storeWAL", "storeSHM")
         for read_event in (matching_read_start, successful_read):
             self.assertEqual(read_event["storePath"], expected_store_path)
@@ -787,11 +787,11 @@ class BridgeTestCases03:
                 f"Successful read events should omit filesystem snapshots: {read_event}",
             )
         self.assertIn("durationMilliseconds", successful_read)
-    # case-contract: test_persistence_store_open_failure_records_detailed_error | A real ModelContainer open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying NSError domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps Playhouse open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic.
+    # case-contract: test_persistence_store_open_failure_records_detailed_error | A real task-store open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying error domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps Playhouse open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic.
     def test_persistence_store_open_failure_records_detailed_error(self):
         failure_directory = self.data_directory / "invalid-store-open"
         failure_directory.mkdir()
-        store = failure_directory / "Playhouse-v2.store"
+        store = failure_directory / "Playhouse-v3.sqlite"
         store.mkdir()
 
         response, _ = self.call_cli(
@@ -818,12 +818,12 @@ class BridgeTestCases03:
         self.assertIn("error0UserInfo", failed_open)
         self.assertEqual(failed_open["schemaProbeResult"], "open-failed")
         self.assertTrue(failed_open.get("schemaProbeSQLiteMessage"))
-    # case-contract: test_persistence_read_failure_records_detailed_error | A real SwiftData fetch failure against an isolated store with a missing task column returns an error and logs a correlated read ID, NSError domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record.
+    # case-contract: test_persistence_read_failure_records_detailed_error | A real task-store read failure against an isolated store with a missing task column returns an error and logs a correlated read ID, error domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record.
     def test_persistence_read_failure_records_detailed_error(self):
         self.create_task("Missing column read failure")
-        store = self.data_directory / "Playhouse-v2.store"
+        store = self.data_directory / "Playhouse-v3.sqlite"
         with sqlite3.connect(store) as database:
-            database.execute("ALTER TABLE ZBOARDTASK DROP COLUMN ZPROGRESSLABEL")
+            database.execute("ALTER TABLE board_tasks DROP COLUMN progressLabel")
 
         response, _ = self.call_cli("task", "list", expected_status=1)
         self.assertFalse(response["ok"], response)
@@ -846,7 +846,8 @@ class BridgeTestCases03:
         self.assertIn("error0UserInfo", failed_read)
         self.assertEqual(failed_read["schemaProbeResult"], "prepare-failed")
         self.assertEqual(failed_read["schemaProbeSQLiteCode"], "1")
-        self.assertIn("no such column: t0.ZPROGRESSLABEL", failed_read["schemaProbeSQLiteMessage"])
+        self.assertIn("no such column", failed_read["schemaProbeSQLiteMessage"])
+        self.assertIn("progressLabel", failed_read["schemaProbeSQLiteMessage"])
         self.assertTrue(any(
             event.get("event") == "persistence.read.started"
             and event.get("readID") == failed_read["readID"]

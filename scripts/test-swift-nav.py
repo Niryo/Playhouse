@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix="swnav-") as temp:
     assert "best-effort" in refs.stdout.lower()
 
     # Structural coverage against the large production source files.
-    bridge = ROOT / "Playhouse" / "App" / "BridgeCore.swift"
+    bridge = ROOT / "Playhouse" / "Core" / "Bridge" / "BridgeCore.swift"
     bridge_outline = run("outline", bridge, "--max-lines", 150)
     assert len(bridge_outline.stdout.encode()) < 8192
     required = run("show", bridge, "BridgeRequest.requiredInt")

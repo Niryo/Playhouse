@@ -175,8 +175,10 @@ final class TaskOperationLockBarrier {
 final class TaskStoreWriteLockBarrier {
     private var descriptor: Int32
 
-    init(dataDirectory: URL) throws {
-        let lockURL = dataDirectory.appendingPathComponent("store-write.lock")
+    /// Holds the store-write lock, or with `lockName` another task-store lock such as
+    /// `store-schema-repair.lock`, under which a SwiftData store is migrated.
+    init(dataDirectory: URL, lockName: String = "store-write.lock") throws {
+        let lockURL = dataDirectory.appendingPathComponent(lockName)
         descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
         guard descriptor >= 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))

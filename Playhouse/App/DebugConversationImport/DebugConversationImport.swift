@@ -4,8 +4,11 @@
 import AppKit
 import Foundation
 import OSLog
-import SwiftData
 import SwiftUI
+import PlayhouseCore
+import PlayhouseViews
+import PlayhouseAtoms
+import PlayhouseUI
 
 /// Imports a conversation that Claude Code or Codex recorded in another client
 /// (VS Code, a terminal) into a new Playhouse task, so the same conversation can
@@ -24,7 +27,7 @@ import SwiftUI
 /// Both imports link the task to the original session, so a follow-up message
 /// resumes it.
 struct DebugConversationImportMenu: View {
-    let modelContainer: ModelContainer
+    let modelContainer: PlayhouseModelContainer
 
     var body: some View {
         Button("Import Conversation…") {
@@ -43,7 +46,7 @@ enum DebugConversationImporter {
         init(_ message: String) { errorDescription = message }
     }
 
-    static func pickAndImport(container: ModelContainer) async {
+    static func pickAndImport(container: PlayhouseModelContainer) async {
         let panel = NSOpenPanel()
         panel.title = "Import a Claude Code or Codex conversation"
         panel.message = "Pick a Claude session (~/.claude/projects/…/<session>.jsonl) or a Codex rollout (~/.codex/sessions/…/*.jsonl)."
@@ -60,7 +63,7 @@ enum DebugConversationImporter {
         }
     }
 
-    static func importConversation(at url: URL, container: ModelContainer) async throws -> String {
+    static func importConversation(at url: URL, container: PlayhouseModelContainer) async throws -> String {
         let startedAt = Date()
         // Reading and decoding a large session (tens of MB) stays off the main thread.
         let parsed = try await Task.detached(priority: .userInitiated) { try SessionFile.parse(url) }.value
