@@ -195,19 +195,18 @@ if [[ "${PLAYHOUSE_UI_TART_GUEST:-0}" == "1" ]]; then
 fi
 source_bundle_identifier="$("${repository_root}/scripts/app-profile.sh" "${repository_root}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundleID"])')"
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
-xcrun swiftc -module-name Playhouse \
-  "${repository_root}/Playhouse/App/BoardTask.swift" \
-  "${repository_root}/Playhouse/App/ConversationSubject.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/scripts/task-store-seeding.swift" \
   "${repository_root}/scripts/seed-task-pr-link.swift" \
   -o "${task_pr_seeder}"
 legacy_chat_seeder="${fixture_root}/seed-legacy-standalone-chat-task"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/scripts/task-store-seeding.swift" \
   "${repository_root}/scripts/seed-legacy-standalone-chat-task.swift" \
   -o "${legacy_chat_seeder}"
-legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/scripts/seed-legacy-task-store.swift" \
-  -o "${legacy_store_seeder}"
+# Real SwiftData stores from before the GRDB task store, for the migration cases.
+rm -rf "${fixture_root}/swiftdata-stores"
+cp -R "${repository_root}/Playhouse/CoreTests/Fixtures/swiftdata-stores" "${fixture_root}/swiftdata-stores"
 # Live UI cases read the selected provider from this marker; the guest
 # runner exports PLAYHOUSE_LIVE_PROVIDER alongside PLAYHOUSE_RUN_LIVE_INTEGRATION.
 live_ui_marker="/tmp/playhouse-live-ui-integration"

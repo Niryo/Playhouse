@@ -60,6 +60,7 @@ python3 "${repository_root}/scripts/prune-test-artifacts.py" \
   --keep "$(basename "${test_output_dir}")"
 architecture="$(uname -m)"
 python3 "${repository_root}/scripts/check-test-parity.py"
+python3 "${repository_root}/scripts/check-module-boundaries.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
 python3 "${repository_root}/scripts/check-hover-scrollers.py"
 python3 "${repository_root}/scripts/check-polling-loops.py"
@@ -83,57 +84,57 @@ bridge_log="${test_output_dir}/bridge-tests.log"
 # The build helper compiles the paired UI test target and reuses this
 # content-matched DerivedData for focused retries and final full verification.
 python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
-legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/scripts/seed-legacy-task-store.swift" \
-  -o "${legacy_store_seeder}"
 # Pure-logic unit checks of the Codex CPU working-directory attribution.
 codex_cpu_attribution_tests="${test_output_dir}/codex-cpu-attribution-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/ProcessCPUSampler.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O \
+  "${repository_root}/Playhouse/Core/Providers/ProcessCPUSampler.swift" \
+  "${repository_root}/Playhouse/Core/Platform/POSIX.swift" \
   "${repository_root}/scripts/unit/codex-cpu-attribution-tests.swift" \
   -o "${codex_cpu_attribution_tests}"
 "${codex_cpu_attribution_tests}"
 # Pure-logic unit checks of the agent usage payload parsing and reset rules.
 agent_usage_parsing_tests="${test_output_dir}/agent-usage-parsing-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/AgentUsage.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O \
+  "${repository_root}/Playhouse/Core/Providers/AgentUsage.swift" \
+  "${repository_root}/Playhouse/Core/Platform/POSIX.swift" \
   "${repository_root}/scripts/unit/agent-usage-parsing-tests.swift" \
   -o "${agent_usage_parsing_tests}"
 "${agent_usage_parsing_tests}"
 # Unit checks of the process host that lets provider agents outlive their daemon.
 agent_run_host_tests="${test_output_dir}/agent-run-host-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/AgentRunHost.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O \
+  "${repository_root}/Playhouse/Core/Providers/AgentRunHost.swift" \
+  "${repository_root}/Playhouse/Core/Platform/POSIX.swift" \
   "${repository_root}/scripts/unit/agent-run-host-tests.swift" \
   -o "${agent_run_host_tests}"
 "${agent_run_host_tests}"
 # Unit checks of the bounded waits that keep a task delete from hanging on a turn that won't stop.
 bounded_waits_tests="${test_output_dir}/bounded-waits-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/BoundedWaits.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O \
+  "${repository_root}/Playhouse/Core/Bridge/BoundedWaits.swift" \
   "${repository_root}/scripts/unit/bounded-waits-tests.swift" \
   -o "${bounded_waits_tests}"
 "${bounded_waits_tests}"
 # Pure-logic unit checks of the context compaction decisions and session state reader.
 context_compaction_tests="${test_output_dir}/context-compaction-policy-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/ContextCompaction.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O \
+  "${repository_root}/Playhouse/Core/Conversation/ContextCompaction.swift" \
   "${repository_root}/scripts/unit/context-compaction-policy-tests.swift" \
   -o "${context_compaction_tests}"
 "${context_compaction_tests}"
 # Pure-logic unit checks of where provider dividers and goal achievements sit in the transcript.
 transcript_row_anchor_tests="${test_output_dir}/transcript-row-anchors-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/TranscriptRowAnchors.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O \
+  "${repository_root}/Playhouse/Core/Conversation/TranscriptRowAnchors.swift" \
   "${repository_root}/scripts/unit/transcript-row-anchors-tests.swift" \
   -o "${transcript_row_anchor_tests}"
 "${transcript_row_anchor_tests}"
 # Pure-logic unit checks of the shared Markdown parser behind the transcript and the Markdown atom.
 markdown_document_tests="${test_output_dir}/markdown-document-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/MarkdownDocument.swift" \
-  "${repository_root}/Playhouse/App/SkillManifest.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O \
+  "${repository_root}/Playhouse/Core/Conversation/MarkdownDocument.swift" \
+  "${repository_root}/Playhouse/Core/Catalogs/SkillManifest.swift" \
+  "${repository_root}/Playhouse/Core/Platform/Hashing.swift" \
   "${repository_root}/scripts/unit/markdown-document-tests.swift" \
   -o "${markdown_document_tests}"
 "${markdown_document_tests}"
@@ -141,27 +142,29 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
 # typed props are never decoded and round-trip through Codable. Built from all of the plugin
 # core, which so also builds with no SwiftUI or AppKit.
 plugin_node_props_tests="${test_output_dir}/plugin-node-props-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O -D PLAYHOUSE_ATOM_BENCHMARK \
-  "${repository_root}"/Playhouse/App/Plugins/Core/*.swift \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -O -D PLAYHOUSE_ATOM_BENCHMARK \
+  "${repository_root}"/Playhouse/Core/Plugins/Runtime/*.swift \
   "${repository_root}/scripts/unit/plugin-node-props-tests.swift" \
   -o "${plugin_node_props_tests}"
 "${plugin_node_props_tests}"
 # The CLI's command catalog against its parser: no handled command without a help entry, and
 # no declared command without a handler. Built from the CLI's sources minus its entry point.
 cli_command_catalog_tests="${test_output_dir}/cli-command-catalog-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -Onone \
-  "${repository_root}/Playhouse/Bridge/BridgeContract.swift" \
-  "${repository_root}/Playhouse/Bridge/CLICommandCatalog.swift" \
-  "${repository_root}/Playhouse/Bridge/BridgeSocket.swift" \
-  "${repository_root}/Playhouse/Bridge/UpdateCore.swift" \
-  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift" \
+xcrun swiftc -parse-as-library -swift-version 5 -package-name playhouse -Onone \
+  "${repository_root}/Playhouse/Core/Bridge/BridgeContract.swift" \
+  "${repository_root}/Playhouse/Core/Bridge/CLICommandCatalog.swift" \
+  "${repository_root}/Playhouse/Core/Bridge/BridgeSocket.swift" \
+  "${repository_root}/Playhouse/Core/Bridge/UpdateCore.swift" \
+  "${repository_root}/Playhouse/Core/Bridge/ReleaseSigningKey.swift" \
+  "${repository_root}/Playhouse/Core/Platform/Hashing.swift" \
   "${repository_root}/Playhouse/CLI/BridgeClient.swift" \
   "${repository_root}/Playhouse/CLI/PlayhouseCLIParsing.swift" \
   "${repository_root}/Playhouse/CLI/PlayhouseCLIUtilities.swift" \
+  "${repository_root}/Playhouse/Core/Platform/POSIX.swift" \
   "${repository_root}/scripts/unit/cli-command-catalog-tests.swift" \
   -o "${cli_command_catalog_tests}"
 "${cli_command_catalog_tests}" "${repository_root}/Playhouse/CLI/PlayhouseCLIParsing.swift" \
-  "${repository_root}/Playhouse/App/CodexTaskInstructions.swift"
+  "${repository_root}/Playhouse/Core/Providers/CodexTaskInstructions.swift"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1
@@ -179,7 +182,6 @@ bridge_arguments=(
   --fixture-root "${fixture_root}"
   --data-root "${data_root}"
   --service-name "${service_name}"
-  --legacy-store-seeder "${legacy_store_seeder}"
 )
 if (( ${#selected_cases[@]} > 0 )); then
   for selected_case in "${selected_cases[@]}"; do

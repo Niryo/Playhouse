@@ -26,7 +26,7 @@ The script creates two items in the login keychain:
 1. **"Playhouse Release Signing"**, a self-signed code-signing certificate. Every release is signed with it. An installed Playhouse accepts an update only when it carries the same certificate, so the app's identity stays stable and macOS permissions survive updates.
 2. **"Playhouse Release Manifest Key"**, an Ed25519 private key that signs each release's `playhouse-release.json`.
 
-It writes the key's public half into `Playhouse/Bridge/ReleaseSigningKey.swift`, which you commit. Running it again reuses whatever already exists.
+It writes the key's public half into `Playhouse/Core/Bridge/ReleaseSigningKey.swift`, which you commit. Running it again reuses whatever already exists.
 
 Back up both items with Keychain Access → Export. If either is lost, installed copies can't verify new releases and must be reinstalled by hand.
 
@@ -41,7 +41,7 @@ Options: `--notes-file <path>`, `--skip-tests`, `--dry-run`.
    - the checkout is on `master`, the tree is clean, and it is in sync with `origin/master`;
    - the version is newer than the latest release, and its tag is unused;
    - `ReleaseSigningKey.swift` has a key that matches the keychain's manifest key, and the certificate exists.
-2. **Notes.** Unless `--notes-file` is given, `scripts/release-notes.sh` sends every commit since the previous release tag (message, changed files and pull request description) to the latest Claude Opus through the installed Claude Code CLI (`claude -p --model opus`), which writes a short list of only the major user-facing changes, split into "New features:" and "Bug fixes:". The script shows the draft and asks to accept it, edit it in `$VISUAL` or `$EDITOR`, regenerate it, or abort. If Claude is unavailable, the draft is the commit subjects. Without `--notes-file` the script must run from a terminal. If the SwiftData model files changed since the previous release, the script warns that the previous version must still read the new data, because a rollback restores only the app (see Data compatibility).
+2. **Notes.** Unless `--notes-file` is given, `scripts/release-notes.sh` sends every commit since the previous release tag (message, changed files and pull request description) to the latest Claude Opus through the installed Claude Code CLI (`claude -p --model opus`), which writes a short list of only the major user-facing changes, split into "New features:" and "Bug fixes:". The script shows the draft and asks to accept it, edit it in `$VISUAL` or `$EDITOR`, regenerate it, or abort. If Claude is unavailable, the draft is the commit subjects. Without `--notes-file` the script must run from a terminal. If the task store's model files changed since the previous release, the script warns that the previous version must still read the new data, because a rollback restores only the app (see Data compatibility).
 3. **Tests.** `scripts/test-e2e.sh` runs unless `--skip-tests` is given.
 4. **Build.**
    - Release configuration, `arm64`, into `/tmp/playhouse-release/<version>/`.
@@ -90,8 +90,8 @@ A zip downloaded in a browser is blocked on first launch. Allow it once with Sys
 
 ### Shared ownership
 
-- `UpdateManager` (`Playhouse/App/UpdateManager.swift`) runs inside the bridge daemon and owns checking, downloading, verifying, staging and starting the installer. The window's `UpdateController` and the CLI both call it through `update.*` bridge commands, so they share one download and one state.
-- Signing, verification and the installer live in `Playhouse/Bridge/UpdateCore.swift`: `ReleaseManifestVerifier`, `ReleaseBundleVerifier` and `ReleaseInstaller`.
+- `UpdateManager` (`Playhouse/Core/Bridge/UpdateManager.swift`) runs inside the bridge daemon and owns checking, downloading, verifying, staging and starting the installer. The window's `UpdateController` and the CLI both call it through `update.*` bridge commands, so they share one download and one state.
+- Signing, verification and the installer live in `Playhouse/Core/Bridge/UpdateCore.swift`: `ReleaseManifestVerifier`, `ReleaseBundleVerifier` and `ReleaseInstaller`.
 - State lives in the app's data folder under `Updates/`:
   - `state.json`: last check, offered release, staged version, whether the install waits, last error;
   - `last-install.json`: the installer's result;
@@ -166,7 +166,7 @@ Callers send `daemon.hello` with the identity of the daemon executable they expe
 
 ### Data compatibility
 
-A rollback restores the app, not the SwiftData store. A release must not change the store in a way the previous release can't read.
+A rollback restores the app, not the task store (GRDB, `Playhouse-v3.sqlite`). A release must not change the store in a way the previous release can't read.
 
 ### UI
 

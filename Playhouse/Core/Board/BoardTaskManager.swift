@@ -1,0 +1,849 @@
+import Foundation
+import GRDBSQLite
+
+@MainActor
+package final class BoardTaskManager {
+    package let modelContext: PlayhouseModelContext
+    package let worktreeRoot: URL
+    package let taskOperationLockDirectory: URL?
+
+    package func queuedConversationMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            for index in items.indices where items[index].state == .dispatching {
+                let processID = items[index].dispatchingProcessID
+                guard let processID, POSIX.kill(processID, 0) == 0 || errno == EPERM else {
+                    items[index].state = .needsAction
+                    items[index].dispatchingProcessID = nil
+                    items[index].enqueuedProcessID = nil
+                    continue
+                }
+            }
+        }
+        return try readQueuedMessages()[taskID.uuidString] ?? []
+    }
+
+    package func enqueueConversationMessage(taskID: UUID, text: String, imageDataURLs: [String] = [], asyncQuestionItemID: String? = nil) throws -> QueuedConversationMessage {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
+        let task = try conversationSubject(taskID)
+        // A task In Progress without a conversation is starting its first message: the follow-up
+        // is saved without a conversation ID and belongs to whichever conversation the task gets.
+        // The saved status is what both the app and the daemon can see.
+        guard let threadID = task.activeConversationID ?? (task.status == .inProgress ? "" : nil) else {
+            throw BridgeCommandError(code: "invalid_transition", message: "A follow-up can only be queued after this conversation has a \(task.conversationProvider.displayName) conversation.")
+        }
+        let item = QueuedConversationMessage(
+            id: UUID(), taskID: taskID, threadID: threadID, text: normalized, imageDataURLs: imageDataURLs, state: .queued,
+            enqueuedProcessID: nil, asyncQuestionItemID: asyncQuestionItemID
+        )
+        try mutateQueuedMessages(taskID: taskID) { $0.append(item) }
+        return item
+    }
+
+    package func conversationSteerMailboxDirectory() throws -> URL {
+        let storeURL = modelContext.storeURL
+        return storeURL.deletingLastPathComponent().appendingPathComponent("conversation-steer-mailbox", isDirectory: true)
+    }
+
+    package func conversationTranscriptStore() throws -> ConversationTranscriptStore {
+        let storeURL = modelContext.storeURL
+        return try ConversationTranscriptStore.open(directory: storeURL.deletingLastPathComponent())
+    }
+
+    /// The page store scoped to the chat with this ID: the standalone chat's own pages, or a
+    /// parallel bubble's while it runs.
+    package func standaloneChatManager(for chatID: UUID) throws -> StandaloneChatManager {
+        let scope = try standaloneChatModel(chatID)?.standaloneChatPageScope ?? StandaloneChatManager.defaultChatID
+        return try standaloneChatManager(scope: scope)
+    }
+
+    /// Resolves the same isolated data directory as the task store itself (so e2e test
+    /// isolation and worktree-specific app data apply here too), rather than needing a raw
+    /// dataDirectory string threaded through every call site.
+    package func standaloneChatManager(scope: String) throws -> StandaloneChatManager {
+        let storeURL = modelContext.storeURL
+        return try StandaloneChatManager(dataDirectory: storeURL.deletingLastPathComponent().path, chatID: scope)
+    }
+
+    package func claimNextQueuedMessage(taskID: UUID, threadID: String, messageID: UUID? = nil) throws -> QueuedConversationMessage? {
+        var claimed: QueuedConversationMessage?
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: {
+                $0.state == .queued && ($0.threadID == threadID || $0.threadID.isEmpty) && (messageID == nil || $0.id == messageID)
+            }) else { return }
+            items[index].state = .dispatching
+            items[index].dispatchingProcessID = Int32(ProcessInfo.processInfo.processIdentifier)
+            claimed = items[index]
+        }
+        return claimed
+    }
+
+    package func finishQueuedMessage(_ message: QueuedConversationMessage, succeeded: Bool) throws {
+        try mutateQueuedMessages(taskID: message.taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == message.id && $0.state == .dispatching }) else { return }
+            if succeeded { items.remove(at: index) }
+            else { items[index].state = .needsAction; items[index].dispatchingProcessID = nil }
+        }
+    }
+
+    package func retryQueuedMessage(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .needsAction }) else {
+                throw BridgeCommandError(code: "invalid_transition", message: "That queued message is not waiting for an explicit retry.")
+            }
+            items[index].state = .queued
+            items[index].enqueuedProcessID = nil
+            items[index].dispatchingProcessID = nil
+        }
+    }
+
+    package func removeQueuedMessage(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID }),
+                  items[index].state != .dispatching else {
+                throw BridgeCommandError(code: "invalid_transition", message: "That follow-up can no longer be removed.")
+            }
+            items.remove(at: index)
+        }
+    }
+
+    package func reserveQueuedMessageForSteering(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .queued }) else {
+                throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
+            }
+            items[index].state = .dispatching
+            items[index].dispatchingProcessID = Int32(ProcessInfo.processInfo.processIdentifier)
+        }
+    }
+
+    package func finishQueuedMessageSteering(taskID: UUID, messageID: UUID, accepted: Bool) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .dispatching }) else { return }
+            if accepted { items.remove(at: index) }
+            else {
+                items[index].state = .needsAction
+                items[index].dispatchingProcessID = nil
+            }
+        }
+    }
+
+    package func requeueMissedSteer(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .dispatching }) else { return }
+            items[index].state = .queued
+            items[index].dispatchingProcessID = nil
+        }
+    }
+
+    package func retainQueuedMessagesForUserAction(taskID: UUID, threadID: String) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            for index in items.indices where (items[index].threadID == threadID || items[index].threadID.isEmpty) && items[index].state == .queued {
+                items[index].state = .needsAction
+            }
+        }
+    }
+
+    package func readQueuedMessages() throws -> [String: [QueuedConversationMessage]] {
+        let url = try queuedMessagesURL()
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        return try JSONDecoder().decode([String: [QueuedConversationMessage]].self, from: Data(contentsOf: url))
+    }
+
+    package func removeQueuedMessages(taskID: UUID) throws {
+        guard try readQueuedMessages()[taskID.uuidString] != nil else { return }
+        try mutateQueuedMessages(taskID: taskID) { $0.removeAll() }
+    }
+
+    package func mutateQueuedMessages(taskID: UUID, _ mutation: (inout [QueuedConversationMessage]) throws -> Void) throws {
+        let url = try queuedMessagesURL()
+        let lockURL = url.appendingPathExtension("lock")
+        let descriptor = POSIX.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { _ = POSIX.close(descriptor) }
+        var lock = flock()
+        lock.l_type = Int16(F_WRLCK); lock.l_whence = Int16(SEEK_SET)
+        guard POSIX.fcntl(descriptor, F_SETLKW, &lock) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { lock.l_type = Int16(F_UNLCK); _ = POSIX.fcntl(descriptor, F_SETLK, &lock) }
+        var all: [String: [QueuedConversationMessage]] = [:]
+        if FileManager.default.fileExists(atPath: url.path) {
+            all = try JSONDecoder().decode([String: [QueuedConversationMessage]].self, from: Data(contentsOf: url))
+        }
+        var items = all[taskID.uuidString] ?? []
+        try mutation(&items)
+        all[taskID.uuidString] = items.isEmpty ? nil : items
+        try JSONEncoder().encode(all).write(to: url, options: .atomic)
+        guard POSIX.chmod(url.path, mode_t(0o600)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    package func queuedMessagesURL() throws -> URL {
+        let storeURL = modelContext.storeURL
+        return storeURL.deletingLastPathComponent().appendingPathComponent("queued-conversation-messages.json")
+    }
+    package let repositoryAllocationLockDirectory: URL?
+    package let conversationTurnLockDirectory: URL?
+    package let worktreeService = PlayhouseWorktreeService()
+    package let pullRequestService = PlayhousePullRequestService()
+    package let preferences: UserDefaults
+
+    package init(
+        modelContext: PlayhouseModelContext,
+        worktreeRoot: URL = PlayhouseWorktreeManager.defaultRoot(),
+        preferences: UserDefaults = WorkspaceSettings.preferencesStore
+    ) {
+        self.modelContext = modelContext
+        self.worktreeRoot = worktreeRoot
+        self.preferences = preferences
+        self.taskOperationLockDirectory = Optional(modelContext.storeURL)?
+            .deletingLastPathComponent()
+            .appendingPathComponent("task-operation-locks", isDirectory: true)
+        self.repositoryAllocationLockDirectory = Optional(modelContext.storeURL)?
+            .deletingLastPathComponent()
+            .appendingPathComponent("repository-allocation-locks", isDirectory: true)
+        self.conversationTurnLockDirectory = Optional(modelContext.storeURL)?
+            .deletingLastPathComponent()
+            .appendingPathComponent("conversation-turn-locks", isDirectory: true)
+    }
+
+
+    /// Board tasks. Recurring schedule templates are not board tasks, so they're left out;
+    /// `scheduledTasks()` lists them.
+
+
+    /// The user's manual counterpart to a `completed` outcome: a task left in
+    /// Waiting Response moves to Review through the same review gate — its
+    /// pull request changes are synced first and its PR mode then applies.
+    /// A sync failure is reported and leaves the task in Waiting Response.
+
+    /// Opens the pull requests a task's PR mode asks for once it reaches
+    /// Review. A failure is recorded rather than thrown: the task stays in
+    /// Review and its card keeps the manual create action.
+    package func playStatusSound(for task: any ConversationSubject, from previous: TaskStatus) {
+        guard task is BoardTask, task.status != previous else { return }
+        let name: String
+        switch task.status {
+        case .review: name = "Glass"
+        case .waitingResponse: name = "Ping"
+        default: return
+        }
+        guard WorkspaceSettings.statusSoundsEnabled(in: preferences) else {
+            PlayhouseDiagnostics.record("task.status_sound.muted", fields: [
+                "taskID": task.id.uuidString, "status": task.status.rawValue, "sound": name
+            ])
+            return
+        }
+        // The test runners set PLAYHOUSE_MUTE_SOUNDS=1 (inherited by the daemon) so
+        // sounds still play and are recorded, just at volume 0.
+        let result = Platform.services.playSystemSound(
+            named: name, muted: PlayhouseProcessEnvironment.current["PLAYHOUSE_MUTE_SOUNDS"] == "1"
+        )
+        PlayhouseDiagnostics.record(result.played ? "task.status_sound.played" : "task.status_sound.failed", fields: [
+            "taskID": task.id.uuidString, "status": task.status.rawValue, "sound": name,
+            // Read back from the sound itself, so it reports the volume it actually played at.
+            "environmentMuted": String(result.muted)
+        ])
+    }
+
+
+    package func reconcileLifecycleStatusOnOpen(_ id: UUID, clients: ConversationClients) async throws -> BoardTaskRecord {
+        let currentTask = try requireSubject(id)
+        guard currentTask.activeConversationID != nil || currentTask.pendingSubmittedPrompt != nil else {
+            return BoardTaskRecord(task: currentTask)
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            let previousStatus = task.status
+            let providerName = task.conversationProvider.displayName
+            let client = clients.client(for: task.conversationProvider)
+            guard let threadID = task.activeConversationID else {
+                if let submittedPrompt = task.pendingSubmittedPrompt, !(try hasConversationTurnReservation(id)) {
+                    if task.status == .inProgress {
+                        task.status = .waitingResponse
+                        task.statusMessage = "Playhouse restarted before \(providerName) started this turn. Your prompt is saved; review it and continue when ready."
+                    }
+                    returnSubmittedPromptToDraft(task, submittedPrompt: submittedPrompt)
+                    try await saveTaskContext(taskID: id)
+                    playStatusSound(for: task, from: previousStatus)
+                }
+                return BoardTaskRecord(task: task)
+            }
+            let hasActiveReservation = try hasConversationTurnReservation(id)
+            guard !client.isTurnActive(threadID: threadID),
+                  !client.isTurnActiveInProcess(threadID: threadID),
+                  !hasActiveReservation else {
+                return BoardTaskRecord(task: task)
+            }
+            let pendingQuestion = try conversationTranscriptStore().readState(id).pendingUserInputRequest
+            if let pendingQuestion, pendingQuestion.threadID == threadID, task.status != .done {
+                let pendingStatus: TaskStatus = pendingQuestion.isBlocking ? .waitingResponse : .inProgress
+                let pendingStatusMessage = pendingQuestion.isBlocking
+                    ? "Waiting for your saved question to be answered."
+                    : "A saved question is available for your response."
+                if task.status != pendingStatus || task.statusMessage != pendingStatusMessage {
+                    task.status = pendingStatus
+                    task.statusMessage = pendingStatusMessage
+                    clearProgressReport(task)
+                    try await saveTaskContext(taskID: id)
+                    playStatusSound(for: task, from: previousStatus)
+                }
+                return BoardTaskRecord(task: task)
+            }
+            // A turn the user paused is waiting on purpose; it needs no restart notice.
+            if task.status == .waitingResponse, client.wasLastTurnInterrupted(threadID: threadID) {
+                return BoardTaskRecord(task: task)
+            }
+            let message: String
+            switch task.status {
+            case .inProgress:
+                message = ConversationManager.interruptedByRestartMessage
+            default:
+                // Waiting Response without a saved question is a finished turn waiting for the user.
+                return BoardTaskRecord(task: task)
+            }
+            task.status = .waitingResponse
+            task.statusMessage = message
+            task.pendingSubmittedPrompt = nil
+            clearProgressReport(task)
+            try await saveTaskContext(taskID: id)
+            playStatusSound(for: task, from: previousStatus)
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    package func resetAllTasksForLifecycle() async throws -> [String] {
+        let all = try listModels()
+        var dirtyManagedWorktrees: [String] = []
+        for snapshot in all {
+            let dirtyForTask = try await withTaskOperationLock(snapshot.id) { () async throws -> [String] in
+                let task: BoardTask
+                do {
+                    task = try requireTask(snapshot.id)
+                } catch let error as PlayhouseManagerError {
+                    if case .taskNotFound = error { return [] }
+                    throw error
+                }
+                var dirtyPaths: [String] = []
+                for record in task.repositoryWorktrees where record.createdByPlayhouse {
+                    guard FileManager.default.fileExists(atPath: record.worktreePath) else { continue }
+                    if (try? await worktreeService.hasChanges(record)) != false {
+                        dirtyPaths.append(record.worktreePath)
+                    } else {
+                        try await worktreeService.remove(record)
+                    }
+                }
+                modelContext.delete(task)
+                try await saveTaskContext(taskID: snapshot.id)
+                return dirtyPaths
+            }
+            dirtyManagedWorktrees.append(contentsOf: dirtyForTask)
+        }
+        return dirtyManagedWorktrees
+    }
+
+
+
+
+    /// How long a delete waits for each lock it takes. A turn holding the task's reservation is
+    /// stopped before this (`ConversationManager.deleteTask`), so a wait this long means some
+    /// other operation is stuck, and the delete fails instead of hanging.
+    package static let deleteLockTimeout: Duration = .seconds(10)
+
+    package func delete(_ id: UUID, diagnostics: [String: String] = [:]) async throws {
+        do {
+            try await withConversationTurnReservation(id, timeout: Self.deleteLockTimeout) {
+                try await self.deleteWhileTurnReserved(id, diagnostics: diagnostics)
+            }
+        } catch let error as FileLockTimeoutError {
+            var fields = ["taskID": id.uuidString, "phase": "lock-wait", "lock": error.purpose]
+            fields.merge(diagnostics) { _, new in new }
+            PlayhouseDiagnostics.record("task.delete.failed", fields: fields)
+            throw BridgeCommandError(
+                code: "operation_failed",
+                message: "Couldn't delete the task: another operation on it didn't finish within \(Int(Self.deleteLockTimeout.components.seconds)) seconds. Try deleting it again."
+            )
+        }
+    }
+
+    package func deleteWhileTurnReserved(_ id: UUID, diagnostics: [String: String]) async throws {
+        try await withTaskOperationLock(id, timeout: Self.deleteLockTimeout) {
+            let task = try requireTask(id)
+            try await withRepositoryAllocationLocks(task.repositoryWorktrees.map(\.repositoryPath), timeout: Self.deleteLockTimeout) {
+                try await deleteTaskWhileLocked(task, diagnostics: diagnostics)
+            }
+        }
+    }
+
+    package func deleteTaskWhileLocked(_ task: BoardTask, diagnostics: [String: String]) async throws {
+        var phase = "worktree-removal"
+        var fields = [
+            "taskID": task.id.uuidString,
+            "taskStatus": task.status.rawValue,
+            "threadID": task.activeConversationID ?? "",
+            "provider": task.conversationProvider.rawValue,
+            "worktreeCount": String(task.repositoryWorktrees.count),
+            "storePath": PlayhouseDiagnostics.storeURL.path
+        ]
+        fields.merge(diagnostics) { _, new in new }
+        PlayhouseDiagnostics.record("task.delete.started", fields: fields)
+        do {
+            for worktree in task.repositoryWorktrees {
+                guard !worktree.isPending else { continue }
+                fields["worktreePath"] = worktree.worktreePath
+                PlayhouseDiagnostics.record("task.delete.worktree_removal_started", fields: fields)
+                try await worktreeService.removeAfterConfirmation(worktree)
+                PlayhouseDiagnostics.record("task.delete.worktree_removal_succeeded", fields: fields)
+            }
+            phase = "swiftdata-save"
+            let taskID = task.id
+            let openCodeSessionID = task.openCodeSessionID
+            let storeDirectory = modelContext.storeURL.deletingLastPathComponent()
+            modelContext.delete(task)
+            try await saveTaskContext(taskID: taskID)
+            try? conversationTranscriptStore().remove(taskID)
+            // The messages OpenCode's turns saved for the token map go with the task.
+            if let openCodeSessionID {
+                OpenCodeRequestLog.remove(sessionID: openCodeSessionID, in: OpenCodeRequestLog.directory(storeDirectory: storeDirectory))
+            }
+            // Follow-ups queued for the task would otherwise stay behind in the shared queue file.
+            try? removeQueuedMessages(taskID: taskID)
+            removeOrphanedTaskPreferences()
+            PlayhouseDiagnostics.record("task.delete.succeeded", fields: fields)
+        } catch {
+            fields["phase"] = phase
+            fields.merge(
+                PlayhouseDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""])
+            ) { _, new in new }
+            PlayhouseDiagnostics.record("task.delete.failed", fields: fields)
+            throw error
+        }
+    }
+
+    package func taskModel(_ id: UUID) throws -> BoardTask {
+        try requireTask(id)
+    }
+
+    package func removeOrphanedTaskPreferences() {
+        do {
+            let taskIDs = try modelContext.fetch(ModelFetch<BoardTask>()).map(\.id)
+            let chatIDs = try modelContext.fetch(ModelFetch<StandaloneChat>()).map(\.id)
+            TaskPreferenceKeys.removeOrphans(keeping: Set(taskIDs + chatIDs), defaults: preferences)
+        } catch {
+            PlayhouseDiagnostics.record("task.preferences.cleanup_failed", fields: PlayhouseDiagnostics.errorFields(error))
+        }
+    }
+
+    /// Resolves whatever owns the conversation with this ID: a board task or the standalone
+    /// chat. The conversation engine runs against this rather than against `BoardTask`, so a
+    /// chat never has to exist as a task to hold a conversation.
+    package func conversationSubject(_ id: UUID) throws -> any ConversationSubject {
+        try requireSubject(id)
+    }
+
+    package func standaloneChatIDs() -> [UUID] {
+        (try? modelContext.fetch(ModelFetch<StandaloneChat>()).map(\.id)) ?? []
+    }
+
+    /// The standalone chat with this ID, or nil when the ID belongs to a board task.
+    package func standaloneChatModel(_ id: UUID) throws -> StandaloneChat? {
+        let descriptor = ModelFetch<StandaloneChat>(.equals("id", id), limit: 1)
+        return try modelContext.fetch(descriptor).first
+    }
+
+    package func setViewedWorkspaceChanges(_ newSnapshots: [WorkspaceViewedChange], taskID: UUID) async throws {
+        let task = try requireTask(taskID)
+        var snapshots = task.viewedWorkspaceChanges
+        for snapshot in newSnapshots {
+            snapshots.removeAll { $0.repository == snapshot.repository && $0.path == snapshot.path }
+            snapshots.append(snapshot)
+        }
+        task.viewedWorkspaceChanges = snapshots
+        try await saveTaskContext(operation: "BoardTaskManager.setViewedWorkspaceChanges", taskID: taskID)
+    }
+
+    package func removeViewedWorkspaceChange(repository: String, path: String, taskID: UUID) async throws {
+        let task = try requireTask(taskID)
+        task.viewedWorkspaceChanges = task.viewedWorkspaceChanges.filter { !($0.repository == repository && $0.path == path) }
+        try await saveTaskContext(operation: "BoardTaskManager.removeViewedWorkspaceChange", taskID: taskID)
+    }
+
+    package func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
+        do {
+            return try requireSubject(taskID).repositoryWorktrees.contains { $0.isSameWorktree(as: record) }
+        } catch PlayhouseManagerError.taskNotFound(_) {
+            return false
+        }
+    }
+
+    package func prepareRepositoryWorktrees(
+        _ id: UUID,
+        fallbackPrompt: String? = nil,
+        resolvedTitle: String? = nil
+    ) async throws -> BoardTask {
+        let initialTask = try requireTask(id)
+        guard initialTask.repositoryWorktrees.contains(where: \.isPending) else { return initialTask }
+        let branchTitle: String
+        if let resolvedTitle, !resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            branchTitle = resolvedTitle
+        } else if ["Generating title…", "Untitled task"].contains(initialTask.title) {
+            // A send names the branch after the prompt it sent; an unsent draft kept beside it
+            // describes later work.
+            let prompt = fallbackPrompt ?? initialTask.savedPrompt ?? initialTask.title
+            branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+        } else {
+            branchTitle = initialTask.title
+        }
+        return try await withTaskOperationLock(id) {
+            // Read under the lock, so a change saved while it was awaited, such as a chip
+            // working out its defaults, is what starts rather than a reason to fail.
+            let task = try requireTask(id)
+            let initialRecords = task.repositoryWorktrees
+            let pending = initialRecords.filter(\.isPending)
+            guard !pending.isEmpty else { return task }
+            return try await withRepositoryAllocationLocks(pending.map(\.repositoryPath)) {
+                var resolved: [RepositoryWorktreeRecord] = []
+                do {
+                    try validateRepositoryAssignments(pending, excludingTaskID: id)
+                    for item in pending {
+                        let requestedBranch = RepositoryWorktreeRecord.isAutomaticBranch(item.branch) ? nil : item.branch
+                        let record = try await worktreeService.resolve(
+                            spec: RepositoryWorktreeSpec(
+                                repositoryPath: item.repositoryPath,
+                                branch: requestedBranch,
+                                branchFrom: item.branchFrom,
+                                mergeTarget: item.mergeTarget
+                            ),
+                            title: branchTitle,
+                            root: worktreeRoot,
+                            reservedBranches: reservedBranches(repositoryPath: item.repositoryPath, excludingTaskID: id)
+                                .union(ownBranches(of: item.repositoryPath, in: task.repositoryWorktrees + resolved))
+                        )
+                        resolved.append(record)
+                    }
+                    let currentTask = try requireTask(id)
+                    guard currentTask.repositoryWorktrees == initialRecords else {
+                        throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while worktrees were being prepared. Try again.")
+                    }
+                    try validateRepositoryAssignments(resolved, excludingTaskID: id)
+                    var iterator = resolved.makeIterator()
+                    currentTask.repositoryWorktrees = currentTask.repositoryWorktrees.map { $0.isPending ? (iterator.next() ?? $0) : $0 }
+                    currentTask.workspaceRootPaths = try Self.normalizeOptionalRoots(currentTask.repositoryWorktrees.map(\.worktreePath) + currentTask.contextFolderPaths)
+                    try await saveTaskContext(taskID: id)
+                    return currentTask
+                } catch {
+                    for record in resolved where record.createdByPlayhouse {
+                        try? await worktreeService.remove(record)
+                    }
+                    throw error
+                }
+            }
+        }
+    }
+
+    package func deleteRequiresConfirmation(_ id: UUID) async throws -> Bool {
+        let task = try requireTask(id)
+        var dirtyWorktree = false
+        for record in task.repositoryWorktrees where !record.isPending {
+            if try await worktreeService.hasChanges(record) {
+                dirtyWorktree = true
+                break
+            }
+        }
+        if dirtyWorktree { return true }
+        let hasSavedConversation = task.hasConversation
+            || !(task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return dirtyWorktree || hasSavedConversation
+    }
+
+    /// Resolves whichever creature owns this conversation. Conversation-level manager methods
+    /// use this so the standalone chat reaches the same shared logic board tasks do; methods
+    /// that genuinely need a workspace use `requireBoardTask` and reject a chat ID by type.
+    package func requireSubject(_ id: UUID) throws -> any ConversationSubject {
+        if let chat = try standaloneChatModel(id) { return chat }
+        return try requireTask(id)
+    }
+
+    package func requireTask(_ id: UUID) throws -> BoardTask {
+        let descriptor = ModelFetch<BoardTask>(.equals("id", id), limit: 1)
+        let readFields = persistenceReadFields(operation: "BoardTaskManager.requireTask", taskID: id)
+        let readStartedAt = DispatchTime.now().uptimeNanoseconds
+        PlayhouseDiagnostics.record("persistence.read.started", fields: readFields)
+        do {
+            guard let task = try modelContext.fetch(descriptor).first else {
+                var fields = readFields
+                fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+                PlayhouseDiagnostics.record("persistence.read.missing", fields: fields)
+                throw PlayhouseManagerError.taskNotFound(id)
+            }
+            var fields = readFields
+            fields["status"] = task.status.rawValue
+            fields["repositoryCount"] = String(task.repositoryWorktrees.count)
+            fields["workspaceRootCount"] = String(task.workspaceRootPaths.count)
+            fields["hasCodexThread"] = String(task.codexThreadID != nil)
+            fields["hasClaudeSession"] = String(task.claudeSessionID != nil)
+            fields["hasOpenCodeSession"] = String(task.openCodeSessionID != nil)
+            fields["hasSavedPrompt"] = String(task.savedPrompt != nil)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+            PlayhouseDiagnostics.record("persistence.read.succeeded", fields: fields)
+            return task
+        } catch {
+            if !(error is PlayhouseManagerError) {
+                var fields = persistenceReadFailureFields(error, context: readFields)
+                fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+                PlayhouseDiagnostics.record("persistence.read.failed", fields: fields)
+            }
+            throw error
+        }
+    }
+
+    package func persistenceReadFields(operation: String, taskID: UUID? = nil) -> [String: String] {
+        let storeURL = Optional(modelContext.storeURL)
+        var fields = [
+            "storePathAvailable": String(storeURL != nil)
+        ]
+        if let storeURL {
+            fields["storePath"] = storeURL.standardizedFileURL.path
+        }
+        fields["readID"] = UUID().uuidString
+        fields["operation"] = operation
+        fields["entity"] = "BoardTask"
+        if let taskID { fields["taskID"] = taskID.uuidString }
+        return fields
+    }
+
+    package func persistenceReadFailureFields(_ error: Error, context: [String: String]) -> [String: String] {
+        var fields = PlayhouseDiagnostics.errorFields(error, includeUserInfoDetails: true)
+        fields.merge(context) { _, new in new }
+        let storeURL = Optional(modelContext.storeURL)
+        fields.merge(PlayhouseDiagnostics.storeContextFields(for: storeURL)) {
+            _, new in new
+        }
+        fields.merge(PlayhouseStore.schemaProbeFields(at: storeURL)) { _, new in new }
+        return fields
+    }
+
+    /// Branches other active tasks use in a repository, which an auto-named branch avoids.
+    package func reservedBranches(repositoryPath: String, excludingTaskID: UUID?) -> Set<String> {
+        let repository = Self.canonicalPath(repositoryPath)
+        var names: Set<String> = []
+        for other in (try? listModels()) ?? [] where other.id != excludingTaskID && other.status != .done {
+            for record in other.repositoryWorktrees where !record.isPending && Self.canonicalPath(record.repositoryPath) == repository {
+                names.insert(record.branch)
+            }
+        }
+        return names
+    }
+
+    /// Branches this task's started worktrees of a repository already use, which another
+    /// worktree of the same repository must not reuse.
+    package func ownBranches(of repositoryPath: String, in records: [RepositoryWorktreeRecord]) -> Set<String> {
+        let repository = Self.canonicalPath(repositoryPath)
+        return Set(records.filter { !$0.isPending && Self.canonicalPath($0.repositoryPath) == repository }.map(\.branch))
+    }
+
+    package func validateRepositoryAssignments(
+        _ candidates: [RepositoryWorktreeRecord],
+        excludingTaskID: UUID?
+    ) throws {
+        for other in try listModels() where other.id != excludingTaskID && other.status != .done {
+            for candidate in candidates {
+                let repositoryPath = Self.canonicalPath(candidate.repositoryPath)
+                if !RepositoryWorktreeRecord.isAutomaticBranch(candidate.branch),
+                   other.repositoryWorktrees.contains(where: {
+                       Self.canonicalPath($0.repositoryPath) == repositoryPath && $0.branch == candidate.branch
+                   }) {
+                    throw PlayhouseManagerError.branchAssigned(branch: candidate.branch, taskTitle: other.title)
+                }
+
+                let candidateWorkspacePath = Self.canonicalPath(
+                    candidate.isPending ? candidate.repositoryPath : candidate.worktreePath
+                )
+                if other.repositoryWorktrees.contains(where: {
+                    !$0.isPending && Self.canonicalPath($0.worktreePath) == candidateWorkspacePath
+                }) {
+                    throw PlayhouseManagerError.repositoryAssigned(candidateWorkspacePath)
+                }
+            }
+        }
+    }
+
+    package static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    package func repositoryRecord(_ path: String, in task: BoardTask) throws -> RepositoryWorktreeRecord {
+        try repositoryRecord(.repository(path), in: task)
+    }
+
+    /// The one worktree of `task` the selector names. A repository path that matches
+    /// several worktrees is ambiguous, and the error lists the worktrees to choose from.
+    package func repositoryRecord(_ selector: RepositoryWorktreeSelector, in task: BoardTask) throws -> RepositoryWorktreeRecord {
+        let standard = { (path: String) in URL(fileURLWithPath: path).standardizedFileURL.path }
+        var matches = task.repositoryWorktrees
+        if let repositoryPath = selector.repositoryPath {
+            let path = standard(repositoryPath)
+            matches = matches.filter { standard($0.repositoryPath) == path }
+            guard !matches.isEmpty else {
+                throw BridgeCommandError(code: "not_found", message: "This repository isn't attached to the task: \(path)")
+            }
+        }
+        if let worktreePath = selector.worktreePath {
+            let path = standard(worktreePath)
+            let canonical = Self.canonicalPath(worktreePath)
+            matches = matches.filter { standard($0.worktreePath) == path || Self.canonicalPath($0.worktreePath) == canonical }
+            guard !matches.isEmpty else {
+                throw BridgeCommandError(code: "not_found", message: "No worktree of this task is at: \(path)")
+            }
+        }
+        guard selector.repositoryPath != nil || selector.worktreePath != nil else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Pass --repo <path> or --worktree <path>.")
+        }
+        if let branch = selector.branch, matches.count > 1 || matches.first?.branch != branch {
+            matches = matches.filter { $0.branch == branch }
+            guard !matches.isEmpty else {
+                throw BridgeCommandError(code: "not_found", message: "No worktree of this task is on branch \(branch).")
+            }
+        }
+        guard matches.count == 1 else {
+            let choices = matches.map { "\($0.worktreePath) (branch \($0.branch)\($0.isPending ? ", not started" : ""))" }
+            // Worktrees not created yet share the repository's path; their branch tells them apart.
+            let sharesPath = Set(matches.map { standard($0.worktreePath) }).count < matches.count
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "Repository \(matches[0].repositoryPath) has \(matches.count) worktrees on this task. Pass --worktree <path>\(sharesPath ? " (and --worktree-branch <branch> for one not started)" : "") to choose one: \(choices.joined(separator: "; "))."
+            )
+        }
+        return matches[0]
+    }
+
+    package static func normalizeRoots(_ roots: [String]) throws -> [String] {
+        let paths = roots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path }
+        guard !paths.isEmpty else { throw PlayhouseManagerError.noWorkspaceRoots }
+        var unique: [String] = []
+        for path in paths where !unique.contains(path) {
+            guard WorkspaceSettings.validDirectoryURL(for: path) != nil else {
+                throw PlayhouseManagerError.unavailableWorkspaceRoot(path)
+            }
+            unique.append(path)
+        }
+        return unique
+    }
+
+    package static func normalizeOptionalRoots(_ roots: [String]) throws -> [String] {
+        let paths = roots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path }
+        var unique: [String] = []
+        for path in paths where !unique.contains(path) {
+            guard WorkspaceSettings.validDirectoryURL(for: path) != nil else {
+                throw PlayhouseManagerError.unavailableWorkspaceRoot(path)
+            }
+            unique.append(path)
+        }
+        return unique
+    }
+
+    package func listModels() throws -> [BoardTask] {
+        let readFields = persistenceReadFields(operation: "BoardTaskManager.listModels")
+        let readStartedAt = DispatchTime.now().uptimeNanoseconds
+        PlayhouseDiagnostics.record("persistence.read.started", fields: readFields)
+        do {
+            let tasks = try modelContext.fetch(ModelFetch<BoardTask>())
+            var fields = readFields
+            fields["resultCount"] = String(tasks.count)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+            PlayhouseDiagnostics.record("persistence.read.succeeded", fields: fields)
+            return tasks
+        } catch {
+            var fields = persistenceReadFailureFields(error, context: readFields)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+            PlayhouseDiagnostics.record("persistence.read.failed", fields: fields)
+            throw error
+        }
+    }
+
+    package func saveTaskContext(operation: String = #function, taskID: UUID? = nil) async throws {
+        let storeURL = Optional(modelContext.storeURL)
+        let writeID = UUID().uuidString
+        let fields = [
+            "writeID": writeID,
+            "operation": operation,
+            "entity": "BoardTask",
+            "taskID": taskID?.uuidString ?? "",
+            "storePath": storeURL?.path ?? "",
+            "hasChanges": String(modelContext.hasChanges)
+        ]
+        PlayhouseDiagnostics.record("persistence.write.started", fields: fields)
+        // The board tasks this save moves between columns, published once it's saved.
+        let moved = modelContext.changedModelsArray.compactMap { $0 as? BoardTask }.filter { $0.statusBeforeSave != nil }
+        defer {
+            // Published only when the save succeeded (nothing is left to save).
+            if !modelContext.hasChanges {
+                for task in moved {
+                    guard let from = task.statusBeforeSave else { continue }
+                    task.statusBeforeSave = nil
+                    if from != task.statusRawValue {
+                        PluginServiceHost.publish(.statusChanged(taskID: task.id.uuidString, from: from, to: task.statusRawValue))
+                    }
+                }
+            }
+        }
+
+        let lockWaitStartedAt = DispatchTime.now().uptimeNanoseconds
+        var lockWaitMilliseconds = 0
+        var lockAcquired = false
+        var attemptCount = 0
+        var retryCount = 0
+        do {
+            guard let storeURL else {
+                throw BridgeFileLockError(message: "Couldn't determine the task-store location for a write lock.")
+            }
+            let lockURL = storeURL.deletingLastPathComponent().appendingPathComponent("store-write.lock")
+            try await withExclusiveFileLocks(at: [lockURL], purpose: "task-store-write") {
+                lockWaitMilliseconds = Int((DispatchTime.now().uptimeNanoseconds - lockWaitStartedAt) / 1_000_000)
+                lockAcquired = true
+                var lockFields = fields
+                lockFields["lockWaitMilliseconds"] = String(lockWaitMilliseconds)
+                PlayhouseDiagnostics.record("persistence.write.lock_acquired", fields: lockFields)
+
+                let retryDelays: [UInt64] = [100_000_000, 300_000_000, 600_000_000]
+                while true {
+                    attemptCount += 1
+                    do {
+                        try modelContext.save()
+                        var successFields = fields
+                        successFields["attemptCount"] = String(attemptCount)
+                        successFields["retryCount"] = String(retryCount)
+                        successFields["lockWaitMilliseconds"] = String(lockWaitMilliseconds)
+                        PlayhouseDiagnostics.record("persistence.write.succeeded", fields: successFields)
+                        return
+                    } catch {
+                        guard Self.isStoreOpenFailure(error), retryCount < retryDelays.count else {
+                            throw error
+                        }
+                        let retryDelayMilliseconds = retryDelays[retryCount] / 1_000_000
+                        var retryFields = PlayhouseDiagnostics.errorFields(error, includeUserInfoDetails: true)
+                        retryFields.merge(fields) { _, new in new }
+                        retryFields["attempt"] = String(attemptCount)
+                        retryFields["retryCount"] = String(retryCount + 1)
+                        retryFields["retryDelayMilliseconds"] = String(retryDelayMilliseconds)
+                        retryFields["lockWaitMilliseconds"] = String(lockWaitMilliseconds)
+                        PlayhouseDiagnostics.record("persistence.write.retry", fields: retryFields)
+                        try await Task.sleep(nanoseconds: retryDelays[retryCount])
+                        retryCount += 1
+                    }
+                }
+            }
+        } catch {
+            var failureFields = PlayhouseDiagnostics.errorFields(error, includeUserInfoDetails: true)
+            failureFields.merge(fields) { _, new in new }
+            failureFields["attemptCount"] = String(attemptCount)
+            failureFields["retryCount"] = String(retryCount)
+            failureFields["lockWaitMilliseconds"] = String(lockAcquired
+                ? lockWaitMilliseconds
+                : Int((DispatchTime.now().uptimeNanoseconds - lockWaitStartedAt) / 1_000_000))
+            PlayhouseDiagnostics.record("persistence.write.failed", fields: failureFields)
+            throw error
+        }
+    }
+
+}

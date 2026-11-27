@@ -585,7 +585,7 @@ extension PlayhouseUITests {
         relaunchApp()
         openTask(named: "Worktree profile")
         XCTAssertEqual(element("message-composer").value as? String, "Keep this draft after restart.")
-        let store = dataDirectory.appendingPathComponent("Playhouse-v2.store")
+        let store = dataDirectory.appendingPathComponent("Playhouse-v3.sqlite")
         let log = dataDirectory.appendingPathComponent("Diagnostics.jsonl")
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.path))
         let diagnostics = try String(contentsOf: log, encoding: .utf8).split(whereSeparator: \.isNewline).compactMap {

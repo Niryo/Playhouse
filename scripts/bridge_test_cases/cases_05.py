@@ -23,22 +23,22 @@ class BridgeTestCases05:
         self.assertIsNone(self.pull_request_mode(task["id"]), "A new task has no saved mode, so it is in Manual mode.")
 
         # Tasks saved before the mode was the plugin's kept it in their own columns. Seed those real
-        # SwiftData rows and forget that the import ran; the bridge imports them once, at the start of
+        # stored rows and forget that the import ran; the bridge imports them once, at the start of
         # its next request. That request goes to the daemon that already holds this case's preferences:
         # a second process on a path-named defaults suite (the tests' isolated preferences, not the app's)
         # reads its own writes stale, which a real launch on the app's suite never does.
         legacy_columns = {
-            "Legacy PR autopilot": ("ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 0", "autopilot"),
-            "Legacy PR merge": ("ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 1", "merge"),
-            "Legacy PR manual": ("ZAUTOCREATEPULLREQUESTONREVIEW = 0, ZPULLREQUESTAUTOPILOT = 0", "manual"),
-            "Legacy PR default": ("ZAUTOCREATEPULLREQUESTONREVIEW = 1, ZPULLREQUESTAUTOPILOT = 0", None),
-            "Legacy PR already chosen": ("ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 1", "manual"),
+            "Legacy PR autopilot": ("pullRequestAutopilot = 1, pullRequestAutoMerge = 0", "autopilot"),
+            "Legacy PR merge": ("pullRequestAutopilot = 1, pullRequestAutoMerge = 1", "merge"),
+            "Legacy PR manual": ("autoCreatePullRequestOnReview = 0, pullRequestAutopilot = 0", "manual"),
+            "Legacy PR default": ("autoCreatePullRequestOnReview = 1, pullRequestAutopilot = 0", None),
+            "Legacy PR already chosen": ("pullRequestAutopilot = 1, pullRequestAutoMerge = 1", "manual"),
         }
         legacy_ids = {title: self.create_task(title=title)["id"] for title in legacy_columns}
         self.set_pull_request_mode(legacy_ids["Legacy PR already chosen"], "manual")
-        with sqlite3.connect(self.data_directory / "Playhouse-v2.store") as database:
+        with sqlite3.connect(self.data_directory / "Playhouse-v3.sqlite") as database:
             for title, (columns, _) in legacy_columns.items():
-                seeded = database.execute(f"UPDATE ZBOARDTASK SET {columns} WHERE ZTITLE = ?", (title,))
+                seeded = database.execute(f"UPDATE board_tasks SET {columns} WHERE title = ?", (title,))
                 self.assertEqual(seeded.rowcount, 1, f"Seed the legacy mode columns of {title}.")
         # Forget, too, that the tasks saved while PR was the default had it saved as their own: a
         # first launch since Manual became the default runs both, the import first.

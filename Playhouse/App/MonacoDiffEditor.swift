@@ -2,6 +2,10 @@ import AppKit
 import Foundation
 import SwiftUI
 import WebKit
+import PlayhouseCore
+import PlayhouseViews
+import PlayhouseAtoms
+import PlayhouseUI
 
 /// Monaco is expensive to boot, so Playhouse loads it once into a single web view that
 /// stays alive for the whole session. Opening a diff reuses that warm editor and only
@@ -238,23 +242,13 @@ extension MonacoDiffWebViewHost: WKNavigationDelegate {
         prewarm()
     }
 }
-
-/// What Monaco has actually rendered, as opposed to the diff the app has asked for.
-struct MonacoDiffPresentation: Equatable {
-    /// Which load of Monaco rendered it: this stays at "1" for a warm session.
-    let editorTag: String
-    let path: String
-    /// True when the editor was already loaded when this diff was opened.
-    let reusedWarmEditor: Bool
-}
-
 struct MonacoDiffEditor: NSViewRepresentable {
     let diff: WorkspaceFileDiff
     let theme: String
     @Binding var isReady: Bool
     @Binding var loadError: String?
     @Binding var diffChangeCount: Int?
-    @Binding var presentation: MonacoDiffPresentation?
+    @Binding var presentation: DiffEditorPresentation?
 
     fileprivate struct Payload: Encodable {
         let path: String
@@ -309,7 +303,7 @@ struct MonacoDiffEditor: NSViewRepresentable {
         var onReady: ((Bool) -> Void)?
         var onError: ((String?) -> Void)?
         var onDiffComputed: ((Int?) -> Void)?
-        var onPresented: ((MonacoDiffPresentation?) -> Void)?
+        var onPresented: ((DiffEditorPresentation?) -> Void)?
 
         private var latestDiff: WorkspaceFileDiff?
         private var latestTheme = "vs"
@@ -407,7 +401,7 @@ struct MonacoDiffEditor: NSViewRepresentable {
                     self.webView?.setAccessibilityValue(Self.accessibilityDiffValue(diff))
                     self.onError?(nil)
                     self.onReady?(true)
-                    self.onPresented?(MonacoDiffPresentation(
+                    self.onPresented?(DiffEditorPresentation(
                         editorTag: webView.identifier?.rawValue ?? "unknown",
                         path: diff.path,
                         reusedWarmEditor: self.attachedToWarmEditor
@@ -450,52 +444,6 @@ struct MonacoDiffEditor: NSViewRepresentable {
             onReady?(false)
             onPresented?(nil)
             onError?(failure)
-        }
-    }
-}
-
-struct EscapeKeyMonitor: NSViewRepresentable {
-    let onEscape: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onEscape: onEscape)
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        context.coordinator.startMonitoring()
-        return view
-    }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        context.coordinator.onEscape = onEscape
-    }
-
-    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
-        coordinator.stopMonitoring()
-    }
-
-    final class Coordinator {
-        var onEscape: () -> Void
-        private var eventMonitor: Any?
-
-        init(onEscape: @escaping () -> Void) {
-            self.onEscape = onEscape
-        }
-
-        func startMonitoring() {
-            guard eventMonitor == nil else { return }
-            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard event.keyCode == 53, let self else { return event }
-                self.onEscape()
-                return nil
-            }
-        }
-
-        func stopMonitoring() {
-            guard let eventMonitor else { return }
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
         }
     }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-// Focused unit checks of Playhouse/App/BoundedWaits.swift, compiled together with it and run by
+// Focused unit checks of Playhouse/Core/Bridge/BoundedWaits.swift, compiled together with it and run by
 // scripts/test-e2e.sh before the bridge suite. They pin the bounded waits that keep deleting a
 // task from hanging on a turn that won't stop; the bridge cases
 // `test_claude_delete_stops_live_turn_immediately` and `test_codex_delete_stops_live_turn_immediately`

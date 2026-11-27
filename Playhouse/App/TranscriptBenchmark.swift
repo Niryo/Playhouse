@@ -2,6 +2,10 @@ import AppKit
 import Darwin
 import QuartzCore
 import SwiftUI
+import PlayhouseCore
+import PlayhouseViews
+import PlayhouseAtoms
+import PlayhouseUI
 
 #if PLAYHOUSE_TRANSCRIPT_BENCHMARK
 /// A development benchmark of the transcript's reply rendering, run by

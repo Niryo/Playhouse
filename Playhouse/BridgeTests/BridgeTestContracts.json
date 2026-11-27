@@ -89,15 +89,19 @@
   },
   {
     "id": "test_persistence_store_open_failure_records_detailed_error",
-    "expectation": "A real ModelContainer open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying NSError domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps Playhouse open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic."
+    "expectation": "A real task-store open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying error domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps Playhouse open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic."
   },
   {
     "id": "test_persistence_read_failure_records_detailed_error",
-    "expectation": "A real SwiftData fetch failure against an isolated store with a missing task column returns an error and logs a correlated read ID, NSError domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record."
+    "expectation": "A real task-store read failure against an isolated store with a missing task column returns an error and logs a correlated read ID, error domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record."
   },
   {
-    "id": "test_task_store_repairs_missing_pending_prompt_column",
-    "expectation": "A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and its saved prompt, which a store from before drafts were flagged does not restore as a draft, and the visible app opens the migrated store with an empty composer that keeps the saved prompt through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only saved prompt data survives import, and a subsequent edited draft survives restart without reimport."
+    "id": "test_task_store_migrates_legacy_swiftdata_store",
+    "expectation": "A real legacy SwiftData task store from before submitted prompts and drafts, with committed WAL-only data, is moved once into the GRDB task store while a concurrent CLI/XPC read waits on the held schema lock; the task keeps its title and saved prompt, which a store from before drafts were flagged does not restore as a draft, and its elapsed time stays zero. The legacy file stays unchanged and is never read again: the visible app opens the migrated store with an empty composer, a later edited draft survives restarts, and the migration is recorded once."
+  },
+  {
+    "id": "test_task_store_migrates_current_swiftdata_store",
+    "expectation": "A real SwiftData task store written by the last SwiftData build, with tasks in every column, a repository, a context folder, an unsent draft with an image, call usage, pending comments, a past pull request, one-time and paused recurring schedules, the standalone chat, a plugin editor and a parallel bubble, is moved into the GRDB task store with every stored column value intact; CLI/XPC reads return exactly what that build returned, the SwiftData file stays unchanged, and the visible app shows the migrated tasks in their columns with the draft in its composer."
   },
   {
     "id": "test_test_bundle_rejects_unisolated_data_directory",

@@ -1,0 +1,35 @@
+# Keeps Playhouse's shared modules ready for a Linux port (docs/linux-port-readiness.md):
+# PlayhouseCore and PlayhouseUI build on Linux and the core tests pass there, and no
+# macOS-only code leaks out of the places a port replaces.
+name: Linux core
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  module-boundaries:
+    name: Module boundaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check module boundaries
+        run: python3 scripts/check-module-boundaries.py
+
+  linux-core:
+    name: Build and test on Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the Linux UI spike's image (Ubuntu 25.10, Swift 6.3.2)
+        uses: docker/build-push-action@v6
+        with:
+          context: spikes/linux-ui
+          tags: playhouse-linux-ui
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build PlayhouseCore and PlayhouseUI, run the core tests
+        run: scripts/test-linux-core.sh

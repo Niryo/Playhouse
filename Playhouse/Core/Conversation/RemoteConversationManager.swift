@@ -1,0 +1,649 @@
+import Foundation
+
+/// A window's view of conversation operations. Everything that starts, steers,
+/// pauses, answers, or inspects a provider turn runs in the bridge daemon, which
+/// is the only process that owns provider state, so a window and the CLI always
+/// reach the same turn. The operations that only read or write Playhouse's own
+/// store (queued follow-ups, model and effort choices) stay in this process: the
+/// store is shared and safe across processes, and the window needs those answers
+/// synchronously while it renders.
+@MainActor
+package struct RemoteConversationManager {
+    private let daemon: DaemonClient
+    private let runtime: ConversationRuntimeModel
+    private let store: ConversationManager
+
+    package init(daemon: DaemonClient, runtime: ConversationRuntimeModel, modelContext: PlayhouseModelContext) {
+        self.daemon = daemon
+        self.runtime = runtime
+        // These clients are never started: the store operations below don't use them.
+        store = ConversationManager(
+            tasks: BoardTaskManager(modelContext: modelContext),
+            clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient(), opencode: OpenCodeClient())
+        )
+    }
+
+    private func id(_ taskID: UUID) -> BridgeValue { .string(taskID.uuidString) }
+
+    private func forwardUpdates(_ onUpdate: @escaping (ConversationUpdate) -> Void) -> (BridgeEvent) -> Void {
+        { event in
+            guard let update = try? event.payload.decoded(ConversationUpdate.self) else { return }
+            onUpdate(update)
+        }
+    }
+
+    // MARK: - Store-only operations
+
+    package func modelID(taskID: UUID) throws -> String? { try store.modelID(taskID: taskID) }
+    package func modelID(taskID: UUID, provider: ConversationProvider) throws -> String? {
+        try store.modelID(taskID: taskID, provider: provider)
+    }
+    package func effort(taskID: UUID) throws -> ConversationEffort { try store.effort(taskID: taskID) }
+    package func contextMode(taskID: UUID) throws -> ConversationContextMode { try store.contextMode(taskID: taskID) }
+    package func setModelID(taskID: UUID, modelID: String, provider: ConversationProvider? = nil) async throws {
+        try await store.setModelID(taskID: taskID, modelID: modelID, provider: provider)
+    }
+    package func cachedModels(taskID: UUID) throws -> [ConversationModelOption] { try store.cachedModels(taskID: taskID) }
+    package func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
+        try store.cachedModels(taskID: taskID, provider: provider)
+    }
+    package func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] { try store.queuedMessages(taskID: taskID) }
+    package func savedUserInputRequest(taskID: UUID) throws -> ConversationUserInputRequest? { try store.savedUserInputRequest(taskID: taskID) }
+    package func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] { try store.answeredAsyncQuestionIDs(taskID: taskID) }
+    package func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = []) throws -> QueuedConversationMessage {
+        try store.queueMessage(taskID: taskID, text: text, imageDataURLs: imageDataURLs)
+    }
+    package func removeQueuedMessage(taskID: UUID, messageID: UUID) throws {
+        try store.removeQueuedMessage(taskID: taskID, messageID: messageID)
+    }
+
+    // MARK: - Provider operations, owned by the daemon
+
+    /// With `messageLimit`, only the newest messages (before `beforeMessageID`,
+    /// when given) cross the bridge, with a count of the earlier ones left.
+    /// `afterMessageID` and `chatPageID` instead read forward: the messages after
+    /// that message, or from the first message of that standalone chat page.
+    package func history(
+        taskID: UUID,
+        messageLimit: Int? = nil,
+        beforeMessageID: String? = nil,
+        afterMessageID: String? = nil,
+        chatPageID: String? = nil,
+        onActionRequest: @escaping () -> Void = {}
+    ) async throws -> ConversationHistory {
+        // The window loads earlier messages' images as it shows them (`messageImages`).
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "deferImages": .boolean(true)]
+        if let messageLimit { arguments["limit"] = .string(String(messageLimit)) }
+        if let beforeMessageID { arguments["before"] = .string(beforeMessageID) }
+        if let afterMessageID { arguments["after"] = .string(afterMessageID) }
+        if let chatPageID { arguments["page"] = .string(chatPageID) }
+        // A read changes no running turn, so it doesn't re-read the runtime state either: the
+        // subscription keeps that current, and a fresh copy re-rendered every view watching it.
+        let result = try await daemon.call("conversation.history", arguments) { event in
+            if event.type == "action_request" { onActionRequest() }
+        }
+        return try result.decoded(ConversationHistory.self)
+    }
+
+    /// The newest `messageLimit` messages and the task as the daemon reconciled it for the read,
+    /// so opening a task takes one request rather than a reconcile and then a read.
+    package func historyOnOpen(
+        taskID: UUID,
+        messageLimit: Int,
+        onActionRequest: @escaping () -> Void = {}
+    ) async throws -> (history: ConversationHistory, reconciled: BoardTaskRecord?) {
+        let result = try await daemon.call("conversation.history", [
+            "taskID": id(taskID), "deferImages": .boolean(true), "includeTask": .boolean(true),
+            "limit": .string(String(messageLimit)),
+        ]) { event in
+            if event.type == "action_request" { onActionRequest() }
+        }
+        return (try result.decoded(ConversationHistory.self), try? result.object?["task"]?.decoded(BoardTaskRecord.self))
+    }
+
+    /// The images of messages a history read marked `imagesDeferred`.
+    package func messageImages(taskID: UUID, messageIDs: [String]) async throws -> [ConversationMessageImages] {
+        let result = try await daemon.call("conversation.images", [
+            "taskID": id(taskID), "messages": .array(messageIDs.map(BridgeValue.string)),
+        ])
+        // Read in place: decoding through JSON would copy megabytes of image data on the main actor.
+        guard case .array(let entries) = result else { return [] }
+        return entries.compactMap { entry in
+            guard let id = entry.object?["id"]?.string else { return nil }
+            return ConversationMessageImages(
+                id: id, turnID: entry.object?["turnID"]?.string, imageDataURLs: entry.object?["imageDataURLs"]?.strings ?? []
+            )
+        }
+    }
+
+    package func send(
+        taskID: UUID,
+        text: String,
+        imageDataURLs: [String] = [],
+        mode: ConversationMode = .code,
+        modelID: String? = nil,
+        statusBeforeSubmission: TaskStatus? = nil,
+        contextPageIDs: [String] = [],
+        startsNewChatPage: Bool = false,
+        onTurnStarting: (() -> Void)? = nil,
+        onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
+        onUserInput: @escaping (ConversationUserInputRequest) -> Void = { _ in }
+    ) async throws -> ConversationHistory {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID),
+            "message": .string(text),
+            "mode": .string(mode.rawValue),
+            "images": .array(imageDataURLs.map(BridgeValue.string)),
+            "reportTurnStarting": .boolean(onTurnStarting != nil),
+            // The window keeps its own paged transcript, so the finished turn
+            // only needs to bring back the newest page rather than everything.
+            "historyLimit": .string(String(ConversationHistory.windowPageSize)),
+            "deferImages": .boolean(true),
+        ]
+        if let modelID { arguments["model"] = .string(modelID) }
+        if let statusBeforeSubmission { arguments["statusBeforeSubmission"] = .string(statusBeforeSubmission.rawValue) }
+        // Standalone chat only: pages an annotation quotes, carried for this turn.
+        if !contextPageIDs.isEmpty { arguments["contextPages"] = .array(contextPageIDs.map(BridgeValue.string)) }
+        // Standalone chat only: the turn opens a new page, without the last page's context.
+        if startsNewChatPage { arguments["newPage"] = .boolean(true) }
+        let forward = forwardUpdates(onUpdate)
+        do {
+            let result = try await daemon.call("conversation.send", arguments) { event in
+                if event.type == "turn_starting" {
+                    onTurnStarting?()
+                    return
+                }
+                forward(event)
+                if event.type == "user_input",
+                   let request = (try? event.payload.decoded(ConversationUpdate.self))?.userInputRequest {
+                    onUserInput(request)
+                }
+            }
+            return try result.decoded(ConversationHistory.self)
+        } catch {
+            await recoverFromFailedTurn(taskID: taskID, error: error)
+            // The agent outlives its daemon: the fresh daemon that just reconciled the task
+            // reattached a turn that is still running, so this send continues by following it.
+            if error is DaemonClientError,
+               (try? await watch(taskID: taskID, onUpdate: onUpdate, onUserInput: onUserInput)) == true,
+               let history = try? await history(taskID: taskID, messageLimit: ConversationHistory.windowPageSize) {
+                return history
+            }
+            throw error
+        }
+    }
+
+    /// Streams the task's running turn, whoever started it (another window, the CLI,
+    /// a schedule, or a turn the daemon reattached after a restart), until it ends.
+    /// Returns false when no turn was running.
+    package func watch(
+        taskID: UUID,
+        onUpdate: @escaping (ConversationUpdate) -> Void,
+        onUserInput: @escaping (ConversationUserInputRequest) -> Void = { _ in }
+    ) async throws -> Bool {
+        let forward = forwardUpdates(onUpdate)
+        let result = try await daemon.call("conversation.events.subscribe", ["taskID": id(taskID)]) { event in
+            guard event.type != "watching" else { return }
+            forward(event)
+            if event.type == "user_input",
+               let request = (try? event.payload.decoded(ConversationUpdate.self))?.userInputRequest {
+                onUserInput(request)
+            }
+        }
+        return result.object?["watched"]?.bool ?? false
+    }
+
+    /// The failure may be a pause, which the window reads from the daemon's state.
+    /// If the daemon itself went away mid-turn, nothing is left to finish the turn
+    /// or settle its status, so a fresh daemon reconciles the task now instead of
+    /// leaving it In Progress with no turn behind it.
+    private func recoverFromFailedTurn(taskID: UUID, error: Error) async {
+        await runtime.refresh()
+        if error is DaemonClientError {
+            _ = try? await reconcileLifecycleStatusOnOpen(taskID: taskID)
+        }
+    }
+
+    package func answerUserInput(
+        taskID: UUID,
+        request: ConversationUserInputRequest,
+        answers: [String: [String]],
+        modelID: String? = nil,
+        onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
+    ) async throws -> Bool {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID),
+            "requestID": .string(request.id),
+            "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) }),
+        ]
+        if let modelID { arguments["model"] = .string(modelID) }
+        do {
+            let result = try await daemon.call("conversation.answer_user_input", arguments, onEvent: forwardUpdates(onUpdate))
+            return result.object?["accepted"]?.bool ?? false
+        } catch {
+            await recoverFromFailedTurn(taskID: taskID, error: error)
+            throw error
+        }
+    }
+
+    package func steer(taskID: UUID, text: String, imageDataURLs: [String] = [], sentAt: Date = Date()) async throws -> Bool {
+        let result = try await daemon.call("conversation.steer", [
+            "taskID": id(taskID),
+            "message": .string(text),
+            "images": .array(imageDataURLs.map(BridgeValue.string)),
+            "queueIfMissed": .boolean(false),
+            "sentAt": .decimal(sentAt.timeIntervalSince1970),
+        ])
+        return result.object?["accepted"]?.bool ?? false
+    }
+
+    package func queueMissedSteer(taskID: UUID, text: String, imageDataURLs: [String] = []) async throws -> QueuedConversationMessage {
+        try await daemon.call("conversation.queue.missed_steer", [
+            "taskID": id(taskID),
+            "message": .string(text),
+            "images": .array(imageDataURLs.map(BridgeValue.string)),
+        ]).decoded(QueuedConversationMessage.self)
+    }
+
+    package func steerQueuedMessage(taskID: UUID, messageID: UUID, sentAt: Date = Date()) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
+        let result = try await daemon.call("conversation.queue.steer", [
+            "taskID": id(taskID), "messageID": .string(messageID.uuidString), "sentAt": .decimal(sentAt.timeIntervalSince1970),
+        ])
+        let queued = result.object?["queued"]?.bool ?? false
+        return (result.object?["text"]?.string ?? "", result.object?["images"]?.strings ?? [], !queued)
+    }
+
+    package func retryQueuedMessage(
+        taskID: UUID,
+        messageID: UUID,
+        onUserInput: @escaping (ConversationUserInputRequest) -> Void = { _ in }
+    ) async throws -> Bool {
+        let result = try await daemon.call("conversation.queue.retry", ["taskID": id(taskID), "messageID": .string(messageID.uuidString)]) { event in
+            guard event.type == "user_input",
+                  let request = (try? event.payload.decoded(ConversationUpdate.self))?.userInputRequest else { return }
+            onUserInput(request)
+        }
+        return result.object?["retried"]?.bool ?? false
+    }
+
+    package func answerAsyncQuestion(
+        taskID: UUID,
+        question: ConversationMessage,
+        answers: [String]
+    ) async throws -> (text: String, queued: Bool, history: ConversationHistory?) {
+        let result = try await daemon.call("conversation.answer_async", [
+            "taskID": id(taskID),
+            "itemID": .string(question.id),
+            "answers": .array(answers.map(BridgeValue.string)),
+            "historyLimit": .string(String(ConversationHistory.windowPageSize)),
+            "deferImages": .boolean(true),
+        ])
+        let history = try result.object?["history"].map { try $0.decoded(ConversationHistory.self) }
+        return (result.object?["text"]?.string ?? "", result.object?["queued"]?.bool ?? false, history)
+    }
+
+    package func interrupt(taskID: UUID, confirmationID: String? = nil) async throws -> Bool {
+        var arguments = ["taskID": id(taskID)]
+        if let confirmationID { arguments["confirmationID"] = .string(confirmationID) }
+        let result = try await daemon.call("conversation.stop", arguments)
+        if let confirmation = result.object?["confirmationID"]?.string {
+            throw ConversationStopConfirmation(id: confirmation)
+        }
+        return result.object?["interrupted"]?.bool ?? false
+    }
+
+    package func models(taskID: UUID) async throws -> [ConversationModelOption] {
+        let result = try await daemon.call("conversation.models", ["taskID": id(taskID)])
+        return try result.object?["models"].map { try $0.decoded([ConversationModelOption].self) } ?? []
+    }
+
+    package func setEffort(taskID: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
+        try await daemon.call("conversation.effort.set", ["taskID": id(taskID), "effort": .string(effort.rawValue)])
+            .decoded(BoardTaskRecord.self)
+    }
+
+    package func setContextMode(taskID: UUID, mode: ConversationContextMode) async throws -> BoardTaskRecord {
+        try await daemon.call("conversation.context-mode.set", ["taskID": id(taskID), "mode": .string(mode.rawValue)])
+            .decoded(BoardTaskRecord.self)
+    }
+
+    /// The saved task and the provider dividers the switch recorded.
+    package func setProvider(
+        taskID: UUID, provider: ConversationProvider, remembersDefault: Bool = true
+    ) async throws -> (record: BoardTaskRecord, providerBoundaries: [ConversationProviderBoundary]) {
+        let result = try await daemon.call("conversation.provider.set", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "remembersDefault": .boolean(remembersDefault),
+        ])
+        let boundaries = try result.object?["providerBoundaries"].map { try $0.decoded([ConversationProviderBoundary].self) } ?? []
+        return (try result.decoded(BoardTaskRecord.self), boundaries)
+    }
+
+    // MARK: - Skills, read and managed by the daemon like the CLI's `skills` commands
+
+    package func skills(taskID: UUID, includeBundled: Bool) async throws -> SkillCatalog {
+        try await daemon.call("skills.list", ["taskID": id(taskID), "includeBundled": .boolean(includeBundled)])
+            .decoded(SkillCatalog.self)
+    }
+
+    /// The skill's SKILL.md exactly as written, or nil for a skill without a folder.
+    package func skillContent(taskID: UUID, skillID: String) async throws -> String? {
+        let result = try await daemon.call("skills.get", ["taskID": id(taskID), "skillID": .string(skillID)])
+        return result.object?["content"]?.string
+    }
+
+    package func createSkill(
+        taskID: UUID, name: String, description: String, body: String, fields: [String: String],
+        scope: SkillScope, root: String?
+    ) async throws -> SkillRecord {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID), "name": .string(name), "description": .string(description),
+            "body": .string(body), "scope": .string(scope.rawValue), "fields": .object(fields.mapValues(BridgeValue.string)),
+        ]
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("skills.create", arguments).decoded(SkillRecord.self)
+    }
+
+    /// Replaces the whole SKILL.md; the daemon rejects a renamed or description-less file.
+    package func updateSkillContent(taskID: UUID, skillID: String, content: String) async throws -> SkillRecord {
+        try await daemon.call("skills.update", [
+            "taskID": id(taskID), "skillID": .string(skillID), "content": .string(content),
+        ]).decoded(SkillRecord.self)
+    }
+
+    package func deleteSkills(taskID: UUID, skillIDs: [String]) async throws {
+        _ = try await daemon.call("skills.delete", ["taskID": id(taskID), "skillIDs": .array(skillIDs.map(BridgeValue.string))])
+    }
+
+    /// Opens a task whose agent repairs the skills, and returns it with the prompt to send.
+    package func fixSkills(taskID: UUID, skillIDs: [String]) async throws -> (task: BoardTaskRecord, prompt: String) {
+        let result = try await daemon.call("skills.fix", ["taskID": id(taskID), "skillIDs": .array(skillIDs.map(BridgeValue.string))])
+        guard let task = result.object?["task"], let prompt = result.object?["prompt"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new task.")
+        }
+        return (try task.decoded(BoardTaskRecord.self), prompt)
+    }
+
+    package func moveSkill(taskID: UUID, skillID: String, scope: SkillScope, root: String?) async throws -> SkillRecord {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "skillID": .string(skillID), "scope": .string(scope.rawValue)]
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("skills.move", arguments).decoded(SkillRecord.self)
+    }
+
+    package func setSkillEnabled(taskID: UUID, skillID: String, enabled: Bool) async throws -> SkillRecord {
+        try await daemon.call("skills.enable", [
+            "taskID": id(taskID), "skillID": .string(skillID), "enabled": .boolean(enabled), "includeBundled": .boolean(true),
+        ]).decoded(SkillRecord.self)
+    }
+
+    package func linkSkill(taskID: UUID, skillID: String, linked: Bool) async throws -> SkillRecord {
+        try await daemon.call(linked ? "skills.link" : "skills.unlink", ["taskID": id(taskID), "skillID": .string(skillID)])
+            .decoded(SkillRecord.self)
+    }
+
+    /// What the composer's `@` menu can mention, read like the CLI's `mentions list`.
+    package func mentions(taskID: UUID) async throws -> MentionCatalog {
+        try await daemon.call("mentions.list", ["taskID": id(taskID)]).decoded(MentionCatalog.self)
+    }
+
+    package func rules(taskID: UUID) async throws -> RuleCatalog {
+        try await daemon.call("rules.list", ["taskID": id(taskID)]).decoded(RuleCatalog.self)
+    }
+
+    package func ruleContent(taskID: UUID, ruleID: String) async throws -> String {
+        let result = try await daemon.call("rules.get", ["taskID": id(taskID), "ruleID": .string(ruleID)])
+        guard let content = result.object?["content"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the rule's text.")
+        }
+        return content
+    }
+
+    /// A nil name writes the shared AGENTS.md; a name writes a topic file in `.claude/rules`.
+    package func createRule(taskID: UUID, name: String?, paths: [String], body: String, scope: RuleScope, root: String?) async throws -> RuleRecord {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID), "scope": .string(scope.rawValue), "body": .string(body),
+            "paths": .array(paths.map(BridgeValue.string)),
+        ]
+        if let name { arguments["name"] = .string(name) }
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("rules.create", arguments).decoded(RuleRecord.self)
+    }
+
+    package func updateRuleContent(taskID: UUID, ruleID: String, content: String) async throws -> RuleRecord {
+        try await daemon.call("rules.update", [
+            "taskID": id(taskID), "ruleID": .string(ruleID), "content": .string(content),
+        ]).decoded(RuleRecord.self)
+    }
+
+    package func deleteRules(taskID: UUID, ruleIDs: [String]) async throws {
+        _ = try await daemon.call("rules.delete", ["taskID": id(taskID), "ruleIDs": .array(ruleIDs.map(BridgeValue.string))])
+    }
+
+    package func setRuleEnabled(taskID: UUID, ruleID: String, enabled: Bool) async throws -> RuleRecord {
+        try await daemon.call("rules.enable", [
+            "taskID": id(taskID), "ruleID": .string(ruleID), "enabled": .boolean(enabled),
+        ]).decoded(RuleRecord.self)
+    }
+
+    package func linkRule(taskID: UUID, ruleID: String, linked: Bool) async throws -> RuleRecord {
+        try await daemon.call(linked ? "rules.link" : "rules.unlink", ["taskID": id(taskID), "ruleID": .string(ruleID)])
+            .decoded(RuleRecord.self)
+    }
+
+    /// Opens a task whose agent repairs the rules, and returns it with the prompt to send.
+    package func fixRules(taskID: UUID, ruleIDs: [String]) async throws -> (task: BoardTaskRecord, prompt: String) {
+        let result = try await daemon.call("rules.fix", ["taskID": id(taskID), "ruleIDs": .array(ruleIDs.map(BridgeValue.string))])
+        guard let task = result.object?["task"], let prompt = result.object?["prompt"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new task.")
+        }
+        return (try task.decoded(BoardTaskRecord.self), prompt)
+    }
+
+    package func mcpServers(taskID: UUID) async throws -> McpCatalog {
+        try await daemon.call("mcp.list", ["taskID": id(taskID)]).decoded(McpCatalog.self)
+    }
+
+    package func mcpServerConfig(taskID: UUID, serverID: String) async throws -> McpServerConfig {
+        let result = try await daemon.call("mcp.get", ["taskID": id(taskID), "serverID": .string(serverID)])
+        guard let config = result.object?["config"] else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the server's definition.")
+        }
+        return try config.decoded(McpServerConfig.self)
+    }
+
+    private static func value(_ config: McpServerConfig) -> BridgeValue {
+        var object: [String: BridgeValue] = [
+            "transport": .string(config.transport.rawValue),
+            "args": .array(config.args.map(BridgeValue.string)),
+            "env": .object(config.env.mapValues(BridgeValue.string)),
+            "headers": .object(config.headers.mapValues(BridgeValue.string)),
+        ]
+        if let command = config.command { object["command"] = .string(command) }
+        if let url = config.url { object["url"] = .string(url) }
+        return .object(object)
+    }
+
+    /// A global server goes into both providers' own configuration; a repository one into its `.mcp.json`.
+    package func createMcpServer(taskID: UUID, name: String, config: McpServerConfig, scope: McpScope, root: String?) async throws -> McpServerRecord {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID), "scope": .string(scope.rawValue), "name": .string(name), "config": Self.value(config),
+        ]
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("mcp.create", arguments).decoded(McpServerRecord.self)
+    }
+
+    package func updateMcpServer(taskID: UUID, serverID: String, config: McpServerConfig) async throws -> McpServerRecord {
+        try await daemon.call("mcp.update", [
+            "taskID": id(taskID), "serverID": .string(serverID), "config": Self.value(config),
+        ]).decoded(McpServerRecord.self)
+    }
+
+    package func deleteMcpServers(taskID: UUID, serverIDs: [String]) async throws {
+        _ = try await daemon.call("mcp.delete", ["taskID": id(taskID), "serverIDs": .array(serverIDs.map(BridgeValue.string))])
+    }
+
+    package func setMcpServerEnabled(taskID: UUID, serverID: String, enabled: Bool) async throws -> McpServerRecord {
+        try await daemon.call("mcp.enable", [
+            "taskID": id(taskID), "serverID": .string(serverID), "enabled": .boolean(enabled),
+        ]).decoded(McpServerRecord.self)
+    }
+
+    package func linkMcpServer(taskID: UUID, serverID: String) async throws -> McpServerRecord {
+        try await daemon.call("mcp.link", ["taskID": id(taskID), "serverID": .string(serverID)]).decoded(McpServerRecord.self)
+    }
+
+    /// Opens a task whose agent repairs the servers, and returns it with the prompt to send.
+    package func fixMcpServers(taskID: UUID, serverIDs: [String]) async throws -> (task: BoardTaskRecord, prompt: String) {
+        let result = try await daemon.call("mcp.fix", ["taskID": id(taskID), "serverIDs": .array(serverIDs.map(BridgeValue.string))])
+        guard let task = result.object?["task"], let prompt = result.object?["prompt"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new task.")
+        }
+        return (try task.decoded(BoardTaskRecord.self), prompt)
+    }
+
+    package func mcpStatus(taskID: UUID, provider: ConversationProvider? = nil) async throws -> McpStatusReport {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID)]
+        if let provider { arguments["provider"] = .string(provider.rawValue) }
+        return try await daemon.call("mcp.status", arguments).decoded(McpStatusReport.self)
+    }
+
+    /// Starts the provider's sign-in to an MCP server and returns the link to open in the browser.
+    package func startMcpLogin(taskID: UUID, provider: ConversationProvider, name: String) async throws -> McpLoginStart {
+        try await daemon.call("mcp.authenticate", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "name": .string(name),
+        ]).decoded(McpLoginStart.self)
+    }
+
+    /// Returns once the started sign-in is finished, failed, or timed out. The
+    /// daemon stays up while it waits.
+    package func mcpLoginResult(taskID: UUID, provider: ConversationProvider, name: String) async throws -> McpLoginResult {
+        try await daemon.call("mcp.authenticate.wait", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "name": .string(name),
+        ]).decoded(McpLoginResult.self)
+    }
+
+    package func providerInstallStatuses() async throws -> [ConversationProviderInstallStatus] {
+        try await daemon.call("providers.list", [:]).decoded([ConversationProviderInstallStatus].self)
+    }
+
+    package func installProvider(_ provider: ConversationProvider) async throws -> ConversationProviderInstallStatus {
+        try await daemon.call("providers.install", ["provider": .string(provider.rawValue)])
+            .decoded(ConversationProviderInstallStatus.self)
+    }
+
+    package func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {
+        try await daemon.call("conversation.provider.capabilities", ["taskID": id(taskID)])
+            .decoded([ConversationProviderCapabilities].self)
+    }
+
+    package func goal(taskID: UUID, objective: String? = nil, action: String = "get", observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "action": .string(action), "observe": .boolean(observeRuntime)]
+        if let objective { arguments["objective"] = .string(objective) }
+        let result = try await daemon.call("conversation.goal", arguments)
+        if case .null = result { return nil }
+        return try result.decoded(CodexThreadGoal.self)
+    }
+
+    package func subagentHistory(taskID: UUID, activity: ConversationActivity) async throws -> ConversationHistory {
+        try await daemon.call("conversation.subagent_history", [
+            "taskID": id(taskID),
+            "activity": try .encoding(activity),
+        ]).decoded(ConversationHistory.self)
+    }
+
+    package func generateTitle(taskID: UUID, prompt: String) async -> (title: String, provider: ConversationProvider)? {
+        guard let result = try? await daemon.call("task.title.generate", ["taskID": id(taskID), "prompt": .string(prompt)]),
+              let title = result.object?["title"]?.string,
+              let providerName = result.object?["provider"]?.string,
+              let provider = ConversationProvider(rawValue: providerName) else { return nil }
+        return (title, provider)
+    }
+
+    /// Names a one-time scheduled task that is still untitled; the daemon reserves the title and
+    /// generates it in the background.
+    package func nameScheduledTask(taskID: UUID) async throws {
+        _ = try await daemon.call("schedule.name", ["taskID": id(taskID)])
+    }
+
+    /// Sends a side chat message; without `sideChatID`, opens a side chat on `selection`.
+    package func sideChat(
+        taskID: UUID,
+        sideChatID: String?,
+        selection: String?,
+        source: ConversationTextSource? = nil,
+        message: String,
+        modelID: String? = nil,
+        effort: ConversationEffort? = nil,
+        onDelta: @escaping (String) -> Void
+    ) async throws -> SideChatReply {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "message": .string(message)]
+        if let modelID, !modelID.isEmpty { arguments["model"] = .string(modelID) }
+        if let effort { arguments["effort"] = .string(effort.rawValue) }
+        if let sideChatID { arguments["sideChatID"] = .string(sideChatID) }
+        if let selection { arguments["selection"] = .string(selection) }
+        if let source, let json = try? JSONEncoder().encode(source), let text = String(data: json, encoding: .utf8) {
+            arguments["source"] = .string(text)
+        }
+        return try await daemon.call("conversation.side_chat", arguments) { event in
+            if event.type == "text_delta", let text = event.payload.object?["text"]?.string { onDelta(text) }
+        }.decoded(SideChatReply.self)
+    }
+
+    /// Asks on a new page that runs alongside the standalone chat, in a parallel bubble.
+    package func sendInParallel(text: String, imageDataURLs: [String] = [], onBubbleCreated: @escaping () -> Void = {}) async throws {
+        _ = try await daemon.call("chat.bubble.send", [
+            "message": .string(text),
+            "images": .array(imageDataURLs.map(BridgeValue.string)),
+            "deferImages": .boolean(true),
+        ]) { event in
+            if event.type == "bubble_created" { onBubbleCreated() }
+        }
+    }
+
+    package func closeParallelChatBubble(id bubbleID: UUID) async throws {
+        _ = try await daemon.call("chat.bubble.close", ["bubbleID": id(bubbleID)])
+    }
+
+    package func savedSideChats(taskID: UUID) async throws -> [SavedSideChat] {
+        try await daemon.call("conversation.side_chats.list", ["taskID": id(taskID)]).decoded([SavedSideChat].self)
+    }
+
+    package func closeSideChat(taskID: UUID, sideChatID: String) async {
+        _ = try? await daemon.call("conversation.side_chat.close", ["taskID": id(taskID), "sideChatID": .string(sideChatID)])
+    }
+
+    package func reconcileLifecycleStatusOnOpen(taskID: UUID) async throws -> BoardTaskRecord {
+        try await daemon.call("task.reconcile", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
+    }
+
+    package func createPullRequests(taskID: UUID) async throws -> BoardTaskRecord {
+        try await daemon.call("task.pr.create", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
+    }
+
+    /// Review syncs pull request changes and may open PRs, which needs the
+    /// daemon's provider clients, so this move runs there rather than in-process.
+    package func moveTaskToReview(taskID: UUID) async throws -> BoardTaskRecord {
+        try await daemon.call("task.move", ["taskID": id(taskID), "status": .string(TaskStatus.review.rawValue)]).decoded(BoardTaskRecord.self)
+    }
+
+    package func syncPullRequestChanges(taskID: UUID) async throws -> PullRequestSyncOutcome {
+        try await daemon.call("task.pr.sync", ["taskID": id(taskID)]).decoded(PullRequestSyncOutcome.self)
+    }
+
+    package func deleteTask(taskID: UUID) async throws {
+        try await daemon.call("task.delete", ["taskID": id(taskID)])
+    }
+
+    /// Starts one run of a schedule now. The turn runs in the daemon.
+    package func runScheduleNow(taskID: UUID) async throws -> ScheduledRunOutcome {
+        try await daemon.call("schedule.run-now", ["taskID": id(taskID)]).decoded(ScheduledRunOutcome.self)
+    }
+
+    package func searchArchive(query: String) async throws -> [BoardTaskRecord] {
+        try await daemon.call("archive.search", ["query": .string(query)]).decoded([BoardTaskRecord].self)
+    }
+}
+
+extension ConversationHistory {
+    /// How many messages a window reads at a time when it opens a conversation or pages back.
+    package static let windowPageSize = 80
+}
