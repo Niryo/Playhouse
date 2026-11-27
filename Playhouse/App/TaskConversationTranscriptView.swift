@@ -638,7 +638,7 @@ extension TaskConversationView {
 
             ComposerView(model: composerModel, actions: composerActions, header: {
         recalledChatPageChips
-        let pendingCommentCount = annotations.filter(\.pending).count
+        let pendingCommentCount = unsentAnnotations.count
         if pendingCommentCount > 0 {
             AtomPanel(
                 props: PanelProps(fill: "primary", fillOpacity: 0.1, cornerRadius: 13, stroke: "primary", strokeOpacity: 0.08),

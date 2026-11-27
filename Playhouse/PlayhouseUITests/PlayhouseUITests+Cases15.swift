@@ -9,7 +9,7 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them, as the composer chip's Discard comments badge does. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation through the selection pill's Comment popover are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the comment popover, whose field can still add a new comment there. The comment chip's X badge (Discard comments) discards every unsent comment at once: the chip and their highlights go, the sent comment stays, and pendingCommentCount is 0 on a fresh read.
+    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them, as the composer chip's Discard comments badge does. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation through the selection pill's Comment popover are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the comment popover, whose field can still add a new comment there. The comment chip's X badge (Discard comments) discards every unsent comment at once: the chip and their highlights go, the sent comment stays, and pendingCommentCount is 0 on a fresh read. In the app, a comment sent from the composer leaves the chip as soon as it is sent: while the turn carrying it still runs, the chip and its badge are gone and pendingCommentCount is 0, and the comment does not return to the chip when that turn ends.
     func test_conversation_persists_unsent_comments() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("unsent-comments-fixture-state", isDirectory: true)
@@ -182,6 +182,39 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("discard-comment-button").exists, "The discarded unsent comment should not reopen.")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(element("comment-popover").waitForNonExistence(timeout: 5))
+
+        // A sent comment leaves the composer chip as soon as it is sent, while its reply still runs.
+        let fixtureExecutable = try XCTUnwrap(codexFixtureExecutable)
+        let holdMarker = URL(fileURLWithPath: fixtureExecutable + ".hold-release")
+        let turnActive = URL(fileURLWithPath: fixtureExecutable + ".turn-active")
+        let turnRelease = URL(fileURLWithPath: fixtureExecutable + ".turn-release")
+        for marker in [turnActive, turnRelease] { try? FileManager.default.removeItem(at: marker) }
+        defer { for marker in [holdMarker, turnActive, turnRelease] { try? FileManager.default.removeItem(at: marker) } }
+        XCTAssertTrue(scrollFullyIntoView(latestReplyView, in: element("conversation-scroll-view")))
+        XCTAssertTrue(waitForStableFrame(latestReplyView))
+        latestReplyView.click()
+        latestReplyView.typeKey("a", modifierFlags: .command)
+        addCommentFromSelection("Sent while the reply runs")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: chip).contains("1 comment") }, timeout: 10))
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 1 }, timeout: 10))
+        try Data("hold\n".utf8).write(to: holdMarker)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: turnActive.path) }, timeout: 30),
+                      "The turn carrying the comment should be running.")
+        // Later turns, such as Playhouse's outcome reminder, are not held.
+        try? FileManager.default.removeItem(at: holdMarker)
+        XCTAssertTrue(chip.waitForNonExistence(timeout: 5), "A sent comment should leave the composer chip while its reply runs.")
+        XCTAssertFalse(element("discard-pending-comments-button").exists)
+        XCTAssertEqual(try taskRecord(id: taskID)?["pendingCommentCount"] as? Int, 0,
+                       "A comment the running turn carries is not saved as unsent.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: turnActive.path), "The reply should still be running.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        attachScreenshot(named: "Sent comment gone from the composer while its reply runs")
+        try Data("release\n".utf8).write(to: turnRelease)
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 60), "The held turn should finish once released.")
+        XCTAssertFalse(chip.waitToExist(timeout: 2), "The sent comment should not return to the chip when its turn ends.")
 
         element("back-to-board-button").click()
         openTask(named: "Unsent comments")

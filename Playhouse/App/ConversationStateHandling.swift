@@ -542,7 +542,7 @@ extension TaskConversationView {
     }
 
     func persistPendingAnnotations() {
-        let data = PersistedAnnotations.encode(annotations.filter { !inFlightAnnotationIDs.contains($0.id) })
+        let data = PersistedAnnotations.encode(unsentAnnotations)
         let taskID = task.id
         let taskManager = BoardTaskManager(modelContext: modelContext)
         let previousSave = composerDraft.annotationSaveTask

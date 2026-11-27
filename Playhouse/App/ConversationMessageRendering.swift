@@ -575,7 +575,7 @@ extension TaskConversationView {
     /// and text with only a sent comment shows it and adds another.
     func commentPopover(_ selection: AnnotationSelection) -> some View {
         let matching = annotations.filter { $0.source == selection.source }
-        let editable = isReadOnly ? nil : matching.last { $0.pending && !inFlightAnnotationIDs.contains($0.id) }
+        let editable = isReadOnly ? nil : matching.last(where: isUnsent)
         let sent = matching.last { $0.id != editable?.id }
         return CommentPopover(
             editingComment: editable?.comment,
@@ -684,7 +684,7 @@ extension TaskConversationView {
 
     /// Discards every unsent comment the composer holds; ones a running send carries stay with it.
     func discardPendingAnnotations() {
-        annotations.removeAll { $0.pending && !inFlightAnnotationIDs.contains($0.id) }
+        annotations.removeAll(where: isUnsent)
         annotationSelection = nil
         currentTextSelection = nil
         if !isReadOnly { persistPendingAnnotations() }
@@ -692,8 +692,7 @@ extension TaskConversationView {
 
     /// Changes an unsent comment's text; saving it empty deletes the comment.
     func editAnnotation(_ id: UUID, comment: String) {
-        guard let index = annotations.firstIndex(where: { $0.id == id && $0.pending }),
-              !inFlightAnnotationIDs.contains(id) else { return }
+        guard let index = annotations.firstIndex(where: { $0.id == id && isUnsent($0) }) else { return }
         let comment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
         if comment.isEmpty {
             annotations.remove(at: index)
