@@ -116,49 +116,7 @@ class TaskOperationLockBarrier:
         fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
         os.close(self.descriptor)
         self.descriptor = None
-# Real SwiftData task stores written by Playhouse releases before the GRDB store, which the
-# migration tests move into it (see Playhouse/CoreTests/Fixtures/swiftdata-stores/README.md).
-SWIFTDATA_FIXTURES = Path(__file__).resolve().parent.parent / "Playhouse" / "CoreTests" / "Fixtures" / "swiftdata-stores"
 TASK_STORE_FILE = "Playhouse-v3.sqlite"
-
-
-class TaskStoreSchemaLockBarrier:
-    """Hold the real task-store schema lock, under which a SwiftData store is migrated."""
-
-    def __init__(self, data_directory):
-        self.descriptor = os.open(Path(data_directory) / "store-schema-repair.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.lockf(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 0, 0, os.SEEK_SET)
-        except BaseException:
-            os.close(self.descriptor)
-            self.descriptor = None
-            raise
-
-    def release(self):
-        if self.descriptor is None:
-            return
-        fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
-        os.close(self.descriptor)
-        self.descriptor = None
-
-
-def core_data_column_values(store, table):
-    """Every SwiftData row of `table`, keyed by its UUID, with Core Data's columns renamed to the
-    persisted property names and UUIDs as text, as the GRDB store keeps them."""
-    with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as database:
-        database.row_factory = sqlite3.Row
-        rows = {}
-        for row in database.execute(f"SELECT * FROM {table}"):
-            values = {}
-            for column in row.keys():
-                if column in ("Z_PK", "Z_ENT", "Z_OPT"):
-                    continue
-                value = row[column]
-                if isinstance(value, bytes) and len(value) == 16 and column in ("ZID", "ZLASTSCHEDULEDRUNTASKID", "ZSCHEDULESOURCETASKID", "ZPARALLELOFCHATID"):
-                    value = str(uuid.UUID(bytes=value)).upper()
-                values[column[1:].lower()] = value
-            rows[values["id"]] = values
-        return rows
 
 
 class TaskStoreWriteLockBarrier:

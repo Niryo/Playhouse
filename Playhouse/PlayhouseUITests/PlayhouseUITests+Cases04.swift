@@ -205,7 +205,7 @@ extension PlayhouseUITests {
         seed.waitUntilExit()
         let seeded = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(seed.terminationStatus, 0, seeded)
-        XCTAssertEqual(seeded.split(whereSeparator: \.isNewline), ["1", "1"], "Seed the legacy Merge columns of the real SwiftData row, and start both tasks so their cards show the pill.")
+        XCTAssertEqual(seeded.split(whereSeparator: \.isNewline), ["1", "1"], "Seed the legacy Merge columns of the real task row, and start both tasks so their cards show the pill.")
         // Forget the import, and keeping PR for existing tasks, the way the CLI case does: an external
         // delete that the bridge, which already holds this case's path-named preferences suite, reads
         // at its next request. A first launch since Manual became the default runs both.

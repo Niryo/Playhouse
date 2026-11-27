@@ -6,10 +6,9 @@ package enum PlayhouseStore {
     private static var lifecycleGateHeld = false
     private static var lifecycleGateWaiters: [CheckedContinuation<Void, Never>] = []
 
+    /// SwiftData stores of earlier releases (`Playhouse-v2.store`, `Playhouse.store`) that may sit
+    /// beside this file are never read or changed; a directory holding only those starts empty.
     package static let storeFileName = "Playhouse-v3.sqlite"
-    /// The SwiftData store this one replaced, and the store that one replaced in turn; the
-    /// first found is moved into a new store once, and both are left on disk as backups.
-    package static let swiftDataStoreFileNames = ["Playhouse-v2.store", "Playhouse.store"]
 
     package static func storeURL(dataDirectory: String? = nil) throws -> URL {
         if let dataDirectory {
@@ -48,14 +47,8 @@ package enum PlayhouseStore {
         PlayhouseDiagnostics.useDataDirectory(dataDirectory)
         do {
             try FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: storeURL.path), swiftDataStoreURL(besides: storeURL) != nil {
-                PlayhouseDiagnostics.recordAndFlush("persistence.store.swiftdata_migration.waiting_for_schema_lock", fields: [
-                    "storePath": storeURL.path
-                ])
-            }
             if let open = openContainer(at: storeURL) { return open }
             return try withSchemaRepairLock(at: storeURL) {
-                try migrateSwiftDataStoreIfNeeded(to: storeURL)
                 let container = try PlayhouseModelContainer(storeURL: storeURL)
                 openContainers[storeURL.standardizedFileURL.path] = (container, fileNumber(storeURL))
                 return container
@@ -144,32 +137,6 @@ package enum PlayhouseStore {
     private static func withSchemaRepairLock<T>(at storeURL: URL, _ body: () throws -> T) throws -> T {
         let lockURL = storeURL.deletingLastPathComponent().appendingPathComponent("store-schema-repair.lock")
         return try POSIX.withExclusiveFileLock(at: lockURL.path, body)
-    }
-
-    /// The SwiftData store to move, when this data directory has one.
-    private static func swiftDataStoreURL(besides storeURL: URL) -> URL? {
-        swiftDataStoreFileNames
-            .map { storeURL.deletingLastPathComponent().appendingPathComponent($0) }
-            .first { FileManager.default.fileExists(atPath: $0.path) }
-    }
-
-    /// Moves the tasks and chats of a SwiftData store into the new store, once: only while the
-    /// new store doesn't exist yet, and never reading the SwiftData file again afterwards.
-    private static func migrateSwiftDataStoreIfNeeded(to storeURL: URL) throws {
-        guard !FileManager.default.fileExists(atPath: storeURL.path), let source = swiftDataStoreURL(besides: storeURL) else { return }
-        guard POSIX.isRegularFile(source.path) else {
-            throw StoreSchemaRepairError("The SwiftData task store must be a regular file.")
-        }
-        let startedAt = Date()
-        let summary = try SwiftDataStoreMigration.migrate(from: source, to: storeURL)
-        PlayhouseDiagnostics.recordAndFlush("persistence.store.swiftdata_migrated", fields: [
-            "sourcePath": source.path,
-            "storePath": storeURL.path,
-            "boardTaskCount": String(summary.boardTasks),
-            "standaloneChatCount": String(summary.standaloneChats),
-            "skippedRowCount": String(summary.skippedRows),
-            "durationMilliseconds": String(Int(Date().timeIntervalSince(startedAt) * 1_000))
-        ])
     }
 
     @MainActor

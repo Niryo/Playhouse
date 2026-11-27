@@ -96,14 +96,6 @@
     "expectation": "A real task-store read failure against an isolated store with a missing task column returns an error and logs a correlated read ID, error domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record."
   },
   {
-    "id": "test_task_store_migrates_legacy_swiftdata_store",
-    "expectation": "A real legacy SwiftData task store from before submitted prompts and drafts, with committed WAL-only data, is moved once into the GRDB task store while a concurrent CLI/XPC read waits on the held schema lock; the task keeps its title and saved prompt, which a store from before drafts were flagged does not restore as a draft, and its elapsed time stays zero. The legacy file stays unchanged and is never read again: the visible app opens the migrated store with an empty composer, a later edited draft survives restarts, and the migration is recorded once."
-  },
-  {
-    "id": "test_task_store_migrates_current_swiftdata_store",
-    "expectation": "A real SwiftData task store written by the last SwiftData build, with tasks in every column, a repository, a context folder, an unsent draft with an image, call usage, pending comments, a past pull request, one-time and paused recurring schedules, the standalone chat, a plugin editor and a parallel bubble, is moved into the GRDB task store with every stored column value intact; CLI/XPC reads return exactly what that build returned, the SwiftData file stays unchanged, and the visible app shows the migrated tasks in their columns with the draft in its composer."
-  },
-  {
     "id": "test_test_bundle_rejects_unisolated_data_directory",
     "expectation": "A test-built Playhouse service rejects a data directory outside the temporary test area and a linked store inside it before creating or opening either store; the visible app remains on its isolated board and can still read its tasks."
   },
@@ -596,8 +588,8 @@
     "expectation": "Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart."
   },
   {
-    "id": "test_legacy_store_import_failure_preserves_original",
-    "expectation": "An invalid legacy database fails import without changing the source or publishing a destination or partial snapshot; the normal isolated board remains usable."
+    "id": "test_legacy_swiftdata_store_is_left_untouched",
+    "expectation": "A data directory holding only SwiftData stores of earlier releases (Playhouse-v2.store with its WAL and the older Playhouse.store) opens as an empty GRDB task store: CLI/XPC reads list no tasks, a new task saves to Playhouse-v3.sqlite, the SwiftData files stay byte-for-byte unchanged and no import snapshot is written; the visible app opens such a directory on an empty board and saves a new task there."
   },
   {
     "id": "test_conversation_provider_selection_persists_and_validates",

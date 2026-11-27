@@ -62,11 +62,6 @@ package enum POSIX {
         return lstat(path, &metadata) == 0 && metadata.st_mode & S_IFMT == S_IFLNK
     }
 
-    package static func isRegularFile(_ path: String) -> Bool {
-        var metadata = stat()
-        return lstat(path, &metadata) == 0 && metadata.st_mode & S_IFMT == S_IFREG
-    }
-
     /// Runs `body` while holding an exclusive `fcntl` lock on the file at `path`, waiting for it.
     /// The kernel releases the lock if the process dies, so a leftover file never blocks anyone.
     package static func withExclusiveFileLock<T>(at path: String, _ body: () throws -> T) throws -> T {

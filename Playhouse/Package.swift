@@ -38,8 +38,7 @@ var targets: [Target] = [
     .testTarget(
         name: "PlayhouseCoreTests",
         dependencies: ["PlayhouseCore"],
-        path: "CoreTests",
-        resources: [.copy("Fixtures")]
+        path: "CoreTests"
     ),
 ]
 

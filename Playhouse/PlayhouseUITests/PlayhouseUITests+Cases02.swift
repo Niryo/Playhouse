@@ -5,7 +5,6 @@ import Darwin
 import Foundation
 import Network
 import XCTest
-import SQLite3
 import Vision
 
 extension PlayhouseUITests {
@@ -180,189 +179,38 @@ extension PlayhouseUITests {
         XCTAssertEqual(app.state, .runningForeground, "The normal app should stay open while the isolated bridge store fails.")
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5), "The normal app board should stay available while the isolated bridge store fails.")
     }
-    // case-contract: test_legacy_store_import_failure_preserves_original | An invalid legacy database fails import without changing the source or publishing a destination or partial snapshot; the normal isolated board remains usable.
-    func test_legacy_store_import_failure_preserves_original() throws {
+    // case-contract: test_legacy_swiftdata_store_is_left_untouched | A data directory holding only SwiftData stores of earlier releases (Playhouse-v2.store with its WAL and the older Playhouse.store) opens as an empty GRDB task store: CLI/XPC reads list no tasks, a new task saves to Playhouse-v3.sqlite, the SwiftData files stay byte-for-byte unchanged and no import snapshot is written; the visible app opens such a directory on an empty board and saves a new task there.
+    func test_legacy_swiftdata_store_is_left_untouched() throws {
+        let legacyFiles: [(URL, Data)] = [
+            (dataDirectory.appendingPathComponent("Playhouse-v2.store"), Data("SwiftData store of an earlier release".utf8)),
+            (dataDirectory.appendingPathComponent("Playhouse-v2.store-wal"), Data("Its write-ahead log".utf8)),
+            (dataDirectory.appendingPathComponent("Playhouse.store"), Data("The older SwiftData store".utf8)),
+        ]
+        for (url, contents) in legacyFiles {
+            try contents.write(to: url)
+        }
         launchApp(defaultParent: fixture.parent.path)
-        let failure = dataDirectory.appendingPathComponent("invalid-legacy", isDirectory: true)
-        try FileManager.default.createDirectory(at: failure, withIntermediateDirectories: true)
-        let source = failure.appendingPathComponent("Playhouse.store")
-        let contents = Data("Not a SQLite database".utf8)
-        try contents.write(to: source)
-        let response = try runCLI(["task", "list"], expectedStatus: 1, extraEnvironment: ["PLAYHOUSE_DATA_DIRECTORY": failure.path])
-        XCTAssertEqual(response["ok"] as? Bool, false)
-        XCTAssertEqual(try Data(contentsOf: source), contents)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: failure.appendingPathComponent("Playhouse-v3.sqlite").path))
-        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: failure.path).contains {
-            $0.hasPrefix(".store-migration-") || $0.hasPrefix(".swiftdata-")
-        })
-        XCTAssertEqual(app.state, .runningForeground)
+        let listed = try XCTUnwrap((try runCLI(["task", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
+        XCTAssertTrue(listed.isEmpty, "A directory holding only SwiftData stores opens with no tasks.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("Playhouse-v3.sqlite").path))
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+        let taskCards = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "task-card-"))
+        XCTAssertEqual(taskCards.count, 0, "The visible board shows no task cards.")
+        attachScreenshot(named: "Empty board beside SwiftData stores")
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
-        saveNewTaskPromptAndReturnToBoard("Healthy board", prompt: "Still usable")
-        openTask(named: "Healthy board")
-        XCTAssertEqual(element("message-composer").value as? String, "Still usable")
-    }
-    // case-contract: test_task_store_migrates_legacy_swiftdata_store | A real legacy SwiftData task store from before submitted prompts and drafts, with committed WAL-only data, is moved once into the GRDB task store while a concurrent CLI/XPC read waits on the held schema lock; the task keeps its title and saved prompt, which a store from before drafts were flagged does not restore as a draft, and its elapsed time stays zero. The legacy file stays unchanged and is never read again: the visible app opens the migrated store with an empty composer, a later edited draft survives restarts, and the migration is recorded once.
-    func test_task_store_migrates_legacy_swiftdata_store() throws {
-        let title = "Legacy pending prompt store"
-        let taskID = "948A506B-0AE6-47E4-A99E-EAE60CDDDAFB"
-        let draft = "Committed WAL draft must survive import."
-        let store = dataDirectory.appendingPathComponent("Playhouse-v3.sqlite")
-        let legacyStore = dataDirectory.appendingPathComponent("Playhouse.store")
-        try FileManager.default.copyItem(
-            at: WorkspaceFixture.root.appendingPathComponent("swiftdata-stores/legacy-pending-prompt/Playhouse.store"),
-            to: legacyStore
-        )
-        // The store predates the chat split and drafts but not the v2 lifecycle reset.
-        try Data("1\n".utf8).write(to: dataDirectory.appendingPathComponent("task-lifecycle-v2-reset"))
-        func sqlite(_ statement: String, at databaseURL: URL) throws -> String {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-            process.arguments = [databaseURL.path, statement]
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = output
-            try process.run()
-            process.waitUntilExit()
-            let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            XCTAssertEqual(process.terminationStatus, 0, "SQLite fixture operation failed: \(text)")
-            return text
+        saveNewTaskPromptAndReturnToBoard("First GRDB task", prompt: "Saved to the new store")
+        let tasks = try XCTUnwrap((try runCLI(["task", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
+        XCTAssertEqual(tasks.compactMap { $0["title"] as? String }, ["First GRDB task"])
+        attachScreenshot(named: "New task on the GRDB board")
+        openTask(named: "First GRDB task")
+        XCTAssertEqual(element("message-composer").value as? String, "Saved to the new store")
+        for (url, contents) in legacyFiles {
+            XCTAssertEqual(try Data(contentsOf: url), contents, "\(url.lastPathComponent) stays as it was.")
         }
-        let legacyColumns = try sqlite("PRAGMA table_info(ZBOARDTASK)", at: legacyStore)
-        XCTAssertFalse(legacyColumns.contains("ZPENDINGSUBMITTEDPROMPT"))
-        XCTAssertFalse(legacyColumns.contains("ZHASUNSENTDRAFT"))
-        XCTAssertTrue(legacyColumns.contains("ZINPROGRESSSTARTEDAT"))
-        XCTAssertTrue(legacyColumns.contains("ZTOTALINPROGRESSSECONDS"))
-        XCTAssertEqual(try sqlite("SELECT count(*) FROM ZBOARDTASK", at: legacyStore).trimmingCharacters(in: .whitespacesAndNewlines), "1")
-        var wal: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(legacyStore.path, &wal), SQLITE_OK)
-        defer { sqlite3_close(wal) }
-        XCTAssertEqual(sqlite3_exec(wal, "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE ZBOARDTASK SET ZSAVEDPROMPT='Committed WAL draft must survive import.'", nil, nil, nil), SQLITE_OK)
-        XCTAssertGreaterThan(try Data(contentsOf: URL(fileURLWithPath: legacyStore.path + "-wal")).count, 0)
-        let legacyBytes = try Data(contentsOf: legacyStore)
-
-        let schemaBarrier = try TaskStoreWriteLockBarrier(dataDirectory: dataDirectory, lockName: "store-schema-repair.lock")
-        defer { try? schemaBarrier.release() }
-        let pendingRead = try startCLIProcess(["task", "get", taskID])
-        XCTAssertTrue(waitUntil({
-            guard let events = try? self.diagnosticEvents() else { return false }
-            return events.contains { $0["event"] as? String == "persistence.store.swiftdata_migration.waiting_for_schema_lock" }
-        }, timeout: 15), "The XPC opener should wait for the held schema lock.")
-        XCTAssertTrue(pendingRead.process.isRunning)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path), "Nothing is migrated while another process holds the lock.")
-        try schemaBarrier.release()
-        let concurrentRead = try finishCLIProcess(pendingRead)
-        XCTAssertEqual((concurrentRead["result"] as? [String: Any])?["savedPrompt"] as? String, draft)
-        launchApp(defaultParent: fixture.parent.path)
-        assertTaskVisible(title, inColumn: "Backlog")
-        XCTAssertEqual(
-            try sqlite("SELECT totalInProgressSeconds, hasUnsentDraft FROM board_tasks", at: store).trimmingCharacters(in: .whitespacesAndNewlines),
-            "0.0|0"
-        )
-        XCTAssertEqual(try Data(contentsOf: legacyStore), legacyBytes)
-        let migrationEvents = try diagnosticEvents()
-        XCTAssertEqual(migrationEvents.filter { $0["event"] as? String == "persistence.store.swiftdata_migrated" }.count, 1)
-        XCTAssertFalse(migrationEvents.contains {
-            ["persistence.store.open.failed", "persistence.read.failed"].contains($0["event"] as? String ?? "")
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: dataDirectory.path).contains {
+            $0.hasPrefix(".store-migration-") || $0.hasPrefix(".swiftdata-")
         })
-        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, draft)
-        openTask(named: title)
-        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "The migrated task should open its composer.")
-        // The draft restores asynchronously after history loads, so hold the empty composer for a moment.
-        XCTAssertFalse(waitUntil({
-            !((element("message-composer").value as? String) ?? "").isEmpty
-        }, timeout: 2), "A store from before drafts were flagged does not restore its saved prompt as a draft.")
-        XCTAssertTrue(terminateAppAndWait(app))
-        launchApp(defaultParent: fixture.parent.path)
-        assertTaskVisible(title, inColumn: "Backlog")
-        openTask(named: title)
-        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "The migrated task should reopen its composer after a restart.")
-        XCTAssertFalse(waitUntil({
-            !((element("message-composer").value as? String) ?? "").isEmpty
-        }, timeout: 2), "The saved prompt should stay out of the composer after a restart.")
-        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, draft, "The saved prompt should survive the restart in the store.")
-        attachScreenshot(named: "Migrated store opens with an empty composer and keeps its saved prompt")
-
-        let composer = element("message-composer")
-        composer.click()
-        composer.typeKey("a", modifierFlags: .command)
-        composer.typeText("Edited after import")
-        element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
-        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, "Edited after import")
-        XCTAssertTrue(terminateAppAndWait(app))
-        launchApp(defaultParent: fixture.parent.path)
-        assertTaskVisible(title, inColumn: "Backlog")
-        openTask(named: title)
-        XCTAssertEqual(element("message-composer").value as? String, "Edited after import")
-        XCTAssertEqual(try Data(contentsOf: legacyStore), legacyBytes, "The SwiftData store stays as it was, as a backup.")
-        XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "persistence.store.swiftdata_migrated" }.count, 1)
-    }
-    // case-contract: test_task_store_migrates_current_swiftdata_store | A real SwiftData task store written by the last SwiftData build, with tasks in every column, a repository, a context folder, an unsent draft with an image, call usage, pending comments, a past pull request, one-time and paused recurring schedules, the standalone chat, a plugin editor and a parallel bubble, is moved into the GRDB task store with every stored column value intact; CLI/XPC reads return exactly what that build returned, the SwiftData file stays unchanged, and the visible app shows the migrated tasks in their columns with the draft in its composer.
-    func test_task_store_migrates_current_swiftdata_store() throws {
-        let fixtureStores = WorkspaceFixture.root.appendingPathComponent("swiftdata-stores/current", isDirectory: true)
-        let source = dataDirectory.appendingPathComponent("Playhouse-v2.store")
-        try FileManager.default.copyItem(at: fixtureStores.appendingPathComponent("Playhouse-v2.store"), to: source)
-        try Data("1\n".utf8).write(to: dataDirectory.appendingPathComponent("task-lifecycle-v2-reset"))
-        let sourceBytes = try Data(contentsOf: source)
-        let expected = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(contentsOf: fixtureStores.appendingPathComponent("expected.json"))) as? [String: Any]
-        )
-
-        launchApp(defaultParent: fixture.parent.path)
-        assertTaskVisible("Task in In Progress", inColumn: "In Progress")
-        assertTaskVisible("Task in Review", inColumn: "Review")
-        assertTaskVisible("Backlog with repository", inColumn: "Backlog")
-        assertTaskVisible("Context folder task", inColumn: "Backlog")
-        assertTaskVisible("Plain task", inColumn: "Backlog")
-        XCTAssertFalse(app.staticTexts["Task in Done"].exists, "A migrated Done task stays in the archive, off the board.")
-        XCTAssertFalse(app.staticTexts["Weekly check"].exists, "A migrated recurring schedule stays a template, off the board.")
-        attachScreenshot(named: "Board after migrating a SwiftData store")
-
-        let board = try XCTUnwrap(runCLI(["board", "list"])["result"] as? NSDictionary)
-        XCTAssertEqual(board, expected["board"] as? NSDictionary, "The migrated board reads as the SwiftData build read it.")
-        for (taskID, record) in try XCTUnwrap(expected["tasks"] as? [String: Any]) {
-            XCTAssertEqual(try runCLI(["task", "get", taskID])["result"] as? NSDictionary, record as? NSDictionary)
-        }
-        XCTAssertEqual(try runCLI(["schedule", "list"])["result"] as? NSDictionary, expected["schedules"] as? NSDictionary)
-        XCTAssertEqual(try runCLI(["chat", "open"])["result"] as? NSDictionary, expected["chat"] as? NSDictionary,
-                       "The migrated standalone chat reads as the SwiftData build read it.")
-
-        func sqlite(_ statement: String, at databaseURL: URL) throws -> String {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-            process.arguments = [databaseURL.path, statement]
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = output
-            try process.run()
-            process.waitUntilExit()
-            let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            XCTAssertEqual(process.terminationStatus, 0, "SQLite fixture operation failed: \(text)")
-            return text
-        }
-        let migrated = dataDirectory.appendingPathComponent("Playhouse-v3.sqlite")
-        for (legacy, current) in [
-            ("SELECT hex(ZID), ZTITLE, ZSTATUSRAWVALUE, ZSAVEDPROMPT, ZHASUNSENTDRAFT, CAST(ZCREATEDAT AS REAL), hex(ZDRAFTIMAGEDATAURLSDATA) FROM ZBOARDTASK ORDER BY ZTITLE",
-             "SELECT upper(replace(id, '-', '')), title, statusRawValue, savedPrompt, hasUnsentDraft, CAST(createdAt AS REAL), hex(draftImageDataURLsData) FROM board_tasks ORDER BY title"),
-            ("SELECT hex(ZID), ZCODEXTHREADID, ZSAVEDPROMPT, ZHASUNSENTDRAFT, CAST(ZCREATEDAT AS REAL) FROM ZSTANDALONECHAT ORDER BY ZCREATEDAT",
-             "SELECT upper(replace(id, '-', '')), codexThreadID, savedPrompt, hasUnsentDraft, CAST(createdAt AS REAL) FROM standalone_chats ORDER BY createdAt"),
-        ] {
-            let legacyRows = try sqlite(legacy, at: source)
-            XCTAssertFalse(legacyRows.isEmpty)
-            XCTAssertEqual(try sqlite(current, at: migrated), legacyRows, "Every row moves with its stored values: \(current)")
-        }
-
-        openTask(named: "Plain task")
-        let composer = element("message-composer")
-        XCTAssertTrue(waitUntil({ (composer.value as? String) == "Unsent draft with an image" }, timeout: 10),
-                      "The migrated unsent draft returns to its composer.")
-        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 10), "The migrated draft's image returns to its composer.")
-        attachScreenshot(named: "Migrated draft in its composer")
-        attachRegionScreenshot([composer, element("pending-chat-images")], named: "Migrated draft text and image")
-        XCTAssertEqual(try Data(contentsOf: source), sourceBytes, "The SwiftData store stays as it was, as a backup.")
-        XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "persistence.store.swiftdata_migrated" }.count, 1)
     }
     // case-contract: test_test_bundle_rejects_unisolated_data_directory | A test-built Playhouse service rejects a data directory outside the temporary test area and a linked store inside it before creating or opening either store; the visible app remains on its isolated board and can still read its tasks.
     func test_test_bundle_rejects_unisolated_data_directory() throws {
