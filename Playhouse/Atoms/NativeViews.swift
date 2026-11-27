@@ -62,6 +62,19 @@ private final class NoTerminalSession: NativeTerminalSession {
     func terminate() {}
 }
 
+private struct KeptAliveHiddenKey: PHEnvironmentKey {
+    static let defaultValue = false
+}
+
+extension PHEnvironmentValues {
+    /// Set on a view kept in the hierarchy while hidden, as the standalone chat is behind an open
+    /// task, so its native editor gives up the keyboard and does not take it back.
+    package var isKeptAliveHidden: Bool {
+        get { self[KeptAliveHiddenKey.self] }
+        set { self[KeptAliveHiddenKey.self] = newValue }
+    }
+}
+
 /// The composer's text editor. The native text view owns wrapping and document sizing; SwiftUI
 /// only receives a bounded viewport height and never asks a multiline text field for its ideal size.
 package struct PHNativeChatEditor: PHView {

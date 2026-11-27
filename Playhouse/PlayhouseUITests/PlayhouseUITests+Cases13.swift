@@ -1071,6 +1071,107 @@ extension PlayhouseUITests {
         XCTAssertFalse(anchors.exists)
     }
 
+    // case-contract: test_standalone_chat_stays_loaded_behind_open_task | With the standalone chat sidebar open on a chat longer than one history window (the CLI's newest window holds 80 of its 100 messages, with 20 earlier), scrolled up so its earlier messages have loaded, opening a board task hides the chat behind the task's conversation instead of removing it: it is invisible, unclickable and out of accessibility, so only the task's transcript and composer are found, and typing goes to the task's composer, never the hidden chat's. Going back to the board shows the chat at once with the same rendered messages and scroll position, never Loading conversation history, because it was neither rebuilt nor read again. A chat turn that completes while a task is open lands in the chat's history, not the task's (the chat's newest window ends with its reply and the task's history stays empty), and shows in the chat on going back. Keeping the chat mounted is Playhouse-owned presentation shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    func test_standalone_chat_stays_loaded_behind_open_task() throws {
+        _ = try installClaudeFixtureExecutable(named: "claude-fixture-chat-behind-task")
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        // Four long pages: more messages than the chat's first history window holds.
+        for title in ["Fjords", "Glaciers", "Harbor", "Icebergs"] {
+            _ = try runCLI(["conversation", "send", chatID, "--message", "anchor-page:\(title):24"])
+        }
+        let task = try XCTUnwrap(try runCLI(
+            ["task", "create", "--title", "Covers the loaded chat", "--prompt", "Fixture task description.", "--repo", fixture.primary.path]
+        )["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        let chatSidebar = element("chat-sidebar")
+        XCTAssertTrue(chatSidebar.waitToExist(timeout: 10))
+        let transcript = element("conversation-scroll-view")
+        func transcriptValue() -> String { transcript.value as? String ?? "" }
+        func renderedCount() -> Int { transcriptValue().split(separator: " ").compactMap { Int($0) }.first ?? 0 }
+        func chatHistoryReads() throws -> [[String: Any]] {
+            try diagnosticEvents().filter {
+                $0["event"] as? String == "conversation.history.read" && $0["taskID"] as? String == chatID.uppercased()
+            }
+        }
+        XCTAssertTrue(waitUntil({ transcript.exists && transcriptValue().hasPrefix("Showing latest ") && renderedCount() > 0 }, timeout: 15),
+                      "The chat opens on its newest window: \(transcriptValue())")
+        let firstWindow = renderedCount()
+        // The accessibility count excludes the newest completed turn's collapsed progress rows.
+        // The daemon records the stored window and its full earlier count.
+        XCTAssertTrue(try chatHistoryReads().contains {
+            $0["returnedMessageCount"] as? String == "80" && $0["earlierMessageCount"] as? String == "20"
+        }, "The initial window reads the latest 80 of 100 stored messages.")
+
+        // Scrolling up loads the earlier messages: state that only the open view holds.
+        let earlyReply = transcriptMessage("Fjords reply 3.")
+        XCTAssertTrue(scrollTranscriptUntilExists(earlyReply), "Scrolling up should load the chat's earliest page.")
+        XCTAssertTrue(waitUntil({ renderedCount() > firstWindow }, timeout: 5), "The earlier messages join the rendered transcript: \(transcriptValue())")
+        let loadedValue = transcriptValue()
+        let chatComposer = element("message-composer")
+        XCTAssertTrue(chatComposer.waitToExist(timeout: 5))
+        chatComposer.click()
+        let earlyReplyFrame = earlyReply.frame
+        let chatFrame = chatSidebar.frame
+        attachAppWindowScreenshot(named: "Chat scrolled up to its earliest page, composer focused")
+        let historyBeforeOpeningTask = try chatHistoryReads()
+        XCTAssertTrue(historyBeforeOpeningTask.contains { $0["beforeMessageProvided"] as? String == "true" },
+                      "Scrolling up read an earlier history page.")
+
+        let card = element("task-card-\(taskID.uppercased())")
+        XCTAssertTrue(card.waitToExist(timeout: 10), "The task shows on the board beside the chat.")
+        clickTaskCardTitle(card)
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Opening a task shows its conversation view.")
+        XCTAssertTrue(waitUntil({ !chatSidebar.exists }, timeout: 5), "The hidden chat is out of accessibility.")
+        XCTAssertFalse(transcriptMessage("Fjords reply 3.").exists, "The hidden chat's messages are out of accessibility too.")
+        XCTAssertFalse(element("chat-page-anchors-handle").exists, "No control of the hidden chat can be reached.")
+        let transcripts = app.descendants(matching: .any).matching(identifier: "conversation-scroll-view")
+        let composers = app.descendants(matching: .any).matching(identifier: "message-composer")
+        XCTAssertTrue(waitUntil({ transcripts.count == 1 && composers.count == 1 }, timeout: 5),
+                      "Only the task's transcript and composer are found: \(transcripts.count) transcripts, \(composers.count) composers.")
+        // The task's composer lies partly under where the chat is drawn, so a click there reaching
+        // it shows the hidden chat takes no clicks, and the keyboard the chat had goes to the task.
+        let taskComposer = composers.firstMatch
+        let underChat = taskComposer.frame.intersection(chatFrame)
+        XCTAssertFalse(underChat.isEmpty, "The task's composer lies under the hidden chat: composer=\(taskComposer.frame), chat=\(chatFrame)")
+        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: underChat.midX - app.windows.firstMatch.frame.minX, dy: underChat.midY - app.windows.firstMatch.frame.minY))
+            .click()
+        app.typeText("Typed into the task.")
+        XCTAssertTrue(waitUntil({ (taskComposer.value as? String ?? "").contains("Typed into the task.") }, timeout: 5),
+                      "Typing reaches the task's composer: \(String(describing: taskComposer.value))")
+        attachAppWindowScreenshot(named: "Task open with the chat hidden behind it")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(chatSidebar.waitToExist(timeout: 5), "Going back shows the chat again.")
+        // Read at once: a rebuilt chat would be reading its history, then show only its newest window.
+        XCTAssertEqual(transcriptValue(), loadedValue, "The chat shows the same rendered messages, without loading again.")
+        XCTAssertEqual(chatSidebar.descendants(matching: .progressIndicator).count, 0, "No loading indicator shows in the chat.")
+        XCTAssertTrue(earlyReply.exists, "The earlier messages are still rendered.")
+        XCTAssertEqual(earlyReply.frame.minY, earlyReplyFrame.minY, accuracy: 2, "The chat keeps its scroll position.")
+        let chatDraft = chatComposer.value as? String ?? ""
+        XCTAssertFalse(chatDraft.contains("Typed into the task."), "No typing reached the hidden chat: \(chatDraft)")
+        XCTAssertEqual(try chatHistoryReads().count, historyBeforeOpeningTask.count, "Switching to a task and back issues no chat history request.")
+        attachAppWindowScreenshot(named: "Back on the board, the chat as it was left")
+
+        // A chat turn that completes while a task is open shows on going back.
+        clickTaskCardTitle(card)
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10))
+        _ = try runCLI(["conversation", "send", chatID, "--message", "anchor-page:Late-tide:1"])
+        element("back-to-board-button").click()
+        XCTAssertTrue(chatSidebar.waitToExist(timeout: 5))
+        XCTAssertNotEqual(transcriptValue(), "Loading conversation history", "The chat shows without reading its history again.")
+        XCTAssertTrue(waitUntil({ transcriptValue().hasSuffix("of 102 messages") }, timeout: 5),
+                      "The chat has the reply that completed while it was hidden: \(transcriptValue())")
+        let lateReply = transcriptMessage("Late tide reply 1.")
+        XCTAssertTrue(scrollTranscriptUntilExists(lateReply), "The late reply shows in the chat.")
+        attachAppWindowScreenshot(named: "Chat shows the reply that completed behind the task")
+    }
+
     // case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest ten labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     func test_standalone_chat_page_labels_search() throws {
         executionTimeAllowance = 240

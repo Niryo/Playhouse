@@ -297,6 +297,45 @@ Playhouse.render(h(Page));
         self.assertIn("anchor-page:Topic-03:1", recalled["userText"], "The recalled page travels with the turn.")
         self.assertIn("Topic 03 reply 1.", recalled["userText"])
         self.assertNotIn("Topic 04 reply 1.", recalled["userText"], "Only the recalled page is carried.")
+
+    # case-contract: test_standalone_chat_stays_loaded_behind_open_task | With the standalone chat sidebar open on a chat longer than one history window (the CLI's newest window holds 80 of its 100 messages, with 20 earlier), scrolled up so its earlier messages have loaded, opening a board task hides the chat behind the task's conversation instead of removing it: it is invisible, unclickable and out of accessibility, so only the task's transcript and composer are found, and typing goes to the task's composer, never the hidden chat's. Going back to the board shows the chat at once with the same rendered messages and scroll position, never Loading conversation history, because it was neither rebuilt nor read again. A chat turn that completes while a task is open lands in the chat's history, not the task's (the chat's newest window ends with its reply and the task's history stays empty), and shows in the chat on going back. Keeping the chat mounted is Playhouse-owned presentation shared by Claude and Codex, so one representative provider (Claude) covers the case.
+    def test_standalone_chat_stays_loaded_behind_open_task(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-behind-task"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+
+        def cli(*arguments, **options):
+            return self.call_cli(*arguments, extra_environment=environment, **options)[0]
+
+        # Four long pages: more messages than the chat's first history window holds.
+        for title in ("Fjords", "Glaciers", "Harbor", "Icebergs"):
+            self.assert_success(cli("conversation", "send", chat_id, "--message", f"anchor-page:{title}:24"))
+        newest = self.assert_success(cli("conversation", "history", chat_id, "--limit", "80"))
+        self.assertEqual(len(newest["messages"]), 80, "The chat opens on one window of its newest messages.")
+        self.assertEqual(newest["earlierMessageCount"], 20, "Earlier messages load only as the reader scrolls up.")
+        earlier = self.assert_success(cli("conversation", "history", chat_id, "--before", newest["messages"][0]["id"], "--limit", "80"))
+        self.assertEqual(len(earlier["messages"]), 20)
+        self.assertEqual(earlier["messages"][1]["text"], "Fjords reply 1.")
+
+        # The UI case checks navigation and focus. Here the task and chat use separate histories.
+        board_task = self.create_task("Covers the loaded chat")
+        self.assert_success(cli("conversation", "send", chat_id, "--message", "anchor-page:Late-tide:1"))
+        latest = self.assert_success(cli("conversation", "history", chat_id, "--limit", "80"))
+        self.assertEqual(latest["messages"][-1]["text"], "Late tide reply 1.", "The reply lands in the chat's own history.")
+        self.assertEqual(latest["earlierMessageCount"], 22)
+        task_history = self.assert_success(cli("conversation", "history", board_task["id"]))
+        self.assertEqual(task_history["messages"], [], "The chat's turn never reaches the board task.")
+        # The task and the chat stay separate records: the chat is still the one chat, off the board.
+        self.assertEqual(self.assert_success(cli("chat", "open"))["id"], chat_id)
+        self.assertNotIn(chat_id, [task["id"] for task in self.assert_success(cli("task", "list"))["tasks"]])
+
     # case-contract: test_standalone_chat_page_labels_search | Above the standalone chat's page labels, a small search field narrows them to the pages whose titles contain its text, read from the whole chat rather than only the newest ten labels, matching case-insensitively and literally: `chat page list --title <text>` returns those pages newest first, its --limit counting matches, surrounding spaces ignored, message text not searched, % and _ matching only themselves, no match an empty list, blank text the same as no filter, and --title without a value invalid_argument. In the chat, the field sits just above the labels the handle slides out, inside their hovered area; typing filters the labels, including a page older than the labels first read, and clicking a match jumps to that page; while the field has the keyboard, unlocked labels stay out after the pointer leaves them. Text that matches nothing shows No matching pages, and the clear button, or Escape, restores every label. The search is Playhouse-owned and shared by Claude and Codex, so one representative provider (Claude) covers the case.
     def test_standalone_chat_page_labels_search(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
