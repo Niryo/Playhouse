@@ -48,7 +48,7 @@ extension PlayhouseUITests {
         let callRow = element("conversation-tool-call-item_long_history_command_21")
         let callOutput = element("conversation-tool-call-output-item_long_history_command_21")
         func isVisible(_ candidate: XCUIElement) -> Bool {
-            candidate.exists && scrollView.frame.intersects(candidate.frame)
+            renderedFrame(candidate).map { scrollView.frame.intersects($0) } ?? false
         }
         func topInViewport(_ candidate: XCUIElement) -> CGFloat { candidate.frame.minY - scrollView.frame.minY }
         // Wheel scrolling keeps each step deterministic: a swipe carries momentum.
@@ -357,7 +357,7 @@ extension PlayhouseUITests {
         assertTranscriptEndsWithoutOverscroll(question: latestQuestion, lastRow: try transcriptRow(for: XCTUnwrap(allMessages.last)), in: scrollView, turnFitsViewport: false)
         attachScreenshot(named: "Paged Claude history scrolled to the bottom")
         func isVisible(_ candidate: XCUIElement) -> Bool {
-            candidate.exists && scrollView.frame.intersects(candidate.frame)
+            renderedFrame(candidate).map { scrollView.frame.intersects($0) } ?? false
         }
         func scrollUp(until condition: () -> Bool) {
             for _ in 0..<40 {
