@@ -196,8 +196,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(terminateAppAndWait(app))
         let seed = Process()
         seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        seed.arguments = [dataDirectory.appendingPathComponent("Playhouse-v2.store").path,
-                          "UPDATE ZBOARDTASK SET ZPULLREQUESTAUTOPILOT = 1, ZPULLREQUESTAUTOMERGE = 1, ZSTATUSRAWVALUE = 'In Progress' WHERE ZTITLE = 'Legacy PR mode UI'; SELECT changes(); UPDATE ZBOARDTASK SET ZSTATUSRAWVALUE = 'In Progress' WHERE ZTITLE = 'Pre-Manual default UI'; SELECT changes();"]
+        seed.arguments = [dataDirectory.appendingPathComponent("Playhouse-v3.sqlite").path,
+                          "UPDATE board_tasks SET pullRequestAutopilot = 1, pullRequestAutoMerge = 1, statusRawValue = 'In Progress' WHERE title = 'Legacy PR mode UI'; SELECT changes(); UPDATE board_tasks SET statusRawValue = 'In Progress' WHERE title = 'Pre-Manual default UI'; SELECT changes();"]
         let seedOutput = Pipe()
         seed.standardOutput = seedOutput
         seed.standardError = seedOutput

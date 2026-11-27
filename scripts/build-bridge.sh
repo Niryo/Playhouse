@@ -80,131 +80,31 @@ if [[ ! -x "${app_executable}" ]]; then
   exit 1
 fi
 
-# Plugins/Core is a synchronized Xcode folder; every Swift file in it is part of
-# the plugin core (the JavaScript runtime and node tree), shared by the app and
-# the daemon's `plugin render` command.
-plugin_core_sources=()
+# The daemon links the same PlayhouseCore module the app builds from Playhouse/Core (every
+# Swift file in it), compiled here as its own static module because this raw swiftc build
+# can't resolve Swift packages. The app target's macOS platform services are compiled into
+# the daemon itself, which installs them at launch.
+core_sources=()
 while IFS= read -r source; do
-  plugin_core_sources+=("${source}")
-done < <(find "${repository_root}/Playhouse/App/Plugins/Core" -name '*.swift' -type f | LC_ALL=C sort)
-if (( ${#plugin_core_sources[@]} == 0 )); then
-  printf 'No plugin core sources found in %s\n' "${repository_root}/Playhouse/App/Plugins/Core" >&2
+  core_sources+=("${source}")
+done < <(find "${repository_root}/Playhouse/Core" -name '*.swift' -type f | LC_ALL=C sort)
+if (( ${#core_sources[@]} == 0 )); then
+  printf 'No PlayhouseCore sources found in %s\n' "${repository_root}/Playhouse/Core" >&2
   exit 1
 fi
-
-shared_sources=(
-  "${repository_root}/Playhouse/App/BoardTask.swift"
-  "${repository_root}/Playhouse/App/ConversationSubject.swift"
-  "${repository_root}/Playhouse/App/WorkspaceSupport.swift"
-  "${repository_root}/Playhouse/App/HoverRevealScrollers.swift"
-  "${repository_root}/Playhouse/App/WorkspaceChanges.swift"
-  "${repository_root}/Playhouse/App/CodexAppServerClient.swift"
-  "${repository_root}/Playhouse/App/CodexSocketConnection.swift"
-  "${repository_root}/Playhouse/App/ConversationModel.swift"
-  "${repository_root}/Playhouse/App/ClaudeCodeClient.swift"
-  "${repository_root}/Playhouse/App/ProviderRequestLog.swift"
-  "${repository_root}/Playhouse/App/ProcessCPUSampler.swift"
-  "${repository_root}/Playhouse/App/AgentRunHost.swift"
-  "${repository_root}/Playhouse/App/ContextCompaction.swift"
-  "${repository_root}/Playhouse/App/AgentUsage.swift"
-  "${repository_root}/Playhouse/App/AgentUsageStore.swift"
-  "${repository_root}/Playhouse/App/ConversationTranscriptStore.swift"
-  "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
-  "${repository_root}/Playhouse/App/SkillCatalog.swift"
-  "${repository_root}/Playhouse/App/RuleCatalog.swift"
-  "${repository_root}/Playhouse/App/MentionCatalog.swift"
-  "${repository_root}/Playhouse/App/SlashCommandCatalog.swift"
-  "${repository_root}/Playhouse/App/McpCatalog.swift"
-  "${repository_root}/Playhouse/App/CodexConfigTOML.swift"
-  "${repository_root}/Playhouse/App/BridgeCore.swift"
-  "${repository_root}/Playhouse/App/BoundedWaits.swift"
-  "${repository_root}/Playhouse/App/TaskSchedule.swift"
-  "${repository_root}/Playhouse/App/Plugins/Services/PluginServiceHost.swift"
-  "${repository_root}/Playhouse/App/Plugins/Services/PullRequestModeService.swift"
-  "${repository_root}/Playhouse/App/Plugins/Services/BuiltInCommandsPlugin.swift"
-  "${repository_root}/Playhouse/App/Plugins/Services/JavaScriptPluginService.swift"
-  "${repository_root}/Playhouse/App/Plugins/Services/PluginAgentRuns.swift"
-  "${repository_root}/Playhouse/App/Plugins/Services/PluginJSONSchema.swift"
-  "${repository_root}/Playhouse/App/Plugins/Services/PluginBackgroundCommands.swift"
-  "${repository_root}/Playhouse/App/UpdateManager.swift"
-  "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
-  "${repository_root}/Playhouse/Bridge/CLICommandCatalog.swift"
-  "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
-  "${repository_root}/Playhouse/Bridge/UpdateCore.swift"
-  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"
-  "${repository_root}/Playhouse/App/BoardConversationStorage.swift"
-  "${repository_root}/Playhouse/App/BoardLifecycleStatus.swift"
-  "${repository_root}/Playhouse/App/BoardOperationLocks.swift"
-  "${repository_root}/Playhouse/App/BoardPromptPersistence.swift"
-  "${repository_root}/Playhouse/App/BoardPullRequestLifecycle.swift"
-  "${repository_root}/Playhouse/App/BoardRepositoryLifecycle.swift"
-  "${repository_root}/Playhouse/App/BoardScheduling.swift"
-  "${repository_root}/Playhouse/App/BoardTaskCRUD.swift"
-  "${repository_root}/Playhouse/App/BoardTaskManager.swift"
-  "${repository_root}/Playhouse/App/BoardUsageReporting.swift"
-  "${repository_root}/Playhouse/App/ClaudeAccountUsage.swift"
-  "${repository_root}/Playhouse/App/ClaudeClientMapping.swift"
-  "${repository_root}/Playhouse/App/ClaudeOutputHandling.swift"
-  "${repository_root}/Playhouse/App/ClaudeProcessLifecycle.swift"
-  "${repository_root}/Playhouse/App/ClaudeProcessProtocol.swift"
-  "${repository_root}/Playhouse/App/ClaudeSessionRunner.swift"
-  "${repository_root}/Playhouse/App/OpenCodeAccountUsage.swift"
-  "${repository_root}/Playhouse/App/OpenCodeClient.swift"
-  "${repository_root}/Playhouse/App/OpenCodeMcp.swift"
-  "${repository_root}/Playhouse/App/OpenCodeRequestLog.swift"
-  "${repository_root}/Playhouse/App/OpenCodeServer.swift"
-  "${repository_root}/Playhouse/App/OpenCodeTurn.swift"
-  "${repository_root}/Playhouse/App/ClaudeSessionSupport.swift"
-  "${repository_root}/Playhouse/App/ClaudeTurnControl.swift"
-  "${repository_root}/Playhouse/App/ClaudeTurnReporting.swift"
-  "${repository_root}/Playhouse/App/CodexAccountUsage.swift"
-  "${repository_root}/Playhouse/App/CodexMessageConversion.swift"
-  "${repository_root}/Playhouse/App/CodexServerEvents.swift"
-  "${repository_root}/Playhouse/App/CodexServerTransport.swift"
-  "${repository_root}/Playhouse/App/CodexSharedServer.swift"
-  "${repository_root}/Playhouse/App/CodexTaskInstructions.swift"
-  "${repository_root}/Playhouse/App/CodexThreadLifecycle.swift"
-  "${repository_root}/Playhouse/App/CodexTurnRecovery.swift"
-  "${repository_root}/Playhouse/App/CodexBackgroundJobs.swift"
-  "${repository_root}/Playhouse/App/CodexTurnSending.swift"
-  "${repository_root}/Playhouse/App/ConversationCompaction.swift"
-  "${repository_root}/Playhouse/App/ConversationHistory.swift"
-  "${repository_root}/Playhouse/App/ParallelChatBubbles.swift"
-  "${repository_root}/Playhouse/App/ConversationManager.swift"
-  "${repository_root}/Playhouse/App/ConversationMessages.swift"
-  "${repository_root}/Playhouse/App/ConversationProviderSelection.swift"
-  "${repository_root}/Playhouse/App/ConversationStandaloneAutomation.swift"
-  "${repository_root}/Playhouse/App/ConversationTranscriptRecording.swift"
-  "${repository_root}/Playhouse/App/ConversationTurnControl.swift"
-  "${repository_root}/Playhouse/App/ConversationTurnExecution.swift"
-  "${repository_root}/Playhouse/App/ConversationTurnRecovery.swift"
-  "${repository_root}/Playhouse/App/McpCatalogModels.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgeConversationFlow.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgeConversationOperations.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgeOverview.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgePullRequests.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgeRequestDiagnostics.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgeRuntime.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgeSettings.swift"
-  "${repository_root}/Playhouse/App/PlayhouseBridgeTaskWorkspace.swift"
-  "${repository_root}/Playhouse/App/PlayhouseDiagnostics.swift"
-  "${repository_root}/Playhouse/App/PlayhouseStore.swift"
-  "${repository_root}/Playhouse/App/PlayhouseWorktreeServices.swift"
-  "${repository_root}/Playhouse/App/ProviderTokenMap.swift"
-  "${repository_root}/Playhouse/App/PullRequestServices.swift"
-  "${repository_root}/Playhouse/App/SkillCatalogModels.swift"
-  "${repository_root}/Playhouse/App/SkillManifest.swift"
-  "${repository_root}/Playhouse/App/WorkspaceActivity.swift"
-  "${repository_root}/Playhouse/App/WorkspaceTaskManagers.swift"
-  "${plugin_core_sources[@]}"
+daemon_sources=(
+  "${repository_root}/Playhouse/Bridge/DaemonMain.swift"
+  "${repository_root}/Playhouse/App/Platform/MacPlatformServices.swift"
 )
 
 cli_sources=(
-  "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
-  "${repository_root}/Playhouse/Bridge/CLICommandCatalog.swift"
-  "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
-  "${repository_root}/Playhouse/Bridge/UpdateCore.swift"
-  "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift"
+  "${repository_root}/Playhouse/Core/Bridge/BridgeContract.swift"
+  "${repository_root}/Playhouse/Core/Bridge/CLICommandCatalog.swift"
+  "${repository_root}/Playhouse/Core/Bridge/BridgeSocket.swift"
+  "${repository_root}/Playhouse/Core/Bridge/UpdateCore.swift"
+  "${repository_root}/Playhouse/Core/Bridge/ReleaseSigningKey.swift"
+  "${repository_root}/Playhouse/Core/Platform/Hashing.swift"
+  "${repository_root}/Playhouse/Core/Platform/POSIX.swift"
   "${repository_root}/Playhouse/CLI/BridgeClient.swift"
   "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift"
   "${repository_root}/Playhouse/CLI/PlayhouseCLIParsing.swift"
@@ -220,8 +120,8 @@ bridge_stamp="${TARGET_BUILD_DIR}/.playhouse-bridge-build-stamp-${PRODUCT_BUNDLE
 bridge_inputs=(
   "${BASH_SOURCE[0]}"
   "${grdb_module}"
-  "${shared_sources[@]}"
-  "${repository_root}/Playhouse/Bridge/DaemonMain.swift"
+  "${core_sources[@]}"
+  "${daemon_sources[@]}"
   "${repository_root}/Playhouse/Bridge/SandboxCheck.h"
   "${cli_sources[@]}"
   "${architecture}-apple-macosx${deployment_target}"
@@ -260,26 +160,46 @@ if [[ -x "${cli_executable}" && -x "${daemon_executable}" &&
   exit 0
 fi
 
+core_module="$(mktemp -d "${TARGET_TEMP_DIR:-${TMPDIR:-/tmp}}/playhouse-core.XXXXXX")"
+trap 'rm -rf "${core_module}"' EXIT
+xcrun --sdk macosx swiftc \
+  -parse-as-library \
+  -swift-version 5 \
+  -module-name PlayhouseCore \
+  -package-name playhouse \
+  -target "${architecture}-apple-macosx${deployment_target}" \
+  -sdk "${sdk}" \
+  "${optimization_flag}" \
+  ${debug_flags[@]+"${debug_flags[@]}"} \
+  -I "${grdb_module}" \
+  -I "${repository_root}/Vendor/GRDB.swift/Sources/GRDBSQLite" \
+  -emit-module \
+  -emit-module-path "${core_module}/PlayhouseCore.swiftmodule" \
+  -emit-library -static \
+  -o "${core_module}/libPlayhouseCore.a" \
+  "${core_sources[@]}"
+
 xcrun --sdk macosx swiftc \
   -swift-version 5 \
+  -package-name playhouse \
   -target "${architecture}-apple-macosx${deployment_target}" \
   -sdk "${sdk}" \
   "${optimization_flag}" \
   ${debug_flags[@]+"${debug_flags[@]}"} \
   -framework Foundation \
   -framework AppKit \
-  -framework SwiftUI \
-  -framework SwiftData \
-  -framework Combine \
+  -framework ServiceManagement \
   -framework JavaScriptCore \
   -framework Security \
+  -I "${core_module}" \
+  -L "${core_module}" \
+  -lPlayhouseCore \
   -I "${grdb_module}" \
   -I "${repository_root}/Vendor/GRDB.swift/Sources/GRDBSQLite" \
   -L "${grdb_module}" \
   -lGRDB \
   -import-objc-header "${repository_root}/Playhouse/Bridge/SandboxCheck.h" \
-  "${shared_sources[@]}" \
-  "${repository_root}/Playhouse/Bridge/DaemonMain.swift" \
+  "${daemon_sources[@]}" \
   -o "${daemon_executable}"
 
 xcrun --sdk macosx swiftc \
@@ -288,6 +208,7 @@ xcrun --sdk macosx swiftc \
   -sdk "${sdk}" \
   "${optimization_flag}" \
   ${debug_flags[@]+"${debug_flags[@]}"} \
+  -package-name playhouse \
   -framework Foundation \
   -framework Security \
   "${cli_sources[@]}" \

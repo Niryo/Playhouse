@@ -820,13 +820,13 @@ class BridgeTestCases16:
         legacy_title = "Claude legacy token usage"
         legacy_id = self.create_task(title=legacy_title, provider="claude")["id"]
         legacy_snapshots = '{"claude:legacy":{"provider":"claude","updatedAt":800000000,"main":{"calls":2,"sentTokens":1200,"outputTokens":60,"lastContextTokens":650},"subagents":{"old":{"calls":1,"sentTokens":300,"outputTokens":10,"lastContextTokens":300}}}}'.encode("utf-8")
-        with sqlite3.connect(self.data_directory / "Playhouse-v2.store") as database:
+        with sqlite3.connect(self.data_directory / "Playhouse-v3.sqlite") as database:
             seeded = database.execute(
-                "UPDATE ZBOARDTASK SET ZCALLUSAGESNAPSHOTSDATA = ?, ZTOTALINPUTTOKENS = 100, ZTOTALOUTPUTTOKENS = 50, "
-                "ZTOTALCACHEREADTOKENS = 400, ZTOTALCACHECREATIONTOKENS = 20 WHERE ZTITLE = ?",
+                "UPDATE board_tasks SET callUsageSnapshotsData = ?, totalInputTokens = 100, totalOutputTokens = 50, "
+                "totalCacheReadTokens = 400, totalCacheCreationTokens = 20 WHERE title = ?",
                 (legacy_snapshots, legacy_title),
             )
-            self.assertEqual(seeded.rowcount, 1, "Seed the real SwiftData row with pre-split call usage.")
+            self.assertEqual(seeded.rowcount, 1, "Seed the real stored row with pre-split call usage.")
         # The running daemon holds the task in memory; a fresh daemon (its own service name) reads the seeded row.
         fresh_daemon = {
             "PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.legacy-{uuid.uuid4().hex[:8]}",

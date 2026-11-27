@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-// Focused unit checks of Playhouse/App/AgentRunHost.swift, compiled together with it and run
+// Focused unit checks of Playhouse/Core/Providers/AgentRunHost.swift, compiled together with it and run
 // by scripts/test-e2e.sh before the bridge suite. They pin the process identity, spawn
 // isolation, ownership lock, sweep, socket path, manifest and line-tailing rules that let an
 // agent outlive its daemon; the bridge cases `test_codex_turn_reattaches_after_daemon_restart`

@@ -10,161 +10,23 @@
 		1004C6E80791CB9B8CFE0DD0 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D270EEC09920B3D8C0579AD1 /* Cocoa.framework */; };
 		3F487ADD7D031EC825404769 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DDE3AE70DC05B141B7C58AFC /* XCTest.framework */; };
 		A10000000000000000000001 /* PlayhouseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* PlayhouseApp.swift */; };
-		A10000000000000000000002 /* BoardTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* BoardTask.swift */; };
-		A10000000000000000000003 /* KanbanBoardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* KanbanBoardView.swift */; };
-		A10000000000000000000F01 /* HoverRevealScrollers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000F01 /* HoverRevealScrollers.swift */; };
-		A10000000000000000000010 /* WorkspaceRootsEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* WorkspaceRootsEditor.swift */; };
-		A10000000000000000000E01 /* SkillCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E01 /* SkillCatalog.swift */; };
-		A10000000000000000000E02 /* SkillsPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E02 /* SkillsPageView.swift */; };
-		A10000000000000000000E03 /* RuleCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E03 /* RuleCatalog.swift */; };
-		A10000000000000000000E07 /* MentionCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E07 /* MentionCatalog.swift */; };
-		A10000000000000000005C01 /* SlashCommandCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000005C01 /* SlashCommandCatalog.swift */; };
-		A10000000000000000000E04 /* McpCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E04 /* McpCatalog.swift */; };
-		A10000000000000000000E05 /* CodexConfigTOML.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E05 /* CodexConfigTOML.swift */; };
-		A10000000000000000000E06 /* McpServersSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E06 /* McpServersSectionView.swift */; };
 		A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000E1 /* TaskTerminalPanel.swift */; };
-		A1000000000000000000F301 /* AgentsInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F301 /* AgentsInfoView.swift */; };
-		A1000000000000000000F302 /* TokenStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F302 /* TokenStatsView.swift */; };
-		A1000000000000000000F303 /* SkillGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F303 /* SkillGalleryView.swift */; };
-		A1000000000000000000F304 /* RepositoryChipsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F304 /* RepositoryChipsView.swift */; };
-		A1000000000000000000F305 /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F305 /* ComposerView.swift */; };
-		A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F306 /* KanbanColumnSection.swift */; };
-		A1000000000000000000F307 /* DoneArchiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F307 /* DoneArchiveView.swift */; };
-		A1000000000000000000F7A1 /* UpdateCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A1 /* UpdateCore.swift */; };
-		A1000000000000000000F7A2 /* ReleaseSigningKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A2 /* ReleaseSigningKey.swift */; };
-		A1000000000000000000F7A3 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A3 /* UpdateManager.swift */; };
 		A1000000000000000000F7A4 /* UpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A4 /* UpdateController.swift */; };
-		A1000000000000000000F401 /* TaskSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F401 /* TaskSchedule.swift */; };
-		A1000000000000000000F402 /* SchedulerAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F402 /* SchedulerAgent.swift */; };
-		A1000000000000000000F201 /* AgentUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F201 /* AgentUsageStore.swift */; };
-		A1000000000000000000F101 /* AgentUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F101 /* AgentUsage.swift */; };
 		A100000000000000000000E2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000004 /* SwiftTerm */; };
-		A10000000000000000000006 /* TaskConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* TaskConversationView.swift */; };
-		A10000000000000000000007 /* CodexAppServerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* CodexAppServerClient.swift */; };
-		A1000000000000000000F404 /* CodexSocketConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F404 /* CodexSocketConnection.swift */; };
-		A10000000000000000000012 /* ConversationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* ConversationModel.swift */; };
-		A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ClaudeCodeClient.swift */; };
-		A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* ConversationTranscriptStore.swift */; };
-		A10000000000000000000019 /* StandaloneChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* StandaloneChatStore.swift */; };
-		A10000000000000000BB0001 /* ParallelChatBubbles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000BB0001 /* ParallelChatBubbles.swift */; };
-		A10000000000000000BB0002 /* ParallelChatBubblesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000BB0002 /* ParallelChatBubblesView.swift */; };
-		A1000000000000000000001A /* ConversationSubject.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* ConversationSubject.swift */; };
-		A1000000000000000000001D /* ProviderRequestLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001D /* ProviderRequestLog.swift */; };
-		A10000000000000000000008 /* WorkspaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* WorkspaceSupport.swift */; };
-		A10000000000000000000009 /* BridgeCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* BridgeCore.swift */; };
-		A1000000000000000000F801 /* BoundedWaits.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F801 /* BoundedWaits.swift */; };
-		A1000000000000000000000A /* BridgeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BridgeContract.swift */; };
-		C11C0000000000000000CA01 /* CLICommandCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11C0000000000000000CA02 /* CLICommandCatalog.swift */; };
-		A1000000000000000000000D /* WorkspaceChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* WorkspaceChanges.swift */; };
 		A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* MonacoDiffEditor.swift */; };
-		A10000000000000000000015 /* CodeSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* CodeSyntaxHighlighter.swift */; };
 		A1000000000000000000000F /* Monaco in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Monaco */; };
 		A100000000000000000000F2 /* PluginRuntime in Resources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000F2 /* PluginRuntime */; };
 		A10000000000000000000011 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* Assets.xcassets */; };
 		B4144B03272C978E6BEE8876 /* PlayhouseBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A603F3AB342E594B68ED99 /* PlayhouseBridgeTests.swift */; };
 		D564A1A1B70481ED860871B3 /* PlayhouseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C95D59E3D25AB8C146839F /* PlayhouseUITests.swift */; };
 		FFFE07E201DA471E79F027E4 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D270EEC09920B3D8C0579AD1 /* Cocoa.framework */; };
-		A10000000000000000000016 /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* DaemonClient.swift */; };
-		A10000000000000000000017 /* RemoteConversationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* RemoteConversationManager.swift */; };
-		A10000000000000000000018 /* BridgeSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* BridgeSocket.swift */; };
-		A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* ProcessCPUSampler.swift */; };
-		A1000000000000000000F403 /* AgentRunHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F403 /* AgentRunHost.swift */; };
-		A1000000000000000000F601 /* ContextCompaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F601 /* ContextCompaction.swift */; };
-		A1000000000000000000F701 /* TranscriptRowAnchors.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F701 /* TranscriptRowAnchors.swift */; };
-		A1000000000000000000F803 /* MarkdownInlineText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F803 /* MarkdownInlineText.swift */; };
-		A1000000000000000000F802 /* MarkdownDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F802 /* MarkdownDocument.swift */; };
 		A1000000000000000000001C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* GRDB */; };
-		A1000000000000000000F501 /* TaskItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F501 /* TaskItemView.swift */; };
+		A1000000000000000000001D /* PlayhouseCore in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000006 /* PlayhouseCore */; };
+		A10000000000000000000020 /* PlayhouseViews in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000009 /* PlayhouseViews */; };
+		A1000000000000000000001F /* PlayhouseAtoms in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000008 /* PlayhouseAtoms */; };
+		A1000000000000000000001E /* PlayhouseUI in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000007 /* PlayhouseUI */; };
 		A100000000000000000000DB /* DebugConversationImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000DB /* DebugConversationImport.swift */; };
-		B10000000000000000000001 /* ConversationMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* ConversationMessages.swift */; };
-		B10000000000000000000002 /* McpCatalogModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000002 /* McpCatalogModels.swift */; };
-		B10000000000000000000003 /* SkillCatalogModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* SkillCatalogModels.swift */; };
-		B10000000000000000000006 /* PlayhouseBridgeRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000006 /* PlayhouseBridgeRuntime.swift */; };
-		B10000000000000000000007 /* PlayhouseWorktreeServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000007 /* PlayhouseWorktreeServices.swift */; };
-		B10000000000000000000008 /* PlayhouseDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000008 /* PlayhouseDiagnostics.swift */; };
-		B10000000000000000000009 /* TaskConversationRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000009 /* TaskConversationRendering.swift */; };
 		B1000000000000000000BE01 /* TranscriptBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BE01 /* TranscriptBenchmark.swift */; };
-		B10000000000000000000010 /* ConversationTranscriptLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000010 /* ConversationTranscriptLayout.swift */; };
-		B10000000000000000007A51 /* TranscriptLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A51 /* TranscriptLayout.swift */; };
-		B10000000000000000007A52 /* TranscriptScrollController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A52 /* TranscriptScrollController.swift */; };
-		B10000000000000000000011 /* RulesPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* RulesPageView.swift */; };
-		B10000000000000000000012 /* ProviderTokenMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000012 /* ProviderTokenMap.swift */; };
-		B10000000000000000000013 /* WorkspaceActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000013 /* WorkspaceActivity.swift */; };
-		B10000000000000000000014 /* WorkspaceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000014 /* WorkspaceSettingsView.swift */; };
-		B10000000000000000000015 /* SkillManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000015 /* SkillManifest.swift */; };
-		B10000000000000000000016 /* RawInputViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000016 /* RawInputViews.swift */; };
-		B10000000000000000000017 /* ConversationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000017 /* ConversationManager.swift */; };
-		B10000000000000000000018 /* BoardTaskManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000018 /* BoardTaskManager.swift */; };
-		B10000000000000000000019 /* KanbanBoardComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000019 /* KanbanBoardComponents.swift */; };
-		B10000000000000000000020 /* PluginAuthoringViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000020 /* PluginAuthoringViews.swift */; };
-		B10000000000000000000021 /* CodexTaskInstructions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000021 /* CodexTaskInstructions.swift */; };
-		B10000000000000000000022 /* ClaudeSessionSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000022 /* ClaudeSessionSupport.swift */; };
-		B10000000000000000000023 /* WorkspaceTaskManagers.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000023 /* WorkspaceTaskManagers.swift */; };
-		B10000000000000000000024 /* ClaudeSessionRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000024 /* ClaudeSessionRunner.swift */; };
-		B10000000000000000007A66 /* OpenCodeAccountUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A66 /* OpenCodeAccountUsage.swift */; };
-		B10000000000000000007A65 /* OpenCodeServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A65 /* OpenCodeServer.swift */; };
-		B10000000000000000007A64 /* OpenCodeTurn.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A64 /* OpenCodeTurn.swift */; };
-		B10000000000000000007A63 /* OpenCodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A63 /* OpenCodeClient.swift */; };
-		B10000000000000000007A67 /* OpenCodeMcp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A67 /* OpenCodeMcp.swift */; };
-		B10000000000000000007A68 /* OpenCodeRequestLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A68 /* OpenCodeRequestLog.swift */; };
-		B10000000000000000000004 /* PlayhouseStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* PlayhouseStore.swift */; };
-		B10000000000000000000005 /* PullRequestServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005 /* PullRequestServices.swift */; };
-		B10000000000000000000025 /* ConversationTranscriptRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000025 /* ConversationTranscriptRendering.swift */; };
-		B10000000000000000000026 /* ConversationSideChatRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000026 /* ConversationSideChatRendering.swift */; };
-		B10000000000000000007A62 /* ConversationCommentPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A62 /* ConversationCommentPopover.swift */; };
-		B10000000000000000000027 /* ConversationTranscriptNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000027 /* ConversationTranscriptNavigation.swift */; };
-		B10000000000000000007A60 /* ConversationChatPageNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A60 /* ConversationChatPageNavigation.swift */; };
-		B10000000000000000007A61 /* ChatPageAnchorsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000007A61 /* ChatPageAnchorsView.swift */; };
-		B10000000000000000000028 /* ConversationMessageRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000028 /* ConversationMessageRendering.swift */; };
-		B10000000000000000000029 /* ConversationComposerFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000029 /* ConversationComposerFlow.swift */; };
-		B10000000000000000000030 /* ConversationStateHandling.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000030 /* ConversationStateHandling.swift */; };
-		B10000000000000000000031 /* ConversationRepositoryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000031 /* ConversationRepositoryPresentation.swift */; };
-		B10000000000000000000032 /* BoardPullRequestLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000032 /* BoardPullRequestLifecycle.swift */; };
-		B10000000000000000000033 /* BoardUsageReporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000033 /* BoardUsageReporting.swift */; };
-		B10000000000000000000034 /* BoardScheduling.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000034 /* BoardScheduling.swift */; };
-		B10000000000000000000035 /* ConversationCompaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000035 /* ConversationCompaction.swift */; };
-		B10000000000000000000036 /* ConversationHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000036 /* ConversationHistory.swift */; };
-		B10000000000000000000037 /* ConversationProviderSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000037 /* ConversationProviderSelection.swift */; };
-		B10000000000000000000038 /* ConversationTurnControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000038 /* ConversationTurnControl.swift */; };
-		B10000000000000000000039 /* ConversationTurnRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000039 /* ConversationTurnRecovery.swift */; };
-		B10000000000000000000040 /* ConversationTranscriptRecording.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000040 /* ConversationTranscriptRecording.swift */; };
-		B10000000000000000000041 /* ConversationTurnExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000041 /* ConversationTurnExecution.swift */; };
-		B10000000000000000000042 /* ConversationStandaloneAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000042 /* ConversationStandaloneAutomation.swift */; };
-		B10000000000000000000043 /* TaskConversationWorkspacePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000043 /* TaskConversationWorkspacePresentation.swift */; };
-		B10000000000000000000044 /* BoardOperationLocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000044 /* BoardOperationLocks.swift */; };
-		B10000000000000000000045 /* BoardTaskCRUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000045 /* BoardTaskCRUD.swift */; };
-		B10000000000000000000046 /* BoardRepositoryLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000046 /* BoardRepositoryLifecycle.swift */; };
-		B10000000000000000000047 /* BoardLifecycleStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000047 /* BoardLifecycleStatus.swift */; };
-		B10000000000000000000048 /* BoardPromptPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000048 /* BoardPromptPersistence.swift */; };
-		B10000000000000000000049 /* BoardConversationStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000049 /* BoardConversationStorage.swift */; };
-		B10000000000000000000050 /* CodexThreadLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000050 /* CodexThreadLifecycle.swift */; };
-		B10000000000000000000051 /* CodexAccountUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000051 /* CodexAccountUsage.swift */; };
-		B10000000000000000000052 /* CodexTurnSending.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000052 /* CodexTurnSending.swift */; };
-		B10000000000000000000053 /* CodexTurnRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000053 /* CodexTurnRecovery.swift */; };
-		B100000000000000000000F1 /* CodexBackgroundJobs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000000F1 /* CodexBackgroundJobs.swift */; };
-		B10000000000000000000054 /* CodexServerTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000054 /* CodexServerTransport.swift */; };
-		B10000000000000000000055 /* CodexServerEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000055 /* CodexServerEvents.swift */; };
-		B10000000000000000000056 /* CodexSharedServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000056 /* CodexSharedServer.swift */; };
-		B10000000000000000000057 /* CodexMessageConversion.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000057 /* CodexMessageConversion.swift */; };
-		B10000000000000000000058 /* ClaudeTurnControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000058 /* ClaudeTurnControl.swift */; };
-		B10000000000000000000059 /* ClaudeProcessProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000059 /* ClaudeProcessProtocol.swift */; };
-		B10000000000000000000060 /* ClaudeProcessLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000060 /* ClaudeProcessLifecycle.swift */; };
-		B10000000000000000000061 /* ClaudeOutputHandling.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000061 /* ClaudeOutputHandling.swift */; };
-		B10000000000000000000062 /* ClaudeTurnReporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000062 /* ClaudeTurnReporting.swift */; };
-		B10000000000000000000063 /* ClaudeClientMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000063 /* ClaudeClientMapping.swift */; };
-		B10000000000000000000064 /* ClaudeAccountUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000064 /* ClaudeAccountUsage.swift */; };
-		B10000000000000000000065 /* KanbanNavigationActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000065 /* KanbanNavigationActions.swift */; };
-		B10000000000000000000066 /* KanbanPullRequestActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000066 /* KanbanPullRequestActions.swift */; };
-		B10000000000000000000067 /* TaskConversationPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000067 /* TaskConversationPanels.swift */; };
-		B10000000000000000000068 /* TaskConversationTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000068 /* TaskConversationTranscriptView.swift */; };
-		B10000000000000000000069 /* TaskConversationComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000069 /* TaskConversationComposerView.swift */; };
-		B10000000000000000000072 /* PlayhouseBridgeRequestDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000072 /* PlayhouseBridgeRequestDiagnostics.swift */; };
-		B10000000000000000000073 /* PlayhouseBridgeSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000073 /* PlayhouseBridgeSettings.swift */; };
-		B10000000000000000000074 /* PlayhouseBridgePullRequests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000074 /* PlayhouseBridgePullRequests.swift */; };
-		B10000000000000000000075 /* PlayhouseBridgeConversationOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000075 /* PlayhouseBridgeConversationOperations.swift */; };
-		B10000000000000000000076 /* PlayhouseBridgeConversationFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000076 /* PlayhouseBridgeConversationFlow.swift */; };
-		B10000000000000000000077 /* PlayhouseBridgeTaskWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000077 /* PlayhouseBridgeTaskWorkspace.swift */; };
-		B10000000000000000000078 /* PlayhouseBridgeOverview.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000078 /* PlayhouseBridgeOverview.swift */; };
 		C6BBA1ABA379B1A5BACB2D9A /* PlayhouseUITestSupport01.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDEAE2E2FD777185DE714AC8 /* PlayhouseUITestSupport01.swift */; };
 		6E810F521A3454FDBB24AC6C /* PlayhouseUITestSupport02.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F89ACA61AB93B9315B0AD33 /* PlayhouseUITestSupport02.swift */; };
 		11441B83B82B75454EFBC200 /* PlayhouseUITestSupport03.swift in Sources */ = {isa = PBXBuildFile; fileRef = F328138C44EDA7534209E395 /* PlayhouseUITestSupport03.swift */; };
@@ -206,6 +68,11 @@
 		A1000000000000000000F7A6 /* PlayhouseUITests+Cases34.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A6 /* PlayhouseUITests+Cases34.swift */; };
 		A1000000000000000000F7A7 /* PlayhouseUITests+Cases35.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A7 /* PlayhouseUITests+Cases35.swift */; };
 		A1000000000000000000F7A8 /* PlayhouseUITests+Cases36.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F7A8 /* PlayhouseUITests+Cases36.swift */; };
+		B12D850024248883DA466D10 /* Platform/MacPlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = B22D850024248883DA466D10 /* Platform/MacPlatformServices.swift */; };
+		B13C17A2F7CF3C177B119A5D /* NativeViews/MacNativeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B23C17A2F7CF3C177B119A5D /* NativeViews/MacNativeViews.swift */; };
+		B1417987BB9907126C0DE28D /* NativeViews/NativeChatEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2417987BB9907126C0DE28D /* NativeViews/NativeChatEditor.swift */; };
+		B123834CB932523C129D0351 /* NativeViews/NativeText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B223834CB932523C129D0351 /* NativeViews/NativeText.swift */; };
+		B16C2816EF4E5F74950D28EF /* NativeViews/NativeTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B26C2816EF4E5F74950D28EF /* NativeViews/NativeTextEditor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -221,54 +88,10 @@
 /* Begin PBXFileReference section */
 		60C95D59E3D25AB8C146839F /* PlayhouseUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlayhouseUITests.swift; sourceTree = "<group>"; };
 		A20000000000000000000001 /* PlayhouseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseApp.swift; sourceTree = "<group>"; };
-		A20000000000000000000002 /* BoardTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardTask.swift; sourceTree = "<group>"; };
-		A20000000000000000000003 /* KanbanBoardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanBoardView.swift; sourceTree = "<group>"; };
-		A20000000000000000000F01 /* HoverRevealScrollers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoverRevealScrollers.swift; sourceTree = "<group>"; };
-		A20000000000000000000010 /* WorkspaceRootsEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceRootsEditor.swift; sourceTree = "<group>"; };
-		A20000000000000000000E01 /* SkillCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCatalog.swift; sourceTree = "<group>"; };
-		A20000000000000000000E02 /* SkillsPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsPageView.swift; sourceTree = "<group>"; };
-		A20000000000000000000E03 /* RuleCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleCatalog.swift; sourceTree = "<group>"; };
-		A20000000000000000000E07 /* MentionCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionCatalog.swift; sourceTree = "<group>"; };
-		A20000000000000000005C01 /* SlashCommandCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandCatalog.swift; sourceTree = "<group>"; };
-		A20000000000000000000E04 /* McpCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpCatalog.swift; sourceTree = "<group>"; };
-		A20000000000000000000E05 /* CodexConfigTOML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexConfigTOML.swift; sourceTree = "<group>"; };
-		A20000000000000000000E06 /* McpServersSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpServersSectionView.swift; sourceTree = "<group>"; };
 		A200000000000000000000E1 /* TaskTerminalPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTerminalPanel.swift; sourceTree = "<group>"; };
-		A2000000000000000000F301 /* AgentsInfoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsInfoView.swift; sourceTree = "<group>"; };
-		A2000000000000000000F302 /* TokenStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStatsView.swift; sourceTree = "<group>"; };
-		A2000000000000000000F303 /* SkillGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillGalleryView.swift; sourceTree = "<group>"; };
-		A2000000000000000000F304 /* RepositoryChipsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryChipsView.swift; sourceTree = "<group>"; };
-		A2000000000000000000F305 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
-		A2000000000000000000F306 /* KanbanColumnSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanColumnSection.swift; sourceTree = "<group>"; };
-		A2000000000000000000F307 /* DoneArchiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoneArchiveView.swift; sourceTree = "<group>"; };
-		A2000000000000000000F7A1 /* UpdateCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/UpdateCore.swift; sourceTree = "<group>"; };
-		A2000000000000000000F7A2 /* ReleaseSigningKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/ReleaseSigningKey.swift; sourceTree = "<group>"; };
-		A2000000000000000000F7A3 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
 		A2000000000000000000F7A4 /* UpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateController.swift; sourceTree = "<group>"; };
-		A2000000000000000000F401 /* TaskSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSchedule.swift; sourceTree = "<group>"; };
-		A2000000000000000000F402 /* SchedulerAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerAgent.swift; sourceTree = "<group>"; };
-		A2000000000000000000F201 /* AgentUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentUsageStore.swift; sourceTree = "<group>"; };
-		A2000000000000000000F101 /* AgentUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentUsage.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* Playhouse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Playhouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A20000000000000000000008 /* TaskConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationView.swift; sourceTree = "<group>"; };
-		A20000000000000000000009 /* CodexAppServerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerClient.swift; sourceTree = "<group>"; };
-		A2000000000000000000F404 /* CodexSocketConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexSocketConnection.swift; sourceTree = "<group>"; };
-		A20000000000000000000012 /* ConversationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModel.swift; sourceTree = "<group>"; };
-		A20000000000000000000013 /* ClaudeCodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCodeClient.swift; sourceTree = "<group>"; };
-		A20000000000000000000014 /* ConversationTranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptStore.swift; sourceTree = "<group>"; };
-		A20000000000000000000019 /* StandaloneChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneChatStore.swift; sourceTree = "<group>"; };
-		A20000000000000000BB0001 /* ParallelChatBubbles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParallelChatBubbles.swift; sourceTree = "<group>"; };
-		A20000000000000000BB0002 /* ParallelChatBubblesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParallelChatBubblesView.swift; sourceTree = "<group>"; };
-		A2000000000000000000001A /* ConversationSubject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSubject.swift; sourceTree = "<group>"; };
-		A2000000000000000000001D /* ProviderRequestLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderRequestLog.swift; sourceTree = "<group>"; };
-		A2000000000000000000000A /* WorkspaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSupport.swift; sourceTree = "<group>"; };
-		A2000000000000000000000B /* BridgeCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCore.swift; sourceTree = "<group>"; };
-		A2000000000000000000F801 /* BoundedWaits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedWaits.swift; sourceTree = "<group>"; };
-		A2000000000000000000000C /* BridgeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeContract.swift; sourceTree = "<group>"; };
-		C11C0000000000000000CA02 /* CLICommandCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/CLICommandCatalog.swift; sourceTree = "<group>"; };
-		A2000000000000000000000D /* WorkspaceChanges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceChanges.swift; sourceTree = "<group>"; };
 		A2000000000000000000000E /* MonacoDiffEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonacoDiffEditor.swift; sourceTree = "<group>"; };
-		A20000000000000000000015 /* CodeSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeSyntaxHighlighter.swift; sourceTree = "<group>"; };
 		A2000000000000000000000F /* Monaco */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Monaco; sourceTree = "<group>"; };
 		A200000000000000000000F2 /* PluginRuntime */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PluginRuntime; sourceTree = "<group>"; };
 		A20000000000000000000011 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -277,108 +100,10 @@
 		D270EEC09920B3D8C0579AD1 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		DDE3AE70DC05B141B7C58AFC /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
 		F0A6DC7B7695FC1EF8FDFB21 /* PlayhouseUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PlayhouseUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		A20000000000000000000016 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
-		A20000000000000000000017 /* RemoteConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteConversationManager.swift; sourceTree = "<group>"; };
-		A20000000000000000000018 /* BridgeSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeSocket.swift; sourceTree = "<group>"; };
-		A2000000000000000000001B /* ProcessCPUSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessCPUSampler.swift; sourceTree = "<group>"; };
-		A2000000000000000000F403 /* AgentRunHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRunHost.swift; sourceTree = "<group>"; };
-		A2000000000000000000F601 /* ContextCompaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextCompaction.swift; sourceTree = "<group>"; };
-		A2000000000000000000F701 /* TranscriptRowAnchors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptRowAnchors.swift; sourceTree = "<group>"; };
-		A2000000000000000000F803 /* MarkdownInlineText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownInlineText.swift; sourceTree = "<group>"; };
-		A2000000000000000000F802 /* MarkdownDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownDocument.swift; sourceTree = "<group>"; };
-		A2000000000000000000F501 /* TaskItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskItemView.swift; sourceTree = "<group>"; };
 		A200000000000000000000DB /* DebugConversationImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConversationImport/DebugConversationImport.swift; sourceTree = "<group>"; };
-		B20000000000000000000001 /* ConversationMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMessages.swift; sourceTree = "<group>"; };
-		B20000000000000000000002 /* McpCatalogModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpCatalogModels.swift; sourceTree = "<group>"; };
-		B20000000000000000000003 /* SkillCatalogModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCatalogModels.swift; sourceTree = "<group>"; };
-		B20000000000000000000006 /* PlayhouseBridgeRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeRuntime.swift; sourceTree = "<group>"; };
-		B20000000000000000000007 /* PlayhouseWorktreeServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseWorktreeServices.swift; sourceTree = "<group>"; };
-		B20000000000000000000008 /* PlayhouseDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseDiagnostics.swift; sourceTree = "<group>"; };
-		B20000000000000000000009 /* TaskConversationRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationRendering.swift; sourceTree = "<group>"; };
 		B2000000000000000000BE01 /* TranscriptBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptBenchmark.swift; sourceTree = "<group>"; };
-		B20000000000000000000010 /* ConversationTranscriptLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptLayout.swift; sourceTree = "<group>"; };
-		B20000000000000000007A51 /* TranscriptLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptLayout.swift; sourceTree = "<group>"; };
-		B20000000000000000007A52 /* TranscriptScrollController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScrollController.swift; sourceTree = "<group>"; };
-		B20000000000000000000011 /* RulesPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesPageView.swift; sourceTree = "<group>"; };
-		B20000000000000000000012 /* ProviderTokenMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderTokenMap.swift; sourceTree = "<group>"; };
-		B20000000000000000000013 /* WorkspaceActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceActivity.swift; sourceTree = "<group>"; };
-		B20000000000000000000014 /* WorkspaceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSettingsView.swift; sourceTree = "<group>"; };
-		B20000000000000000000015 /* SkillManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillManifest.swift; sourceTree = "<group>"; };
-		B20000000000000000000016 /* RawInputViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawInputViews.swift; sourceTree = "<group>"; };
-		B20000000000000000000017 /* ConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationManager.swift; sourceTree = "<group>"; };
-		B20000000000000000000018 /* BoardTaskManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardTaskManager.swift; sourceTree = "<group>"; };
-		B20000000000000000000019 /* KanbanBoardComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanBoardComponents.swift; sourceTree = "<group>"; };
-		B20000000000000000000020 /* PluginAuthoringViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginAuthoringViews.swift; sourceTree = "<group>"; };
-		B20000000000000000000021 /* CodexTaskInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexTaskInstructions.swift; sourceTree = "<group>"; };
-		B20000000000000000000022 /* ClaudeSessionSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSessionSupport.swift; sourceTree = "<group>"; };
-		B20000000000000000000023 /* WorkspaceTaskManagers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTaskManagers.swift; sourceTree = "<group>"; };
-		B20000000000000000000024 /* ClaudeSessionRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSessionRunner.swift; sourceTree = "<group>"; };
-		B20000000000000000007A66 /* OpenCodeAccountUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeAccountUsage.swift; sourceTree = "<group>"; };
-		B20000000000000000007A65 /* OpenCodeServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeServer.swift; sourceTree = "<group>"; };
-		B20000000000000000007A64 /* OpenCodeTurn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeTurn.swift; sourceTree = "<group>"; };
-		B20000000000000000007A63 /* OpenCodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeClient.swift; sourceTree = "<group>"; };
-		B20000000000000000007A67 /* OpenCodeMcp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeMcp.swift; sourceTree = "<group>"; };
-		B20000000000000000007A68 /* OpenCodeRequestLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeRequestLog.swift; sourceTree = "<group>"; };
-		B20000000000000000000004 /* PlayhouseStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseStore.swift; sourceTree = "<group>"; };
-		B20000000000000000000005 /* PullRequestServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequestServices.swift; sourceTree = "<group>"; };
-		B20000000000000000000025 /* ConversationTranscriptRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptRendering.swift; sourceTree = "<group>"; };
-		B20000000000000000000026 /* ConversationSideChatRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChatRendering.swift; sourceTree = "<group>"; };
-		B20000000000000000007A62 /* ConversationCommentPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationCommentPopover.swift; sourceTree = "<group>"; };
-		B20000000000000000000027 /* ConversationTranscriptNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptNavigation.swift; sourceTree = "<group>"; };
-		B20000000000000000007A60 /* ConversationChatPageNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationChatPageNavigation.swift; sourceTree = "<group>"; };
-		B20000000000000000007A61 /* ChatPageAnchorsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPageAnchorsView.swift; sourceTree = "<group>"; };
-		B20000000000000000000028 /* ConversationMessageRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMessageRendering.swift; sourceTree = "<group>"; };
-		B20000000000000000000029 /* ConversationComposerFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposerFlow.swift; sourceTree = "<group>"; };
-		B20000000000000000000030 /* ConversationStateHandling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStateHandling.swift; sourceTree = "<group>"; };
-		B20000000000000000000031 /* ConversationRepositoryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRepositoryPresentation.swift; sourceTree = "<group>"; };
-		B20000000000000000000032 /* BoardPullRequestLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardPullRequestLifecycle.swift; sourceTree = "<group>"; };
-		B20000000000000000000033 /* BoardUsageReporting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardUsageReporting.swift; sourceTree = "<group>"; };
-		B20000000000000000000034 /* BoardScheduling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardScheduling.swift; sourceTree = "<group>"; };
-		B20000000000000000000035 /* ConversationCompaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationCompaction.swift; sourceTree = "<group>"; };
-		B20000000000000000000036 /* ConversationHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistory.swift; sourceTree = "<group>"; };
-		B20000000000000000000037 /* ConversationProviderSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationProviderSelection.swift; sourceTree = "<group>"; };
-		B20000000000000000000038 /* ConversationTurnControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTurnControl.swift; sourceTree = "<group>"; };
-		B20000000000000000000039 /* ConversationTurnRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTurnRecovery.swift; sourceTree = "<group>"; };
-		B20000000000000000000040 /* ConversationTranscriptRecording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptRecording.swift; sourceTree = "<group>"; };
-		B20000000000000000000041 /* ConversationTurnExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTurnExecution.swift; sourceTree = "<group>"; };
-		B20000000000000000000042 /* ConversationStandaloneAutomation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStandaloneAutomation.swift; sourceTree = "<group>"; };
-		B20000000000000000000043 /* TaskConversationWorkspacePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationWorkspacePresentation.swift; sourceTree = "<group>"; };
-		B20000000000000000000044 /* BoardOperationLocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardOperationLocks.swift; sourceTree = "<group>"; };
-		B20000000000000000000045 /* BoardTaskCRUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardTaskCRUD.swift; sourceTree = "<group>"; };
-		B20000000000000000000046 /* BoardRepositoryLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardRepositoryLifecycle.swift; sourceTree = "<group>"; };
-		B20000000000000000000047 /* BoardLifecycleStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardLifecycleStatus.swift; sourceTree = "<group>"; };
-		B20000000000000000000048 /* BoardPromptPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardPromptPersistence.swift; sourceTree = "<group>"; };
-		B20000000000000000000049 /* BoardConversationStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardConversationStorage.swift; sourceTree = "<group>"; };
-		B20000000000000000000050 /* CodexThreadLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexThreadLifecycle.swift; sourceTree = "<group>"; };
-		B20000000000000000000051 /* CodexAccountUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAccountUsage.swift; sourceTree = "<group>"; };
-		B20000000000000000000052 /* CodexTurnSending.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexTurnSending.swift; sourceTree = "<group>"; };
-		B20000000000000000000053 /* CodexTurnRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexTurnRecovery.swift; sourceTree = "<group>"; };
-		B200000000000000000000F1 /* CodexBackgroundJobs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexBackgroundJobs.swift; sourceTree = "<group>"; };
-		B20000000000000000000054 /* CodexServerTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexServerTransport.swift; sourceTree = "<group>"; };
-		B20000000000000000000055 /* CodexServerEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexServerEvents.swift; sourceTree = "<group>"; };
-		B20000000000000000000056 /* CodexSharedServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexSharedServer.swift; sourceTree = "<group>"; };
-		B20000000000000000000057 /* CodexMessageConversion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexMessageConversion.swift; sourceTree = "<group>"; };
-		B20000000000000000000058 /* ClaudeTurnControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeTurnControl.swift; sourceTree = "<group>"; };
-		B20000000000000000000059 /* ClaudeProcessProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeProcessProtocol.swift; sourceTree = "<group>"; };
-		B20000000000000000000060 /* ClaudeProcessLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeProcessLifecycle.swift; sourceTree = "<group>"; };
-		B20000000000000000000061 /* ClaudeOutputHandling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeOutputHandling.swift; sourceTree = "<group>"; };
-		B20000000000000000000062 /* ClaudeTurnReporting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeTurnReporting.swift; sourceTree = "<group>"; };
-		B20000000000000000000063 /* ClaudeClientMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeClientMapping.swift; sourceTree = "<group>"; };
-		B20000000000000000000064 /* ClaudeAccountUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeAccountUsage.swift; sourceTree = "<group>"; };
-		B20000000000000000000065 /* KanbanNavigationActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanNavigationActions.swift; sourceTree = "<group>"; };
-		B20000000000000000000066 /* KanbanPullRequestActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanPullRequestActions.swift; sourceTree = "<group>"; };
-		B20000000000000000000067 /* TaskConversationPanels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationPanels.swift; sourceTree = "<group>"; };
-		B20000000000000000000068 /* TaskConversationTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationTranscriptView.swift; sourceTree = "<group>"; };
-		B20000000000000000000069 /* TaskConversationComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationComposerView.swift; sourceTree = "<group>"; };
 		B20000000000000000000070 /* PlayhouseCLIUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseCLIUtilities.swift; sourceTree = "<group>"; };
 		B20000000000000000000071 /* PlayhouseCLIParsing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseCLIParsing.swift; sourceTree = "<group>"; };
-		B20000000000000000000072 /* PlayhouseBridgeRequestDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeRequestDiagnostics.swift; sourceTree = "<group>"; };
-		B20000000000000000000073 /* PlayhouseBridgeSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeSettings.swift; sourceTree = "<group>"; };
-		B20000000000000000000074 /* PlayhouseBridgePullRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgePullRequests.swift; sourceTree = "<group>"; };
-		B20000000000000000000075 /* PlayhouseBridgeConversationOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeConversationOperations.swift; sourceTree = "<group>"; };
-		B20000000000000000000076 /* PlayhouseBridgeConversationFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeConversationFlow.swift; sourceTree = "<group>"; };
-		B20000000000000000000077 /* PlayhouseBridgeTaskWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeTaskWorkspace.swift; sourceTree = "<group>"; };
-		B20000000000000000000078 /* PlayhouseBridgeOverview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeOverview.swift; sourceTree = "<group>"; };
 		FDEAE2E2FD777185DE714AC8 /* PlayhouseUITestSupport01.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseUITestSupport01.swift; sourceTree = "<group>"; };
 		8F89ACA61AB93B9315B0AD33 /* PlayhouseUITestSupport02.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseUITestSupport02.swift; sourceTree = "<group>"; };
 		F328138C44EDA7534209E395 /* PlayhouseUITestSupport03.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayhouseUITestSupport03.swift; sourceTree = "<group>"; };
@@ -420,6 +145,11 @@
 		A2000000000000000000F7A6 /* PlayhouseUITests+Cases34.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlayhouseUITests+Cases34.swift"; sourceTree = "<group>"; };
 		A2000000000000000000F7A7 /* PlayhouseUITests+Cases35.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlayhouseUITests+Cases35.swift"; sourceTree = "<group>"; };
 		A2000000000000000000F7A8 /* PlayhouseUITests+Cases36.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlayhouseUITests+Cases36.swift"; sourceTree = "<group>"; };
+		B22D850024248883DA466D10 /* Platform/MacPlatformServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform/MacPlatformServices.swift; sourceTree = "<group>"; };
+		B23C17A2F7CF3C177B119A5D /* NativeViews/MacNativeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeViews/MacNativeViews.swift; sourceTree = "<group>"; };
+		B2417987BB9907126C0DE28D /* NativeViews/NativeChatEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeViews/NativeChatEditor.swift; sourceTree = "<group>"; };
+		B223834CB932523C129D0351 /* NativeViews/NativeText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeViews/NativeText.swift; sourceTree = "<group>"; };
+		B26C2816EF4E5F74950D28EF /* NativeViews/NativeTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeViews/NativeTextEditor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -454,6 +184,10 @@
 			files = (
 				A1000000000000000000001C /* GRDB in Frameworks */,
 				A100000000000000000000E2 /* SwiftTerm in Frameworks */,
+				A1000000000000000000001D /* PlayhouseCore in Frameworks */,
+				A10000000000000000000020 /* PlayhouseViews in Frameworks */,
+				A1000000000000000000001F /* PlayhouseAtoms in Frameworks */,
+				A1000000000000000000001E /* PlayhouseUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -536,153 +270,16 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000001 /* PlayhouseApp.swift */,
-				A20000000000000000000002 /* BoardTask.swift */,
-				A20000000000000000000003 /* KanbanBoardView.swift */,
-				B20000000000000000000020 /* PluginAuthoringViews.swift */,
-				B20000000000000000000019 /* KanbanBoardComponents.swift */,
-				B20000000000000000000016 /* RawInputViews.swift */,
-				A20000000000000000000F01 /* HoverRevealScrollers.swift */,
-				A20000000000000000000010 /* WorkspaceRootsEditor.swift */,
-				A20000000000000000000E01 /* SkillCatalog.swift */,
-				B20000000000000000000015 /* SkillManifest.swift */,
-				B20000000000000000000003 /* SkillCatalogModels.swift */,
-				A20000000000000000000E02 /* SkillsPageView.swift */,
-				B20000000000000000000011 /* RulesPageView.swift */,
-				A20000000000000000000E03 /* RuleCatalog.swift */,
-				A20000000000000000000E07 /* MentionCatalog.swift */,
-				A20000000000000000005C01 /* SlashCommandCatalog.swift */,
-				A20000000000000000000E04 /* McpCatalog.swift */,
-				B20000000000000000000002 /* McpCatalogModels.swift */,
-				A20000000000000000000E05 /* CodexConfigTOML.swift */,
-				A20000000000000000000E06 /* McpServersSectionView.swift */,
+				B26C2816EF4E5F74950D28EF /* NativeViews/NativeTextEditor.swift */,
+				B223834CB932523C129D0351 /* NativeViews/NativeText.swift */,
+				B2417987BB9907126C0DE28D /* NativeViews/NativeChatEditor.swift */,
+				B23C17A2F7CF3C177B119A5D /* NativeViews/MacNativeViews.swift */,
+				B22D850024248883DA466D10 /* Platform/MacPlatformServices.swift */,
 				A200000000000000000000E1 /* TaskTerminalPanel.swift */,
-				A2000000000000000000F301 /* AgentsInfoView.swift */,
-				A2000000000000000000F302 /* TokenStatsView.swift */,
-				A2000000000000000000F303 /* SkillGalleryView.swift */,
-				A2000000000000000000F304 /* RepositoryChipsView.swift */,
-				A2000000000000000000F305 /* ComposerView.swift */,
-				A2000000000000000000F306 /* KanbanColumnSection.swift */,
-				A2000000000000000000F307 /* DoneArchiveView.swift */,
 				A2000000000000000000F7A4 /* UpdateController.swift */,
-				A2000000000000000000F7A3 /* UpdateManager.swift */,
-				A2000000000000000000F7A2 /* ReleaseSigningKey.swift */,
-				A2000000000000000000F7A1 /* UpdateCore.swift */,
-				A2000000000000000000F401 /* TaskSchedule.swift */,
-				A2000000000000000000F402 /* SchedulerAgent.swift */,
-				A2000000000000000000F201 /* AgentUsageStore.swift */,
-				A2000000000000000000F101 /* AgentUsage.swift */,
-				A20000000000000000000008 /* TaskConversationView.swift */,
-				B20000000000000000000010 /* ConversationTranscriptLayout.swift */,
-				B20000000000000000007A51 /* TranscriptLayout.swift */,
-				B20000000000000000007A52 /* TranscriptScrollController.swift */,
-				B20000000000000000000009 /* TaskConversationRendering.swift */,
 				B2000000000000000000BE01 /* TranscriptBenchmark.swift */,
-				A20000000000000000000009 /* CodexAppServerClient.swift */,
-				B20000000000000000000021 /* CodexTaskInstructions.swift */,
-				A2000000000000000000F404 /* CodexSocketConnection.swift */,
-				A20000000000000000000012 /* ConversationModel.swift */,
-				B20000000000000000000001 /* ConversationMessages.swift */,
-				A20000000000000000000013 /* ClaudeCodeClient.swift */,
-				B20000000000000000000022 /* ClaudeSessionSupport.swift */,
-				B20000000000000000000024 /* ClaudeSessionRunner.swift */,
-				B20000000000000000007A66 /* OpenCodeAccountUsage.swift */,
-				B20000000000000000007A65 /* OpenCodeServer.swift */,
-				B20000000000000000007A64 /* OpenCodeTurn.swift */,
-				B20000000000000000007A63 /* OpenCodeClient.swift */,
-				B20000000000000000007A67 /* OpenCodeMcp.swift */,
-				B20000000000000000007A68 /* OpenCodeRequestLog.swift */,
-				B20000000000000000000072 /* PlayhouseBridgeRequestDiagnostics.swift */,
-				B20000000000000000000073 /* PlayhouseBridgeSettings.swift */,
-				B20000000000000000000074 /* PlayhouseBridgePullRequests.swift */,
-				B20000000000000000000075 /* PlayhouseBridgeConversationOperations.swift */,
-				B20000000000000000000076 /* PlayhouseBridgeConversationFlow.swift */,
-				B20000000000000000000077 /* PlayhouseBridgeTaskWorkspace.swift */,
-				B20000000000000000000078 /* PlayhouseBridgeOverview.swift */,
-				B20000000000000000000069 /* TaskConversationComposerView.swift */,
-				B20000000000000000000068 /* TaskConversationTranscriptView.swift */,
-				B20000000000000000000067 /* TaskConversationPanels.swift */,
-				B20000000000000000000066 /* KanbanPullRequestActions.swift */,
-				B20000000000000000000065 /* KanbanNavigationActions.swift */,
-				B20000000000000000000064 /* ClaudeAccountUsage.swift */,
-				B20000000000000000000063 /* ClaudeClientMapping.swift */,
-				B20000000000000000000062 /* ClaudeTurnReporting.swift */,
-				B20000000000000000000061 /* ClaudeOutputHandling.swift */,
-				B20000000000000000000060 /* ClaudeProcessLifecycle.swift */,
-				B20000000000000000000059 /* ClaudeProcessProtocol.swift */,
-				B20000000000000000000058 /* ClaudeTurnControl.swift */,
-				B20000000000000000000057 /* CodexMessageConversion.swift */,
-				B20000000000000000000056 /* CodexSharedServer.swift */,
-				B20000000000000000000055 /* CodexServerEvents.swift */,
-				B20000000000000000000054 /* CodexServerTransport.swift */,
-				B20000000000000000000053 /* CodexTurnRecovery.swift */,
-				B200000000000000000000F1 /* CodexBackgroundJobs.swift */,
-				B20000000000000000000052 /* CodexTurnSending.swift */,
-				B20000000000000000000051 /* CodexAccountUsage.swift */,
-				B20000000000000000000050 /* CodexThreadLifecycle.swift */,
-				B20000000000000000000049 /* BoardConversationStorage.swift */,
-				B20000000000000000000048 /* BoardPromptPersistence.swift */,
-				B20000000000000000000047 /* BoardLifecycleStatus.swift */,
-				B20000000000000000000046 /* BoardRepositoryLifecycle.swift */,
-				B20000000000000000000045 /* BoardTaskCRUD.swift */,
-				B20000000000000000000044 /* BoardOperationLocks.swift */,
-				B20000000000000000000043 /* TaskConversationWorkspacePresentation.swift */,
-				B20000000000000000000042 /* ConversationStandaloneAutomation.swift */,
-				B20000000000000000000041 /* ConversationTurnExecution.swift */,
-				B20000000000000000000040 /* ConversationTranscriptRecording.swift */,
-				B20000000000000000000039 /* ConversationTurnRecovery.swift */,
-				B20000000000000000000038 /* ConversationTurnControl.swift */,
-				B20000000000000000000037 /* ConversationProviderSelection.swift */,
-				B20000000000000000000036 /* ConversationHistory.swift */,
-				B20000000000000000000035 /* ConversationCompaction.swift */,
-				B20000000000000000000034 /* BoardScheduling.swift */,
-				B20000000000000000000033 /* BoardUsageReporting.swift */,
-				B20000000000000000000032 /* BoardPullRequestLifecycle.swift */,
-				B20000000000000000000031 /* ConversationRepositoryPresentation.swift */,
-				B20000000000000000000030 /* ConversationStateHandling.swift */,
-				B20000000000000000000029 /* ConversationComposerFlow.swift */,
-				B20000000000000000000028 /* ConversationMessageRendering.swift */,
-				B20000000000000000000027 /* ConversationTranscriptNavigation.swift */,
-				B20000000000000000007A60 /* ConversationChatPageNavigation.swift */,
-				B20000000000000000007A61 /* ChatPageAnchorsView.swift */,
-				B20000000000000000000026 /* ConversationSideChatRendering.swift */,
-				B20000000000000000007A62 /* ConversationCommentPopover.swift */,
-				B20000000000000000000025 /* ConversationTranscriptRendering.swift */,
-				A20000000000000000000014 /* ConversationTranscriptStore.swift */,
-				A20000000000000000000019 /* StandaloneChatStore.swift */,
-				A20000000000000000BB0001 /* ParallelChatBubbles.swift */,
-				A20000000000000000BB0002 /* ParallelChatBubblesView.swift */,
-				A2000000000000000000001A /* ConversationSubject.swift */,
-				A2000000000000000000001D /* ProviderRequestLog.swift */,
-				B20000000000000000000012 /* ProviderTokenMap.swift */,
-				A2000000000000000000000A /* WorkspaceSupport.swift */,
-				B20000000000000000000014 /* WorkspaceSettingsView.swift */,
-				B20000000000000000000013 /* WorkspaceActivity.swift */,
-				B20000000000000000000008 /* PlayhouseDiagnostics.swift */,
-				B20000000000000000000007 /* PlayhouseWorktreeServices.swift */,
-				A2000000000000000000000B /* BridgeCore.swift */,
-				A2000000000000000000F801 /* BoundedWaits.swift */,
-				B20000000000000000000005 /* PullRequestServices.swift */,
-				B20000000000000000000004 /* PlayhouseStore.swift */,
-				B20000000000000000000023 /* WorkspaceTaskManagers.swift */,
-				B20000000000000000000018 /* BoardTaskManager.swift */,
-				B20000000000000000000017 /* ConversationManager.swift */,
-				B20000000000000000000006 /* PlayhouseBridgeRuntime.swift */,
-				A2000000000000000000000C /* BridgeContract.swift */,
-				C11C0000000000000000CA02 /* CLICommandCatalog.swift */,
-				A2000000000000000000000D /* WorkspaceChanges.swift */,
 				A2000000000000000000000E /* MonacoDiffEditor.swift */,
-				A20000000000000000000015 /* CodeSyntaxHighlighter.swift */,
-				A20000000000000000000018 /* BridgeSocket.swift */,
-				A20000000000000000000017 /* RemoteConversationManager.swift */,
-				A20000000000000000000016 /* DaemonClient.swift */,
-				A2000000000000000000001B /* ProcessCPUSampler.swift */,
-				A2000000000000000000F403 /* AgentRunHost.swift */,
-				A2000000000000000000F601 /* ContextCompaction.swift */,
-				A2000000000000000000F701 /* TranscriptRowAnchors.swift */,
-				A2000000000000000000F803 /* MarkdownInlineText.swift */,
-				A2000000000000000000F802 /* MarkdownDocument.swift */,
 				A200000000000000000000DB /* DebugConversationImport.swift */,
-				A2000000000000000000F501 /* TaskItemView.swift */,
 				A200000000000000000000F1 /* Plugins */,
 			);
 			path = Playhouse/App;
@@ -784,6 +381,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXNativeTarget "Playhouse" */;
 			buildPhases = (
+				A60000000000000000000008 /* Check module boundaries */,
 				A60000000000000000000003 /* Sources */,
 				A60000000000000000000001 /* Frameworks */,
 				A60000000000000000000004 /* Resources */,
@@ -800,6 +398,8 @@
 			packageProductDependencies = (
 				A90000000000000000000002 /* GRDB */,
 				A90000000000000000000004 /* SwiftTerm */,
+				A90000000000000000000006 /* PlayhouseCore */,
+				A90000000000000000000007 /* PlayhouseUI */,
 			);
 			productName = Playhouse;
 			productReference = A20000000000000000000006 /* Playhouse.app */;
@@ -834,6 +434,7 @@
 			mainGroup = A70000000000000000000001;
 			packageReferences = (
 				A90000000000000000000001 /* XCLocalSwiftPackageReference "Vendor/GRDB.swift" */,
+				A90000000000000000000005 /* XCLocalSwiftPackageReference "Playhouse" */,
 				A90000000000000000000003 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */,
 			);
 			productRefGroup = A70000000000000000000004 /* Products */;
@@ -875,6 +476,21 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		A60000000000000000000008 /* Check module boundaries */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Check module boundaries";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Atoms and composites import no UI framework, the core no Apple UI framework, and the\n# package keeps its dependency direction (docs/linux-port-readiness.md).\nexec python3 \"${SRCROOT}/scripts/check-module-boundaries.py\"\n";
+		};
 		A60000000000000000000007 /* Build CLI and bridge daemon */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -888,12 +504,12 @@
 				"$(SRCROOT)/Vendor/GRDB.swift/Package.swift",
 				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
-				"$(SRCROOT)/Playhouse/Bridge/BridgeContract.swift",
-				"$(SRCROOT)/Playhouse/Bridge/CLICommandCatalog.swift",
-				"$(SRCROOT)/Playhouse/Bridge/BridgeSocket.swift",
-				"$(SRCROOT)/Playhouse/Bridge/UpdateCore.swift",
-				"$(SRCROOT)/Playhouse/Bridge/ReleaseSigningKey.swift",
-				"$(SRCROOT)/Playhouse/App/UpdateManager.swift",
+				"$(SRCROOT)/Playhouse/Core/Bridge/BridgeContract.swift",
+				"$(SRCROOT)/Playhouse/Core/Bridge/CLICommandCatalog.swift",
+				"$(SRCROOT)/Playhouse/Core/Bridge/BridgeSocket.swift",
+				"$(SRCROOT)/Playhouse/Core/Bridge/UpdateCore.swift",
+				"$(SRCROOT)/Playhouse/Core/Bridge/ReleaseSigningKey.swift",
+				"$(SRCROOT)/Playhouse/Core/Bridge/UpdateManager.swift",
 				"$(SRCROOT)/Playhouse/Bridge/DaemonMain.swift",
 				"$(SRCROOT)/Playhouse/Bridge/SandboxCheck.h",
 				"$(SRCROOT)/Playhouse/CLI/BridgeClient.swift",
@@ -1071,153 +687,16 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* PlayhouseApp.swift in Sources */,
-				A10000000000000000000002 /* BoardTask.swift in Sources */,
-				A10000000000000000000003 /* KanbanBoardView.swift in Sources */,
-				A10000000000000000000F01 /* HoverRevealScrollers.swift in Sources */,
-				A10000000000000000000010 /* WorkspaceRootsEditor.swift in Sources */,
-				A10000000000000000000E01 /* SkillCatalog.swift in Sources */,
-				A10000000000000000000E02 /* SkillsPageView.swift in Sources */,
-				A10000000000000000000E03 /* RuleCatalog.swift in Sources */,
-				A10000000000000000000E07 /* MentionCatalog.swift in Sources */,
-				A10000000000000000005C01 /* SlashCommandCatalog.swift in Sources */,
-				A10000000000000000000E04 /* McpCatalog.swift in Sources */,
-				A10000000000000000000E05 /* CodexConfigTOML.swift in Sources */,
-				A10000000000000000000E06 /* McpServersSectionView.swift in Sources */,
+				B16C2816EF4E5F74950D28EF /* NativeViews/NativeTextEditor.swift in Sources */,
+				B123834CB932523C129D0351 /* NativeViews/NativeText.swift in Sources */,
+				B1417987BB9907126C0DE28D /* NativeViews/NativeChatEditor.swift in Sources */,
+				B13C17A2F7CF3C177B119A5D /* NativeViews/MacNativeViews.swift in Sources */,
+				B12D850024248883DA466D10 /* Platform/MacPlatformServices.swift in Sources */,
 				A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */,
-				A1000000000000000000F301 /* AgentsInfoView.swift in Sources */,
-				A1000000000000000000F302 /* TokenStatsView.swift in Sources */,
-				A1000000000000000000F303 /* SkillGalleryView.swift in Sources */,
-				A1000000000000000000F304 /* RepositoryChipsView.swift in Sources */,
-				A1000000000000000000F305 /* ComposerView.swift in Sources */,
-				A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */,
-				A1000000000000000000F307 /* DoneArchiveView.swift in Sources */,
 				A1000000000000000000F7A4 /* UpdateController.swift in Sources */,
-				A1000000000000000000F7A3 /* UpdateManager.swift in Sources */,
-				A1000000000000000000F7A2 /* ReleaseSigningKey.swift in Sources */,
-				A1000000000000000000F7A1 /* UpdateCore.swift in Sources */,
-				A1000000000000000000F401 /* TaskSchedule.swift in Sources */,
-				A1000000000000000000F402 /* SchedulerAgent.swift in Sources */,
-				A1000000000000000000F201 /* AgentUsageStore.swift in Sources */,
-				A1000000000000000000F101 /* AgentUsage.swift in Sources */,
-				A10000000000000000000006 /* TaskConversationView.swift in Sources */,
-				A10000000000000000000007 /* CodexAppServerClient.swift in Sources */,
-				A1000000000000000000F404 /* CodexSocketConnection.swift in Sources */,
-				A10000000000000000000012 /* ConversationModel.swift in Sources */,
-				A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */,
-				A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */,
-				A10000000000000000000019 /* StandaloneChatStore.swift in Sources */,
-				A10000000000000000BB0001 /* ParallelChatBubbles.swift in Sources */,
-				A10000000000000000BB0002 /* ParallelChatBubblesView.swift in Sources */,
-				A1000000000000000000001A /* ConversationSubject.swift in Sources */,
-				A1000000000000000000001D /* ProviderRequestLog.swift in Sources */,
-				A10000000000000000000008 /* WorkspaceSupport.swift in Sources */,
-				A10000000000000000000009 /* BridgeCore.swift in Sources */,
-				A1000000000000000000F801 /* BoundedWaits.swift in Sources */,
-				A1000000000000000000000A /* BridgeContract.swift in Sources */,
-				C11C0000000000000000CA01 /* CLICommandCatalog.swift in Sources */,
-				A1000000000000000000000D /* WorkspaceChanges.swift in Sources */,
 				A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */,
-				A10000000000000000000015 /* CodeSyntaxHighlighter.swift in Sources */,
-				A10000000000000000000018 /* BridgeSocket.swift in Sources */,
-				A10000000000000000000017 /* RemoteConversationManager.swift in Sources */,
-				A10000000000000000000016 /* DaemonClient.swift in Sources */,
-				A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */,
-				A1000000000000000000F403 /* AgentRunHost.swift in Sources */,
-				A1000000000000000000F601 /* ContextCompaction.swift in Sources */,
-				A1000000000000000000F701 /* TranscriptRowAnchors.swift in Sources */,
-				A1000000000000000000F803 /* MarkdownInlineText.swift in Sources */,
-				A1000000000000000000F802 /* MarkdownDocument.swift in Sources */,
 				A100000000000000000000DB /* DebugConversationImport.swift in Sources */,
-				B10000000000000000000004 /* PlayhouseStore.swift in Sources */,
-				B10000000000000000000005 /* PullRequestServices.swift in Sources */,
-				B10000000000000000000024 /* ClaudeSessionRunner.swift in Sources */,
-				B10000000000000000007A66 /* OpenCodeAccountUsage.swift in Sources */,
-				B10000000000000000007A65 /* OpenCodeServer.swift in Sources */,
-				B10000000000000000007A64 /* OpenCodeTurn.swift in Sources */,
-				B10000000000000000007A63 /* OpenCodeClient.swift in Sources */,
-				B10000000000000000007A67 /* OpenCodeMcp.swift in Sources */,
-				B10000000000000000007A68 /* OpenCodeRequestLog.swift in Sources */,
-				B10000000000000000000072 /* PlayhouseBridgeRequestDiagnostics.swift in Sources */,
-				B10000000000000000000073 /* PlayhouseBridgeSettings.swift in Sources */,
-				B10000000000000000000074 /* PlayhouseBridgePullRequests.swift in Sources */,
-				B10000000000000000000075 /* PlayhouseBridgeConversationOperations.swift in Sources */,
-				B10000000000000000000076 /* PlayhouseBridgeConversationFlow.swift in Sources */,
-				B10000000000000000000077 /* PlayhouseBridgeTaskWorkspace.swift in Sources */,
-				B10000000000000000000078 /* PlayhouseBridgeOverview.swift in Sources */,
-				B10000000000000000000069 /* TaskConversationComposerView.swift in Sources */,
-				B10000000000000000000068 /* TaskConversationTranscriptView.swift in Sources */,
-				B10000000000000000000067 /* TaskConversationPanels.swift in Sources */,
-				B10000000000000000000066 /* KanbanPullRequestActions.swift in Sources */,
-				B10000000000000000000065 /* KanbanNavigationActions.swift in Sources */,
-				B10000000000000000000064 /* ClaudeAccountUsage.swift in Sources */,
-				B10000000000000000000063 /* ClaudeClientMapping.swift in Sources */,
-				B10000000000000000000062 /* ClaudeTurnReporting.swift in Sources */,
-				B10000000000000000000061 /* ClaudeOutputHandling.swift in Sources */,
-				B10000000000000000000060 /* ClaudeProcessLifecycle.swift in Sources */,
-				B10000000000000000000059 /* ClaudeProcessProtocol.swift in Sources */,
-				B10000000000000000000058 /* ClaudeTurnControl.swift in Sources */,
-				B10000000000000000000057 /* CodexMessageConversion.swift in Sources */,
-				B10000000000000000000056 /* CodexSharedServer.swift in Sources */,
-				B10000000000000000000055 /* CodexServerEvents.swift in Sources */,
-				B10000000000000000000054 /* CodexServerTransport.swift in Sources */,
-				B10000000000000000000053 /* CodexTurnRecovery.swift in Sources */,
-				B100000000000000000000F1 /* CodexBackgroundJobs.swift in Sources */,
-				B10000000000000000000052 /* CodexTurnSending.swift in Sources */,
-				B10000000000000000000051 /* CodexAccountUsage.swift in Sources */,
-				B10000000000000000000050 /* CodexThreadLifecycle.swift in Sources */,
-				B10000000000000000000049 /* BoardConversationStorage.swift in Sources */,
-				B10000000000000000000048 /* BoardPromptPersistence.swift in Sources */,
-				B10000000000000000000047 /* BoardLifecycleStatus.swift in Sources */,
-				B10000000000000000000046 /* BoardRepositoryLifecycle.swift in Sources */,
-				B10000000000000000000045 /* BoardTaskCRUD.swift in Sources */,
-				B10000000000000000000044 /* BoardOperationLocks.swift in Sources */,
-				B10000000000000000000043 /* TaskConversationWorkspacePresentation.swift in Sources */,
-				B10000000000000000000042 /* ConversationStandaloneAutomation.swift in Sources */,
-				B10000000000000000000041 /* ConversationTurnExecution.swift in Sources */,
-				B10000000000000000000040 /* ConversationTranscriptRecording.swift in Sources */,
-				B10000000000000000000039 /* ConversationTurnRecovery.swift in Sources */,
-				B10000000000000000000038 /* ConversationTurnControl.swift in Sources */,
-				B10000000000000000000037 /* ConversationProviderSelection.swift in Sources */,
-				B10000000000000000000036 /* ConversationHistory.swift in Sources */,
-				B10000000000000000000035 /* ConversationCompaction.swift in Sources */,
-				B10000000000000000000034 /* BoardScheduling.swift in Sources */,
-				B10000000000000000000033 /* BoardUsageReporting.swift in Sources */,
-				B10000000000000000000032 /* BoardPullRequestLifecycle.swift in Sources */,
-				B10000000000000000000031 /* ConversationRepositoryPresentation.swift in Sources */,
-				B10000000000000000000030 /* ConversationStateHandling.swift in Sources */,
-				B10000000000000000000029 /* ConversationComposerFlow.swift in Sources */,
-				B10000000000000000000028 /* ConversationMessageRendering.swift in Sources */,
-				B10000000000000000000027 /* ConversationTranscriptNavigation.swift in Sources */,
-				B10000000000000000007A60 /* ConversationChatPageNavigation.swift in Sources */,
-				B10000000000000000007A61 /* ChatPageAnchorsView.swift in Sources */,
-				B10000000000000000000026 /* ConversationSideChatRendering.swift in Sources */,
-				B10000000000000000007A62 /* ConversationCommentPopover.swift in Sources */,
-				B10000000000000000000025 /* ConversationTranscriptRendering.swift in Sources */,
-				B10000000000000000000023 /* WorkspaceTaskManagers.swift in Sources */,
-				B10000000000000000000022 /* ClaudeSessionSupport.swift in Sources */,
-				B10000000000000000000019 /* KanbanBoardComponents.swift in Sources */,
-				B10000000000000000000020 /* PluginAuthoringViews.swift in Sources */,
-				B10000000000000000000021 /* CodexTaskInstructions.swift in Sources */,
-				B10000000000000000000017 /* ConversationManager.swift in Sources */,
-				B10000000000000000000018 /* BoardTaskManager.swift in Sources */,
-				B10000000000000000000013 /* WorkspaceActivity.swift in Sources */,
-				B10000000000000000000014 /* WorkspaceSettingsView.swift in Sources */,
-				B10000000000000000000015 /* SkillManifest.swift in Sources */,
-				B10000000000000000000016 /* RawInputViews.swift in Sources */,
-				B10000000000000000000011 /* RulesPageView.swift in Sources */,
-				B10000000000000000000012 /* ProviderTokenMap.swift in Sources */,
-				B10000000000000000000009 /* TaskConversationRendering.swift in Sources */,
 				B1000000000000000000BE01 /* TranscriptBenchmark.swift in Sources */,
-				B10000000000000000000010 /* ConversationTranscriptLayout.swift in Sources */,
-				B10000000000000000007A51 /* TranscriptLayout.swift in Sources */,
-				B10000000000000000007A52 /* TranscriptScrollController.swift in Sources */,
-				B10000000000000000000006 /* PlayhouseBridgeRuntime.swift in Sources */,
-				B10000000000000000000007 /* PlayhouseWorktreeServices.swift in Sources */,
-				B10000000000000000000008 /* PlayhouseDiagnostics.swift in Sources */,
-				B10000000000000000000001 /* ConversationMessages.swift in Sources */,
-				B10000000000000000000002 /* McpCatalogModels.swift in Sources */,
-				B10000000000000000000003 /* SkillCatalogModels.swift in Sources */,
-				A1000000000000000000F501 /* TaskItemView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1320,6 +799,7 @@
 		AB0000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				SWIFT_PACKAGE_NAME = playhouse;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_STYLE = Automatic;
@@ -1343,6 +823,7 @@
 		AB0000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				SWIFT_PACKAGE_NAME = playhouse;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_STYLE = Automatic;
@@ -1412,6 +893,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Vendor/SwiftTerm;
 		};
+		A90000000000000000000005 /* XCLocalSwiftPackageReference "Playhouse" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Playhouse;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1422,6 +907,26 @@
 		A90000000000000000000004 /* SwiftTerm */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SwiftTerm;
+		};
+		A90000000000000000000006 /* PlayhouseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90000000000000000000005 /* XCLocalSwiftPackageReference "Playhouse" */;
+			productName = PlayhouseCore;
+		};
+		A90000000000000000000007 /* PlayhouseUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90000000000000000000005 /* XCLocalSwiftPackageReference "Playhouse" */;
+			productName = PlayhouseUI;
+		};
+		A90000000000000000000008 /* PlayhouseAtoms */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90000000000000000000005 /* XCLocalSwiftPackageReference "Playhouse" */;
+			productName = PlayhouseAtoms;
+		};
+		A90000000000000000000009 /* PlayhouseViews */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90000000000000000000005 /* XCLocalSwiftPackageReference "Playhouse" */;
+			productName = PlayhouseViews;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

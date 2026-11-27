@@ -2,6 +2,10 @@ import AppKit
 import Darwin
 import QuartzCore
 import SwiftUI
+import PlayhouseCore
+import PlayhouseViews
+import PlayhouseAtoms
+import PlayhouseUI
 
 #if PLAYHOUSE_ATOM_BENCHMARK
 /// A development benchmark of the atom-tree renderer, run by `scripts/benchmark-atom-tree.sh`;

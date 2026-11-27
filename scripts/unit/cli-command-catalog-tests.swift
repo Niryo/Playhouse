@@ -1,6 +1,6 @@
 import Foundation
 
-// Unit checks of Playhouse/Bridge/CLICommandCatalog.swift against the CLI's parser, compiled
+// Unit checks of Playhouse/Core/Bridge/CLICommandCatalog.swift against the CLI's parser, compiled
 // with the CLI's sources except its entry point and run by scripts/test-e2e.sh before the
 // bridge suite. They fail when a command the parser handles has no help entry, or a declared
 // command has no handler; the bridge case `test_cli_help_lists_commands_by_group_and_audience`

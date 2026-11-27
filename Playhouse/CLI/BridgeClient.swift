@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 
 final class BridgeClient {

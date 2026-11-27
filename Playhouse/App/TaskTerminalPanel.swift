@@ -1,14 +1,19 @@
 import AppKit
 import SwiftTerm
 import SwiftUI
+import PlayhouseCore
+import PlayhouseViews
+import PlayhouseAtoms
+import PlayhouseUI
 
 /// One task's shells: one pane per created repository worktree, so a multi-repository task opens
 /// a split view. The session outlives the panel: hiding the panel keeps the shells and their
 /// scrollback, and only closing the task's conversation (or restarting after an exit) ends them.
 @MainActor
-final class TaskTerminalSession: ObservableObject {
-    @Published private(set) var panes: [TaskTerminalPane] = []
-    @Published private(set) var launchError: String?
+@Observable
+final class TaskTerminalSession {
+    private(set) var panes: [TaskTerminalPane] = []
+    private(set) var launchError: String?
     private(set) var taskID: UUID?
 
     /// Starts the shells the first time the panel opens for this task. Later calls reuse running
@@ -67,16 +72,17 @@ final class TaskTerminalSession: ObservableObject {
 
 /// One shell in the terminal panel, running in one repository worktree.
 @MainActor
-final class TaskTerminalPane: ObservableObject, Identifiable {
+@Observable
+final class TaskTerminalPane: Identifiable {
     let repositoryPath: String
     let name: String
     /// The worktree the shell starts in, which identifies the pane across launches.
     let directory: String
     let taskID: UUID
-    @Published private(set) var exitStatus: String?
-    @Published private(set) var currentDirectory: String?
-    @Published private(set) var terminalView: PlayhouseTerminalView?
-    private var processObserver: ProcessObserver?
+    private(set) var exitStatus: String?
+    private(set) var currentDirectory: String?
+    private(set) var terminalView: PlayhouseTerminalView?
+    @ObservationIgnored private var processObserver: ProcessObserver?
 
     nonisolated var id: String { directory }
     var isRunning: Bool { terminalView?.process?.running == true }
@@ -185,27 +191,10 @@ final class PlayhouseTerminalView: LocalProcessTerminalView {
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
-
-/// The terminal panel's width, which the user sets by dragging its left border.
-enum TerminalPanelLayout {
-    static let widthKey = "terminalPanelWidth"
-    static let defaultWidth: CGFloat = 460
-    static let minimumWidth: CGFloat = 320
-    /// The conversation keeps at least this much of the space the panel floats over.
-    static let minimumUncovered: CGFloat = 260
-    /// Each shell in a multi-repository split keeps at least this height.
-    static let minimumPaneHeight: CGFloat = 90
-
-    static func clampedWidth(_ width: CGFloat, available: CGFloat) -> CGFloat {
-        let maximum = max(minimumWidth, available - minimumUncovered)
-        return min(max(width, minimumWidth), maximum)
-    }
-}
-
 /// The terminal panel that slides in from the right edge of a task's conversation. A task with
 /// several repository worktrees shows one shell per worktree, stacked in a resizable split view.
 struct TaskTerminalPanel: View {
-    @ObservedObject var session: TaskTerminalSession
+    var session: TaskTerminalSession
     let onRestart: () -> Void
     let onRestartPane: (TaskTerminalPane) -> Void
     let onClose: () -> Void
@@ -288,7 +277,7 @@ struct TaskTerminalPanel: View {
 
 /// A pane's current folder, abbreviated against the home folder.
 private struct TerminalPaneDirectory: View {
-    @ObservedObject var pane: TaskTerminalPane
+    var pane: TaskTerminalPane
 
     var body: some View {
         if let directory = pane.currentDirectory {
@@ -310,7 +299,7 @@ private struct TerminalPaneDirectory: View {
 
 /// One worktree's shell; in a split view it carries a header naming its repository.
 private struct TerminalPaneView: View {
-    @ObservedObject var pane: TaskTerminalPane
+    var pane: TaskTerminalPane
     let showsHeader: Bool
     let focusesOnAttach: Bool
     let onRestart: () -> Void

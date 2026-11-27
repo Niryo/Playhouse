@@ -4,7 +4,7 @@
 A SwiftUI ScrollView, List, or Form must carry `.hoverRevealScrollers()` inside its content,
 unless `.scrollIndicators(.never)` directly follows it and it has no scrollers to reveal,
 and a file that builds an AppKit scroll view must call `HoverRevealScrollers.install(on:)`.
-SwiftUI's TextEditor hides its scroll view, so the app uses SkillTextEditor instead.
+SwiftUI's TextEditor hides its scroll view, so the app uses PHNativeTextEditor instead.
 """
 
 from pathlib import Path
@@ -13,11 +13,13 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "Playhouse" / "App"
-FILES = tuple(sorted(APP.rglob("*.swift")))
-CONTAINER = re.compile(r"(?<![A-Za-z.])(ScrollView|List|Form)\s*(?:\(|\{)")
+SOURCES = ROOT / "Playhouse"
+# The app target and the shared view modules: every file that builds scroll views.
+FILES = tuple(sorted(path for folder in ("App", "Views", "Atoms", "UI") for path in (SOURCES / folder).rglob("*.swift")))
+# Atoms and composites write them with PlayhouseUI names (PHScrollView, PHList, PHForm).
+CONTAINER = re.compile(r"(?<![A-Za-z.])(?:PH)?(ScrollView|List|Form)\s*(?:\(|\{)")
 APPKIT_SCROLL_VIEW = re.compile(r"\bscrollableTextView\(\)|\b\w*ScrollView\(\)|\bNSScrollView\(frame")
-TEXT_EDITOR = re.compile(r"(?<![A-Za-z])TextEditor\s*\(")
+TEXT_EDITOR = re.compile(r"(?<![A-Za-z])(?:PH)?TextEditor\s*\(")
 # Comment lines may sit between the container's closing brace and the modifier.
 NEVER_SHOWS_SCROLLERS = re.compile(r"\}(?:\s*//[^\n]*)*\s*\.scrollIndicators\(\.never\)")
 
@@ -46,7 +48,7 @@ def main() -> int:
     errors: list[str] = []
     containers = 0
     for path in FILES:
-        name = path.relative_to(APP).as_posix()
+        name = path.relative_to(SOURCES).as_posix()
         source = path.read_text(encoding="utf-8")
         for match in CONTAINER.finditer(source):
             span = content_range(source, match)
@@ -60,7 +62,7 @@ def main() -> int:
                 errors.append(f"{name}:{line}: {match.group(1)} content lacks .hoverRevealScrollers()")
         for match in TEXT_EDITOR.finditer(source):
             line = source.count("\n", 0, match.start()) + 1
-            errors.append(f"{name}:{line}: TextEditor's scroll view can't reveal on hover; use SkillTextEditor")
+            errors.append(f"{name}:{line}: TextEditor's scroll view can't reveal on hover; use PHNativeTextEditor")
         if APPKIT_SCROLL_VIEW.search(source) and "HoverRevealScrollers.install(on:" not in source:
             errors.append(f"{name}: builds an AppKit scroll view without HoverRevealScrollers.install(on:)")
     if errors:

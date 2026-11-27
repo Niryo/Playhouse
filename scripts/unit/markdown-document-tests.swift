@@ -1,6 +1,6 @@
 import Foundation
 
-// Pure-logic checks of the shared Markdown parser in Playhouse/App/MarkdownDocument.swift,
+// Pure-logic checks of the shared Markdown parser in Playhouse/Core/Conversation/MarkdownDocument.swift,
 // compiled with it (and SkillManifest.swift, for frontmatter) and run by scripts/test-e2e.sh
 // before the bridge suite. The transcript, the Markdown atom and the skill and rule previews
 // all render from these blocks; the bridge case `test_plugin_renderer_commits_minimal_ops_and_runs_handlers`

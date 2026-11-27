@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 // Focused unit checks of `CodexProcessAttribution`, compiled together with
-// Playhouse/App/ProcessCPUSampler.swift and run by scripts/test-e2e.sh before
+// Playhouse/Core/Providers/ProcessCPUSampler.swift and run by scripts/test-e2e.sh before
 // the bridge suite. They pin the working-directory -> task rules without a
 // live app-server; the bridge case `test_task_cpu_usage_attributes_codex_load_by_worktree`
 // covers the same rules end to end against real processes.

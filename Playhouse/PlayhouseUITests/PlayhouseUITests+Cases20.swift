@@ -186,8 +186,8 @@ extension PlayhouseUITests {
         let seedLegacyModel = Process()
         seedLegacyModel.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         seedLegacyModel.arguments = [
-            dataDirectory.appendingPathComponent("Playhouse-v2.store").path,
-            "UPDATE ZBOARDTASK SET ZCONVERSATIONMODELIDSDATA = X'\(legacyModelHex)' WHERE ZTITLE = 'Conversation modes'",
+            dataDirectory.appendingPathComponent("Playhouse-v3.sqlite").path,
+            "UPDATE board_tasks SET conversationModelIDsData = X'\(legacyModelHex)' WHERE title = 'Conversation modes'",
         ]
         let seedOutput = Pipe()
         seedLegacyModel.standardOutput = seedOutput

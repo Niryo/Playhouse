@@ -1,7 +1,7 @@
 import Foundation
 
 // Pure-logic checks of where provider dividers and goal achievements sit in the transcript, in
-// Playhouse/App/TranscriptRowAnchors.swift, compiled with it and run by scripts/test-e2e.sh
+// Playhouse/Core/Conversation/TranscriptRowAnchors.swift, compiled with it and run by scripts/test-e2e.sh
 // before the bridge suite. The bridge case `test_transcript_rows_stay_with_older_messages`
 // covers the same placement end to end, against paged history and the visible transcript.
 

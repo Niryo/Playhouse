@@ -62,7 +62,6 @@ def source_fingerprint():
             "scripts/check-hover-scrollers.py",
             "scripts/check-test-parity.py",
             "scripts/prepare-e2e-fixture.py",
-            "scripts/seed-legacy-task-store.swift",
             "scripts/test-bridge.py",
             "workflow-improvements.md",
         }:

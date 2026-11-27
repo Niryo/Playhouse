@@ -105,8 +105,8 @@ extension PlayhouseUITests {
         let seed = Process()
         seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         seed.arguments = [
-            dataDirectory.appendingPathComponent("Playhouse-v2.store").path,
-            "UPDATE ZBOARDTASK SET ZCALLUSAGESNAPSHOTSDATA = CAST('\(legacySnapshots)' AS BLOB), ZTOTALINPUTTOKENS = 100, ZTOTALOUTPUTTOKENS = 50, ZTOTALCACHEREADTOKENS = 400, ZTOTALCACHECREATIONTOKENS = 20 WHERE ZTITLE = '\(legacyTitle)'",
+            dataDirectory.appendingPathComponent("Playhouse-v3.sqlite").path,
+            "UPDATE board_tasks SET callUsageSnapshotsData = CAST('\(legacySnapshots)' AS BLOB), totalInputTokens = 100, totalOutputTokens = 50, totalCacheReadTokens = 400, totalCacheCreationTokens = 20 WHERE title = '\(legacyTitle)'",
         ]
         try seed.run()
         seed.waitUntilExit()

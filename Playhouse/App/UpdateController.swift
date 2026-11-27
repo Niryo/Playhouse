@@ -1,20 +1,25 @@
 import AppKit
 import SwiftUI
+import PlayhouseCore
+import PlayhouseViews
+import PlayhouseAtoms
+import PlayhouseUI
 
 /// The window's side of updates. The daemon's `UpdateManager` checks, downloads
 /// and starts the installer; this asks it to, shows where it is, and quits the
 /// app when the installer asks so the bundle can be replaced.
 @MainActor
-final class UpdateController: ObservableObject {
-    @Published private(set) var status: UpdateStatus?
+@Observable
+final class UpdateController {
+    private(set) var status: UpdateStatus?
     /// What the last install did, shown once after the app restarts.
-    @Published private(set) var notice: UpdateInstallRecord?
-    @Published private(set) var isWorking = false
-    @Published private(set) var lastError: String?
+    private(set) var notice: UpdateInstallRecord?
+    private(set) var isWorking = false
+    private(set) var lastError: String?
 
-    let client: DaemonClient
-    private var loop: Task<Void, Never>?
-    private var quitObserver: NSObjectProtocol?
+    @ObservationIgnored let client: DaemonClient
+    @ObservationIgnored private var loop: Task<Void, Never>?
+    @ObservationIgnored private var quitObserver: NSObjectProtocol?
 
     /// How often the window asks the daemon to run its scheduled check, which
     /// reaches the network at most once a day.
@@ -40,7 +45,7 @@ final class UpdateController: ObservableObject {
             // queue; quitting from inside this main-queue block would wait on
             // itself, so the run loop starts it once the block returns.
             MainActor.assumeIsolated {
-                NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
+                Platform.services.terminateApp()
             }
         }
         loop = Task { [weak self] in
@@ -202,7 +207,7 @@ final class UpdateController: ObservableObject {
 /// The update button at the trailing end of the main window's title bar, built
 /// from the plugin atoms. Hidden on development builds and when there is nothing to say.
 struct UpdatePill: View {
-    @EnvironmentObject private var updates: UpdateController
+    @Environment(UpdateController.self) private var updates
 
     var body: some View {
         if let notice = updates.notice {
@@ -406,7 +411,7 @@ private struct ReleaseNotesView: View {
 
 /// Settings → Updates.
 struct UpdateSettingsSection: View {
-    @EnvironmentObject private var updates: UpdateController
+    @Environment(UpdateController.self) private var updates
 
     var body: some View {
         Section("Updates") {
@@ -500,7 +505,7 @@ struct UpdateTitlebarAccessory: NSViewRepresentable {
             host.rootView = AnyView(
                 UpdatePill()
                     .fixedSize(horizontal: true, vertical: false)
-                    .environmentObject(updates)
+                    .environment(updates)
                     .tint(WorkspaceTheme.accent)
                     .padding(.trailing, 10)
                     .frame(maxHeight: .infinity)

@@ -1,0 +1,450 @@
+{
+ "board": {
+  "tasks": [
+   {
+    "contextFolders": [],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "codex",
+    "createdAt": "2026-11-26T18:54:25Z",
+    "hasUnsentDraft": true,
+    "id": "B656B7A7-D3F4-494A-AF47-1BEEA82F6C4E",
+    "openCodeSessionID": "opencode-fixture",
+    "pastRepositoryWorktrees": [
+     {
+      "branch": "feature-done",
+      "branchFrom": "main",
+      "createdByPlayhouse": true,
+      "isPending": false,
+      "isPullRequestClosed": false,
+      "isPullRequestMerged": true,
+      "mergeTarget": "main",
+      "pullRequestNumber": 42,
+      "pullRequestURL": "https://github.com/playhouse-test/fixture/pull/42",
+      "repositoryPath": "/tmp/ph-fixture-repo",
+      "worktreePath": "/tmp/ph-fixture-worktrees/done"
+     }
+    ],
+    "pendingCommentCount": 0,
+    "repositoryWorktrees": [],
+    "savedPrompt": "Status fixture.",
+    "status": "Done",
+    "title": "Task in Done",
+    "workspaceRoots": []
+   },
+   {
+    "claudeSessionID": "claude-session-fixture",
+    "contextFolders": [],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "claude",
+    "createdAt": "2026-11-26T18:54:25Z",
+    "hasUnsentDraft": true,
+    "id": "29C1AD1C-F870-4BE5-BE45-BCE0EA180BDB",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 1,
+    "pendingSubmittedPrompt": "Queued follow-up",
+    "repositoryWorktrees": [],
+    "savedPrompt": "Status fixture.",
+    "status": "Review",
+    "statusMessage": "Ready for review",
+    "title": "Task in Review",
+    "workspaceRoots": []
+   },
+   {
+    "codexThreadID": "thread-fixture-1",
+    "contextFolders": [],
+    "conversationContextMode": "optimized",
+    "conversationEffort": "high",
+    "conversationProvider": "codex",
+    "createdAt": "2026-11-26T18:54:25Z",
+    "hasUnsentDraft": true,
+    "id": "2A679618-F395-43A7-8DCD-AB8FE7C1493E",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 0,
+    "progressDetail": "Compiling the app",
+    "progressLabel": "Building",
+    "progressType": "building",
+    "repositoryWorktrees": [],
+    "savedPrompt": "Status fixture.",
+    "status": "In Progress",
+    "statusMessage": "Working on it",
+    "title": "Task in In Progress",
+    "workspaceRoots": []
+   },
+   {
+    "contextFolders": [],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "codex",
+    "createdAt": "2026-11-26T18:54:25Z",
+    "hasUnsentDraft": true,
+    "id": "69212857-60C7-4863-BD2A-035AEBB2DF5A",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 0,
+    "repositoryWorktrees": [],
+    "savedPrompt": "Run the scheduled work.",
+    "schedule": {
+     "imageCount": 0,
+     "kind": "once",
+     "mode": "default",
+     "paused": false,
+     "prompt": "Run the scheduled work.",
+     "scheduledAt": "2030-01-02T09:00:00Z",
+     "summary": "Once"
+    },
+    "status": "Backlog",
+    "title": "Scheduled once",
+    "workspaceRoots": []
+   },
+   {
+    "contextFolders": [],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "codex",
+    "createdAt": "2026-11-26T18:54:14Z",
+    "hasUnsentDraft": true,
+    "id": "84F158A4-1F82-4FEC-9AED-4797553722C8",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 0,
+    "repositoryWorktrees": [],
+    "savedPrompt": "Unsent draft with an image",
+    "status": "Backlog",
+    "title": "Plain task",
+    "workspaceRoots": []
+   },
+   {
+    "contextFolders": [
+     "/tmp/ph-fixture-context"
+    ],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "claude",
+    "createdAt": "2026-11-26T18:54:14Z",
+    "hasUnsentDraft": true,
+    "id": "16E09630-7CB4-41AC-9FF2-1F4743D39922",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 0,
+    "repositoryWorktrees": [],
+    "savedPrompt": "Read the notes.",
+    "status": "Backlog",
+    "title": "Context folder task",
+    "workspaceRoots": [
+     "/tmp/ph-fixture-context"
+    ]
+   },
+   {
+    "contextFolders": [],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "codex",
+    "createdAt": "2026-11-26T18:54:14Z",
+    "hasUnsentDraft": true,
+    "id": "C80A51AE-E6F3-4990-A049-043060FB750D",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 0,
+    "repositoryWorktrees": [
+     {
+      "branch": "auto",
+      "branchFrom": "",
+      "createdByPlayhouse": false,
+      "isPending": true,
+      "isPullRequestClosed": false,
+      "isPullRequestMerged": false,
+      "repositoryPath": "/tmp/ph-fixture-repo",
+      "worktreePath": "/tmp/ph-fixture-repo"
+     }
+    ],
+    "savedPrompt": "Plan the repository work.",
+    "status": "Backlog",
+    "title": "Backlog with repository",
+    "workspaceRoots": [
+     "/tmp/ph-fixture-repo"
+    ]
+   }
+  ]
+ },
+ "chat": {
+  "codexThreadID": "chat-thread",
+  "contextFolders": [],
+  "conversationContextMode": "full",
+  "conversationEffort": "medium",
+  "conversationProvider": "codex",
+  "createdAt": "2026-11-26T18:54:14Z",
+  "draftImageDataURLs": [],
+  "hasUnsentDraft": true,
+  "id": "68FD1F4D-7AEF-46D7-A963-8F0A23C0DC5C",
+  "pastRepositoryWorktrees": [],
+  "pendingCommentCount": 0,
+  "repositoryWorktrees": [],
+  "savedPrompt": "Chat draft",
+  "status": "Backlog",
+  "statusMessage": "Idle chat",
+  "title": "Chat",
+  "workspaceRoots": []
+ },
+ "schedules": {
+  "tasks": [
+   {
+    "contextFolders": [],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "codex",
+    "createdAt": "2026-11-26T18:54:25Z",
+    "hasUnsentDraft": true,
+    "id": "5655899D-FB6E-4ABD-8070-37DB53269423",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 0,
+    "repositoryWorktrees": [],
+    "savedPrompt": "Check the board.",
+    "schedule": {
+     "imageCount": 0,
+     "kind": "recurring",
+     "mode": "default",
+     "paused": true,
+     "prompt": "Check the board.",
+     "recurrence": {
+      "hour": 10,
+      "minute": 30,
+      "preset": "weekly",
+      "weekday": 3
+     },
+     "scheduledAt": "2026-12-01T08:30:00Z",
+     "summary": "Tuesdays at 10:30"
+    },
+    "status": "Backlog",
+    "title": "Weekly check",
+    "workspaceRoots": []
+   },
+   {
+    "contextFolders": [],
+    "conversationContextMode": "full",
+    "conversationEffort": "medium",
+    "conversationProvider": "codex",
+    "createdAt": "2026-11-26T18:54:25Z",
+    "hasUnsentDraft": true,
+    "id": "69212857-60C7-4863-BD2A-035AEBB2DF5A",
+    "pastRepositoryWorktrees": [],
+    "pendingCommentCount": 0,
+    "repositoryWorktrees": [],
+    "savedPrompt": "Run the scheduled work.",
+    "schedule": {
+     "imageCount": 0,
+     "kind": "once",
+     "mode": "default",
+     "paused": false,
+     "prompt": "Run the scheduled work.",
+     "scheduledAt": "2030-01-02T09:00:00Z",
+     "summary": "Once"
+    },
+    "status": "Backlog",
+    "title": "Scheduled once",
+    "workspaceRoots": []
+   }
+  ]
+ },
+ "tasks": {
+  "16E09630-7CB4-41AC-9FF2-1F4743D39922": {
+   "contextFolders": [
+    "/tmp/ph-fixture-context"
+   ],
+   "conversationContextMode": "full",
+   "conversationEffort": "medium",
+   "conversationProvider": "claude",
+   "createdAt": "2026-11-26T18:54:14Z",
+   "draftImageDataURLs": [],
+   "hasUnsentDraft": true,
+   "id": "16E09630-7CB4-41AC-9FF2-1F4743D39922",
+   "pastRepositoryWorktrees": [],
+   "pendingCommentCount": 0,
+   "repositoryWorktrees": [],
+   "savedPrompt": "Read the notes.",
+   "status": "Backlog",
+   "title": "Context folder task",
+   "workspaceRoots": [
+    "/tmp/ph-fixture-context"
+   ]
+  },
+  "29C1AD1C-F870-4BE5-BE45-BCE0EA180BDB": {
+   "claudeSessionID": "claude-session-fixture",
+   "contextFolders": [],
+   "conversationContextMode": "full",
+   "conversationEffort": "medium",
+   "conversationProvider": "claude",
+   "createdAt": "2026-11-26T18:54:25Z",
+   "draftImageDataURLs": [],
+   "hasUnsentDraft": true,
+   "id": "29C1AD1C-F870-4BE5-BE45-BCE0EA180BDB",
+   "pastRepositoryWorktrees": [],
+   "pendingCommentCount": 1,
+   "pendingSubmittedPrompt": "Queued follow-up",
+   "repositoryWorktrees": [],
+   "savedPrompt": "Status fixture.",
+   "status": "Review",
+   "statusMessage": "Ready for review",
+   "title": "Task in Review",
+   "workspaceRoots": []
+  },
+  "2A679618-F395-43A7-8DCD-AB8FE7C1493E": {
+   "codexThreadID": "thread-fixture-1",
+   "contextFolders": [],
+   "conversationContextMode": "optimized",
+   "conversationEffort": "high",
+   "conversationProvider": "codex",
+   "createdAt": "2026-11-26T18:54:25Z",
+   "draftImageDataURLs": [],
+   "hasUnsentDraft": true,
+   "id": "2A679618-F395-43A7-8DCD-AB8FE7C1493E",
+   "pastRepositoryWorktrees": [],
+   "pendingCommentCount": 0,
+   "progressDetail": "Compiling the app",
+   "progressLabel": "Building",
+   "progressType": "building",
+   "repositoryWorktrees": [],
+   "savedPrompt": "Status fixture.",
+   "status": "In Progress",
+   "statusMessage": "Working on it",
+   "title": "Task in In Progress",
+   "workspaceRoots": []
+  },
+  "5655899D-FB6E-4ABD-8070-37DB53269423": {
+   "contextFolders": [],
+   "conversationContextMode": "full",
+   "conversationEffort": "medium",
+   "conversationProvider": "codex",
+   "createdAt": "2026-11-26T18:54:25Z",
+   "draftImageDataURLs": [],
+   "hasUnsentDraft": true,
+   "id": "5655899D-FB6E-4ABD-8070-37DB53269423",
+   "pastRepositoryWorktrees": [],
+   "pendingCommentCount": 0,
+   "repositoryWorktrees": [],
+   "savedPrompt": "Check the board.",
+   "schedule": {
+    "imageCount": 0,
+    "kind": "recurring",
+    "mode": "default",
+    "paused": true,
+    "prompt": "Check the board.",
+    "recurrence": {
+     "hour": 10,
+     "minute": 30,
+     "preset": "weekly",
+     "weekday": 3
+    },
+    "scheduledAt": "2026-12-01T08:30:00Z",
+    "summary": "Tuesdays at 10:30"
+   },
+   "status": "Backlog",
+   "title": "Weekly check",
+   "workspaceRoots": []
+  },
+  "69212857-60C7-4863-BD2A-035AEBB2DF5A": {
+   "contextFolders": [],
+   "conversationContextMode": "full",
+   "conversationEffort": "medium",
+   "conversationProvider": "codex",
+   "createdAt": "2026-11-26T18:54:25Z",
+   "draftImageDataURLs": [],
+   "hasUnsentDraft": true,
+   "id": "69212857-60C7-4863-BD2A-035AEBB2DF5A",
+   "pastRepositoryWorktrees": [],
+   "pendingCommentCount": 0,
+   "repositoryWorktrees": [],
+   "savedPrompt": "Run the scheduled work.",
+   "schedule": {
+    "imageCount": 0,
+    "kind": "once",
+    "mode": "default",
+    "paused": false,
+    "prompt": "Run the scheduled work.",
+    "scheduledAt": "2030-01-02T09:00:00Z",
+    "summary": "Once"
+   },
+   "status": "Backlog",
+   "title": "Scheduled once",
+   "workspaceRoots": []
+  },
+  "84F158A4-1F82-4FEC-9AED-4797553722C8": {
+   "contextFolders": [],
+   "conversationContextMode": "full",
+   "conversationEffort": "medium",
+   "conversationProvider": "codex",
+   "createdAt": "2026-11-26T18:54:14Z",
+   "draftImageDataURLs": [
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+   ],
+   "hasUnsentDraft": true,
+   "id": "84F158A4-1F82-4FEC-9AED-4797553722C8",
+   "pastRepositoryWorktrees": [],
+   "pendingCommentCount": 0,
+   "repositoryWorktrees": [],
+   "savedPrompt": "Unsent draft with an image",
+   "status": "Backlog",
+   "title": "Plain task",
+   "workspaceRoots": []
+  },
+  "B656B7A7-D3F4-494A-AF47-1BEEA82F6C4E": {
+   "contextFolders": [],
+   "conversationContextMode": "full",
+   "conversationEffort": "medium",
+   "conversationProvider": "codex",
+   "createdAt": "2026-11-26T18:54:25Z",
+   "draftImageDataURLs": [],
+   "hasUnsentDraft": true,
+   "id": "B656B7A7-D3F4-494A-AF47-1BEEA82F6C4E",
+   "openCodeSessionID": "opencode-fixture",
+   "pastRepositoryWorktrees": [
+    {
+     "branch": "feature-done",
+     "branchFrom": "main",
+     "createdByPlayhouse": true,
+     "isPending": false,
+     "isPullRequestClosed": false,
+     "isPullRequestMerged": true,
+     "mergeTarget": "main",
+     "pullRequestNumber": 42,
+     "pullRequestURL": "https://github.com/playhouse-test/fixture/pull/42",
+     "repositoryPath": "/tmp/ph-fixture-repo",
+     "worktreePath": "/tmp/ph-fixture-worktrees/done"
+    }
+   ],
+   "pendingCommentCount": 0,
+   "repositoryWorktrees": [],
+   "savedPrompt": "Status fixture.",
+   "status": "Done",
+   "title": "Task in Done",
+   "workspaceRoots": []
+  },
+  "C80A51AE-E6F3-4990-A049-043060FB750D": {
+   "contextFolders": [],
+   "conversationContextMode": "full",
+   "conversationEffort": "medium",
+   "conversationProvider": "codex",
+   "createdAt": "2026-11-26T18:54:14Z",
+   "draftImageDataURLs": [],
+   "hasUnsentDraft": true,
+   "id": "C80A51AE-E6F3-4990-A049-043060FB750D",
+   "pastRepositoryWorktrees": [],
+   "pendingCommentCount": 0,
+   "repositoryWorktrees": [
+    {
+     "branch": "auto",
+     "branchFrom": "",
+     "createdByPlayhouse": false,
+     "isPending": true,
+     "isPullRequestClosed": false,
+     "isPullRequestMerged": false,
+     "repositoryPath": "/tmp/ph-fixture-repo",
+     "worktreePath": "/tmp/ph-fixture-repo"
+    }
+   ],
+   "savedPrompt": "Plan the repository work.",
+   "status": "Backlog",
+   "title": "Backlog with repository",
+   "workspaceRoots": [
+    "/tmp/ph-fixture-repo"
+   ]
+  }
+ }
+}

@@ -18,3 +18,7 @@ __pycache__/
 docs/nightly-tests/
 docs/performance/
 docs/workflow-improvements/
+
+# SwiftPM build output of the Playhouse package
+.build/
+.swiftpm/

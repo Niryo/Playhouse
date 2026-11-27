@@ -278,7 +278,7 @@ extension PlayhouseUITests {
             $0["event"] as? String == "conversation.send.failed" && $0["taskID"] as? String == interruptedID
         })
         XCTAssertEqual(sendFailure["phase"] as? String, "codex-turn")
-        XCTAssertEqual(sendFailure["storePath"] as? String, dataDirectory.appendingPathComponent("Playhouse-v2.store").path)
+        XCTAssertEqual(sendFailure["storePath"] as? String, dataDirectory.appendingPathComponent("Playhouse-v3.sqlite").path)
 
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         app.launchEnvironment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable

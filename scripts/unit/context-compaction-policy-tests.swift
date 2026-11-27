@@ -1,7 +1,7 @@
 import Foundation
 
 // Pure-logic checks of the compaction decisions and the session state reader
-// in Playhouse/App/ContextCompaction.swift, compiled with it and run by
+// in Playhouse/Core/Conversation/ContextCompaction.swift, compiled with it and run by
 // scripts/test-e2e.sh before the bridge suite. The bridge cases
 // `test_claude_idle_session_compacts_before_cache_expires` and
 // `test_claude_resume_compacts_after_cache_expires_or_model_switch` cover the

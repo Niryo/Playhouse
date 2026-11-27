@@ -95,7 +95,7 @@ When an agent needs a decision, the task moves to **Waiting Response** and tells
 
 ### Plugins
 
-Extend Playhouse with plugins. Add a sidebar section, a composer action, a control on every task card, or a tool in the task sidebar. Plugins get live app state (running agents, tasks, usage) and render as real SwiftUI. Several built-in features, like the pull request modes, are plugins themselves. See the [plugin guide](Playhouse/App/Plugins/README.md).
+Extend Playhouse with plugins. Add a sidebar section, a composer action, a control on every task card, or a tool in the task sidebar. Plugins get live app state (running agents, tasks, usage) and render as real SwiftUI. Several built-in features, like the pull request modes, are plugins themselves. See the [plugin guide](Playhouse/Core/Plugins/README.md).
 
 <p align="center">
   <img src="docs/images/plugin.png" width="216" alt="A Release Train plugin in the sidebar showing release progress and running agents">

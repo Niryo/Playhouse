@@ -84,8 +84,8 @@ fi
 tag="v${version}"
 git -C "${repository_root}" rev-parse -q --verify "refs/tags/${tag}" >/dev/null && die "tag ${tag} already exists."
 
-public_key="$(sed -n 's/.*static let publicKey = "\([^"]*\)".*/\1/p' "${repository_root}/Playhouse/Bridge/ReleaseSigningKey.swift")"
-[[ -n "${public_key}" ]] || die "Playhouse/Bridge/ReleaseSigningKey.swift has no key; run scripts/release-setup.sh and commit it."
+public_key="$(sed -n 's/.*static let publicKey = "\([^"]*\)".*/\1/p' "${repository_root}/Playhouse/Core/Bridge/ReleaseSigningKey.swift")"
+[[ -n "${public_key}" ]] || die "Playhouse/Core/Bridge/ReleaseSigningKey.swift has no key; run scripts/release-setup.sh and commit it."
 security find-identity -v -p codesigning | grep -q "\"${certificate_name}\"" \
   || die "no \"${certificate_name}\" certificate; run scripts/release-setup.sh."
 printf 'Reading the manifest signing key from the keychain (macOS may ask to allow it)...\n'
@@ -130,10 +130,10 @@ fi
 
 # A rollback restores the app, not its data, so the store must stay readable by
 # the previous release.
-model_files=(Playhouse/App/BoardTask.swift Playhouse/App/ConversationSubject.swift)
+model_files=(Playhouse/Core/Storage/BoardTask.swift Playhouse/Core/Storage/ConversationSubject.swift)
 if [[ -n "${latest}" ]] && git -C "${repository_root}" rev-parse -q --verify "refs/tags/v${latest}" >/dev/null \
   && ! git -C "${repository_root}" diff --quiet "v${latest}" HEAD -- "${model_files[@]}"; then
-  printf 'warning: the SwiftData models changed since %s (%s).\n' "v${latest}" "${model_files[*]}" >&2
+  printf 'warning: the task store models changed since %s (%s).\n' "v${latest}" "${model_files[*]}" >&2
   printf 'warning: make sure Playhouse %s can still read data that %s writes, or a rollback loses it.\n' "${latest}" "${version}" >&2
 fi
 printf 'Releasing Playhouse %s (latest: %s)%s\n' "${version}" "${latest:-none}" "$(${dry_run} && printf ' — dry run')"

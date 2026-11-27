@@ -19,7 +19,8 @@ let package = Package(
             resources: [.copy("PrivacyInfo.xcprivacy")],
             swiftSettings: [
                 .define("SQLITE_ENABLE_FTS5"),
-                .define("SQLITE_ENABLE_SNAPSHOT"),
+                // Linux distributions' libsqlite3 is built without snapshots.
+                .define("SQLITE_ENABLE_SNAPSHOT", .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS])),
                 .enableUpcomingFeature("MemberImportVisibility"),
             ]
         ),

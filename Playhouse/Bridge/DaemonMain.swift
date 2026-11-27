@@ -1,5 +1,5 @@
-import Darwin
 import Foundation
+import PlayhouseCore
 
 /// One stderr line with time and pid; the spawner routes stderr to the socket's `.log`.
 func daemonLog(_ message: String) {
@@ -187,6 +187,7 @@ enum PlayhouseBridgeDaemonMain {
     }
 
     static func main() {
+        Platform.services = MacPlatformServices()
         // The updater's health check: the daemon starts and knows its version.
         if CommandLine.arguments.dropFirst().first == "--version" {
             let info = Bundle.main.infoDictionary ?? [:]
@@ -297,7 +298,7 @@ enum PlayhouseBridgeDaemonMain {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        let descriptor = Darwin.open(socketPath + ".instance.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        let descriptor = POSIX.open(socketPath + ".instance.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { return }
         let deadline = Date().addingTimeInterval(30)
         while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
