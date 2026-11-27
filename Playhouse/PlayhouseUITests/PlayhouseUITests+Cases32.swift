@@ -1019,7 +1019,7 @@ extension PlayhouseUITests {
         attachScreenshot(named: "Deferred images: conversation opens on the latest turn without reading earlier images")
 
         func isVisible(_ candidate: XCUIElement) -> Bool {
-            candidate.exists && scrollView.frame.intersects(candidate.frame)
+            renderedFrame(candidate).map { scrollView.frame.intersects($0) } ?? false
         }
         func scrollUp(until condition: () -> Bool) {
             for _ in 0..<60 {

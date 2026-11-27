@@ -805,6 +805,13 @@ extension PlayhouseUITests {
         XCTAssertTrue(tab.waitToExist(timeout: 5), "Token Stats should offer its \(section) section.")
         tab.click()
     }
+    /// `candidate`'s frame while it is rendered, else nil. A lazy row can leave the hierarchy
+    /// between an existence check and a frame read, which fails hard; a snapshot's frame fails
+    /// softly. The existence check comes first: a snapshot of a row that isn't rendered retries
+    /// for a second.
+    func renderedFrame(_ candidate: XCUIElement) -> CGRect? {
+        candidate.exists ? (try? candidate.snapshot())?.frame : nil
+    }
     /// Rows of the raw input list are drawn lazily; scrolls the list until one is on screen.
     /// The list also keeps rows just past its bottom edge, so a row that exists can still be
     /// out of view; it scrolls until the row sits inside the list.
@@ -813,7 +820,7 @@ extension PlayhouseUITests {
         let list = element("raw-input-list")
         XCTAssertTrue(list.waitToExist(timeout: 10))
         for _ in 0..<20 {
-            let frame = row.exists ? (try? row.snapshot())?.frame : nil
+            let frame = renderedFrame(row)
             if let frame, list.frame.contains(frame) { break }
             // A row drawn above the list's top scrolls back up; a missing or lower one, down.
             list.scroll(byDeltaX: 0, deltaY: frame.map { $0.minY < list.frame.minY } == true ? 300 : -300)
