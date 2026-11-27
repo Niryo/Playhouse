@@ -238,10 +238,16 @@ package struct ChatPageAnchorsColumnInset: PHViewModifier, PHAnimatable {
     }
 }
 
-/// Where the marker above the oldest label read so far ends, in the labels' scroll view.
+/// The marker above the oldest label read so far: how many labels were read when it was placed,
+/// and where it ends in the labels' scroll view.
+private struct ChatPageAnchorsOlderEdge: Equatable {
+    let labelCount: Int
+    let maxY: CGFloat
+}
+
 private struct ChatPageAnchorsOlderEdgeKey: PHPreferenceKey {
-    static let defaultValue: CGFloat? = nil
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+    static let defaultValue: ChatPageAnchorsOlderEdge? = nil
+    static func reduce(value: inout ChatPageAnchorsOlderEdge?, nextValue: () -> ChatPageAnchorsOlderEdge?) {
         value = value ?? nextValue()
     }
 }
@@ -261,10 +267,11 @@ package struct ChatPageAnchorsView: PHView {
     @PHState private var olderEdge = OlderEdge()
     private static let scrollSpace = "chat-page-anchors-scroll"
 
-    /// Whether the marker above the oldest label read is in view, and a count of its moves in
-    /// and out of view that cancels a pending read, kept out of SwiftUI's state.
+    /// Which marker above the oldest label read is in view, by the labels read when it was
+    /// placed, and a count of the changes to it that cancels a pending read, kept out of
+    /// SwiftUI's state.
     package final class OlderEdge {
-        package var isInView = false
+        package var labelCountInView: Int?
         package var generation = 0
     }
 
@@ -280,7 +287,10 @@ package struct ChatPageAnchorsView: PHView {
                             .background(PHGeometryReader { geometry in
                                 PHColor.clear.preference(
                                     key: ChatPageAnchorsOlderEdgeKey.self,
-                                    value: geometry.frame(in: .named(Self.scrollSpace)).maxY
+                                    value: ChatPageAnchorsOlderEdge(
+                                        labelCount: model.shownPages.count,
+                                        maxY: geometry.frame(in: .named(Self.scrollSpace)).maxY
+                                    )
                                 )
                             })
                     }
@@ -311,7 +321,7 @@ package struct ChatPageAnchorsView: PHView {
             // The marker's place, not its appearing: the stack builds rows just outside the
             // column, so the marker can appear while the reader is still at the newest labels.
             .onPreferenceChange(ChatPageAnchorsOlderEdgeKey.self) { edge in
-                olderEdgeMoved(inView: (edge ?? 0) > 0, proxy)
+                olderEdgeMoved(labelCountInView: edge.flatMap { $0.maxY > 0 ? $0.labelCount : nil }, proxy)
             }
             .defaultScrollAnchor(.bottom)
             .accessibilityLabel("Chat pages")
@@ -342,16 +352,19 @@ package struct ChatPageAnchorsView: PHView {
         }
     }
 
-    /// Reads older labels once each time the marker comes into view. A lazy stack sizes itself
+    /// Reads older labels once each time a marker comes into view. A lazy stack sizes itself
     /// over several layout passes, which can show the marker for a moment, as can the labels
     /// read laying out before the column scrolls back to the one the reader reached; so the
-    /// marker counts as reached only while it is still in view 0.15 s later.
-    private func olderEdgeMoved(inView: Bool, _ proxy: PHScrollViewProxy) {
+    /// marker counts as reached only while it is still in view 0.15 s later. The marker placed
+    /// above newly read labels is a new arrival even when the one before it was still in view:
+    /// a wheel scroll still under way can keep the column at its top, so the new marker never
+    /// leaves view, and without that it would never read on.
+    private func olderEdgeMoved(labelCountInView: Int?, _ proxy: PHScrollViewProxy) {
         let edge = olderEdge
-        guard inView != edge.isInView else { return }
-        edge.isInView = inView
+        guard labelCountInView != edge.labelCountInView else { return }
+        edge.labelCountInView = labelCountInView
         edge.generation += 1
-        guard inView else { return }
+        guard labelCountInView != nil else { return }
         let generation = edge.generation
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             guard edge.generation == generation else { return }

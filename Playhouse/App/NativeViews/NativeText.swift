@@ -494,11 +494,6 @@ package final class CommentTrackingTextView: MeasuredTextView {
         Platform.services.copyToClipboard(wholeMessageText)
     }
 
-    package override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        window?.acceptsMouseMovedEvents = true
-    }
-
     private var pendingClick: DispatchWorkItem?
 
     /// The text view tracks the drag that selects text until the mouse goes up, so the

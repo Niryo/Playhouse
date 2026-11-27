@@ -125,16 +125,13 @@ extension PlayhouseUITests {
         composer.click()
         composer.typeText(prompt)
         element("send-message-button").click()
-        // A row far from the viewport stops rendering as the transcript scrolls, so one that
-        // exists can be gone by the time its frame is read; a snapshot reads it without failing.
-        func frame(_ candidate: XCUIElement) -> CGRect? {
-            candidate.exists ? (try? candidate.snapshot())?.frame : nil
-        }
+        // A row far from the viewport stops rendering as the transcript scrolls, so its frame is
+        // read only while it is rendered.
         func isInView(_ candidate: XCUIElement) -> Bool {
-            frame(candidate).map { scrollView.frame.insetBy(dx: 0, dy: -2).contains($0) } ?? false
+            renderedFrame(candidate).map { scrollView.frame.insetBy(dx: 0, dy: -2).contains($0) } ?? false
         }
         func isOutOfView(_ candidate: XCUIElement) -> Bool {
-            frame(candidate).map { !scrollView.frame.intersects($0) } ?? true
+            renderedFrame(candidate).map { !scrollView.frame.intersects($0) } ?? true
         }
 
         // At the bottom when the reply starts, the transcript follows it past its question.
@@ -701,12 +698,9 @@ extension PlayhouseUITests {
         func renderedCount() -> Int {
             (scrollView.value as? String ?? "").split(separator: " ").compactMap { Int($0) }.first ?? 0
         }
-        // A lazy row can leave the hierarchy between an existence check and a frame read, which
-        // fails hard; a snapshot's frame fails softly and the row simply reads as not visible. The
-        // existence check comes first: a snapshot of a row that isn't rendered retries for a second.
-        func frameIfRendered(_ candidate: XCUIElement) -> CGRect? { candidate.exists ? (try? candidate.snapshot())?.frame : nil }
+        // A lazy row that leaves the hierarchy simply reads as not visible.
         func isVisible(_ candidate: XCUIElement) -> Bool {
-            frameIfRendered(candidate).map { scrollView.frame.intersects($0) } ?? false
+            renderedFrame(candidate).map { scrollView.frame.intersects($0) } ?? false
         }
         func scrollTranscript(by delta: CGFloat, until condition: () -> Bool, limit: Int = 40, settle: TimeInterval = 0) {
             for _ in 0..<limit {
@@ -739,7 +733,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ renderedCount() > 42 }, timeout: 5), "The messages above the one the reader reached should be rendered ahead of them; rendered=\(renderedCount()).")
         let restingTop = firstLoadedUser.frame.minY
         let restingCount = renderedCount()
-        XCTAssertFalse(waitUntil({ abs((frameIfRendered(firstLoadedUser)?.minY ?? .infinity) - restingTop) > 20 }, timeout: 2), "Revealing older messages should not move the message the reader is on.")
+        XCTAssertFalse(waitUntil({ abs((renderedFrame(firstLoadedUser)?.minY ?? .infinity) - restingTop) > 20 }, timeout: 2), "Revealing older messages should not move the message the reader is on.")
         XCTAssertGreaterThanOrEqual(renderedCount(), restingCount, "Revealed messages stay rendered.")
         XCTAssertLessThan(renderedCount(), 120, "Automatic pagination should stop while the reader rests away from the top; rendered=\(renderedCount()).")
         XCTAssertFalse(isVisible(oldest), "The oldest page should still be out of view.")
