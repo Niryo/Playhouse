@@ -601,7 +601,7 @@ extension TaskConversationView {
             return
         }
         let freeformText = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        let pendingAnnotations = annotations.filter(\.pending)
+        let pendingAnnotations = unsentAnnotations
         let usesComposerDraft = overrideText == nil
         // An empty Goal still goes to the bridge, which explains the length rule.
         guard (!freeformText.isEmpty || (usesComposerDraft && (!pendingImages.isEmpty || isEnteringGoal)) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, hasLoadedConversation, userInputRequest == nil else { return }
@@ -652,7 +652,8 @@ extension TaskConversationView {
             return
         }
         if !pendingAnnotations.isEmpty {
-            inFlightAnnotationIDs = Set(pendingAnnotations.map(\.id))
+            // Each send releases only its own comments when it ends.
+            inFlightAnnotationIDs.formUnion(pendingAnnotations.map(\.id))
             persistPendingAnnotations()
         }
         if usesComposerDraft && isEnteringGoal && !pendingAnnotations.isEmpty {
