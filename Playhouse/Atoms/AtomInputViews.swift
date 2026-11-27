@@ -48,11 +48,27 @@ package struct AtomToggle: PHView {
     package var common = AtomCommon()
     package let onToggle: () -> Void
 
+    @PHViewBuilder
     package var body: some PHView {
-        PHToggle(common.label ?? "", isOn: PHBinding(get: { props.isOn }, set: { if $0 != props.isOn { onToggle() } }))
-            .toggleStyle(.switch)
-            .controlSize(controlSize)
-            .labelsHidden()
+        let selection = PHBinding(get: { props.isOn }, set: { if $0 != props.isOn { onToggle() } })
+        let toggle = PHToggle(common.label ?? "", isOn: selection)
+                         // no-pointer: styled adds window feedback and AppKit tracks menu toggles.
+        if props.style == "menuItem" {
+            toggle
+                .disabled(props.disabled == true)
+                .help(common.help ?? common.label ?? "")
+        } else {
+            styled(toggle)
+        }
+    }
+
+    private func styled(_ toggle: some PHView) -> some PHView {
+        toggle
+            .modifier(Applied(when: props.style != "automatic") { $0.toggleStyle(.switch) })
+            .modifier(Applied(when: props.size != nil || props.style != "automatic") {
+                $0.controlSize(controlSize)
+            })
+            .modifier(Applied(when: props.showsLabel != true) { $0.labelsHidden() })
             .disabled(props.disabled == true)
             .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
             .atomCommon(common, atom: .toggle)
@@ -86,25 +102,33 @@ package struct AtomTextField: PHView {
     package let onChange: (String) -> Void
     package var onSubmit: (() -> Void)?
     package var onArrow: ((String) -> Void)?
+    package var onEscape: (() -> Void)?
+    private var formattedField: (() -> PHAnyView)?
+    private var namedFocus: (PHFocusState<String?>.Binding, String)?
+    private var externalFocus: PHFocusState<Bool>.Binding?
     @PHState private var text: String
     @PHFocusState private var isFocused: Bool
 
     package init(
         props: TextFieldProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void,
-        onSubmit: (() -> Void)? = nil, onArrow: ((String) -> Void)? = nil
+        onSubmit: (() -> Void)? = nil, onArrow: ((String) -> Void)? = nil, onEscape: (() -> Void)? = nil, focus: PHFocusState<Bool>.Binding? = nil, namedFocus: (PHFocusState<String?>.Binding, String)? = nil
     ) {
         self.props = props
         self.common = common
         self.onChange = onChange
         self.onSubmit = onSubmit
         self.onArrow = onArrow
+        self.onEscape = onEscape
+        self.externalFocus = focus
+        self.namedFocus = namedFocus
         _text = PHState(initialValue: props.text)
     }
 
     package var body: some PHView {
-        styledField
-            .focused($isFocused)
-            .defaultFocus($isFocused, props.autoFocus == true)
+        focusedField
+            .atomFont(AtomFont.font(size: props.size, weight: nil, design: props.design))
+            .modifier(Applied(when: props.controlSize == "large") { $0.controlSize(.large) })
+            .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
             .onKeyPress { press in
                 switch press.key {
                 case .downArrow, .upArrow:
@@ -112,8 +136,13 @@ package struct AtomTextField: PHView {
                     onArrow(press.key == .downArrow ? "down" : "up")
                     return .handled
                 case .return:
+                    // A multiline field's Return without a handler adds a line.
                     guard let onSubmit else { return .ignored }
                     onSubmit()
+                    return .handled
+                case .escape:
+                    guard let onEscape else { return .ignored }
+                    onEscape()
                     return .handled
                 default:
                     return .ignored
@@ -122,16 +151,57 @@ package struct AtomTextField: PHView {
             .onChange(of: props.text) { _, owned in
                 if owned != text { text = owned }
             }
+            .onChange(of: props.focusRequest) { _, request in
+                if request != nil { isFocused = true }
+            }
+            .onAppear {
+                if props.focusRequest != nil, props.autoFocus == true { isFocused = true }
+            }
             .atomCommon(common, atom: .textField)
+    }
+
+    package init<Format: ParseableFormatStyle>(
+        value: PHBinding<Format.FormatInput>, format: Format, placeholder: String, common: AtomCommon = AtomCommon()
+    ) where Format.FormatOutput == String {
+        self.init(props: TextFieldProps(text: "", placeholder: placeholder), common: common, onChange: { _ in })
+        self.formattedField = { PHAnyView(PHTextField(placeholder, value: value, format: format)) }
+    }
+
+    @PHViewBuilder
+    private var focusedField: some PHView {
+        if let (focus, id) = namedFocus {
+            styledField.focused(focus, equals: id)
+        } else {
+            styledField
+                .focused(externalFocus ?? $isFocused)
+                .defaultFocus(externalFocus ?? $isFocused, props.autoFocus == true)
+        }
+    }
+
+    private var binding: PHBinding<String> {
+        PHBinding(get: { text }, set: { edited in
+            guard edited != text else { return }
+            text = edited
+            onChange(edited)
+        })
+    }
+
+    @PHViewBuilder
+    private var field: some PHView {
+        if let formattedField {
+            formattedField()
+        } else if props.secure == true {
+            PHSecureField(props.placeholder ?? "", text: binding)
+        } else if props.multiline == true {
+            PHTextField(props.placeholder ?? "", text: binding, axis: .vertical)
+                .modifier(Applied(when: props.lineLimit != nil) { $0.lineLimit(1...max(1, props.lineLimit ?? 1)) })
+        } else {
+            PHTextField(props.placeholder ?? "", text: binding)
+        }
     }
 
     @PHViewBuilder
     private var styledField: some PHView {
-        let field = PHTextField(props.placeholder ?? "", text: PHBinding(get: { text }, set: { edited in
-            guard edited != text else { return }
-            text = edited
-            onChange(edited)
-        }))
         if props.style == "plain" {
             field.textFieldStyle(.plain)
         } else {
@@ -148,17 +218,25 @@ package struct AtomSegmented: PHView {
     package let onChange: (String) -> Void
 
     package var body: some PHView {
-        PHPicker(common.label ?? "", selection: PHBinding(get: { props.selected }, set: { if $0 != props.selected { onChange($0) } })) {
+        styled(PHPicker(common.label ?? "", selection: PHBinding(get: { props.selected }, set: { if $0 != props.selected { onChange($0) } })) {
             PHForEach(props.options, id: \.value) { option in
                 PHText(verbatim: option.label).tag(option.value)
             }
-        }
+        })
         .buttonHoverPointer()
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .modifier(Applied(when: common.width == nil) { $0.fixedSize() })
+        .modifier(Applied(when: props.showsLabel != true) { $0.labelsHidden() })
+        .modifier(Applied(when: common.width == nil && props.fitContent != false) { $0.fixedSize() })
         .disabled(props.disabled == true)
         .atomCommon(common, atom: .segmented)
+    }
+
+    @PHViewBuilder
+    private func styled(_ picker: some PHView) -> some PHView {
+        switch props.style {
+        case "menu": picker.pickerStyle(.menu)
+        case "radio": picker.pickerStyle(.radioGroup)
+        default: picker.pickerStyle(.segmented)
+        }
     }
 
     package init(props: SegmentedProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void) {
@@ -166,6 +244,26 @@ package struct AtomSegmented: PHView {
         self.common = common
         self.onChange = onChange
     }
+    /// Adapts a native typed selection to the same control used by plugin props.
+    package init<Value: Equatable>(
+        style: String = "segmented", showsLabel: Bool = false, fitContent: Bool? = nil, selection: PHBinding<Value>,
+        options: [Value], label: (Value) -> String, common: AtomCommon = AtomCommon()
+    ) {
+        let selectedIndex = options.firstIndex(of: selection.wrappedValue)
+        self.init(
+            props: SegmentedProps(
+                options: options.enumerated().map { .init(value: String($0.offset), label: label($0.element)) },
+                selected: selectedIndex.map { String($0) } ?? "", style: style, showsLabel: showsLabel, fitContent: fitContent
+            ),
+            common: common,
+            onChange: { value in
+                if let index = Int(value), options.indices.contains(index) {
+                    selection.wrappedValue = options[index]
+                }
+            }
+        )
+    }
+
 }
 
 /// A borderless pull-down menu labelled by an SF Symbol, text or both. The
@@ -176,16 +274,14 @@ package struct AtomMenu: PHView {
     package var common = AtomCommon()
     package let onMenu: (String) -> Void
 
-    package var body: some PHView {
-        var label = common
-        label.testID = nil
-        label.label = nil
-        label.help = nil
+    private var items: some PHView {
         let groups = props.items.filter { !$0.isEmpty }
-        return PHMenu {
-            PHForEach(Array(groups.enumerated()), id: \.offset) { index, group in
-                if index > 0 { PHDivider() }
-                PHForEach(group, id: \.id) { item in
+        return PHForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+            if index > 0 { PHDivider() }
+            PHForEach(group, id: \.id) { item in
+                if item.informational == true {
+                    PHText(verbatim: item.title)
+                } else {
                     PHButton(role: item.destructive == true ? .destructive : nil) { onMenu(item.id) } label: {
                         if item.checked == true {
                             PHLabel(item.title, icon: .checkmark)
@@ -195,11 +291,53 @@ package struct AtomMenu: PHView {
                             PHText(verbatim: item.title)
                         }
                     }
+                        // no-pointer: AppKit tracks menu items.
+                        // no-tooltip: menu items use native menu help.
                     .disabled(item.disabled == true)
                     .help(item.help ?? item.title)
                     .modifier(Applied(when: item.testID != nil) { $0.accessibilityIdentifier(item.testID ?? "") })
                 }
             }
+        }
+    }
+
+    package var body: some PHView {
+        PHGroup {
+            if props.style == "submenu" {
+                PHMenu {
+                    items
+                } label: {
+                    if let icon = props.icon {
+                        PHLabel(props.text ?? "", icon: PHIcon(named: icon))
+                    } else {
+                        PHText(verbatim: props.text ?? "")
+                    }
+                }
+                    // no-pointer: AppKit tracks native submenus.
+                    // no-tooltip: the command menu provides the label.
+            } else if props.style == "automatic" {
+                PHMenu(props.text ?? "") { items }
+                    .buttonHoverPointer()
+                    // no-tooltip: the atom's help prop sets the tooltip.
+            } else {
+                borderlessMenu
+            }
+        }
+        .disabled(props.disabled == true)
+        .atomCommon(common, atom: .menu, frame: false)
+    }
+
+    private var labelCommon: AtomCommon {
+        var label = common
+        label.testID = nil
+        label.label = nil
+        label.help = nil
+        return label
+    }
+
+    private var borderlessMenu: some PHView {
+        PHMenu {
+            items
         } label: {
             PHHStack(spacing: 5) {
                 if let icon = props.icon {
@@ -216,15 +354,14 @@ package struct AtomMenu: PHView {
                 }
             }
             .foregroundStyle(AtomColor.style(props.color) ?? PHAnyShapeStyle(.secondary))
-            .atomFrame(label)
+            .atomFrame(labelCommon)
             .contentShape(PHRectangle())
         }
         .menuStyle(.borderlessButton)
         .modifier(Applied(when: props.indicator != true) { $0.menuIndicator(.hidden) })
         .fixedSize()
-        .disabled(props.disabled == true)
-        .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
-        .atomCommon(common, atom: .menu, frame: false)
+        .buttonHoverPointer()
+            // no-tooltip: the atom's help prop sets the tooltip.
     }
 
     package init(props: MenuProps, common: AtomCommon = AtomCommon(), onMenu: @escaping (String) -> Void) {
@@ -469,3 +606,97 @@ package struct AtomPressArea<Content: PHView>: PHView {
 }
 /// Tracks the whole row independently of the views revealed above it. SwiftUI's
 /// hover target can change when those views appear, producing exit/enter loops.
+
+/// An invisible strip that drags a border. The resize cursor shows over it
+/// and is held for the whole drag, so the pointer can leave the thin strip;
+/// `onDrag` gets the translation along the axis since the drag began, and
+/// `onDragEnd` follows the last one, also when the strip goes away mid-drag.
+package struct AtomResizeHandle: PHView {
+    package var props = ResizeHandleProps()
+    package var common = AtomCommon()
+    package let onDrag: (Double) -> Void
+    package let onDragEnd: () -> Void
+    @PHState private var isDragging = false
+
+    private var vertical: Bool { props.axis == "v" }
+
+    package var body: some PHView {
+        PHColor.clear
+            .contentShape(PHRectangle())
+            .hoverCursor(vertical ? .resizeUpDown : .resizeLeftRight)
+            .gesture(
+                PHDragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        if !isDragging {
+                            isDragging = true
+                            Platform.services.pushCursor(vertical ? .resizeUpDown : .resizeLeftRight)
+                        }
+                        onDrag(Double(vertical ? value.translation.height : value.translation.width))
+                    }
+                    .onEnded { _ in end() }
+            )
+            .onDisappear(perform: end)
+            .accessibilityElement()
+            .atomCommon(common, atom: .resizeHandle)
+    }
+
+    private func end() {
+        guard isDragging else { return }
+        isDragging = false
+        Platform.services.popCursor()
+        onDragEnd()
+    }
+
+    package init(props: ResizeHandleProps = ResizeHandleProps(), common: AtomCommon = AtomCommon(), onDrag: @escaping (Double) -> Void, onDragEnd: @escaping () -> Void = {}) {
+        self.props = props
+        self.common = common
+        self.onDrag = onDrag
+        self.onDragEnd = onDragEnd
+    }
+}
+
+/// A date or time field showing `date`; each edit calls `onChange` with the
+/// new date, in seconds since 1970.
+package struct AtomDatePicker: PHView {
+    package var props: DatePickerProps
+    package var common = AtomCommon()
+    package let onChange: (Double) -> Void
+
+    package var body: some PHView {
+        picker
+            .datePickerStyle(.field)
+            .labelsHidden()
+            .buttonHoverPointer()
+            .atomCommon(common, atom: .datePicker)
+    }
+
+    private var selection: PHBinding<Date> {
+        PHBinding(get: { Date(timeIntervalSince1970: props.date) }, set: { date in
+            let seconds = date.timeIntervalSince1970
+            if seconds != props.date { onChange(seconds) }
+        })
+    }
+
+    private var components: PHDatePickerComponents {
+        switch props.components {
+        case "date": [.date]
+        case "time": [.hourAndMinute]
+        default: [.date, .hourAndMinute]
+        }
+    }
+
+    @PHViewBuilder
+    private var picker: some PHView {
+        if let min = props.min {
+            PHDatePicker(common.label ?? "", selection: selection, in: Date(timeIntervalSince1970: min)..., displayedComponents: components)
+        } else {
+            PHDatePicker(common.label ?? "", selection: selection, displayedComponents: components)
+        }
+    }
+
+    package init(props: DatePickerProps, common: AtomCommon = AtomCommon(), onChange: @escaping (Double) -> Void) {
+        self.props = props
+        self.common = common
+        self.onChange = onChange
+    }
+}

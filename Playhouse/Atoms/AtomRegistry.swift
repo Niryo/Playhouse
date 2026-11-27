@@ -23,7 +23,9 @@ package enum AtomRegistry {
             }
         }
         register(StackProps.self) { node, props, common, events in
-            AtomStack(props: props, common: common) {
+            AtomStack(props: props, common: common, onHover: node.events.contains("onHover") ? { hovering in
+                events.dispatch(nodeID: node.id, event: "onHover", value: .bool(hovering))
+            } : nil) {
                 PluginChildren(node: node, events: events)
             }
         }
@@ -117,6 +119,8 @@ package enum AtomRegistry {
                 events.dispatch(nodeID: node.id, event: "onSubmit", value: nil)
             } : nil, onArrow: node.events.contains("onArrow") ? { direction in
                 events.dispatch(nodeID: node.id, event: "onArrow", value: .string(direction))
+            } : nil, onEscape: node.events.contains("onEscape") ? {
+                events.dispatch(nodeID: node.id, event: "onEscape", value: nil)
             } : nil)
         }
         register(SegmentedProps.self) { node, props, common, events in
@@ -198,6 +202,18 @@ package enum AtomRegistry {
                 PHForEach(children.dropFirst()) { child in
                     PluginNodeView(node: child, events: events)
                 }
+            }
+        }
+        register(ResizeHandleProps.self) { node, props, common, events in
+            AtomResizeHandle(props: props, common: common, onDrag: { translation in
+                events.dispatch(nodeID: node.id, event: "onDrag", value: .number(translation))
+            }, onDragEnd: {
+                events.dispatch(nodeID: node.id, event: "onDragEnd", value: nil)
+            })
+        }
+        register(DatePickerProps.self) { node, props, common, events in
+            AtomDatePicker(props: props, common: common) { value in
+                events.dispatch(nodeID: node.id, event: "onChange", value: .number(value))
             }
         }
         assert(Set(builders.keys) == Set(AtomType.allCases.map(\.rawValue)), "Every atom needs exactly one registry entry.")

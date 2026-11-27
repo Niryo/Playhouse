@@ -12,19 +12,29 @@ package struct AtomOverlay<Base: PHView, Over: PHView>: PHView {
     @PHState private var isHovering = false
 
     package var body: some PHView {
-        base()
-            .overlay(alignment: alignment) {
-                if isHovering || props.revealOnHover != true {
-                    overlay()
-                        .offset(x: CGFloat(props.offsetX ?? 0), y: CGFloat(props.offsetY ?? 0))
-                }
-            }
+        layered
             .background {
                 if props.revealOnHover == true {
                     PHHoverTracker { isHovering = $0 }.accessibilityHidden(true)
                 }
             }
-            .atomCommon(common, atom: .overlay, group: true)
+            .atomCommon(common, atom: .overlay, group: props.group != false)
+    }
+
+    @PHViewBuilder
+    private var layered: some PHView {
+        if props.behind == true {
+            base().background(alignment: alignment) { layer }
+        } else {
+            base().overlay(alignment: alignment) { layer }
+        }
+    }
+
+    @PHViewBuilder
+    private var layer: some PHView {
+        if isHovering || props.revealOnHover != true {
+            overlay().offset(x: CGFloat(props.offsetX ?? 0), y: CGFloat(props.offsetY ?? 0))
+        }
     }
 
     private var alignment: PHAlignment {

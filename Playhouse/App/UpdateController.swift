@@ -390,22 +390,21 @@ private struct ReleaseNotesView: View {
 
     var body: some View {
         let notes = record.notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        VStack(alignment: .leading, spacing: 8) {
-            Text("What's new in Playhouse \(record.toVersion)")
-                .font(.system(size: 13, weight: .semibold))
-                .accessibilityIdentifier("update-notes-title")
-            ScrollView {
-                Text(notes.isEmpty ? "This release has no notes." : notes)
-                    .font(.system(size: 12))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("update-notes-body")
-                    .hoverRevealScrollers()
+        AtomStack(
+            props: StackProps(axis: "v", spacing: 8, align: "leading"),
+            common: AtomCommon(width: 320, paddingX: 14, paddingY: 14)
+        ) {
+            AtomText(
+                props: TextProps(text: "What's new in Playhouse \(record.toVersion)", size: 13, weight: "semibold"),
+                common: AtomCommon(testID: "update-notes-title")
+            )
+            AtomScroll(props: ScrollProps(maxHeight: 240)) {
+                AtomText(
+                    props: TextProps(text: notes.isEmpty ? "This release has no notes." : notes, size: 12, selectable: true),
+                    common: AtomCommon(testID: "update-notes-body", fillWidth: true)
+                )
             }
-            .frame(maxHeight: 240)
         }
-        .padding(14)
-        .frame(width: 320)
     }
 }
 
@@ -414,32 +413,36 @@ struct UpdateSettingsSection: View {
     @Environment(UpdateController.self) private var updates
 
     var body: some View {
-        Section("Updates") {
+        AtomStack(props: StackProps(sectionTitle: "Updates", layout: "section")) {
             if let status = updates.status, status.phase == "misplaced" {
-                Text(PlayhouseRelease.moveToApplicationsMessage)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("update-settings-summary")
+                updateSummary(PlayhouseRelease.moveToApplicationsMessage)
             } else if let status = updates.status, status.phase != "development" {
-                HStack {
-                    Text("Playhouse \(status.currentVersion)")
-                        .accessibilityIdentifier("update-current-version")
-                    Spacer()
-                    Button("Check Now") { Task { await updates.checkNow() } }
-                        .buttonHoverPointer()
-                        .nativeHelp("Check GitHub for a newer Playhouse release")
-                        .disabled(updates.isWorking)
-                        .accessibilityIdentifier("update-check-now-button")
+                AtomStack(props: StackProps(axis: "h")) {
+                    AtomText(
+                        props: TextProps(text: "Playhouse \(status.currentVersion)"),
+                        common: AtomCommon(testID: "update-current-version")
+                    )
+                    AtomSpacer()
+                    AtomButton(
+                        props: ButtonProps(style: "automatic", disabled: updates.isWorking),
+                        common: AtomCommon(testID: "update-check-now-button", help: "Check GitHub for a newer Playhouse release"),
+                        action: { Task { await updates.checkNow() } }
+                    ) {
+                        AtomText(props: TextProps(text: "Check Now"))
+                    }
                 }
-                Text(summary(status))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("update-settings-summary")
+                updateSummary(summary(status), size: 12)
             } else {
-                Text("This is a development build. It updates from source, not from releases.")
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("update-settings-summary")
+                updateSummary("This is a development build. It updates from source, not from releases.")
             }
         }
+    }
+
+    private func updateSummary(_ text: String, size: Double? = nil) -> some View {
+        AtomText(
+            props: TextProps(text: text, size: size, color: "secondary"),
+            common: AtomCommon(testID: "update-settings-summary")
+        )
     }
 
     private func summary(_ status: UpdateStatus) -> String {

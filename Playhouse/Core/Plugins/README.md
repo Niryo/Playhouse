@@ -178,8 +178,8 @@ exits 1 when the plugin reported errors.
 
 ## Atoms
 
-These are exactly the atoms the task item, the Agents info section, the
-Token Stats modal, the Skills page, the skill and rule previews, the repository chips and picker, the composer and the Done archive are built from, and that present the board's modal, page and side panel. Every atom also takes these common props:
+These are exactly the atoms every native composite is built from (Playhouse/Views and
+the app's ordinary UI; see Composites below), and that present the board's modal, page and side panel. Every atom also takes these common props:
 
 | Common prop | |
 | --- | --- |
@@ -193,17 +193,26 @@ Token Stats modal, the Skills page, the skill and rule previews, the repository 
 | `paddingY` | Extra vertical padding (inside `padding`) |
 | `opacity` | Dims the atom and everything in it (0…1) |
 | `paddingX` | Extra horizontal padding (a Button's sits inside its hover capsule) |
+| `paddingTop`, `paddingBottom`, `paddingLeading`, `paddingTrailing` | Extra padding on one edge, beside `paddingX` and `paddingY` (inside `padding`) |
+| `maxWidth`, `maxHeight` | The widest and tallest it grows: it takes the size it is offered up to these |
+| `fillHeight` | Stretch to the available height |
+| `frameAlign` | Where its content sits in a frame larger than it (`width`, `height`, `fillWidth`, `fillHeight`, `maxWidth`, `maxHeight`): `center`, `leading`, `trailing`, `top`, `bottom`, `topLeading`, `topTrailing`, `bottomLeading`, `bottomTrailing`. Unset, a stretched frame keeps it leading when `fillWidth` stretches it and centered otherwise, and a fixed size centers it |
+| `layoutPriority` | Which of a row's children keeps its size when the row is tight: the highest first (0 default) |
+| `decorative` | Hidden from accessibility (a status dot, a hairline) |
 | `passThrough` | Let clicks through to what is behind it (the card) |
 
-Colors are `white`, `primary`, `secondary`, `tertiary`, `accent`, `text`, `panel`
-and `window` (the workspace's panel and window backgrounds), `red`,
-`green`, `orange`, `blue`, `purple`, or `#RRGGBB`. Weights are `regular`,
+Colors are `white`, `black`, `gray`, `clear`, `primary`, `secondary`, `tertiary`,
+`accent` (the system accent), `themeAccent` (the workspace's own blue), `text` (the
+conversation text), `panel`, `window` and `input` (the workspace's panel, window and
+text field backgrounds), `control` (the system control background), `red`, `green`,
+`orange`, `yellow`, `blue`, `purple`, or `#RRGGBB`. The named colors follow the light
+and dark appearance; `#RRGGBB` is the same in both. Weights are `regular`,
 `medium`, `semibold` and `bold`.
 
 | Atom | Props | Events | Children |
 | --- | --- | --- | --- |
-| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels), `summary` (one accessibility element that reads only as its `label`, hiding its children, for a notice whose combined texts would otherwise hide the label); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary`. `scrollID` names it as a place a `Scroll` around it can scroll to | | atoms |
-| `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits`, `align` (how wrapped lines line up: `leading` default, `center`, `trailing`) | | strings |
+| `Stack` | `axis` (`"v"` default, `"h"`, `"z"`: its children drawn over each other, as large as the largest), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline; layers: any `frameAlign` name, center default), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels), `summary` (one accessibility element that reads only as its `label`, hiding its children, for a notice whose combined texts would otherwise hide the label); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary`. Three more surface props: `material` (`regular`, `ultraThin` or `bar`: a translucent material behind the fill), `clip` (clips the children to the shape) and `shadow` (a black shadow blurred that many points, at `shadowOpacity`, 0.33 default, moved by `shadowX` and `shadowY`). `scrollID` names it as a place a `Scroll` around it can scroll to | `onHover(isHovering)`: the pointer entered (true) or left (false) it; the owner keeps the hover state and restyles it | atoms |
+| `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits`, `align` (how wrapped lines line up: `leading` default, `center`, `trailing`), `selectable` (the reader can select and copy it) | | strings |
 | `Markdown` | `text` (or string children) in Markdown, rendered as formatted blocks: headings (`#` to `######`), bullet (`-`, `*`, `+`) and numbered list items, `>` quotes with a leading bar, fenced code (a card with its language and a copy button), pipe tables (with `:` column alignment), rules (`---`, `***`, `___`) and paragraphs, with **bold**, *italic*, `` `code` `` and links inline (a link opens in the default browser when it is `http`, `https` or `mailto`; any other scheme does nothing). Lists don't nest and raw HTML shows as text. `size` (body text, 13 default; headings are semibold and scale from it: +3, +1, then -1), `color` (the prose and cards; the prose is AppKit text, so a surrounding SwiftUI foreground style doesn't reach it), `selectable` (lets the reader select its text), `frontmatter` (what a leading `---` YAML block shows as: `table`, a small table of its entries, whose accessibility identifier is the atom's `testID` plus `-frontmatter`, or `hide`; unset, the block is ordinary Markdown, a rule and paragraphs; any other value is an error). Each run of prose (headings, paragraphs, lists, quotes) is one AppKit text view, so a selection runs across its blocks, and each block in it reads as its own static text; code blocks, tables and rules are separate cards. Sizes and spacing all scale from `size` (`MarkdownStyle`). With a `testID`, its prose runs are identified `<testID>-prose-<line>` and their blocks `<testID>-heading-<line>`, `<testID>-paragraph-<line>`, `<testID>-list-item-<line>`, `<testID>-ordered-list-item-<line>` and `<testID>-quote-<line>`, its code cards `<testID>-code-block-<line>` with their language and copy button `<testID>-code-block-language-<line>` and `<testID>-code-block-copy-<line>`, its rules `<testID>-rule-<line>` and its tables' cells `<testID>-table-<line>-cell-<row>-<column>`. The transcript's replies are this atom | | strings |
 | `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color`, `original` (draw the asset in its own colors, as the board's logo) | | |
 | `Image` | `url` (required: `https`, `http` to IP addresses and local hosts as for `fetch`, a `file://` path or a `data:image/…` URL; any other is an error), `size` (a square of that many points; otherwise the common `width` and `height` frame it, or it takes the width it is offered at the picture's aspect ratio), `contentMode` (`fill` default, covering the frame and cropping; `fit`, showing all of it), `cornerRadius`, `circle` (clipped to a circle, as a profile picture), `placeholder` (an SF Symbol shown on a faint fill while it loads and when it fails; a failed load is never an error); the window loads and caches the picture natively (`AtomImageLoader` in `Playhouse/Atoms/`: decoded pictures in memory, responses in a URL cache that honors the server's cache headers, one request shared by concurrent copies, a failure remembered for a minute), so a re-render or another copy of the URL doesn't load it again, and `plugin render` reports it without loading it; decorative unless it has a `label` | | |
@@ -221,8 +230,8 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Divider` | none; a thin separator across its stack | | |
 | `ChoiceBar` | `options` (`[{value, label, testID?}]`), `selected`; one button per option, the selected one highlighted and marked selected. Its capabilities are reachable through a decorated row `Stack` of `Button`s (`selected`) each on a decorated `Stack` with a `Text`, as the ChoiceBar page composes it beside the atom (see Composite atoms below) | `onChange(value)`, not raised for the option already selected | |
 | `Toggle` | `isOn` (required; the atom shows what it is given), `size` (`mini`, `small`, `regular` default), `disabled`; a switch with no visible label, so give it a `label` | `onToggle()`; the owner flips `isOn` | |
-| `TextField` | `text` (required), `placeholder`, `autoFocus` (takes the keyboard focus when it appears), `style` (`rounded` default, `plain`: no border, for a field on a decorated `Stack`); a one-line field that edits its own copy and takes `text` whenever the owner changes it | `onChange(text)` on every edit; `onSubmit()` for Return and `onArrow(direction)` (`up`, `down`) for the arrows, which keep their usual behavior when there is no handler | |
-| `Segmented` | `options` (`[{value, label}]`), `selected`, `disabled`; a segmented control, as wide as its segments unless it has a `width` | `onChange(value)`, not raised for the segment already selected | |
+| `TextField` | `text` (required), `placeholder`, `autoFocus` (takes the keyboard focus when it appears), `style` (`rounded` default, `plain`: no border, for a field on a decorated `Stack`), `secure` (hides what is typed), `multiline` (wraps and grows down with its text), `size` and `design` (its font), `focusRequest` (each new value moves the keyboard into it); a one-line field that edits its own copy and takes `text` whenever the owner changes it | `onChange(text)` on every edit; `onSubmit()` for Return, `onArrow(direction)` (`up`, `down`) for the arrows and `onEscape()` for Escape, which keep their usual behavior when there is no handler | |
+| `Segmented` | `options` (`[{value, label}]`), `selected`, `disabled`, `style` (`segmented` default; `menu`, a pop-up button showing the selected option; `radio`, a column of radio buttons); a segmented control, as wide as its segments unless it has a `width` | `onChange(value)`, not raised for the segment already selected | |
 | `Menu` | `icon` (SF Symbol), `text` (beside or instead of the symbol), `size`, `weight` (the symbol's), `textSize`, `textWeight`, `badgeIcon` (a second symbol before the text), `color` (`secondary` default), `indicator` (the pull-down chevron, hidden by default), `disabled`, `items` (groups `[[{id, title, destructive?, help?, testID?, checked?, icon?, disabled?}]]`, a separator between non-empty groups; a checked item shows a checkmark and a disabled one is dimmed and can't be chosen); a borderless pull-down whose common `width` and `height` frame its label | `onMenu(id)` | |
 | `PressArea` | `spacing`, `pointer` (the pointing hand); a leading column that takes every click on its children, one accessibility container | `onPress()` for a click, `onLongPress()` for a press and hold | atoms |
 | `Overlay` | `align` (`center` default, `top`, `bottom`, `leading`, `trailing`, `topLeading`, `topTrailing`, `bottomLeading`, `bottomTrailing`), `offsetX`, `offsetY`, `revealOnHover` (the overlay shows only while the pointer is over the atom); its first child laid out as usual and the rest drawn over it at `align`, moved by the offsets without changing its size; one accessibility container | | atoms |
@@ -232,6 +241,67 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Modal` | `isPresented` (required), `width`, `height` (fix the sheet's size, content at the top; it fits its content otherwise), `title`, `subtitle`, `icon` (SF Symbol), `inset` (padding around the header and content, 24 default), `spacing` (between the header and each child, 16 default), `dismissible` (false: no close button and Escape does nothing, so only the owner's own control closes it; true default); a sheet over the window presented from its first child, which stays laid out as usual, showing the rest in a leading column. With a `title` the sheet starts with the app's standard modal header: the accent `icon`, the 19-point semibold rounded title (`<testID>-title`), the secondary subtitle, and, unless `dismissible` is false, a close button (`<testID>-close`, or `modal-title` and `modal-close` without a `testID`); its `testID` and accessibility props name the sheet's content | `onDismiss()` (Escape or the header's close button; the owner sets `isPresented` false) | atoms: the presenter, then the content |
 | `Page` | `isPresented` (required); slides in from the trailing edge over all of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a leading column on the window background, like a page plugin over the board; its `testID` and accessibility props name the page; the owner closes it with its own control | | atoms: the covered view, then the page |
 | `SidePanel` | `isPresented` (required), `edge` (`trailing` default, `leading`), `width` (340 default); a full-height panel sliding in over that edge of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a column with no spacing on the window background, with a hairline along its inner edge and a shadow, like the Done archive; its `testID` and accessibility props name the panel; the owner closes it with its own control | | atoms: the covered view, then the panel |
+| `ResizeHandle` | `axis` (`h` default: drags left and right; `v`: up and down); an invisible strip to drag a border by, as wide (or for `v` as tall) as its common `width` (`height`), which shows the resize cursor and holds it for the whole drag, so the pointer can leave the strip; draw the border itself with a `Stack`. The terminal panel's and the chat sidebar's edges are this atom | `onDrag(translation)`: the points moved along its axis since the drag began; `onDragEnd()`, also when the strip goes away mid-drag | |
+| `DatePicker` | `date` (required, seconds since 1970), `components` (`dateTime` default, `date`, `time`), `min` (the earliest date it takes, seconds since 1970); a field-style date and time control whose parts the reader edits with the keyboard or the arrows, with no visible label (give it a `label`). The composer's schedule uses it | `onChange(date)`, in seconds since 1970 | |
+
+### Composites: compose, don't add
+
+Every view in `Playhouse/Views` (the board, the conversation, the settings,
+Skills, Rules and MCP pages, the plugin host and catalog), and the app's
+ordinary UI (the Plugins menu, the terminal panel's chrome, the updater's
+settings and release notes), is composed of these atoms and styled only
+through their props. A Linux port reimplements the atoms once and every
+composite follows. `scripts/check-atom-composites.py` enforces it: it rejects
+raw views an atom stands for (`PHText`, `PHHStack`, `PHVStack`, `PHZStack`,
+`PHButton`, shapes, images, labels, spacers, dividers and the standard
+controls), styling modifiers (`.font`, `.padding`, `.frame`, `.background`,
+`.foregroundStyle`, `.overlay`, `.clipShape`, `.opacity`, `.lineLimit`,
+`.buttonStyle`, shadows, materials, tooltips and hover pointers) and raw
+colors there, with a short allowlist naming each native exception and why. It
+runs as an app build phase, in `scripts/test-e2e.sh` and in CI. Behavior stays
+native around the atoms: gestures, drag and drop, keyboard handling, focus,
+alerts and sheets, animations, geometry reading, the transcript's scroll
+engine and the native views atoms don't draw (the text editors, the terminal
+and the Monaco diff, framed by an enclosing `Stack`).
+
+Compose; don't add atoms. A reusable piece of UI is a native Swift helper
+that builds a tree of atoms (a tool-call row is a row `Stack` of an `Icon` or
+`Spinner`, `Text`s and a capsule `Stack` holding a `Text`; a chat bubble is a
+filled, rounded `Stack` around `Markdown`; a form row is a row `Stack` of a
+`Text`, a `Spacer` and a control), never a new atom. When a composite needs a
+style an atom lacks, add the prop to that atom (as `maxWidth`, `frameAlign`,
+the edge paddings, `decorative`, `layoutPriority`, a Stack's `axis: "z"`,
+`material`, `clip`, `shadow` and `onHover`, a Text's `selectable`, a
+TextField's `secure`, `multiline`, `onEscape` and `focusRequest`, and a
+Segmented's `style` were added). Add an atom only for a behavior, event or
+platform capability no combination of atoms can express: `ResizeHandle` (a
+drag gesture that reports its translation and holds the resize cursor) and
+`DatePicker` (the platform's date and time field) are the two the composites
+needed.
+
+Native composition props used by the converted views:
+
+- `Stack` uses `lazy` for a lazily loaded column, `layout: "form"` for a grouped
+  settings form and `layout: "section"` with an optional `sectionTitle` for its
+  sections. `topCorners` limits rounding to the top edge, `hitSurface` includes
+  empty space in hit testing, and `textSize` and `textColor` set inherited
+  typography.
+- `Text` and `Icon` accept platform fonts such as `caption` and `headline`
+  through `textStyle`. `Icon` also accepts `secondaryColor` and
+  `secondaryOpacity` for a second symbol layer. `Label` accepts `lineLimit`.
+  Native Swift can pass an already decoded attachment to `AtomImage`.
+- `Scroll` takes `axis: "horizontal"` or `"both"`. Set `directContent` on a
+  vertical scroll view to keep the caller's layout in place of the atom's
+  column. These modes leave insets and scroll positioning to the caller.
+  `Overlay` can draw `behind` its base or disable its accessibility grouping
+  with `group: false`.
+- `TextField` accepts `controlSize` and a multiline `lineLimit`. Native Swift
+  can keep an external focus binding or supply a formatted value.
+  `Toggle` and `Segmented` can display their label with `showsLabel`.
+- The Plugins menu composes native command items with `Button` and `Toggle`
+  using `style: "menuItem"` and submenus with `Menu` using `style: "submenu"`.
+  Menu entries can display informational text, and `style: "automatic"`
+  retains the platform's standard pull-down button in ordinary views.
 
 ### Defaults
 

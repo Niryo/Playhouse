@@ -93,7 +93,7 @@ package struct ParallelChatBubbleStack: PHView {
     private func bubbleCard(id: UUID?, prompt: String, isRunning: Bool, isClosing: Bool) -> some PHView {
         let isOpen = id != nil && id == openBubbleID
         return AtomStack(
-            props: StackProps(axis: "h", spacing: 8, align: "center", group: true, fill: "panel", fillOpacity: 1, cornerRadius: 14, stroke: isOpen ? "accent" : "primary", strokeOpacity: isOpen ? 0.6 : 0.12),
+            props: StackProps(axis: "h", spacing: 8, align: "center", group: true, fill: "panel", fillOpacity: 1, cornerRadius: 14, stroke: isOpen ? "accent" : "primary", strokeOpacity: isOpen ? 0.6 : 0.12, shadow: 8, shadowOpacity: 0.18, shadowY: 2),
             common: AtomCommon(testID: "parallel-chat-bubble", width: Double(Self.width), paddingX: 12, paddingY: 9)
         ) {
             // Beside the open button rather than in it, so each keeps its own identity.
@@ -125,7 +125,6 @@ package struct ParallelChatBubbleStack: PHView {
                 }
             }
         }
-        .phShadow(color: .black.opacity(0.18), radius: 8, y: 2)
     }
 
     package init(bubbles: [StandaloneChat], pendingPrompts: [PendingParallelChatPrompt], runningIDs: Set<UUID>, closingIDs: Set<UUID>, openBubbleID: UUID?, onOpen: @escaping (UUID) -> Void, onClose: @escaping (UUID) -> Void) {
@@ -145,15 +144,17 @@ package struct ParallelChatBubblePanel: PHView {
     package let onBack: () -> Void
 
     package var body: some PHView {
-        StandaloneChatPanel(chat: bubble, onOpenTask: { _, _ in }, onClose: onBack)
-            .equatable()
-            .id(bubble.id)
-            .background(WorkspaceTheme.windowBackground)
-            .clipShape(PHRoundedRectangle(cornerRadius: 14))
-            .overlay(PHRoundedRectangle(cornerRadius: 14).stroke(PHColor.primary.opacity(0.12)))
-            .phShadow(color: .black.opacity(0.25), radius: 16, y: 4)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("parallel-chat-panel")
+        AtomStack(
+            props: StackProps(
+                group: true, fill: "window", cornerRadius: 14, stroke: "primary", strokeOpacity: 0.12,
+                clip: true, shadow: 16, shadowOpacity: 0.25, shadowY: 4
+            ),
+            common: AtomCommon(testID: "parallel-chat-panel")
+        ) {
+            StandaloneChatPanel(chat: bubble, onOpenTask: { _, _ in }, onClose: onBack)
+                .equatable()
+                .id(bubble.id)
+        }
     }
 
     package init(bubble: StandaloneChat, onBack: @escaping () -> Void) {
@@ -181,16 +182,15 @@ package struct ParallelChatPlaceholderRow: PHView {
 
     package var body: some PHView {
         AtomStack(props: StackProps(axis: "h", spacing: 8, align: "center", group: true), common: AtomCommon(testID: "parallel-chat-placeholder", paddingY: 4)) {
-            PHRectangle().fill(PHColor.primary.opacity(0.1)).frame(height: 1)
+            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.1), common: AtomCommon(height: 1, fillWidth: true)) {}
             AtomStack(
                 props: StackProps(axis: "h", spacing: 6, align: "center", fillOpacity: 0, capsule: true, stroke: "secondary", strokeOpacity: 0.35, dash: [3, 3]),
-                common: AtomCommon(paddingX: 10, paddingY: 3)
+                common: AtomCommon(layoutPriority: 1, paddingX: 10, paddingY: 3)
             ) {
                 AtomIcon(props: IconProps(name: PHIcon.squareOnSquare.name, size: 10, weight: "semibold", color: "secondary"))
                 AtomText(props: TextProps(text: prompt, size: 11, weight: "medium", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "parallel-chat-placeholder-prompt"))
             }
-            .layoutPriority(1)
-            PHRectangle().fill(PHColor.primary.opacity(0.1)).frame(height: 1)
+            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.1), common: AtomCommon(height: 1, fillWidth: true)) {}
         }
         .accessibilityValue(bubbleID.uuidString)
     }
@@ -219,14 +219,13 @@ extension KanbanBoardView {
         let leading = expandedBubble != nil && !showsStack
             ? max(0, min(sidebarEdge, visibleWidth - expandedWidth - 12))
             : sidebarEdge
-        return PHZStack(alignment: .topLeading) {
+        return AtomStack(props: StackProps(axis: "z", align: "topLeading")) {
             // Always present, so the bubbles are read even before the first one shows, such as
             // after a relaunch.
-            PHColor.clear
-                .frame(width: 0, height: 0)
+            AtomStack(common: AtomCommon(width: 0, height: 0)) {}
                 .task(id: parallelBubblesRefreshKey) { refreshParallelBubbles() }
             if isChatOverlayVisible, !parallelBubbles.isEmpty || !store.pendingPrompts.isEmpty {
-                PHHStack(alignment: .top, spacing: 12) {
+                AtomStack(props: StackProps(axis: "h", spacing: 12, align: "top"), common: AtomCommon(fillHeight: true, frameAlign: "topLeading", paddingTop: 16, paddingBottom: 16, paddingLeading: Double(leading))) {
                     if showsStack {
                         ParallelChatBubbleStack(
                             bubbles: parallelBubbles, pendingPrompts: store.pendingPrompts,
@@ -236,21 +235,17 @@ extension KanbanBoardView {
                         )
                     }
                     if let bubble = expandedBubble {
-                        ParallelChatBubblePanel(
-                            bubble: bubble,
-                            onBack: {
-                                if openParallelBubbleID == bubble.id { openParallelBubbleID = nil }
-                            }
-                        )
-                        .frame(width: expandedWidth)
-                        .frame(maxHeight: .infinity)
+                        AtomStack(common: AtomCommon(width: Double(expandedWidth), fillHeight: true)) {
+                            ParallelChatBubblePanel(
+                                bubble: bubble,
+                                onBack: {
+                                    if openParallelBubbleID == bubble.id { openParallelBubbleID = nil }
+                                }
+                            )
+                        }
                         .transition(.opacity.combined(with: .move(edge: .leading)))
                     }
                 }
-                .padding(.leading, leading)
-                .padding(.top, 16)
-                .padding(.bottom, 16)
-                .frame(maxHeight: .infinity, alignment: .topLeading)
                 .transition(.opacity)
             }
         }

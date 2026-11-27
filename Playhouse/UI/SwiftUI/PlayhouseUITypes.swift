@@ -65,6 +65,7 @@ public typealias PHSecureField<Label: SwiftUI.View> = SwiftUI.SecureField<Label>
 public typealias PHToggle<Label: SwiftUI.View> = SwiftUI.Toggle<Label>
 public typealias PHPicker<Label: SwiftUI.View, SelectionValue: Hashable, Content: SwiftUI.View> = SwiftUI.Picker<Label, SelectionValue, Content>
 public typealias PHDatePicker<Label: SwiftUI.View> = SwiftUI.DatePicker<Label>
+public typealias PHDatePickerComponents = SwiftUI.DatePickerComponents
 public typealias PHSlider<Label: SwiftUI.View, ValueLabel: SwiftUI.View> = SwiftUI.Slider<Label, ValueLabel>
 public typealias PHMenu<Label: SwiftUI.View, Content: SwiftUI.View> = SwiftUI.Menu<Label, Content>
 public typealias PHLabel<Title: SwiftUI.View, Icon: SwiftUI.View> = SwiftUI.Label<Title, Icon>

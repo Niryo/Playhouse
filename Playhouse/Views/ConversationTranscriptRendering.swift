@@ -45,12 +45,13 @@ package struct ToolCallTimelineRow: PHView {
         return output
     }
 
-    private var statusColor: PHColor {
+    /// The status dot's color name.
+    private var statusColor: String {
         switch activity.status.lowercased() {
-        case "completed": .green
-        case "failed": .red
-        case "interrupted", "stopped": .orange
-        default: .accentColor
+        case "completed": "green"
+        case "failed": "red"
+        case "interrupted", "stopped": "orange"
+        default: "accent"
         }
     }
 
@@ -78,95 +79,78 @@ package struct ToolCallTimelineRow: PHView {
     }
 
     package var body: some PHView {
-        PHHStack(alignment: .top, spacing: 10) {
-            PHCircle()
-                .fill(statusColor)
-                .frame(width: 7, height: 7)
-                .padding(.top, 6)
-                .accessibilityHidden(true)
-            PHVStack(alignment: .leading, spacing: 8) {
-                PHHStack(alignment: .firstTextBaseline, spacing: 8) {
-                    PHText(name)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(WorkspaceTheme.conversationText)
-                        .accessibilityIdentifier("conversation-tool-call-name-\(activity.id)")
+        AtomStack(
+            props: StackProps(axis: "h", spacing: 10, align: "top", group: true),
+            common: AtomCommon(
+                testID: "conversation-tool-call-\(activity.id)", label: "\(name) \(activity.statusLabel)",
+                fillWidth: true, paddingY: 2
+            )
+        ) {
+            // The dot is framed before its top padding, so the padding sits in an outer stack.
+            AtomStack(common: AtomCommon(paddingTop: 6, decorative: true)) {
+                AtomStack(props: StackProps(fill: statusColor, capsule: true), common: AtomCommon(width: 7, height: 7)) {
+                    PHEmptyView()
+                }
+            }
+            AtomStack(props: StackProps(spacing: 8, align: "leading")) {
+                AtomStack(props: StackProps(axis: "h", spacing: 8, align: "baseline")) {
+                    AtomText(
+                        props: TextProps(text: name, size: 14, weight: "semibold", color: "text"),
+                        common: AtomCommon(testID: "conversation-tool-call-name-\(activity.id)")
+                    )
                     if !showsDetails, let commandPreview {
-                        PHText(commandPreview)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .accessibilityLabel(commandPreview)
-                            .accessibilityIdentifier("conversation-tool-call-command-\(activity.id)")
+                        AtomText(
+                            props: TextProps(text: commandPreview, size: 12, design: "monospaced", color: "secondary", lineLimit: 1, truncation: "tail"),
+                            common: AtomCommon(testID: "conversation-tool-call-command-\(activity.id)", label: commandPreview)
+                        )
                     } else if let summary {
-                        PHText(summary)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .accessibilityIdentifier("conversation-tool-call-summary-\(activity.id)")
+                        AtomText(
+                            props: TextProps(text: summary, size: 14, color: "secondary", lineLimit: 1, truncation: "middle"),
+                            common: AtomCommon(testID: "conversation-tool-call-summary-\(activity.id)")
+                        )
                     }
-                    PHSpacer(minLength: 0)
+                    AtomSpacer(props: SpacerProps(minLength: 0))
                     if canExpand {
-                        PHButton {
-                            phWithAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
-                        } label: {
-                            PHImage(icon: isExpanded ? .chevronUp : .chevronDown)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 20, height: 20)
-                                .contentShape(PHRectangle())
+                        let hint = isExpanded ? "Show less" : "Show full input and output"
+                        AtomButton(
+                            common: AtomCommon(testID: "conversation-tool-call-toggle-\(activity.id)", label: hint, help: hint, width: 20, height: 20),
+                            action: { phWithAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() } }
+                        ) {
+                            AtomIcon(props: IconProps(name: (isExpanded ? PHIcon.chevronUp : PHIcon.chevronDown).name, size: 11, weight: "semibold", color: "secondary"))
                         }
-                        .buttonStyle(.plain)
-                        .plainButtonHoverPointer()
-                        .nativeHelp(isExpanded ? "Show less" : "Show full input and output")
-                        .accessibilityLabel(isExpanded ? "Show less" : "Show full input and output")
-                        .accessibilityIdentifier("conversation-tool-call-toggle-\(activity.id)")
                     }
                 }
                 if showsDetails, activity.input != nil || output != nil {
-                    PHVStack(alignment: .leading, spacing: 0) {
+                    AtomStack(props: StackProps(spacing: 0, align: "leading", fill: "input", cornerRadius: 8, stroke: "primary", strokeOpacity: 0.08)) {
                         if let input = activity.input {
                             ioRow(label: "IN", text: input, identifier: "conversation-tool-call-input-\(activity.id)")
                         }
                         if activity.input != nil, output != nil {
-                            PHDivider().opacity(0.35)
+                            AtomDivider(common: AtomCommon(opacity: 0.35))
                         }
                         if let output {
                             ioRow(label: "OUT", text: output, identifier: "conversation-tool-call-output-\(activity.id)")
                         }
                     }
-                    .background(WorkspaceTheme.inputBackground, in: PHRoundedRectangle.phContinuous(cornerRadius: 8))
-                    .overlay(PHRoundedRectangle.phContinuous(cornerRadius: 8).strokeBorder(PHColor.primary.opacity(0.08)))
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(name) \(activity.statusLabel)")
-        .accessibilityIdentifier("conversation-tool-call-\(activity.id)")
     }
 
     private func ioRow(label: String, text: String, identifier: String) -> some PHView {
-        PHHStack(alignment: .firstTextBaseline, spacing: 12) {
-            PHText(label)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 30, alignment: .leading)
-                .accessibilityHidden(true)
-            PHText(text)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(WorkspaceTheme.conversationText)
-                .lineLimit(isExpanded ? nil : Self.collapsedLineLimit)
-                .truncationMode(.tail)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("\(label) \(text)")
-                .accessibilityIdentifier(identifier)
+        AtomStack(props: StackProps(axis: "h", spacing: 12, align: "baseline"), common: AtomCommon(paddingX: 12, paddingY: 8)) {
+            AtomText(
+                props: TextProps(text: label, size: 11, weight: "medium", design: "monospaced", color: "secondary"),
+                common: AtomCommon(width: 30, frameAlign: "leading", decorative: true)
+            )
+            AtomText(
+                props: TextProps(
+                    text: text, size: 12, design: "monospaced", color: "text",
+                    lineLimit: isExpanded ? nil : Self.collapsedLineLimit, truncation: "tail", selectable: true
+                ),
+                common: AtomCommon(testID: identifier, label: "\(label) \(text)", fillWidth: true)
+            )
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
     }
 
     package init(activity: ConversationActivity, expansion: ToolCallExpansionState) {
@@ -181,17 +165,19 @@ package struct ResponseCommentHoverCard: PHView {
 
     /// Composed only of plugin atoms (Plugins/Atoms); it fades in.
     package var body: some PHView {
-        AtomPanel(
-            props: PanelProps(spacing: 8, fill: "window", fillOpacity: 1, cornerRadius: 12),
-            common: AtomCommon(
-                testID: "response-comment-hover-card", label: "Highlighted text: \(selectedText). Comment: \(comment)",
-                width: 320, padding: 0, paddingX: 12, paddingY: 12
-            )
-        ) {
-            entry("Highlighted text", selectedText, testID: "response-comment-highlighted-text")
-            entry("Comment", comment, testID: "response-comment-content")
+        // The fade sits outside the panel: a surfaced stack's own opacity would leave its fill opaque.
+        AtomStack(common: AtomCommon(opacity: isVisible ? 1 : 0)) {
+            AtomPanel(
+                props: PanelProps(spacing: 8, fill: "window", fillOpacity: 1, cornerRadius: 12),
+                common: AtomCommon(
+                    testID: "response-comment-hover-card", label: "Highlighted text: \(selectedText). Comment: \(comment)",
+                    width: 320, padding: 0, paddingX: 12, paddingY: 12
+                )
+            ) {
+                entry("Highlighted text", selectedText, testID: "response-comment-highlighted-text")
+                entry("Comment", comment, testID: "response-comment-content")
+            }
         }
-        .opacity(isVisible ? 1 : 0)
         .onAppear {
             phWithAnimation(.easeIn(duration: 0.12)) {
                 isVisible = true

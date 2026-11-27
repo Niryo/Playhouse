@@ -11,45 +11,23 @@ extension TaskConversationView {
 
     /// The panel's left border; dragging it left widens the terminal and right narrows it.
     package func terminalResizeHandle(width: CGFloat, available: CGFloat) -> some PHView {
-        PHRectangle()
-            .fill(PHColor.primary.opacity(0.08))
-            .frame(width: 1)
-            .frame(maxHeight: .infinity)
-            .overlay {
-                PHColor.clear
-                    .frame(width: 17)
-                    .contentShape(PHRectangle())
-                    .hoverCursor(.resizeLeftRight)
-                    .gesture(
-                        PHDragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { value in
-                                if terminalResizeStartWidth == nil {
-                                    // Held for the whole drag, so the pointer can leave the thin border.
-                                    Platform.services.pushCursor(.resizeLeftRight)
-                                }
-                                let start = terminalResizeStartWidth ?? width
-                                terminalResizeStartWidth = start
-                                terminalPanelWidth = Double(TerminalPanelLayout.clampedWidth(
-                                    start - value.translation.width, available: available
-                                ))
-                            }
-                            .onEnded { _ in
-                                if terminalResizeStartWidth != nil { Platform.services.popCursor() }
-                                terminalResizeStartWidth = nil
-                            }
-                    )
-                    .onDisappear {
-                        // A panel closed mid-drag may never end the gesture.
-                        if terminalResizeStartWidth != nil {
-                            Platform.services.popCursor()
-                            terminalResizeStartWidth = nil
-                        }
-                    }
-                    .accessibilityElement()
-                    .accessibilityLabel("Resize terminal")
-                    .accessibilityValue("\(Int(width.rounded())) points")
-                    .accessibilityIdentifier("terminal-resize-handle")
+        AtomOverlay {
+            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.08), common: AtomCommon(width: 1, fillHeight: true)) {
+                PHEmptyView()
             }
+        } overlay: {
+            // The handle holds the resize cursor for the whole drag, and ends it when a panel
+            // closed mid-drag takes the handle away.
+            AtomResizeHandle(
+                common: AtomCommon(testID: "terminal-resize-handle", label: "Resize terminal", value: "\(Int(width.rounded())) points", width: 17),
+                onDrag: { translation in
+                    let start = terminalResizeStartWidth ?? width
+                    terminalResizeStartWidth = start
+                    terminalPanelWidth = Double(TerminalPanelLayout.clampedWidth(start - CGFloat(translation), available: available))
+                },
+                onDragEnd: { terminalResizeStartWidth = nil }
+            )
+        }
     }
 
     package static let expandedSidebarWidth: CGFloat = 232
@@ -67,57 +45,52 @@ extension TaskConversationView {
 
     /// Quick actions for the task, right-aligned along the bottom of the sidebar.
     package var sidebarCommandRow: some PHView {
-        PHHStack(spacing: 4) {
-            PHSpacer(minLength: 0)
+        let unavailable = terminalUnavailableReason != nil && !isTerminalPresented
+        return AtomStack(
+            props: StackProps(axis: "h", spacing: 4, group: true),
+            common: AtomCommon(testID: "sidebar-command-row", paddingX: 10, paddingY: 6)
+        ) {
+            AtomSpacer(props: SpacerProps(minLength: 0))
             PluginSlot(placement: .conversationToolbar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
             sidebarSkillsButton
-            PHButton {
-                setTerminalPresented(!isTerminalPresented)
-            } label: {
-                PHImage(icon: .terminal)
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 26, height: 24)
-                    .foregroundStyle(terminalUnavailableReason != nil && !isTerminalPresented
-                        ? PHColor.secondary.opacity(0.35)
-                        : (isTerminalPresented ? WorkspaceTheme.accent : PHColor.secondary))
-                    .background(
-                        PHRoundedRectangle(cornerRadius: 5)
-                            .fill(isTerminalPresented ? WorkspaceTheme.accent.opacity(0.14) : PHColor.clear)
-                    )
-                    .contentShape(PHRectangle())
+            AtomButton(
+                props: ButtonProps(disabled: unavailable, shortcut: AppShortcut.terminal),
+                common: AtomCommon(
+                    testID: "toggle-terminal-button",
+                    label: isTerminalPresented ? "Hide terminal" : "Open terminal",
+                    value: isTerminalPresented ? "Shown" : "Hidden",
+                    help: terminalUnavailableReason ?? (isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's worktree")
+                ),
+                action: { setTerminalPresented(!isTerminalPresented) }
+            ) {
+                sidebarToolIcon(.terminal, isActive: isTerminalPresented, dimmed: unavailable)
             }
-            .buttonStyle(.plain)
-            .plainButtonHoverPointer()
-            .disabled(terminalUnavailableReason != nil && !isTerminalPresented)
-            .shortcutHelp(terminalUnavailableReason ?? (isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's worktree"), shortcut: AppShortcut.terminal)
-            .accessibilityLabel(isTerminalPresented ? "Hide terminal" : "Open terminal")
-            .accessibilityValue(isTerminalPresented ? "Shown" : "Hidden")
-            .accessibilityIdentifier("toggle-terminal-button")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("sidebar-command-row")
     }
 
     /// Opens the Skills, Rules & MCP page; beside the terminal button, styled like it.
     package var sidebarSkillsButton: some PHView {
-        PHButton { openSkillsPage(focus: nil) } label: {
-            PHImage(icon: .sparkles)
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: 26, height: 24)
-                .foregroundStyle(isShowingSkills ? WorkspaceTheme.accent : PHColor.secondary)
-                .background(
-                    PHRoundedRectangle(cornerRadius: 5)
-                        .fill(isShowingSkills ? WorkspaceTheme.accent.opacity(0.14) : PHColor.clear)
-                )
-                .contentShape(PHRectangle())
+        AtomButton(
+            props: ButtonProps(shortcut: AppShortcut.skills),
+            common: AtomCommon(testID: "open-skills-button", label: "Skills", help: "Skills, Rules & MCP"),
+            action: { openSkillsPage(focus: nil) }
+        ) {
+            sidebarToolIcon(.sparkles, isActive: isShowingSkills)
         }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .shortcutHelp("Skills, Rules & MCP", shortcut: AppShortcut.skills)
-        .accessibilityLabel("Skills")
-        .accessibilityIdentifier("open-skills-button")
+    }
+
+    /// A sidebar command's symbol: accent on a faint accent tile while its panel shows,
+    /// faded while it can't be used.
+    private func sidebarToolIcon(_ icon: PHIcon, isActive: Bool, dimmed: Bool = false) -> some PHView {
+        AtomStack(
+            props: StackProps(fill: isActive ? "themeAccent" : "clear", fillOpacity: isActive ? 0.14 : nil, cornerRadius: 5),
+            common: AtomCommon(width: 26, height: 24)
+        ) {
+            AtomIcon(
+                props: IconProps(name: icon.name, size: 12, weight: "medium", color: isActive && !dimmed ? "themeAccent" : "secondary"),
+                common: AtomCommon(opacity: dimmed ? 0.35 : nil)
+            )
+        }
     }
 
     @PHViewBuilder
@@ -239,66 +212,68 @@ extension TaskConversationView {
     }
 
     package func repositorySettingsPopover(_ repository: RepositoryWorktreeRecord, name: String) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 14) {
-            PHText(name).font(.system(size: 15, weight: .semibold))
-                .allowsHitTesting(false)
-                .accessibilityIdentifier("conversation-repository-settings-title")
-            PHVStack(alignment: .leading, spacing: 8) {
-                repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", repository: repository)
-                repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", repository: repository)
-                repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", repository: repository)
-                if let number = repository.pullRequestNumber {
-                    repositoryPullRequestRow(repository, number: number)
+        return AtomOverlay(props: OverlayProps(behind: true, group: false)) {
+            AtomStack(
+                props: StackProps(spacing: 14, align: "leading"),
+                common: AtomCommon(width: 360, frameAlign: "leading", paddingX: 18, paddingY: 18)
+            ) {
+                AtomText(
+                    props: TextProps(text: name, size: 15, weight: "semibold"),
+                    common: AtomCommon(testID: "conversation-repository-settings-title", passThrough: true)
+                )
+                AtomStack(props: StackProps(spacing: 8, align: "leading")) {
+                    repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", repository: repository)
+                    repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", repository: repository)
+                    repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", repository: repository)
+                    if let number = repository.pullRequestNumber {
+                        repositoryPullRequestRow(repository, number: number)
+                    }
                 }
-            }
-            if !repository.isPending {
-                PHText("Settings are locked after the task starts.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .allowsHitTesting(false)
-                    .accessibilityIdentifier("conversation-repository-settings-locked")
-            }
-            if !isReadOnly {
-                PHDivider()
-                // Another worktree of this repository, on its own branch, for a separate pull request.
-                PHVStack(alignment: .leading, spacing: 6) {
-                    PHText("Another worktree")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .allowsHitTesting(false)
-                    PHHStack(spacing: 8) {
-                        PHTextField("Branch (auto)", text: $newWorktreeBranch)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityIdentifier("conversation-repository-new-worktree-branch")
-                            .onSubmit { addConversationWorktree(repository) }
-                        PHButton {
-                            addConversationWorktree(repository)
-                        } label: {
-                            if isAddingWorktree {
-                                PHProgressView().controlSize(.small)
-                            } else {
-                                PHText("Add worktree")
+                if !repository.isPending {
+                    AtomText(
+                        props: TextProps(text: "Settings are locked after the task starts.", size: 11, color: "secondary"),
+                        common: AtomCommon(testID: "conversation-repository-settings-locked", passThrough: true)
+                    )
+                }
+                if !isReadOnly {
+                    AtomDivider()
+                    // Another worktree of this repository, on its own branch, for a separate pull request.
+                    AtomStack(props: StackProps(spacing: 6, align: "leading")) {
+                        AtomText(props: TextProps(text: "Another worktree", size: 11, weight: "semibold", color: "secondary"), common: AtomCommon(passThrough: true))
+                        AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                            AtomTextField(
+                                props: TextFieldProps(text: newWorktreeBranch, placeholder: "Branch (auto)", size: 13),
+                                common: AtomCommon(testID: "conversation-repository-new-worktree-branch"),
+                                onChange: { newWorktreeBranch = $0 },
+                                onSubmit: { addConversationWorktree(repository) }
+                            )
+                            AtomButton(
+                                props: ButtonProps(style: "automatic", disabled: isAddingWorktree),
+                                common: AtomCommon(
+                                    testID: "conversation-repository-add-worktree-button", label: "Add worktree",
+                                    help: "Add another worktree of \(name) on its own branch"
+                                ),
+                                action: { addConversationWorktree(repository) }
+                            ) {
+                                if isAddingWorktree {
+                                    AtomSpinner(props: SpinnerProps(size: "small"))
+                                } else {
+                                    AtomText(props: TextProps(text: "Add worktree", size: 13))
+                                }
                             }
                         }
-                        .disabled(isAddingWorktree)
-                        .buttonHoverPointer()
-                        .nativeHelp("Add another worktree of \(name) on its own branch")
-                        .accessibilityLabel("Add worktree")
-                        .accessibilityIdentifier("conversation-repository-add-worktree-button")
                     }
                 }
             }
+        } overlay: {
+            // Clicking an empty area dismisses an edit without taking focus from the fields.
+            AtomStack(
+                props: StackProps(fill: "clear", hitSurface: true),
+                common: AtomCommon(fillWidth: true, fillHeight: true, decorative: true)
+            ) {}
+            .onTapGesture { cancelRepositoryFieldEdit(repository) }
+            // no-pointer: a click in otherwise empty space dismisses the edit.
         }
-        .font(.system(size: 13))
-        .padding(18)
-        .frame(width: 360, alignment: .leading)
-        // A click anywhere outside the field being edited dismisses the edit unsaved.
-        .background(
-            PHColor.clear
-                .contentShape(PHRectangle())
-                .onTapGesture { cancelRepositoryFieldEdit(repository) }
-                // no-pointer: a click outside the field dismisses the edit; the area is not a control.
-        )
     }
 
     package var repositoryPicker: some PHView {

@@ -31,17 +31,16 @@ extension TaskConversationView {
     package var mentionMenu: some PHView {
         if let active = activeMention {
             let items = mentionSuggestions
-            ComposerMentionMenu(
-                query: active.query,
-                items: items,
-                showsRecent: active.query.isEmpty && !(mentionCatalog?.recent.isEmpty ?? true),
-                isLoading: mentionCatalog == nil,
-                selectedIndex: min(mentionSelection, max(items.count - 1, 0)),
-                select: { insertMention($0, at: active) }
-            )
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 14)
-            .padding(.bottom, 8)
+            AtomStack(common: AtomCommon(paddingBottom: 8, paddingLeading: 14, fixedHeight: true)) {
+                ComposerMentionMenu(
+                    query: active.query,
+                    items: items,
+                    showsRecent: active.query.isEmpty && !(mentionCatalog?.recent.isEmpty ?? true),
+                    isLoading: mentionCatalog == nil,
+                    selectedIndex: min(mentionSelection, max(items.count - 1, 0)),
+                    select: { insertMention($0, at: active) }
+                )
+            }
         }
     }
 
@@ -136,22 +135,21 @@ extension TaskConversationView {
     package var slashMenu: some PHView {
         if let menu = slashMenuModel, let active = activeSlash {
             let count = menu.command == nil ? menu.commands.count : (menu.list?.items.count ?? 0)
-            ComposerSlashMenu(
-                menu: menu,
-                command: activeSlashCommand,
-                isLoading: isLoadingSlashItems,
-                selectedIndex: min(slashSelection, max(count - 1, 0)),
-                actions: ComposerSlashActions(
-                    choose: { chooseSlashRow($0, in: menu, at: active) },
-                    press: { item, button in
-                        guard let command = activeSlashCommand, button.disabled != true else { return }
-                        runSlash(command, at: active) { try await $0.act(command, item: item, button: button.id, filter: menu.filter) }
-                    }
+            AtomStack(common: AtomCommon(paddingBottom: 8, paddingLeading: 14, fixedHeight: true)) {
+                ComposerSlashMenu(
+                    menu: menu,
+                    command: activeSlashCommand,
+                    isLoading: isLoadingSlashItems,
+                    selectedIndex: min(slashSelection, max(count - 1, 0)),
+                    actions: ComposerSlashActions(
+                        choose: { chooseSlashRow($0, in: menu, at: active) },
+                        press: { item, button in
+                            guard let command = activeSlashCommand, button.disabled != true else { return }
+                            runSlash(command, at: active) { try await $0.act(command, item: item, button: button.id, filter: menu.filter) }
+                        }
+                    )
                 )
-            )
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 14)
-            .padding(.bottom, 8)
+            }
         }
     }
 
@@ -270,17 +268,25 @@ extension TaskConversationView {
     }
 
     package func userInputForm(_ request: ConversationUserInputRequest) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 16) {
-            PHText("A few questions")
-                .font(.system(size: 17, weight: .semibold))
-                .accessibilityIdentifier("ai-question-form-title")
+        let isIncomplete = request.questions.contains { question in
+            let selections = userInputAnswers[question.id] ?? []
+            return selections.isEmpty && (!userInputOtherSelected.contains(question.id) || (userInputOther[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        return AtomStack(
+            props: StackProps(spacing: 16, align: "leading", group: true, fill: "panel", cornerRadius: 14),
+            common: AtomCommon(maxWidth: 720, frameAlign: "leading", paddingX: 16, paddingY: 16)
+        ) {
+            AtomText(
+                props: TextProps(text: "A few questions", size: 17, weight: "semibold"),
+                common: AtomCommon(testID: "ai-question-form-title")
+            )
             PHForEach(request.questions) { question in
-                PHVStack(alignment: .leading, spacing: 9) {
+                AtomStack(props: StackProps(spacing: 9, align: "leading")) {
                     if !question.header.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        PHText(question.header.uppercased())
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(PHColor.accentColor)
-                            .accessibilityIdentifier("ai-question-header-\(question.id)")
+                        AtomText(
+                            props: TextProps(text: question.header.uppercased(), size: 11, weight: "semibold", color: "accent"),
+                            common: AtomCommon(testID: "ai-question-header-\(question.id)")
+                        )
                     }
                     // Providers write questions in Markdown, as they do replies, so they share the reply
                     // renderer and size.
@@ -289,94 +295,72 @@ extension TaskConversationView {
                         common: AtomCommon(testID: "ai-question-text-\(question.id)")
                     )
                     if question.options.isEmpty {
-                        PHGroup {
-                            if question.isSecret {
-                                PHSecureField("Answer", text: PHBinding(
-                                    get: { userInputAnswers[question.id]?.first ?? "" },
-                                    set: { userInputAnswers[question.id] = [$0] }
-                                ))
-                            } else {
-                                PHTextField("Your answer", text: PHBinding(
-                                    get: { userInputAnswers[question.id]?.first ?? "" },
-                                    set: { userInputAnswers[question.id] = [$0] }
-                                ))
-                            }
-                        }
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 15))
-                        .controlSize(.large)
-                        .accessibilityIdentifier("ai-question-answer-\(question.id)")
+                        AtomTextField(
+                            props: TextFieldProps(
+                                text: userInputAnswers[question.id]?.first ?? "",
+                                placeholder: question.isSecret ? "Answer" : "Your answer",
+                                secure: question.isSecret, size: 15, controlSize: "large"
+                            ),
+                            common: AtomCommon(testID: "ai-question-answer-\(question.id)"),
+                            onChange: { userInputAnswers[question.id] = [$0] }
+                        )
                     } else {
                         PHForEach(question.options) { option in
                             let isSelected = (userInputAnswers[question.id] ?? []).first == option.label
-                            PHVStack(alignment: .leading, spacing: 2) {
-                                PHButton {
-                                    userInputAnswers[question.id] = [option.label]
-                                    userInputOtherSelected.remove(question.id)
-                                } label: {
-                                    PHLabel(option.label, icon: isSelected ? .largecircleFillCircle : .circle)
-                                        .font(.system(size: 15))
+                            AtomStack(props: StackProps(spacing: 2, align: "leading")) {
+                                AtomButton(
+                                    common: AtomCommon(
+                                        testID: "ai-question-option-\(question.id)-\(option.label)",
+                                        value: isSelected ? "selected" : "not selected",
+                                        help: "Select answer: \(option.label)"
+                                    ),
+                                    action: {
+                                        userInputAnswers[question.id] = [option.label]
+                                        userInputOtherSelected.remove(question.id)
+                                    }
+                                ) {
+                                    AtomLabel(props: LabelProps(text: option.label, icon: (isSelected ? PHIcon.largecircleFillCircle : PHIcon.circle).name, size: 15))
                                 }
-                                .plainButtonHoverPointer()
-                                .nativeHelp("Select answer: \(option.label)")
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
-                                .accessibilityValue(isSelected ? "selected" : "not selected")
                                 if let description = option.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
-                                    PHText(description)
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        // Aligns with the option label, past the radio symbol.
-                                        .padding(.leading, 24)
-                                        .accessibilityIdentifier("ai-question-option-description-\(question.id)-\(option.label)")
+                                    // Aligns with the option label, past the radio symbol.
+                                    AtomText(
+                                        props: TextProps(text: description, size: 13, color: "secondary", wrap: true),
+                                        common: AtomCommon(testID: "ai-question-option-description-\(question.id)-\(option.label)", paddingLeading: 24)
+                                    )
                                 }
                             }
                         }
                         if question.allowsOther {
-                            PHButton {
-                                userInputAnswers[question.id] = []
-                                userInputOtherSelected.insert(question.id)
-                            } label: {
-                                PHLabel("Other", icon: userInputOtherSelected.contains(question.id) ? .largecircleFillCircle : .circle)
-                                    .font(.system(size: 15))
+                            let isOtherSelected = userInputOtherSelected.contains(question.id)
+                            AtomButton(
+                                common: AtomCommon(value: isOtherSelected ? "selected" : "not selected", help: "Select a free-text answer"),
+                                action: {
+                                    userInputAnswers[question.id] = []
+                                    userInputOtherSelected.insert(question.id)
+                                }
+                            ) {
+                                AtomLabel(props: LabelProps(text: "Other", icon: (isOtherSelected ? PHIcon.largecircleFillCircle : PHIcon.circle).name, size: 15))
                             }
-                            .plainButtonHoverPointer()
-                            .nativeHelp("Select a free-text answer")
-                            .buttonStyle(.plain)
-                            .accessibilityValue(userInputOtherSelected.contains(question.id) ? "selected" : "not selected")
-                            PHTextField("Other answer", text: PHBinding(
-                                get: { userInputOther[question.id] ?? "" },
-                                set: {
+                            AtomTextField(
+                                props: TextFieldProps(text: userInputOther[question.id] ?? "", placeholder: "Other answer", size: 15, controlSize: "large"),
+                                onChange: {
                                     userInputOther[question.id] = $0
                                     userInputAnswers[question.id] = []
                                     userInputOtherSelected.insert(question.id)
                                 }
-                            ))
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 15))
-                            .controlSize(.large)
+                            )
                         }
                     }
                 }
             }
-            PHButton("Submit answers") {
-                Task { @MainActor in await submitUserInput(request) }
+            AtomButton(
+                props: ButtonProps(style: "prominent", disabled: isIncomplete, controlSize: "large"),
+                common: AtomCommon(testID: "submit-ai-answers-button", help: "Submit answers"),
+                action: { Task { @MainActor in await submitUserInput(request) } }
+            ) {
+                AtomText(props: TextProps(text: "Submit answers"))
             }
-            .buttonHoverPointer()
-            .nativeHelp("Submit answers")
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(request.questions.contains { question in
-                    let selections = userInputAnswers[question.id] ?? []
-                    return selections.isEmpty && (!userInputOtherSelected.contains(question.id) || (userInputOther[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                })
-                .accessibilityIdentifier("submit-ai-answers-button")
         }
-        .padding(16)
-        .frame(maxWidth: 720, alignment: .leading)
-        .background(WorkspaceTheme.panelBackground, in: PHRoundedRectangle(cornerRadius: 14))
-        .accessibilityElement(children: .contain)
     }
 
     package func submitUserInput(_ request: ConversationUserInputRequest) async {

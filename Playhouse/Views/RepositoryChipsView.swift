@@ -33,7 +33,7 @@ package struct RepositoryChipsModel: Codable, Equatable {
 
     package var prefix: String
     package var chips: [Chip]
-    /// The branch icon's color, the workspace accent as #RRGGBB.
+    /// The branch icon's color, a color name or #RRGGBB: the workspace accent.
     package var accent: String
     /// The task can't change its repositories: the chips and Add are
     /// disabled and the remove badges hidden.
@@ -62,7 +62,7 @@ extension RepositoryChipsModel {
             }
             return Chip(name: "\(name)-\(record.branch)", path: record.repositoryPath, key: records.chipKey(at: index), branch: record.branch)
         }
-        accent = AtomColor.hex(WorkspaceTheme.accent)
+        accent = "themeAccent"
         self.readOnly = readOnly
     }
 }
@@ -206,7 +206,7 @@ package struct RepositoryPickerActions {
 /// (`picker`) and a chip's settings from that chip (`settings`); both stay
 /// native presentations, like the board's Token Stats sheet. Without them
 /// (the catalog) nothing is presented.
-package struct RepositoryChipsView<PHPicker: PHView, Settings: PHView>: PHView {
+package struct RepositoryChipsView<PickerContent: PHView, Settings: PHView>: PHView {
     package let model: RepositoryChipsModel
     package var actions = RepositoryChipsActions()
     package var isPickerPresented: PHBinding<Bool> = .constant(false)
@@ -214,7 +214,7 @@ package struct RepositoryChipsView<PHPicker: PHView, Settings: PHView>: PHView {
     package var editingPath: PHBinding<String?> = .constant(nil)
     /// The + button's keyboard shortcut: the task header's; the catalog's copy takes none.
     package var addShortcut: String? = nil
-    @PHViewBuilder package var picker: () -> PHPicker
+    @PHViewBuilder package var picker: () -> PickerContent
     @PHViewBuilder package var settings: (RepositoryChipsModel.Chip) -> Settings
 
     private var prefix: String { model.prefix }
@@ -280,7 +280,7 @@ package struct RepositoryChipsView<PHPicker: PHView, Settings: PHView>: PHView {
         }
     }
 
-    package init(model: RepositoryChipsModel, actions: RepositoryChipsActions = RepositoryChipsActions(), isPickerPresented: PHBinding<Bool> = .constant(false), editingPath: PHBinding<String?> = .constant(nil), addShortcut: String? = nil, @PHViewBuilder picker: @escaping () -> PHPicker, @PHViewBuilder settings: @escaping (RepositoryChipsModel.Chip) -> Settings) {
+    package init(model: RepositoryChipsModel, actions: RepositoryChipsActions = RepositoryChipsActions(), isPickerPresented: PHBinding<Bool> = .constant(false), editingPath: PHBinding<String?> = .constant(nil), addShortcut: String? = nil, @PHViewBuilder picker: @escaping () -> PickerContent, @PHViewBuilder settings: @escaping (RepositoryChipsModel.Chip) -> Settings) {
         self.model = model
         self.actions = actions
         self.isPickerPresented = isPickerPresented
@@ -291,7 +291,7 @@ package struct RepositoryChipsView<PHPicker: PHView, Settings: PHView>: PHView {
     }
 }
 
-extension RepositoryChipsView where PHPicker == PHEmptyView, Settings == PHEmptyView {
+extension RepositoryChipsView where PickerContent == PHEmptyView, Settings == PHEmptyView {
     /// Chips that present nothing (the catalog's native copy).
     package init(model: RepositoryChipsModel, actions: RepositoryChipsActions) {
         self.init(model: model, actions: actions, picker: { PHEmptyView() }, settings: { _ in PHEmptyView() })

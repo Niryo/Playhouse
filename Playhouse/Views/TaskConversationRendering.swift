@@ -38,7 +38,7 @@ package struct AssistantReplyHoverScope<Content: PHView>: PHView {
 
     package var body: some PHView {
         content(isHovering)
-            .background {
+            .background { // ATOM-GAP: no atom hands its content an AppKit-tracked hover state (AtomStack's onHover is SwiftUI hover, which ends when a press begins)
                 PHHoverTracker { hovering in
                     if isHovering != hovering { isHovering = hovering }
                 }
@@ -64,30 +64,23 @@ package struct CopyMessageButton: PHView {
 
     package var body: some PHView {
         let isShown = isRevealed || didCopy
-        PHButton {
-            Platform.services.copyToClipboard(markdown)
-            didCopy = true
-            let token = UUID()
-            copyFeedbackToken = token
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                if copyFeedbackToken == token { didCopy = false }
+        AtomButton(
+            common: AtomCommon(
+                testID: "assistant-copy-message-\(messageID)", label: "Copy message", value: didCopy ? "Copied" : "", help: "Copy message",
+                width: 18, height: 16, opacity: isShown ? 1 : 0, passThrough: !isShown, decorative: !isShown
+            ),
+            action: {
+                Platform.services.copyToClipboard(markdown)
+                didCopy = true
+                let token = UUID()
+                copyFeedbackToken = token
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if copyFeedbackToken == token { didCopy = false }
+                }
             }
-        } label: {
-            PHImage(icon: didCopy ? .checkmark : .docOnDoc)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 18, height: 16)
-                .contentShape(PHRectangle())
+        ) {
+            AtomIcon(props: IconProps(name: (didCopy ? PHIcon.checkmark : PHIcon.docOnDoc).name, size: 11, weight: "medium", color: "secondary"))
         }
-        .buttonStyle(.plain)
-        .plainButtonHoverPointer()
-        .nativeHelp("Copy message")
-        .accessibilityLabel("Copy message")
-        .accessibilityValue(didCopy ? "Copied" : "")
-        .accessibilityIdentifier("assistant-copy-message-\(messageID)")
-        .opacity(isShown ? 1 : 0)
-        .allowsHitTesting(isShown)
-        .accessibilityHidden(!isShown)
     }
 
     package init(markdown: String, messageID: String, isRevealed: Bool) {

@@ -489,7 +489,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# Atoms and composites import no UI framework, the core no Apple UI framework, and the\n# package keeps its dependency direction (docs/linux-port-readiness.md).\nexec python3 \"${SRCROOT}/scripts/check-module-boundaries.py\"\n";
+			shellScript = "# Atoms and composites import no UI framework, the core no Apple UI framework, and the\n# package keeps its dependency direction (docs/linux-port-readiness.md). The composites\n# are built from atoms (Playhouse/Core/Plugins/README.md, Composites).\npython3 \"${SRCROOT}/scripts/check-module-boundaries.py\" || exit 1\nexec python3 \"${SRCROOT}/scripts/check-atom-composites.py\"\n";
 		};
 		A60000000000000000000007 /* Build CLI and bridge daemon */ = {
 			isa = PBXShellScriptBuildPhase;

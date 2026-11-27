@@ -23,96 +23,57 @@ package struct WorkspaceRootSelector: PHView {
     }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 10) {
-            PHHStack {
-                PHText("Working folders")
-                    .font(.system(size: 13, weight: .semibold))
-                PHSpacer()
-                PHButton(action: browseForFolders) {
-                    PHLabel("Browse…", icon: .folder)
-                        .font(.system(size: 12, weight: .medium))
+        AtomStack(props: StackProps(spacing: 10, align: "leading")) {
+            AtomStack(props: StackProps(axis: "h")) {
+                AtomText(props: TextProps(text: "Working folders", size: 13, weight: "semibold"))
+                AtomSpacer()
+                AtomButton(
+                    props: ButtonProps(style: "bordered"),
+                    common: AtomCommon(testID: "browse-workspace-roots-button", help: "Browse folders"),
+                    action: browseForFolders
+                ) {
+                    AtomLabel(props: LabelProps(text: "Browse…", icon: PHIcon.folder.name, size: 12, weight: "medium"))
                 }
-                .buttonHoverPointer()
-                .nativeHelp("Browse folders")
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("browse-workspace-roots-button")
             }
 
             if roots.isEmpty {
-                PHText("Choose one or more folders. Git repositories under your parent folder appear as suggestions.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                AtomText(props: TextProps(
+                    text: "Choose one or more folders. Git repositories under your parent folder appear as suggestions.",
+                    size: 11, color: "secondary", wrap: true
+                ))
             } else {
                 FlowLayout(spacing: 7) {
                     PHForEach(roots, id: \.standardizedFileURL.path) { root in
-                        PHHStack(spacing: 5) {
-                            PHImage(icon: .folderFill)
-                                .font(.system(size: 10))
-                            PHText(displayNames[root.standardizedFileURL.path] ?? (root.lastPathComponent.isEmpty ? root.path : root.lastPathComponent))
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                            PHButton {
-                                roots.removeAll { $0.standardizedFileURL.path == root.standardizedFileURL.path }
-                            } label: {
-                                PHImage(icon: .xmarkCircleFill)
-                                    .font(.system(size: 11))
-                            }
-                            .plainButtonHoverPointer()
-                            .buttonStyle(.plain)
-                            .nativeHelp("Remove \(displayNames[root.standardizedFileURL.path] ?? root.path)")
-                            .accessibilityLabel("Remove \(displayNames[root.standardizedFileURL.path] ?? root.lastPathComponent)")
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(PHColor.accentColor.opacity(0.1), in: PHCapsule())
+                        rootChip(root)
                     }
                 }
             }
 
-            PHTextField("Search suggested repositories…", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("workspace-repository-search")
+            AtomTextField(
+                props: TextFieldProps(text: searchText, placeholder: "Search suggested repositories…"),
+                common: AtomCommon(testID: "workspace-repository-search"),
+                onChange: { searchText = $0 }
+            )
 
             if isScanning {
-                PHProgressView("Finding Git repositories…")
-                    .controlSize(.small)
-                    .font(.system(size: 11))
+                // A small spinner over its title, as a titled native progress view shows.
+                AtomStack {
+                    AtomSpinner(props: SpinnerProps(size: "small"))
+                    AtomText(props: TextProps(text: "Finding Git repositories…", size: 11, color: "secondary"))
+                }
             } else if filteredRepositories.isEmpty {
-                PHText(parentFolderURL == nil ? "Choose a default parent folder in Settings to see repository suggestions." : "No matching repositories. Browse to add any folder.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                AtomText(props: TextProps(
+                    text: parentFolderURL == nil ? "Choose a default parent folder in Settings to see repository suggestions." : "No matching repositories. Browse to add any folder.",
+                    size: 11, color: "secondary"
+                ))
             } else {
-                PHScrollView {
-                    PHLazyVStack(spacing: 1) {
+                AtomStack(props: StackProps(fill: "panel", fillOpacity: 0.5, cornerRadius: 8)) {
+                    AtomScroll(props: ScrollProps(spacing: 1, maxHeight: 142, lazy: true)) {
                         PHForEach(filteredRepositories, id: \.path) { repository in
-                            PHButton {
-                                add(repository)
-                            } label: {
-                                PHVStack(alignment: .leading, spacing: 2) {
-                                    PHText(repository.lastPathComponent)
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundStyle(.primary)
-                                    PHText(repository.path)
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 7)
-                                .contentShape(PHRectangle())
-                            }
-                            .plainButtonHoverPointer()
-                            .nativeHelp("Add repository \(repository.lastPathComponent)")
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
+                            suggestionRow(repository)
                         }
                     }
-                    .hoverRevealScrollers()
                 }
-                .frame(maxHeight: 142)
-                .background(WorkspaceTheme.panelBackground.opacity(0.5), in: PHRoundedRectangle(cornerRadius: 8))
             }
         }
         .task(id: parentFolderURL?.path) {
@@ -125,6 +86,41 @@ package struct WorkspaceRootSelector: PHView {
                 URL(fileURLWithPath: $0, isDirectory: true)
             }) ?? []
             isScanning = false
+        }
+    }
+
+    private func displayName(_ root: URL) -> String? {
+        displayNames[root.standardizedFileURL.path]
+    }
+
+    private func rootChip(_ root: URL) -> some PHView {
+        AtomStack(props: StackProps(axis: "h", spacing: 5, fill: "accent", fillOpacity: 0.1, capsule: true), common: AtomCommon(paddingX: 8, paddingY: 5)) {
+            AtomIcon(props: IconProps(name: PHIcon.folderFill.name, size: 10))
+            AtomText(props: TextProps(
+                text: displayName(root) ?? (root.lastPathComponent.isEmpty ? root.path : root.lastPathComponent),
+                size: 11, weight: "medium", lineLimit: 1
+            ))
+            AtomButton(
+                common: AtomCommon(label: "Remove \(displayName(root) ?? root.lastPathComponent)", help: "Remove \(displayName(root) ?? root.path)"),
+                action: { roots.removeAll { $0.standardizedFileURL.path == root.standardizedFileURL.path } }
+            ) {
+                AtomIcon(props: IconProps(name: PHIcon.xmarkCircleFill.name, size: 11))
+            }
+        }
+    }
+
+    private func suggestionRow(_ repository: URL) -> some PHView {
+        AtomButton(
+            common: AtomCommon(
+                testID: "repository-suggestion-\(repository.lastPathComponent)", help: "Add repository \(repository.lastPathComponent)",
+                fillWidth: true, paddingX: 9, paddingY: 7
+            ),
+            action: { add(repository) }
+        ) {
+            AtomStack(props: StackProps(spacing: 2, align: "leading")) {
+                AtomText(props: TextProps(text: repository.lastPathComponent, size: 12, weight: "medium", color: "primary"))
+                AtomText(props: TextProps(text: repository.path, size: 10, color: "secondary", lineLimit: 1))
+            }
         }
     }
 

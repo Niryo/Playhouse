@@ -24,5 +24,6 @@ Playhouse.render(h(Stack, { axis: "v", spacing: 10, align: "leading" },
   h(Text, { size: 11, wrap: true, width: 220 }, "wrap: true — this text grows vertically to fit instead of truncating."),
   h(Text, { size: 11, wrap: true, width: 220, align: "center", testID: "text-centered" }, "align: center — wrapped lines line up in the middle, as a notice's do."),
   h(Text, { text: "From the text prop", size: 11 }),
+  h(Text, { size: 11, design: "monospaced", selectable: true, testID: "text-selectable" }, "selectable: true — select and copy this"),
   h(Counter)
 ));

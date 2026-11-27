@@ -5,48 +5,31 @@ import PlayhouseUI
 
 extension KanbanBoardView {
     package func chatSidebarResizeHandle(width: CGFloat) -> some PHView {
-        PHRectangle()
-            .fill(PHColor.primary.opacity(0.07))
-            .frame(width: 1)
-            .frame(maxHeight: .infinity)
-            .overlay(alignment: .leading) {
-                // A wide invisible strip makes the 1pt border easy to grab. It starts at the border
-                // and extends only over the board, so the chat transcript's scroller, which runs
-                // along the border's inner side, keeps its own pointer and drags.
-                PHColor.clear
-                    .frame(width: 9)
-                    .contentShape(PHRectangle())
-                    .hoverCursor(.resizeLeftRight)
-                    .gesture(
-                        PHDragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { value in
-                                if chatSidebarResizeStartWidth == nil {
-                                    // Held for the whole drag, so the pointer can leave the thin border.
-                                    Platform.services.pushCursor(.resizeLeftRight)
-                                }
-                                let start = chatSidebarResizeStartWidth ?? width
-                                chatSidebarResizeStartWidth = start
-                                if chatSidebarReflowWidth == nil { chatSidebarReflowWidth = start }
-                                chatSidebarDragWidth = ChatSidebarLayout.clampedWidth(start + value.translation.width)
-                            }
-                            .onEnded { _ in
-                                endChatSidebarResize()
-                            }
-                    )
-                    .onDisappear {
-                        // A sidebar closed mid-drag may never end the gesture.
-                        endChatSidebarResize()
-                    }
-                    .accessibilityElement()
-                    .accessibilityLabel("Resize chat")
-                    .accessibilityValue("\(Int(width.rounded())) points")
-                    .accessibilityIdentifier("chat-sidebar-resize-handle")
+        AtomOverlay(props: OverlayProps(align: "leading")) {
+            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(width: 1, fillHeight: true)) {
+                PHEmptyView()
             }
+        } overlay: {
+            // A wide invisible strip makes the 1pt border easy to grab. It starts at the border
+            // and extends only over the board, so the chat transcript's scroller, which runs
+            // along the border's inner side, keeps its own pointer and drags. The handle holds
+            // the resize cursor for the whole drag and ends it when a sidebar closed mid-drag
+            // takes the handle away.
+            AtomResizeHandle(
+                common: AtomCommon(testID: "chat-sidebar-resize-handle", label: "Resize chat", value: "\(Int(width.rounded())) points", width: 9),
+                onDrag: { translation in
+                    let start = chatSidebarResizeStartWidth ?? width
+                    chatSidebarResizeStartWidth = start
+                    if chatSidebarReflowWidth == nil { chatSidebarReflowWidth = start }
+                    chatSidebarDragWidth = ChatSidebarLayout.clampedWidth(start + CGFloat(translation))
+                },
+                onDragEnd: endChatSidebarResize
+            )
+        }
     }
 
     package func endChatSidebarResize() {
         guard chatSidebarResizeStartWidth != nil else { return }
-        Platform.services.popCursor()
         if let chatSidebarDragWidth {
             storedChatSidebarWidth = Double(chatSidebarDragWidth)
         }

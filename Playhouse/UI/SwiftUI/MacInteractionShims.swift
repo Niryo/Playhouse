@@ -17,11 +17,14 @@ package enum HoverCursorKind {
     case pointingHand
     /// The left-right resize arrows over a draggable column divider.
     case resizeLeftRight
+    /// The up-down resize arrows over a draggable row divider.
+    case resizeUpDown
 
     package var cursor: NSCursor {
         switch self {
         case .pointingHand: .pointingHand
         case .resizeLeftRight: .resizeLeftRight
+        case .resizeUpDown: .resizeUpDown
         }
     }
 
@@ -30,6 +33,7 @@ package enum HoverCursorKind {
         switch self {
         case .pointingHand: .link
         case .resizeLeftRight: .columnResize
+        case .resizeUpDown: .rowResize
         }
     }
 }

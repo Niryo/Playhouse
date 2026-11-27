@@ -112,26 +112,33 @@ extension TaskConversationView {
     package func repositoryPullRequestRow(_ repository: RepositoryWorktreeRecord, number: Int) -> some PHView {
         let state = repository.isPullRequestMerged ? "merged" : repository.isPullRequestClosed ? "closed" : "open"
         let text = "#\(number) · \(state)"
-        return PHHStack(spacing: 12) {
-            PHText("Pull request").foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
-                .allowsHitTesting(false)
-            PHGroup {
-                if let url = repository.pullRequestURL.flatMap(URL.init(string:)) {
-                    PHLink(text, destination: url)
-                        .buttonHoverPointer()
-                        .nativeHelp("Open pull request #\(number) on GitHub")
-                } else {
-                    PHText(text)
+        let testID = "conversation-repository-pull-request"
+        return AtomStack(props: StackProps(axis: "h", spacing: 12), common: AtomCommon(minHeight: 34)) {
+            repositoryRowTitle("Pull request")
+            if let url = repository.pullRequestURL, URL(string: url) != nil {
+                // A link draws its title in the accent color, as a native link does.
+                AtomLink(
+                    props: LinkProps(url: url),
+                    common: AtomCommon(testID: testID, label: text, value: state, help: "Open pull request #\(number) on GitHub")
+                ) {
+                    AtomText(props: TextProps(text: text, size: 13, weight: "medium", color: "accent", lineLimit: 1))
                 }
+            } else {
+                AtomText(
+                    props: TextProps(text: text, size: 13, weight: "medium", lineLimit: 1),
+                    common: AtomCommon(testID: testID, label: text, value: state)
+                )
             }
-            .fontWeight(.medium)
-            .lineLimit(1)
-            .accessibilityLabel(text)
-            .accessibilityValue(state)
-            .accessibilityIdentifier("conversation-repository-pull-request")
-            PHSpacer(minLength: 0)
+            AtomSpacer(props: SpacerProps(minLength: 0))
         }
-        .frame(minHeight: 34)
+    }
+
+    /// A settings row's title, in a fixed-width leading column.
+    private func repositoryRowTitle(_ title: String) -> some PHView {
+        AtomText(
+            props: TextProps(text: title, size: 13, color: "secondary"),
+            common: AtomCommon(width: 96, frameAlign: "leading", passThrough: true)
+        )
     }
 
     @PHViewBuilder
@@ -144,69 +151,59 @@ extension TaskConversationView {
         repository: RepositoryWorktreeRecord
     ) -> some PHView {
         let editable = repository.isPending
-        PHHStack(spacing: 12) {
-            PHText(title).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
-                .allowsHitTesting(false)
+        AtomStack(props: StackProps(axis: "h", spacing: 12), common: AtomCommon(minHeight: 34)) {
+            repositoryRowTitle(title)
             if editable, editingRepositoryField == field {
-                PHTextField(placeholder, text: value)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .focused($focusedRepositoryField, equals: field)
-                    .onSubmit { saveConversationRepository(repository, field: field) }
-                    .onKeyPress(.escape) {
-                        cancelRepositoryFieldEdit(repository)
-                        return .handled
+                AtomOverlay(props: OverlayProps(align: "trailing")) {
+                    AtomStack(
+                        props: StackProps(fill: "primary", fillOpacity: 0.06, cornerRadius: 7, stroke: "accent", strokeOpacity: 0.8, strokeWidth: 1.5),
+                        common: AtomCommon(paddingY: 6, paddingLeading: 9, paddingTrailing: 34)
+                    ) {
+                        // It takes the keyboard as it appears: the pencil opens it to type in.
+                        AtomTextField(
+                            props: TextFieldProps(text: value.wrappedValue, placeholder: placeholder, autoFocus: true, style: "plain", size: 13, focusRequest: 1),
+                            common: AtomCommon(testID: identifier),
+                            onChange: { value.wrappedValue = $0 },
+                            onSubmit: { saveConversationRepository(repository, field: field) },
+                            onEscape: { cancelRepositoryFieldEdit(repository) }
+                        )
                     }
-                    .accessibilityIdentifier(identifier)
-                    .padding(.leading, 9).padding(.trailing, 34).padding(.vertical, 6)
-                    .background(PHColor.primary.opacity(0.06), in: PHRoundedRectangle(cornerRadius: 7))
-                    .overlay(PHRoundedRectangle(cornerRadius: 7).strokeBorder(PHColor.accentColor.opacity(0.8), lineWidth: 1.5))
-                    .overlay(alignment: .trailing) {
-                        PHButton { saveConversationRepository(repository, field: field) } label: {
-                            PHImage(icon: .checkmark)
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 22, height: 22)
-                                .background(PHColor.accentColor, in: PHCircle())
-                                .contentShape(PHCircle())
+                } overlay: {
+                    AtomStack(common: AtomCommon(paddingTrailing: 5)) {
+                        AtomButton(
+                            common: AtomCommon(testID: "\(identifier)-save", label: "Save \(title)", help: "Save \(title)"),
+                            action: { saveConversationRepository(repository, field: field) }
+                        ) {
+                            AtomStack(props: StackProps(fill: "accent", capsule: true), common: AtomCommon(width: 22, height: 22)) {
+                                AtomIcon(props: IconProps(name: PHIcon.checkmark.name, size: 11, weight: "bold", color: "white"))
+                            }
                         }
-                        .plainButtonHoverPointer()
-                        .buttonStyle(.plain)
-                        .nativeHelp("Save \(title)")
-                        .accessibilityLabel("Save \(title)")
-                        .accessibilityIdentifier("\(identifier)-save")
-                        .padding(.trailing, 5)
-                    }
-            } else {
-                let displayValue = value.wrappedValue.isEmpty ? placeholder : value.wrappedValue
-                PHHStack(spacing: 3) {
-                    PHText(displayValue)
-                        .fontWeight(.medium)
-                        .lineLimit(1).truncationMode(.middle)
-                        .allowsHitTesting(false)
-                        .accessibilityLabel(displayValue)
-                        .accessibilityIdentifier("\(identifier)-value")
-                    if editable {
-                        PHButton {
-                            beginRepositoryFieldEdit(field, repository: repository)
-                        } label: {
-                            EditPencilShape()
-                                .stroke(style: PHStrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 14, height: 14)
-                                .frame(width: 22, height: 24)
-                                .contentShape(PHRectangle())
-                        }
-                        .plainButtonHoverPointer()
-                        .buttonStyle(.plain).nativeHelp("Edit \(title)").accessibilityLabel("Edit \(title)")
-                        .accessibilityIdentifier("\(identifier)-edit")
                     }
                 }
-                .padding(.vertical, 6)
-                PHSpacer(minLength: 0)
+            } else {
+                let displayValue = value.wrappedValue.isEmpty ? placeholder : value.wrappedValue
+                AtomStack(props: StackProps(axis: "h", spacing: 3), common: AtomCommon(paddingY: 6)) {
+                    AtomText(
+                        props: TextProps(text: displayValue, size: 13, weight: "medium", lineLimit: 1, truncation: "middle"),
+                        common: AtomCommon(testID: "\(identifier)-value", label: displayValue, passThrough: true)
+                    )
+                    if editable {
+                        AtomButton(
+                            common: AtomCommon(testID: "\(identifier)-edit", label: "Edit \(title)", help: "Edit \(title)"),
+                            action: { beginRepositoryFieldEdit(field, repository: repository) }
+                        ) {
+                            AtomStack(common: AtomCommon(width: 22, height: 24)) {
+                                AtomIcon(
+                                    props: IconProps(asset: "EditPencil", color: "secondary"),
+                                    common: AtomCommon(width: 14, height: 14)
+                                )
+                            }
+                        }
+                    }
+                }
+                AtomSpacer(props: SpacerProps(minLength: 0))
             }
         }
-        .frame(minHeight: 34)
     }
 
     /// The chip settings' Add worktree: another worktree of the same repository on its

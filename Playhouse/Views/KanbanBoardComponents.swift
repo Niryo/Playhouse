@@ -32,37 +32,36 @@ package struct DoneDropDrawer: PHView {
     package var body: some PHView {
         // The gutter keeps its width so the board never reflows; only the tab slides, from
         // a sliver peeking at the window edge to fully open while a card is dragged.
-        tab
-            .frame(width: Self.tabWidth, height: Self.tabHeight)
-            .scaleEffect(isActive ? 1.06 : 1)
-            .offset(x: isOpen ? 0 : Self.tabWidth + Self.trailingMargin - Self.peekWidth)
-            .padding(.leading, Self.gap)
-            .padding(.trailing, Self.trailingMargin)
-            .frame(maxHeight: .infinity)
-            .clipped()
-            .animation(.spring(response: 0.34, dampingFraction: 0.84), value: isOpen)
-            .animation(.easeOut(duration: 0.14), value: isActive)
+        AtomStack(
+            props: StackProps(clip: true),
+            common: AtomCommon(fillHeight: true, paddingLeading: Double(Self.gap), paddingTrailing: Double(Self.trailingMargin))
+        ) {
+            tab
+                .offset(x: isOpen ? 0 : Self.tabWidth + Self.trailingMargin - Self.peekWidth)
+        }
+        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: isOpen)
+        .animation(.easeOut(duration: 0.14), value: isActive)
     }
 
     private var tab: some PHView {
-        PHVStack(spacing: 7) {
-            PHImage(icon: .checkmark)
-                .font(.system(size: 14, weight: .bold))
-            PHText("Done")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
+        let accent = AtomColor.hex(TaskStatus.done.accent)
+        let foreground = isActive ? "white" : accent
+        return AtomStack(
+            props: StackProps(
+                axis: "v", spacing: 7, fill: accent, fillOpacity: isActive ? 1 : (isOpen ? 0.12 : 0.45),
+                cornerRadius: 14, stroke: accent, strokeOpacity: isActive ? 0 : 0.45, hitSurface: true
+            ),
+            common: AtomCommon(width: Double(Self.tabWidth), height: Double(Self.tabHeight), scale: isActive ? 1.06 : 1)
+        ) {
+            AtomIcon(
+                props: IconProps(name: PHIcon.checkmark.name, size: 14, weight: "bold", color: foreground),
+                common: AtomCommon(opacity: isOpen ? 1 : 0)
+            )
+            AtomText(
+                props: TextProps(text: "Done", size: 10, weight: "semibold", design: "rounded", color: foreground),
+                common: AtomCommon(opacity: isOpen ? 1 : 0)
+            )
         }
-        .foregroundStyle(isActive ? PHColor.white : TaskStatus.done.accent)
-        .opacity(isOpen ? 1 : 0)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            isActive ? TaskStatus.done.accent : TaskStatus.done.accent.opacity(isOpen ? 0.12 : 0.45),
-            in: PHRoundedRectangle.phContinuous(cornerRadius: 14)
-        )
-        .overlay(
-            PHRoundedRectangle.phContinuous(cornerRadius: 14)
-                .strokeBorder(TaskStatus.done.accent.opacity(isActive ? 0 : 0.45), lineWidth: 1)
-        )
-        .contentShape(PHRoundedRectangle.phContinuous(cornerRadius: 14))
         .onDrop(of: [.plainText], delegate: DoneDrawerDropDelegate(isOpen: isOpen, isActive: $isActive, onDrop: onDrop))
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("task-done-drop-target")
@@ -136,22 +135,28 @@ package struct KanbanColumnView: PHView {
     }
 
     private var columnContent: some PHView {
-        KanbanColumnSection(
-            model: KanbanColumnModel(status: status, taskCount: tasks.count),
-            minHeight: Double(minHeight),
-            onAdd: onAddTask
-        ) {
-            PHForEach(tasks) { task in
-                draggableTaskCard(task)
+        AtomOverlay(props: OverlayProps(group: false)) {
+            KanbanColumnSection(
+                model: KanbanColumnModel(status: status, taskCount: tasks.count),
+                minHeight: Double(minHeight),
+                onAdd: onAddTask
+            ) {
+                PHForEach(tasks) { task in
+                    draggableTaskCard(task)
+                }
             }
-        }
-        .overlay {
+        } overlay: {
             if acceptsDraggedTask {
-                PHRoundedRectangle.phContinuous(cornerRadius: 16)
-                    .fill(status.accent.opacity(isDropTargeted ? 0.16 : 0.06))
-                    .strokeBorder(status.accent.opacity(isDropTargeted ? 0.9 : 0.45), style: PHStrokeStyle(lineWidth: isDropTargeted ? 2 : 1.5, dash: isDropTargeted ? [] : [6, 4]))
-                    .allowsHitTesting(false)
-                    .accessibilityIdentifier("task-\(status.accessibilityKey)-drop-target")
+                let accent = AtomColor.hex(status.accent)
+                AtomStack(
+                    props: StackProps(
+                        fill: accent, fillOpacity: isDropTargeted ? 0.16 : 0.06, cornerRadius: 16,
+                        stroke: accent, strokeOpacity: isDropTargeted ? 0.9 : 0.45,
+                        strokeWidth: isDropTargeted ? 2 : 1.5, dash: isDropTargeted ? [] : [6, 4]
+                    ),
+                    common: AtomCommon(testID: "task-\(status.accessibilityKey)-drop-target",
+                                       fillWidth: true, fillHeight: true, passThrough: true)
+                ) {}
             }
         }
     }

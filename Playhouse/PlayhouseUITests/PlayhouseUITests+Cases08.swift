@@ -728,6 +728,8 @@ extension PlayhouseUITests {
             preferencesWindow.buttons["Light"].click()
         }
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "light")
+        attachScreenshot(named: "Workspace Settings and board in light appearance")
+        attachElementScreenshot(preferencesWindow, named: "Workspace Settings in light appearance")
         _ = try runCLI(["settings", "set-appearance", "dark"])
         // The pop-up button reports its visible title ("Dark") as its value.
         XCTAssertTrue(waitUntil({ (appearancePicker.value as? String)?.lowercased() == "dark" }, timeout: 5), "An external CLI write should update the open appearance picker.")

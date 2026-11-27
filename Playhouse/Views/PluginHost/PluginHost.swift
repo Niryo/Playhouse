@@ -289,6 +289,7 @@ package struct PluginConfirmationModifier: PHViewModifier {
             titleVisibility: .visible,
             presenting: confirmations.current
         ) { confirmation in
+            // ATOM-GAP: a confirmation dialog's actions and message are the native alert's buttons and text, not views an atom can draw.
             PHButton(confirmation.confirm, role: confirmation.destructive ? .destructive : nil) { confirmations.answer(true) }
                 .buttonHoverPointer()
                 .nativeHelp(confirmation.confirm)

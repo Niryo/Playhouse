@@ -675,13 +675,17 @@ package enum ComposerSuggestionMenu {
         @PHViewBuilder package let content: Content
 
         package var body: some PHView {
-            AtomPanel(
-                props: PanelProps(spacing: 0, fill: "panel", fillOpacity: 1, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.1),
-                common: AtomCommon(testID: testID, label: label, value: value, width: Double(width), padding: Double(inset))
+            // A Panel (a grouped leading column with a surface) that also casts a shadow.
+            AtomStack(
+                props: StackProps(
+                    axis: "v", spacing: 0, align: "leading", group: true, fill: "panel", fillOpacity: 1, cornerRadius: 18,
+                    stroke: "primary", strokeOpacity: 0.1, shadow: 16, shadowOpacity: 0.22, shadowY: 6
+                ),
+                common: AtomCommon(testID: testID, label: label, value: value, width: Double(width), padding: Double(inset)),
+                atom: .panel
             ) {
                 content
             }
-            .phShadow(color: .black.opacity(0.22), radius: 16, y: 6)
         }
 
         package init(testID: String, label: String, value: String, @PHViewBuilder content: () -> Content) {
@@ -744,11 +748,12 @@ package enum ComposerSuggestionMenu {
 
         package var body: some PHView {
             PHScrollViewReader { proxy in
-                PHScrollView {
-                    PHVStack(alignment: .leading, spacing: 0) { content }
-                        .hoverRevealScrollers()
+                AtomStack(common: AtomCommon(height: Double(min(contentHeight, maxListHeight)))) {
+                    AtomScroll(props: ScrollProps(directContent: true)) {
+                        AtomStack(props: StackProps(spacing: 0, align: "leading")) { content }
+                            .hoverRevealScrollers()
+                    }
                 }
-                .frame(height: min(contentHeight, maxListHeight))
                 .onChange(of: selectedID) { _, id in
                     if let id { proxy.scrollTo(id) }
                 }
@@ -794,8 +799,7 @@ package enum ComposerSuggestionMenu {
         package var body: some PHView {
             AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(minHeight: Double(rowHeight), fillWidth: true)) {
                 AtomIcon(props: IconProps(name: icon, size: 13, weight: "regular", color: "secondary"), common: AtomCommon(width: 18))
-                AtomText(props: TextProps(text: title, size: 13, color: "primary", lineLimit: 1, truncation: "tail"))
-                    .layoutPriority(1)
+                AtomText(props: TextProps(text: title, size: 13, color: "primary", lineLimit: 1, truncation: "tail"), common: AtomCommon(layoutPriority: 1))
                 if !detail.isEmpty {
                     AtomText(props: TextProps(text: detail, size: 13, color: detailColor, lineLimit: 1, truncation: "tail"))
                 }

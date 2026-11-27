@@ -92,7 +92,7 @@ private struct PluginEntryButton: PHView {
         }
         .popover(isPresented: $isPopoverPresented, arrowEdge: placement == .composerActions ? .top : .trailing) {
             PluginPropsScope {
-                PHGroup {
+                AtomStack(common: AtomCommon(width: Double(plugin.surfaceSize.width), height: Double(plugin.surfaceSize.height))) {
                     if plugin.builtIn {
                         // A built-in draws its own chrome; the container carries the
                         // surface's identifier, as an installed plugin's surface does.
@@ -103,7 +103,6 @@ private struct PluginEntryButton: PHView {
                         PluginSurfaceView(plugin: plugin, props: props(plugin), actions: popoverActions)
                     }
                 }
-                .frame(width: plugin.surfaceSize.width, height: plugin.surfaceSize.height)
                 .modifier(PluginConfirmationModifier(confirmations: confirmations))
             }
         }
@@ -281,7 +280,11 @@ package struct PluginInlineSlot: PHView {
 package struct PluginSectionContentKey: PHPreferenceKey {
     package static let defaultValue = true
 
-    package static func reduce(value: inout Bool, nextValue: () -> Bool) { value = nextValue() }
+    package static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        // Wrapping a plugin can contribute default values; only the plugin's
+        // explicit report can hide its section.
+        value = nextValue() && value
+    }
 
     package init() {}
 }
@@ -299,13 +302,14 @@ package struct PluginSectionSlot: PHView {
     @PHEnvironment(PluginRegistry.self) private var registry
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
+        AtomStack(props: StackProps(spacing: 0, align: "leading")) {
             PHForEach(registry.sectionPlugins(for: placement)) { plugin in
                 PluginSection(plugin: plugin, props: props, actions: actions)
             }
             // Only the placeholder: no plugin here has an entry button.
-            PluginSlot(placement: placement, props: props, actions: actions, add: add)
-                .padding(.top, 12)
+            AtomStack(common: AtomCommon(paddingTop: 12)) {
+                PluginSlot(placement: placement, props: props, actions: actions, add: add)
+            }
         }
     }
 
@@ -334,30 +338,30 @@ private struct PluginSection: PHView {
 
     var body: some PHView {
         let collapsed = isCollapsed
-        PHVStack(alignment: .leading, spacing: 0) {
+        let hidden = collapsed || !hasContent
+        AtomStack(props: StackProps(spacing: 0, align: "leading", group: true), common: AtomCommon(testID: "plugin-section-\(plugin.id)", paddingTop: hasContent ? 12 : 0)) {
             if hasContent {
                 AtomDisclosure(
                     props: DisclosureProps(title: plugin.name, collapsed: collapsed, toggleTestID: "plugin-section-\(plugin.id)-toggle"),
                     onToggle: { toggle(to: !collapsed) }
                 ) {}
             }
-            PluginPropsScope {
-                if plugin.builtIn {
-                    BuiltInPluginView(plugin: plugin, props: props(plugin), actions: actions)
-                } else {
-                    PluginSurfaceView(plugin: plugin, props: props(plugin), actions: actions)
+            // Every prop here is set whether or not it is collapsed, so collapsing
+            // never rebuilds the plugin's view.
+            AtomStack(props: StackProps(clip: true), common: AtomCommon(opacity: hidden ? 0 : 1)) {
+                AtomStack(props: StackProps(collapsed: hidden), common: AtomCommon(paddingTop: 6)) {
+                    PluginPropsScope {
+                        if plugin.builtIn {
+                            BuiltInPluginView(plugin: plugin, props: props(plugin), actions: actions)
+                        } else {
+                            PluginSurfaceView(plugin: plugin, props: props(plugin), actions: actions)
+                        }
+                    }
                 }
             }
-            .padding(.top, 6)
-            .frame(height: collapsed || !hasContent ? 0 : nil, alignment: .top)
-            .clipped()
-            .opacity(collapsed || !hasContent ? 0 : 1)
-            .allowsHitTesting(!collapsed && hasContent)
-            .accessibilityHidden(collapsed || !hasContent)
+            .allowsHitTesting(!hidden)
+            .accessibilityHidden(hidden)
         }
-        .padding(.top, hasContent ? 12 : 0)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("plugin-section-\(plugin.id)")
         // A section with nothing to show is not there at all.
         .accessibilityHidden(!hasContent)
         .onPreferenceChange(PluginSectionContentKey.self) { hasContent = $0 }

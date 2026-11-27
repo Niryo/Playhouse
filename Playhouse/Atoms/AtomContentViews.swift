@@ -7,6 +7,8 @@ package struct AtomStack<Content: PHView>: PHView {
     package var common = AtomCommon()
     /// The atom it is, for the debug highlight: a composite built on it (a Panel) passes its own.
     package var atom: AtomType = .stack
+    /// Told as the pointer enters (true) and leaves (false) it.
+    private var pointerChanged: ((Bool) -> Void)?
     @PHViewBuilder package var content: () -> Content
 
     package var body: some PHView {
@@ -14,45 +16,73 @@ package struct AtomStack<Content: PHView>: PHView {
             if !props.hasSurface {
                 stack
                     .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true)
+            } else if props.topCorners == true {
+                let radius = CGFloat(props.cornerRadius ?? 0)
+                surfaced(PHUnevenRoundedRectangle(topLeadingRadius: radius, topTrailingRadius: radius))
             } else if props.capsule == true {
                 surfaced(PHCapsule())
             } else {
                 surfaced(PHRoundedRectangle.phContinuous(cornerRadius: CGFloat(props.cornerRadius ?? 0)))
             }
         }
+        .modifier(Applied(when: props.collapsed != nil) {
+            $0.frame(height: props.collapsed == true ? 0 : nil, alignment: .top)
+        })
+        .atomFont(AtomFont.font(size: props.textSize, weight: nil))
+        .atomForeground(props.textColor)
+        .modifier(Applied(when: pointerChanged != nil || props.hitSurface == true) { $0.contentShape(PHRectangle()) })
+        .modifier(Applied(when: pointerChanged != nil) { $0.phOnHover { pointerChanged?($0) } })
         // A place an enclosing Scroll's `scrollTo` reaches.
         .modifier(Applied(when: props.scrollID != nil) { $0.id(props.scrollID ?? "") })
     }
 
     private var stack: some PHView {
         PHGroup {
-            if props.axis == "h" {
+            if props.layout == "form" {
+                PHForm(content: content).formStyle(.grouped)
+            } else if props.layout == "section" {
+                if let title = props.sectionTitle {
+                    PHSection(title, content: content)
+                } else {
+                    PHSection(content: content)
+                }
+            } else if props.axis == "h" {
                 PHHStack(alignment: verticalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
+            } else if props.axis == "z" {
+                PHZStack(alignment: AtomAlignment.alignment(props.align) ?? .center, content: content)
+            } else if props.lazy == true {
+                PHLazyVStack(alignment: horizontalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
             } else {
                 PHVStack(alignment: horizontalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
             }
         }
     }
 
+    private var material: PHMaterial? {
+        switch props.material {
+        case "regular": .regular
+        case "ultraThin": .ultraThin
+        case "bar": .bar
+        default: nil
+        }
+    }
+
     private func surfaced(_ shape: some PHInsettableShape) -> some PHView {
         let placement = surfacePlacement
-        let stretchesLeading = placement.horizontal == .leading
         var framed = common
         framed.minWidth = nil
         framed.minHeight = nil
-        if !stretchesLeading { framed.fillWidth = nil }
         let fill = props.hasFill
             ? PHAnyShapeStyle((AtomColor.style(props.fill) ?? PHAnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 1))
             : PHAnyShapeStyle(PHColor.clear)
         return stack
-            .atomFrame(framed)
-            .modifier(Applied(when: !stretchesLeading && common.fillWidth == true) {
-                $0.frame(maxWidth: .infinity, alignment: PHAlignment(horizontal: placement.horizontal, vertical: .center))
-            })
+            .atomFrame(framed, stretchAlignment: placement)
             .modifier(Applied(when: common.minWidth != nil || common.minHeight != nil) {
                 $0.frame(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) }, alignment: placement)
             })
             .background(fill, in: shape)
+            .modifier(Applied(when: material != nil) { $0.phMaterialBackground(material ?? .regular, in: shape) })
+            .modifier(Applied(when: props.clip == true) { $0.clipShape(shape) })
             .overlay {
                 if props.hasStroke {
                     shape.strokeBorder(
@@ -63,6 +93,12 @@ package struct AtomStack<Content: PHView>: PHView {
                     .allowsHitTesting(false)
                 }
             }
+            .modifier(Applied(when: props.shadow != nil) {
+                $0.phShadow(
+                    color: PHColor.black.opacity(props.shadowOpacity ?? 0.33), radius: CGFloat(props.shadow ?? 0),
+                    x: CGFloat(props.shadowX ?? 0), y: CGFloat(props.shadowY ?? 0)
+                )
+            })
             .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, summary: props.summary == true, frame: false)
     }
 
@@ -70,6 +106,7 @@ package struct AtomStack<Content: PHView>: PHView {
     /// at `align` across it, or centered both ways when `align` is center or
     /// unset (the default).
     private var surfacePlacement: PHAlignment {
+        if props.axis == "z" { return AtomAlignment.alignment(props.align) ?? .center }
         if props.axis == "h" {
             let vertical = verticalAlignment
             if vertical == .center { return .center }
@@ -96,10 +133,11 @@ package struct AtomStack<Content: PHView>: PHView {
         }
     }
 
-    package init(props: StackProps = StackProps(), common: AtomCommon = AtomCommon(), atom: AtomType = .stack, @PHViewBuilder content: @escaping () -> Content) {
+    package init(props: StackProps = StackProps(), common: AtomCommon = AtomCommon(), atom: AtomType = .stack, onHover: ((Bool) -> Void)? = nil, @PHViewBuilder content: @escaping () -> Content) {
         self.props = props
         self.common = common
         self.atom = atom
+        self.pointerChanged = onHover
         self.content = content
     }
 }
@@ -115,7 +153,7 @@ package struct AtomText: PHView {
         PHText(verbatim: string)
             .lineSpacing(CGFloat(props.lineSpacing ?? 0))
             .multilineTextAlignment(alignment)
-            .atomFont(AtomFont.font(size: props.size, weight: props.weight, design: props.design, monospacedDigits: props.monospacedDigits == true))
+            .atomFont(AtomFont.font(size: props.size, weight: props.weight, design: props.design, monospacedDigits: props.monospacedDigits == true, textStyle: props.textStyle))
             .tracking(CGFloat(props.tracking ?? 0))
             .atomForeground(props.color)
             .lineLimit(props.lineLimit)
@@ -123,6 +161,7 @@ package struct AtomText: PHView {
             .contentTransition(props.numeric == true ? .numericText() : .identity)
             .animation(props.numeric == true ? .default : nil, value: string)
             .fixedSize(horizontal: false, vertical: props.wrap == true)
+            .modifier(Applied(when: props.selectable == true) { $0.textSelection(.enabled) })
             .atomCommon(common, atom: .text)
     }
 
@@ -162,10 +201,16 @@ package struct AtomIcon: PHView {
                     .scaledToFit()
             } else {
                 PHImage(icon: props.name.map(PHIcon.init(named:)) ?? .questionmark)
-                    .atomFont(AtomFont.font(size: props.size, weight: props.weight))
+                    .atomFont(AtomFont.font(size: props.size, weight: props.weight, textStyle: props.textStyle))
             }
         }
-        .atomForeground(props.color)
+        .modifier(Applied(when: props.secondaryColor == nil) { $0.atomForeground(props.color) })
+        .modifier(Applied(when: props.secondaryColor != nil) {
+            $0.foregroundStyle(
+                AtomColor.style(props.color) ?? PHAnyShapeStyle(.primary),
+                AtomColor.style(props.secondaryColor, opacity: props.secondaryOpacity) ?? PHAnyShapeStyle(.secondary)
+            )
+        })
         .atomCommon(common, atom: .icon)
     }
 
@@ -180,13 +225,14 @@ package struct AtomIcon: PHView {
 package struct AtomImage: PHView {
     package var props: ImageProps
     package var common = AtomCommon()
+    private var suppliedImage: PHPlatformImage?
 
     /// The last load this view finished, for the URL it was made for.
     @PHState private var loaded: (url: URL, image: PHPlatformImage?)?
 
     package var body: some PHView {
         let source = props.source
-        let image = source.flatMap { source in
+        let image = suppliedImage ?? source.flatMap { source in
             loaded?.url == source ? loaded?.image : AtomImageLoader.shared.cached(source)
         }
         let width = (props.size ?? common.width).map { CGFloat($0) }
@@ -240,8 +286,14 @@ package struct AtomImage: PHView {
     }
 
     package init(props: ImageProps, common: AtomCommon = AtomCommon()) {
+        self.suppliedImage = nil
         self.props = props
         self.common = common
+    }
+    package init(platformImage: PHPlatformImage, contentMode: String = "fit", cornerRadius: Double? = nil, common: AtomCommon = AtomCommon()) {
+        self.props = ImageProps(url: "", contentMode: contentMode, cornerRadius: cornerRadius)
+        self.common = common
+        self.suppliedImage = platformImage
     }
 }
 
@@ -252,6 +304,7 @@ package struct AtomLabel: PHView {
     package var body: some PHView {
         PHLabel(props.text, icon: PHIcon(named: props.icon))
             .atomFont(AtomFont.font(size: props.size, weight: props.weight))
+            .modifier(Applied(when: props.lineLimit != nil) { $0.lineLimit(props.lineLimit) })
             .atomForeground(props.color)
             .atomCommon(common, atom: .label)
     }
@@ -268,7 +321,20 @@ package struct AtomButton<Content: PHView>: PHView {
     package let action: () -> Void
     @PHViewBuilder package var content: () -> Content
 
+    @PHViewBuilder
     package var body: some PHView {
+        if props.style == "menuItem", let title = props.title {
+            PHButton(title, role: role, action: action)
+                // no-pointer: native command menu tracking supplies feedback.
+                // no-tooltip: the native menu item uses SwiftUI help.
+                .disabled(props.disabled == true)
+                .help(common.help ?? title)
+        } else {
+            ordinaryButton
+        }
+    }
+
+    private var ordinaryButton: some PHView {
         styled
             .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
             .modifier(Applied(when: props.controlSize == "large") { $0.controlSize(.large) })

@@ -1,9 +1,18 @@
-// Stack: a row (axis "h") or column (axis "v", the default). It draws nothing
-// unless a surface prop (fill, fillOpacity, cornerRadius, capsule, stroke,
-// strokeOpacity, strokeWidth, dash) is set; then its frame and padding size
-// the surface and its children sit inside it.
+// Stack: a row (axis "h"), column (axis "v", the default) or layers (axis
+// "z"). It draws nothing unless a surface prop (fill, fillOpacity,
+// cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash, material,
+// clip, shadow) is set; then its frame and padding size the surface and its
+// children sit inside it. With an onHover handler it reports the pointer
+// entering and leaving it.
 function Box(label) {
   return h(Text, { size: 11, weight: "medium", color: "accent", padding: 6 }, label);
+}
+
+function HoverRow() {
+  var hovering = React.useState(false);
+  return h(Stack, { axis: "h", spacing: 6, fill: "primary", fillOpacity: hovering[0] ? 0.12 : 0.04, cornerRadius: 7, paddingX: 10, paddingY: 6,
+    combine: true, testID: "stack-hover", label: hovering[0] ? "hovering" : "idle", onHover: function (isHovering) { hovering[1](isHovering === true || isHovering === "true"); } },
+    h(Text, { size: 11, testID: "stack-hover-text" }, hovering[0] ? "Pointer over the row" : "Hover this row"));
 }
 
 Playhouse.render(h(Stack, { axis: "v", spacing: 16, align: "leading" },
@@ -36,4 +45,19 @@ Playhouse.render(h(Stack, { axis: "v", spacing: 16, align: "leading" },
   h(Text, { size: 11, color: "secondary" }, "Surface, align unset (center), fillWidth: true, minHeight: 60, strokeWidth: 2 (a border only)"),
   h(Stack, { axis: "h", spacing: 4, strokeWidth: 2, cornerRadius: 12, fillWidth: true, minHeight: 60, group: true, testID: "stack-surface-center" },
     h(Text, { size: 11, testID: "stack-surface-center-text" }, "Centered both ways"))
+,
+  h(Text, { size: 11, color: "secondary" }, "axis: \"z\", align: \"topTrailing\" (layers)"),
+  h(Stack, { axis: "z", align: "topTrailing", group: true, testID: "stack-layers" },
+    h(Stack, { fill: "accent", fillOpacity: 0.15, cornerRadius: 8, width: 120, height: 50, summary: true, label: "Base", testID: "stack-layers-base" }, h(Text, { size: 11 }, "Base")),
+    h(Stack, { fill: "red", capsule: true, width: 10, height: 10, decorative: true, testID: "stack-layers-badge" })),
+  h(Text, { size: 11, color: "secondary" }, "material: \"regular\", shadow: 8, shadowOpacity: 0.2, shadowY: 3, clip: true"),
+  h(Stack, { axis: "h", spacing: 6, material: "regular", cornerRadius: 12, clip: true, shadow: 8, shadowOpacity: 0.2, shadowY: 3,
+    paddingX: 12, paddingY: 8, summary: true, label: "Translucent, shadowed", testID: "stack-material" },
+    h(Text, { size: 11, weight: "medium" }, "Translucent, shadowed")),
+  h(Text, { size: 11, color: "secondary" }, "onHover (hover state the owner keeps)"),
+  h(HoverRow),
+  h(Text, { size: 11, color: "secondary" }, "maxWidth: 160, frameAlign: \"trailing\", paddingTop: 6, paddingLeading: 12"),
+  h(Stack, { axis: "h", fill: "primary", fillOpacity: 0.05, fillWidth: true, maxWidth: 160, frameAlign: "trailing", paddingTop: 6, paddingLeading: 12,
+    summary: true, label: "Trailing", testID: "stack-edges" },
+    h(Text, { size: 11, testID: "stack-edges-text" }, "Trailing"))
 ));

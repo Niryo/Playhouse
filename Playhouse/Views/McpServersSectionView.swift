@@ -52,68 +52,45 @@ package struct McpServersSectionView: PHView {
     }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
-            PHHStack(spacing: 8) {
-                SkillsPageSearchField(text: search, placeholder: "Search servers", testID: "mcp-search") { search = $0 }
-                AtomButton(
-                    props: ButtonProps(style: "bordered", controlSize: "small"),
-                    common: AtomCommon(testID: "new-mcp-server-button", help: "Add an MCP server that both Claude and Codex can use"),
-                    action: { setPanel(.creating) }
-                ) {
-                    AtomLabel(props: LabelProps(text: "New Server", icon: PHIcon.plus.name))
-                }
-            }
-            .padding(.horizontal, 20)
-            PHHStack(spacing: 8) {
-                SkillsPageAnchorBar(testID: "mcp-tab-picker", anchorPrefix: "mcp-anchor", anchors: anchors, onJump: jump)
-                PHSpacer()
-                if isCheckingStatus {
-                    PHHStack(spacing: 5) {
-                        PHProgressView().controlSize(.mini)
-                        PHText("Checking sign-in…").font(.system(size: 11)).foregroundStyle(.secondary)
+        AtomOverlay(common: AtomCommon(testID: "mcp-page")) {
+            AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading")) {
+                AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 20)) {
+                    SkillsPageSearchField(text: search, placeholder: "Search servers", testID: "mcp-search") { search = $0 }
+                    AtomButton(
+                        props: ButtonProps(style: "bordered", controlSize: "small"),
+                        common: AtomCommon(testID: "new-mcp-server-button", help: "Add an MCP server that both Claude and Codex can use"),
+                        action: { setPanel(.creating) }
+                    ) {
+                        AtomLabel(props: LabelProps(text: "New Server", icon: PHIcon.plus.name))
                     }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("mcp-checking-status")
                 }
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            if let errorMessage {
-                PHText(errorMessage)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("mcp-error")
-            }
-            PHDivider()
-            PHScrollViewReader { proxy in
-                PHScrollView {
-                    PHVStack(alignment: .leading, spacing: 18) {
-                        content
-                        PHText("MCP servers give agents tools. Hover one for its details, or click it to open it. Turning a server on or off reaches both agents on their next turn.")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 4)
-                            .accessibilityIdentifier("mcp-provider-timing")
+                AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 20, paddingY: 12)) {
+                    SkillsPageAnchorBar(testID: "mcp-tab-picker", anchorPrefix: "mcp-anchor", anchors: anchors, onJump: jump)
+                    AtomSpacer()
+                    if isCheckingStatus {
+                        AtomStack(props: StackProps(axis: "h", spacing: 5, combine: true), common: AtomCommon(testID: "mcp-checking-status")) {
+                            AtomSpinner(props: SpinnerProps(size: "mini"))
+                            AtomText(props: TextProps(text: "Checking sign-in…", size: 11, color: "secondary"))
+                        }
                     }
-                    .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .hoverRevealScrollers()
                 }
-                .onChange(of: scrollRequest) {
-                    guard let scrollTarget else { return }
-                    phWithAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(scrollTarget, anchor: .top) }
+                if let errorMessage {
+                    CatalogRows.pageError(errorMessage, testID: "mcp-error")
+                }
+                AtomDivider()
+                AtomScroll(props: ScrollProps(spacing: 18, inset: 20, scrollTo: scrollTarget, scrollRequest: scrollRequest), common: AtomCommon(testID: "mcp-list")) {
+                    content
+                    CatalogRows.footnote(
+                        "MCP servers give agents tools. Hover one for its details, or click it to open it. Turning a server on or off reaches both agents on their next turn.",
+                        testID: "mcp-provider-timing"
+                    )
                 }
             }
-            .accessibilityIdentifier("mcp-list")
+        } overlay: {
+            // A closed panel's removal transition can leave the overlay catching clicks over the
+            // header (New Server stopped responding after a create), so it takes hits only while open.
+            panels.allowsHitTesting(panel != nil)
         }
-        // A closed panel's removal transition can leave the overlay catching clicks over the
-        // header (New Server stopped responding after a create), so it takes hits only while open.
-        .overlay { panels.allowsHitTesting(panel != nil) }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("mcp-page")
         .task {
             // Opening the page asks both agents which servers need a sign-in, while the list loads.
             async let statuses: Void = checkStatus()
@@ -121,6 +98,8 @@ package struct McpServersSectionView: PHView {
             openFocus()
             await statuses
         }
+        // ATOM-GAP: an alert's and a confirmation dialog's actions and message must be native
+        // Buttons and Text (the system dialog reads them), and ButtonProps has no cancel role.
         .alert(
             "Delete \(pendingDelete?.name ?? "server")?",
             isPresented: PHBinding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
@@ -169,31 +148,31 @@ package struct McpServersSectionView: PHView {
     }
 
     private var panels: some PHView {
-        PHZStack {
+        AtomStack(props: StackProps(axis: "z")) {
             if panel != nil {
-                PHColor.black.opacity(0.18).ignoresSafeArea().transition(.opacity).zIndex(0)
+                CatalogRows.dimming.ignoresSafeArea().transition(.opacity).zIndex(0)
             }
             switch panel {
             case .editing(let server, let config):
-                McpServerEditorPanel(server: server, config: config, roots: [], onClose: { setPanel(nil) }) { _, edited, _, _ in
-                    let record = try await manager.updateMcpServer(taskID: task.id, serverID: server.id, config: edited)
-                    catalog = catalog?.replacing(record)
-                    await reload()
+                CatalogRows.panelSlot {
+                    McpServerEditorPanel(server: server, config: config, roots: [], onClose: { setPanel(nil) }) { _, edited, _, _ in
+                        let record = try await manager.updateMcpServer(taskID: task.id, serverID: server.id, config: edited)
+                        catalog = catalog?.replacing(record)
+                        await reload()
+                    }
+                    .id(server.id)
                 }
-                .id(server.id)
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
                 .transition(.move(edge: .bottom))
                 .zIndex(1)
             case .creating:
-                McpServerEditorPanel(server: nil, config: McpServerConfig(transport: .stdio), roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, config, scope, root in
-                    let record = try await manager.createMcpServer(taskID: task.id, name: name, config: config, scope: scope, root: root)
-                    jump(record.scope == .global ? "global" : "repo")
-                    search = ""
-                    await reload()
+                CatalogRows.panelSlot {
+                    McpServerEditorPanel(server: nil, config: McpServerConfig(transport: .stdio), roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, config, scope, root in
+                        let record = try await manager.createMcpServer(taskID: task.id, name: name, config: config, scope: scope, root: root)
+                        jump(record.scope == .global ? "global" : "repo")
+                        search = ""
+                        await reload()
+                    }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
                 .transition(.move(edge: .bottom))
                 .zIndex(1)
             case nil:
@@ -220,10 +199,10 @@ package struct McpServersSectionView: PHView {
         if let catalog {
             let counts = Dictionary(uniqueKeysWithValues: anchors.map { ($0.value, $0) })
             PHForEach(catalog.problems, id: \.path) { problem in
-                PHLabel("\(problem.path): \(problem.message)", icon: .exclamationmarkTriangle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("mcp-file-problem")
+                AtomLabel(
+                    props: LabelProps(text: "\(problem.path): \(problem.message)", icon: PHIcon.exclamationmarkTriangle.name, size: 12, color: "orange"),
+                    common: AtomCommon(testID: "mcp-file-problem")
+                )
             }
             group(counts["repo"]!, intro: "Servers in the task's repositories: .mcp.json, which Claude reads, and .codex/config.toml, which Codex reads. Playhouse passes each one to the agent that would not start it on its own.") {
                 if catalog.repositories.isEmpty {
@@ -231,10 +210,7 @@ package struct McpServersSectionView: PHView {
                 }
                 PHForEach(catalog.repositories, id: \.rootPath) { section in
                     let shown = filtered(section.servers)
-                    PHText(section.name)
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 4)
-                        .accessibilityIdentifier("mcp-repo-section-\(section.name)")
+                    CatalogRows.sectionHeader(section.name, testID: "mcp-repo-section-\(section.name)")
                     if shown.isEmpty {
                         emptyState(section.servers.isEmpty ? "No MCP servers in \(section.name)." : "No matching servers.", identifier: "mcp-empty-\(section.name)")
                     }
@@ -253,21 +229,19 @@ package struct McpServersSectionView: PHView {
                 connectors(catalog)
             }
         } else {
-            PHProgressView().frame(maxWidth: .infinity).accessibilityIdentifier("mcp-loading")
+            CatalogRows.loading(testID: "mcp-loading")
         }
     }
 
     /// One of the list's sections, which its anchor scrolls to.
-    private func group<Content: PHView>(_ anchor: SkillsPageAnchor, intro: String, @PHViewBuilder content: () -> Content) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 8) {
+    private func group<Content: PHView>(_ anchor: SkillsPageAnchor, intro: String, @PHViewBuilder content: @escaping () -> Content) -> some PHView {
+        AtomStack(
+            props: StackProps(axis: "v", spacing: 8, align: "leading", group: true, scrollID: anchor.value),
+            common: AtomCommon(testID: "mcp-group-\(anchor.value)", label: anchor.label, fillWidth: true)
+        ) {
             SkillsPageGroupHeader(label: anchor.label, count: anchor.count, intro: intro, introTestID: "mcp-intro-\(anchor.value)")
             content()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .id(anchor.value)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(anchor.label)
-        .accessibilityIdentifier("mcp-group-\(anchor.value)")
     }
 
     @PHViewBuilder
@@ -289,15 +263,9 @@ package struct McpServersSectionView: PHView {
         let known = Set(catalog.allServers.map(\.name))
         let query = searchQuery
         let others = (status?.claude ?? []).filter { !known.contains($0.name) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
-        PHText("Also started by Claude Code")
-            .font(.system(size: 12, weight: .semibold))
-            .padding(.horizontal, 4)
-            .padding(.top, 4)
+        CatalogRows.sectionHeader("Also started by Claude Code", paddingTop: 4)
         if status == nil {
-            PHText("Checking which claude.ai connectors and plugin servers Claude Code starts on its own…")
-                .font(.system(size: 12)).foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
-                .accessibilityIdentifier("mcp-connectors-hint")
+            CatalogRows.note("Checking which claude.ai connectors and plugin servers Claude Code starts on its own…", testID: "mcp-connectors-hint")
         } else if others.isEmpty {
             emptyState("Claude Code starts no other servers.", identifier: "mcp-connectors-empty")
         }
@@ -305,19 +273,15 @@ package struct McpServersSectionView: PHView {
             SkillsPageCard {
                 PHForEach(Array(others.enumerated()), id: \.element.name) { index, server in
                     if index > 0 { AtomDivider() }
-                    PHHStack(spacing: 8) {
-                        PHText(server.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                        PHSpacer()
+                    AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: "mcp-connector-\(server.name)", paddingX: 12, paddingY: 7)) {
+                        AtomText(props: TextProps(text: server.name, size: 13, weight: "medium", lineLimit: 1))
+                        AtomSpacer()
                         if server.needsSignIn {
                             connectorSignInButton(server)
                         } else {
-                            badge(server.status, icon: .circleFill, color: .secondary)
+                            CatalogRows.badge(server.status, icon: .circleFill, color: "secondary")
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("mcp-connector-\(server.name)")
                 }
             }
         }
@@ -326,54 +290,49 @@ package struct McpServersSectionView: PHView {
     /// A claude.ai connector is signed in to on claude.ai, not from Claude Code,
     /// so its badge opens the connectors settings; a plugin server is signed in
     /// to the same way as any other server.
-    @PHViewBuilder
     private func connectorSignInButton(_ server: McpProviderStatus) -> some PHView {
         let isConnector = server.name.hasPrefix("claude.ai ")
         let key = "\(server.name)|claude"
-        PHButton {
-            if isConnector {
-                openInBrowser("https://claude.ai/settings/connectors")
-            } else {
-                signIn(name: server.name, provider: .claude)
+        return AtomButton(
+            props: ButtonProps(disabled: signingIn.contains(key)),
+            common: AtomCommon(
+                testID: "mcp-connector-signin-\(server.name)",
+                help: isConnector ? "Connect \(server.name) in claude.ai's connector settings" : "Open your browser to sign in to \(server.name) for Claude"
+            ),
+            action: {
+                if isConnector {
+                    openInBrowser("https://claude.ai/settings/connectors")
+                } else {
+                    signIn(name: server.name, provider: .claude)
+                }
             }
-        } label: {
+        ) {
             signInLabel(.claude, waiting: signingIn.contains(key))
         }
-        .buttonStyle(.plain)
-        .disabled(signingIn.contains(key))
-        .plainButtonHoverPointer()
-        .nativeHelp(isConnector ? "Connect \(server.name) in claude.ai's connector settings" : "Open your browser to sign in to \(server.name) for Claude")
-        .accessibilityIdentifier("mcp-connector-signin-\(server.name)")
     }
 
     /// The provider's logo and a short "Sign in" so the badge fits the narrow
     /// modal's row; its accessibility label still names the provider. A row
     /// with a badge for each agent shows only the logos, so its name keeps room.
     private func signInLabel(_ provider: ConversationProvider, waiting: Bool, compact: Bool = false) -> some PHView {
-        PHHStack(spacing: 4) {
+        AtomStack(
+            props: StackProps(axis: "h", spacing: 4, fill: "orange", fillOpacity: 0.12, capsule: true, summary: true),
+            common: AtomCommon(label: waiting ? "Waiting for sign-in…" : "Sign in for \(provider.displayName)", fixedSize: true, paddingX: 6, paddingY: 2)
+        ) {
             if waiting {
-                PHProgressView().controlSize(.mini)
+                AtomSpinner(props: SpinnerProps(size: "mini"))
             } else {
                 AtomIcon(props: IconProps(asset: SkillsPageModel.logoAsset(provider), size: 10, color: "orange"), common: AtomCommon(width: 10, height: 10))
             }
             if !compact {
-                PHText(waiting ? "Waiting…" : "Sign in").lineLimit(1)
+                AtomText(props: TextProps(text: waiting ? "Waiting…" : "Sign in", size: 10, weight: "medium", color: "orange", lineLimit: 1))
             }
         }
-        .font(.caption2.weight(.medium))
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .foregroundStyle(.orange)
-        .background(PHColor.orange.opacity(0.12), in: PHCapsule())
-        .fixedSize()
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(waiting ? "Waiting for sign-in…" : "Sign in for \(provider.displayName)")
     }
 
     private func emptyState(_ text: String, identifier: String) -> some PHView {
-        PHText(text).font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 4).accessibilityIdentifier(identifier)
+        CatalogRows.note(text, testID: identifier)
     }
-
     private var searchQuery: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     /// The servers whose name or command line contains the search, like the Skills search.
@@ -412,120 +371,77 @@ package struct McpServersSectionView: PHView {
     private func row(_ server: McpServerRecord) -> some PHView {
         let key = Self.key(server)
         return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "leading", width: 280, inset: 12, hover: true), onDismiss: {}) {
-            PHHStack(alignment: .center, spacing: 8) {
-                PHHStack(alignment: .center, spacing: 8) {
-                    // Who starts the server leads its name, like a skill's row.
-                    if let mark = SkillsPageModel.providerMark(Set(server.providers), testID: "mcp-provider-\(key)") {
-                        ProviderMarkIcon(mark: mark)
-                    }
-                    PHText(server.name)
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("mcp-name-\(key)")
-                    if server.conflict {
-                        flag("Conflict", identifier: "mcp-conflict-\(key)")
-                    } else if server.issue != nil {
-                        flag("Problem", identifier: "mcp-problem-\(key)")
-                    }
-                    PHSpacer(minLength: 8)
+            CatalogRows.listRow(testID: "mcp-row-\(key)", hint: server.summary, onOpen: { openEditor(server) }) {
+                // Who starts the server leads its name, like a skill's row.
+                if let mark = SkillsPageModel.providerMark(Set(server.providers), testID: "mcp-provider-\(key)") {
+                    ProviderMarkIcon(mark: mark)
                 }
-                .overlay {
-                    PHPressArea(onClick: { openEditor(server) }, onLongPress: {})
+                AtomText(props: TextProps(text: server.name, size: 13, weight: "medium", lineLimit: 1), common: AtomCommon(testID: "mcp-name-\(key)"))
+                if server.conflict {
+                    CatalogRows.flag("Conflict", testID: "mcp-conflict-\(key)")
+                } else if server.issue != nil {
+                    CatalogRows.flag("Problem", testID: "mcp-problem-\(key)")
                 }
-                .buttonHoverPointer()
-                .accessibilityHint(server.summary)
-                // Outside the click-to-open area above, so the buttons get their own clicks.
+            } controls: {
+                // Outside the click-to-open area, so the buttons get their own clicks.
                 signInButtons(server, key: key)
                 if server.issue != nil, server.scope != .managed {
-                    PHButton { fix(server) } label: { PHLabel("Fix", icon: .wandAndStars) }
-                        .controlSize(.small)
-                        .disabled(isFixing)
-                        .buttonHoverPointer()
-                        .nativeHelp("Open a task whose agent fixes \(server.name)")
-                        .accessibilityIdentifier("mcp-fix-\(key)")
+                    CatalogRows.fixButton(name: server.name, testID: "mcp-fix-\(key)", disabled: isFixing) { fix(server) }
                 }
                 if server.scope != .managed {
-                    PHToggle("Enabled", isOn: PHBinding(get: { isEnabled(server) }, set: { setEnabled(server, $0) }))
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .labelsHidden()
-                        .buttonHoverPointer()
-                        .nativeHelp(isEnabled(server) ? "Turn the server off in Playhouse sessions" : "Turn the server on in Playhouse sessions")
-                        .accessibilityLabel("\(server.name) enabled")
-                        .accessibilityIdentifier("mcp-toggle-\(key)")
+                    CatalogRows.enabledToggle(
+                        isOn: isEnabled(server), name: server.name, noun: "server", testID: "mcp-toggle-\(key)",
+                        onToggle: { setEnabled(server, !isEnabled(server)) }
+                    )
                 }
                 actions(server, key: key)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("mcp-row-\(key)")
         } content: {
             hint(server, key: key)
         }
-    }
-
-    private func flag(_ text: String, identifier: String) -> some PHView {
-        PHImage(icon: .exclamationmarkTriangleFill)
-            .font(.system(size: 11))
-            .foregroundStyle(.orange)
-            .nativeHelp(text)
-            .accessibilityLabel(text)
-            .accessibilityIdentifier(identifier)
     }
 
     /// A server's details: its command line or URL, its transport, its
     /// variables, any problem, and where it is defined. The agents that start
     /// it show on the row.
     private func hint(_ server: McpServerRecord, key: String) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 6) {
-            PHText(server.name).font(.system(size: 13, weight: .semibold))
-            PHText(server.summary)
-                .font(.system(size: 11).monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .truncationMode(.middle)
-                .accessibilityIdentifier("mcp-summary-\(key)")
-            PHHStack(spacing: 4) {
-                badge(server.transport == .stdio ? "Local" : server.transport.rawValue.uppercased(),
-                      icon: server.transport == .stdio ? .terminal : .network, color: .purple)
-                    .accessibilityIdentifier("mcp-transport-\(key)")
+        AtomStack(props: StackProps(axis: "v", spacing: 6, align: "leading", group: true), common: AtomCommon(testID: "mcp-hint-\(key)")) {
+            AtomText(props: TextProps(text: server.name, size: 13, weight: "semibold"))
+            AtomText(
+                props: TextProps(text: server.summary, size: 11, design: "monospaced", color: "secondary", lineLimit: 3, truncation: "middle"),
+                common: AtomCommon(testID: "mcp-summary-\(key)")
+            )
+            AtomStack(props: StackProps(axis: "h", spacing: 4)) {
+                CatalogRows.badge(
+                    server.transport == .stdio ? "Local" : server.transport.rawValue.uppercased(),
+                    icon: server.transport == .stdio ? .terminal : .network, color: "purple", testID: "mcp-transport-\(key)"
+                )
                 if server.availableOutsidePlayhouse {
-                    badge("Both CLIs", icon: .checkmarkSeal, color: .blue)
-                        .accessibilityIdentifier("mcp-native-\(key)")
+                    CatalogRows.badge("Both CLIs", icon: .checkmarkSeal, color: "blue", testID: "mcp-native-\(key)")
                 }
             }
             if !server.envNames.isEmpty || !server.headerNames.isEmpty {
-                PHText(Self.variableNames(server))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("mcp-env-\(key)")
+                CatalogRows.detail(Self.variableNames(server), testID: "mcp-env-\(key)")
             }
             if let issue = server.issue {
-                PHText(issue).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("mcp-issue-\(key)")
+                CatalogRows.detail(issue, color: "orange", testID: "mcp-issue-\(key)")
             }
             if let limitation = server.limitation {
-                PHText(limitation).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("mcp-limitation-\(key)")
+                CatalogRows.detail(limitation, testID: "mcp-limitation-\(key)")
             }
             if !isEnabled(server), !server.alwaysOnFor.isEmpty {
-                PHText("\(ConversationProvider.names(server.alwaysOnFor)) still \(server.alwaysOnFor.count == 1 ? "starts" : "start") it from its own configuration, so turning it off applies to the other agents only. Delete it to stop it everywhere.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("mcp-always-on-\(key)")
+                CatalogRows.detail(
+                    "\(ConversationProvider.names(server.alwaysOnFor)) still \(server.alwaysOnFor.count == 1 ? "starts" : "start") it from its own configuration, so turning it off applies to the other agents only. Delete it to stop it everywhere.",
+                    color: "orange", testID: "mcp-always-on-\(key)"
+                )
             } else if let note = Self.sharedNote(server) {
-                PHText(note).font(.system(size: 11)).foregroundStyle(.secondary).accessibilityIdentifier("mcp-shared-\(key)")
+                CatalogRows.detail(note, wrap: false, testID: "mcp-shared-\(key)")
             }
-            PHText(server.locations.map(\.layout.displayName).joined(separator: " · "))
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("mcp-location-\(key)")
+            AtomText(
+                props: TextProps(text: server.locations.map(\.layout.displayName).joined(separator: " · "), size: 10, color: "tertiary", wrap: true),
+                common: AtomCommon(testID: "mcp-location-\(key)")
+            )
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("mcp-hint-\(key)")
     }
 
     /// One button per agent that needs the server's sign-in: the label that says
@@ -534,70 +450,56 @@ package struct McpServersSectionView: PHView {
     private func signInButtons(_ server: McpServerRecord, key: String) -> some PHView {
         let providers = signInNeeded(server)
         if !providers.isEmpty {
-            PHHStack(spacing: 6) {
+            AtomStack(props: StackProps(axis: "h", spacing: 6)) {
                 PHForEach(providers) { provider in
                     let waiting = signingIn.contains("\(server.name)|\(provider.rawValue)")
-                    PHButton { signIn(name: server.name, provider: provider) } label: {
+                    AtomButton(
+                        props: ButtonProps(disabled: waiting),
+                        common: AtomCommon(
+                            testID: "mcp-signin-\(key)-\(provider.rawValue)",
+                            help: "Open your browser to sign in to \(server.name) for \(provider.displayName)"
+                        ),
+                        action: { signIn(name: server.name, provider: provider) }
+                    ) {
                         signInLabel(provider, waiting: waiting, compact: providers.count > 1)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(waiting)
-                    .plainButtonHoverPointer()
-                    .nativeHelp("Open your browser to sign in to \(server.name) for \(provider.displayName)")
-                    .accessibilityIdentifier("mcp-signin-\(key)-\(provider.rawValue)")
                 }
             }
         }
-    }
-
-    private func badge(_ text: String, icon: PHIcon, color: PHColor) -> some PHView {
-        PHLabel(text, icon: icon)
-            .font(.caption2.weight(.medium))
-            .lineLimit(1)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .foregroundStyle(color)
-            .background(color.opacity(0.12), in: PHCapsule())
     }
 
     private func actions(_ server: McpServerRecord, key: String) -> some PHView {
-        PHMenu {
-            PHButton(server.editable ? "Edit…" : "View…") { openEditor(server) }
-                .help(server.editable ? "Edit the server" : "Read the server's definition")
-                .accessibilityIdentifier("mcp-edit-\(key)")
-            if let path = server.locations.first?.path {
-                PHButton("Reveal in Finder") { Platform.services.revealInFileBrowser([URL(fileURLWithPath: path)]) }
-                    .help("Show the file that defines the server in Finder")
-                    .accessibilityIdentifier("mcp-reveal-\(key)")
-            }
-            if server.editable {
-                if server.linkable {
-                    PHDivider()
-                    PHButton("Make Available Outside Playhouse…") { pendingLink = server }
-                        .help("Write the server into the configuration of the CLI that doesn't start it yet")
-                        .accessibilityIdentifier("mcp-link-\(key)")
-                }
-                PHDivider()
-                PHButton("Delete…", role: .destructive) { pendingDelete = server }
-                    .help("Remove the server from every file that defines it")
-                    .accessibilityIdentifier("mcp-delete-\(key)")
-            }
-        } label: {
-            PHImage(icon: .ellipsis)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 24, height: 24)
-                .contentShape(PHRectangle())
+        var items = [[
+            MenuProps.Item(
+                id: "edit", title: server.editable ? "Edit…" : "View…",
+                help: server.editable ? "Edit the server" : "Read the server's definition", testID: "mcp-edit-\(key)"
+            ),
+        ]]
+        let path = server.locations.first?.path
+        if path != nil {
+            items[0].append(MenuProps.Item(id: "reveal", title: "Reveal in Finder", help: "Show the file that defines the server in Finder", testID: "mcp-reveal-\(key)"))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .buttonHoverPointer()
-        .nativeHelp("More actions for \(server.name)")
-        .accessibilityLabel("Actions for \(server.name)")
-        .accessibilityIdentifier("mcp-actions-\(key)")
+        if server.editable {
+            if server.linkable {
+                items.append([MenuProps.Item(
+                    id: "link", title: "Make Available Outside Playhouse…",
+                    help: "Write the server into the configuration of the CLI that doesn't start it yet", testID: "mcp-link-\(key)"
+                )])
+            }
+            items.append([MenuProps.Item(
+                id: "delete", title: "Delete…", destructive: true, help: "Remove the server from every file that defines it", testID: "mcp-delete-\(key)"
+            )])
+        }
+        return CatalogRows.actionsMenu(name: server.name, testID: "mcp-actions-\(key)", items: items) { choice in
+            switch choice {
+            case "edit": openEditor(server)
+            case "reveal": if let path { Platform.services.revealInFileBrowser([URL(fileURLWithPath: path)]) }
+            case "link": pendingLink = server
+            case "delete": pendingDelete = server
+            default: break
+            }
+        }
     }
-
     private func openEditor(_ server: McpServerRecord) {
         perform(reloading: false) {
             let config = try await manager.mcpServerConfig(taskID: task.id, serverID: server.id)
@@ -785,119 +687,99 @@ private struct McpServerEditorPanel: PHView {
 
     var body: some PHView {
         SkillPanel(identifier: "mcp-editor-panel") {
-            PHVStack(alignment: .leading, spacing: 10) {
-                PHHStack(spacing: 10) {
-                    PHImage(icon: .puzzlepieceExtension)
-                        .font(.title2)
-                        .foregroundStyle(.tint)
-                    PHText(server?.name ?? "New MCP Server")
-                        .font(.title2.weight(.semibold))
-                        .accessibilityIdentifier("mcp-editor-title")
-                    PHSpacer()
+            AtomStack(props: StackProps(axis: "v", spacing: 10, align: "leading")) {
+                AtomStack(props: StackProps(axis: "h", spacing: 10)) {
+                    CatalogRows.panelIcon(.puzzlepieceExtension)
+                    CatalogRows.panelTitle(server?.name ?? "New MCP Server", testID: "mcp-editor-title")
+                    AtomSpacer()
                 }
                 // The controls get their own rows so the panel fits the narrow modal.
-                PHVStack(alignment: .leading, spacing: 8) {
+                AtomStack(props: StackProps(axis: "v", spacing: 8, align: "leading")) {
                     if server == nil {
-                        PHPicker("Save to", selection: $destination) {
-                            PHText("Global").tag("global")
-                            PHForEach(roots, id: \.rootPath) { root in PHText(root.name).tag(root.rootPath) }
-                        }
-                        .buttonHoverPointer()
-                        .fixedSize()
-                        .accessibilityIdentifier("mcp-editor-scope")
+                        CatalogRows.picker(
+                            "Save to", style: "menu",
+                            options: [SegmentedProps.Option(value: "global", label: "Global")] + roots.map { SegmentedProps.Option(value: $0.rootPath, label: $0.name) },
+                            selected: destination, testID: "mcp-editor-scope"
+                        ) { destination = $0 }
                     }
-                    PHPicker("Kind", selection: $kind) {
-                        PHForEach(Kind.allCases) { kind in PHText(kind.rawValue).tag(kind) }
-                    }
-                    .buttonHoverPointer()
-                    .pickerStyle(.segmented)
-                    .fixedSize()
-                    .disabled(!editable)
-                    .accessibilityIdentifier("mcp-editor-kind")
+                    CatalogRows.picker(
+                        "Kind", options: Kind.allCases.map { SegmentedProps.Option(value: $0.rawValue, label: $0.rawValue) },
+                        selected: kind.rawValue, disabled: !editable, testID: "mcp-editor-kind"
+                    ) { kind = Kind(rawValue: $0) ?? kind }
                 }
-                PHText(target)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier("mcp-editor-target")
+                AtomText(
+                    props: TextProps(text: target, size: 12, color: "secondary", lineLimit: 2, truncation: "middle", selectable: true),
+                    common: AtomCommon(testID: "mcp-editor-target")
+                )
                 if server == nil {
-                    PHTextField("server-name", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Name")
-                        .accessibilityIdentifier("mcp-editor-name")
+                    AtomTextField(
+                        props: TextFieldProps(text: name, placeholder: "server-name", style: "rounded"),
+                        common: AtomCommon(testID: "mcp-editor-name", label: "Name"),
+                        onChange: { name = $0 }
+                    )
                 }
             }
         } content: {
-            PHVStack(alignment: .leading, spacing: 8) {
+            AtomStack(props: StackProps(axis: "v", spacing: 8, align: "leading")) {
                 switch kind {
                 case .local:
-                    field("Command") {
-                        PHTextField("npx", text: $command)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.body.monospaced())
-                            .disabled(!editable)
-                            .accessibilityLabel("Command")
-                            .accessibilityIdentifier("mcp-editor-command")
+                    CatalogRows.field("Command") {
+                        AtomTextField(
+                            props: TextFieldProps(text: command, placeholder: "npx", style: "rounded", size: 13, design: "monospaced"),
+                            common: AtomCommon(testID: "mcp-editor-command", label: "Command"),
+                            onChange: { command = $0 }
+                        )
+                        .disabled(!editable)
                     }
-                    field("Arguments, one per line") {
+                    CatalogRows.field("Arguments, one per line") {
                         PHNativeTextEditor(text: $arguments, identifier: "mcp-editor-args", isEditable: editable)
                     }
-                    field("Environment, one NAME=value per line. ${NAME} passes a variable through.") {
+                    CatalogRows.field("Environment, one NAME=value per line. ${NAME} passes a variable through.") {
                         PHNativeTextEditor(text: $environment, identifier: "mcp-editor-env", isEditable: editable)
                     }
                 case .remote:
-                    field("URL") {
-                        PHTextField("https://example.com/mcp", text: $url)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.body.monospaced())
-                            .disabled(!editable)
-                            .accessibilityLabel("URL")
-                            .accessibilityIdentifier("mcp-editor-url")
+                    CatalogRows.field("URL") {
+                        AtomTextField(
+                            props: TextFieldProps(text: url, placeholder: "https://example.com/mcp", style: "rounded", size: 13, design: "monospaced"),
+                            common: AtomCommon(testID: "mcp-editor-url", label: "URL"),
+                            onChange: { url = $0 }
+                        )
+                        .disabled(!editable)
                     }
-                    field("Headers, one Name: value per line. Authorization: Bearer ${TOKEN} reads a token from the environment.") {
+                    CatalogRows.field("Headers, one Name: value per line. Authorization: Bearer ${TOKEN} reads a token from the environment.") {
                         PHNativeTextEditor(text: $headers, identifier: "mcp-editor-headers", isEditable: editable)
                     }
                 }
             }
         } footer: {
-            PHHStack {
+            AtomStack(props: StackProps(axis: "h")) {
                 if let errorMessage {
-                    PHText(errorMessage).foregroundStyle(.red).font(.callout).accessibilityIdentifier("mcp-editor-error")
+                    CatalogRows.footerMessage(errorMessage, color: "red", testID: "mcp-editor-error")
                 } else if !editable {
-                    PHText(server?.scope == .managed
-                         ? "Your organization manages this server, so it is read-only."
-                         : server?.editable == false
-                         ? "It is written inline in config.toml, so Playhouse leaves it to you. Edit it there."
-                         : "Playhouse edits local and HTTP servers; edit this SSE server in its file.")
-                        .accessibilityIdentifier("mcp-editor-read-only")
-                        .font(.callout).foregroundStyle(.secondary)
+                    CatalogRows.footerMessage(
+                        server?.scope == .managed
+                            ? "Your organization manages this server, so it is read-only."
+                            : server?.editable == false
+                            ? "It is written inline in config.toml, so Playhouse leaves it to you. Edit it there."
+                            : "Playhouse edits local and HTTP servers; edit this SSE server in its file.",
+                        color: "secondary", testID: "mcp-editor-read-only"
+                    )
                 }
-                PHSpacer()
-                PHButton(editable ? "Cancel" : "Close", action: onClose)
-                    .buttonHoverPointer()
-                    .shortcutHelp(editable ? "Discard changes" : "Close the server", shortcut: "cancel")
-                    .accessibilityIdentifier("mcp-editor-cancel")
+                AtomSpacer()
+                CatalogRows.panelButton(
+                    editable ? "Cancel" : "Close", testID: "mcp-editor-cancel",
+                    help: editable ? "Discard changes" : "Close the server", shortcut: "cancel", action: onClose
+                )
                 if editable {
-                    PHButton(server == nil ? "Create" : "Save") { save() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSaving)
-                        .buttonHoverPointer()
-                        .shortcutHelp(server == nil ? "Create the server" : "Save the server", shortcut: AppShortcut.save)
-                        .accessibilityIdentifier("mcp-editor-save")
+                    CatalogRows.panelButton(
+                        server == nil ? "Create" : "Save", testID: "mcp-editor-save",
+                        help: server == nil ? "Create the server" : "Save the server", shortcut: AppShortcut.save,
+                        prominent: true, disabled: isSaving
+                    ) { save() }
                 }
             }
         }
     }
-
-    private func field<Content: PHView>(_ title: String, @PHViewBuilder content: () -> Content) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 4) {
-            PHText(title).font(.subheadline.weight(.semibold))
-            content()
-        }
-    }
-
     private static func lines(_ text: String) -> [String] {
         text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
@@ -933,6 +815,159 @@ private struct McpServerEditorPanel: PHView {
             } catch {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+}
+
+/// The atom compositions the MCP page and its editor are built from. The Rules
+/// page (RulesPageView.swift) builds the same rows, forms and headers.
+enum CatalogRows {
+    /// The page's error line, under its header.
+    static func pageError(_ text: String, testID: String) -> some PHView {
+        AtomText(props: TextProps(text: text, size: 12, color: "red"), common: AtomCommon(testID: testID, fillWidth: true, paddingX: 20, paddingBottom: 4))
+    }
+
+    /// The small print under the list.
+    static func footnote(_ text: String, testID: String) -> some PHView {
+        AtomText(props: TextProps(text: text, size: 10, color: "tertiary"), common: AtomCommon(testID: testID, paddingX: 4))
+    }
+
+    /// A heading over a run of rows, such as a repository's name.
+    static func sectionHeader(_ text: String, testID: String? = nil, paddingTop: Double? = nil) -> some PHView {
+        AtomText(props: TextProps(text: text, size: 12, weight: "semibold"), common: AtomCommon(testID: testID, paddingX: 4, paddingTop: paddingTop))
+    }
+
+    /// A line in the list where rows would be: an empty section, or what is still loading.
+    static func note(_ text: String, testID: String) -> some PHView {
+        AtomText(props: TextProps(text: text, size: 12, color: "secondary"), common: AtomCommon(testID: testID, paddingX: 4))
+    }
+
+    static func loading(testID: String) -> some PHView {
+        AtomSpinner(props: SpinnerProps(size: "regular"), common: AtomCommon(testID: testID, fillWidth: true, frameAlign: "center"))
+    }
+
+    /// A list row on one line: what a click opens (the name and its marks),
+    /// then the controls, which keep their own clicks.
+    static func listRow<Lead: PHView, Controls: PHView>(
+        testID: String, hint: String, onOpen: @escaping () -> Void,
+        @PHViewBuilder lead: @escaping () -> Lead, @PHViewBuilder controls: @escaping () -> Controls
+    ) -> some PHView {
+        AtomStack(props: StackProps(axis: "h", spacing: 8, group: true), common: AtomCommon(testID: testID, fillWidth: true, paddingX: 12, paddingY: 6)) {
+            AtomPressArea(props: PressAreaProps(pointer: true), common: AtomCommon(hint: hint), onPress: onOpen, onLongPress: {}) {
+                AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                    lead()
+                    AtomSpacer(props: SpacerProps(minLength: 8))
+                }
+            }
+            controls()
+        }
+    }
+
+    /// The warning mark after a row's name.
+    static func flag(_ text: String, testID: String) -> some PHView {
+        AtomIcon(props: IconProps(name: PHIcon.exclamationmarkTriangleFill.name, size: 11, color: "orange"), common: AtomCommon(testID: testID, label: text, help: text))
+    }
+
+    static func fixButton(name: String, testID: String, disabled: Bool, action: @escaping () -> Void) -> some PHView {
+        AtomButton(
+            props: ButtonProps(style: "automatic", disabled: disabled, controlSize: "small"),
+            common: AtomCommon(testID: testID, help: "Open a task whose agent fixes \(name)"),
+            action: action
+        ) {
+            AtomLabel(props: LabelProps(text: "Fix", icon: PHIcon.wandAndStars.name))
+        }
+    }
+
+    /// A row's switch; its label names what it turns on.
+    static func enabledToggle(isOn: Bool, name: String, noun: String, testID: String, onToggle: @escaping () -> Void) -> some PHView {
+        AtomToggle(
+            props: ToggleProps(isOn: isOn, size: "mini"),
+            common: AtomCommon(
+                testID: testID, label: "\(name) enabled",
+                help: isOn ? "Turn the \(noun) off in Playhouse sessions" : "Turn the \(noun) on in Playhouse sessions"
+            ),
+            onToggle: onToggle
+        )
+    }
+
+    /// A row's "…" menu.
+    static func actionsMenu(name: String, testID: String, items: [[MenuProps.Item]], onMenu: @escaping (String) -> Void) -> some PHView {
+        AtomMenu(
+            props: MenuProps(icon: PHIcon.ellipsis.name, size: 13, weight: "semibold", items: items),
+            common: AtomCommon(testID: testID, label: "Actions for \(name)", help: "More actions for \(name)", width: 24, height: 24),
+            onMenu: onMenu
+        )
+    }
+
+    /// A chip in a row's hint.
+    static func badge(_ text: String, icon: PHIcon, color: String, testID: String? = nil) -> some PHView {
+        AtomStack(props: StackProps(fill: color, fillOpacity: 0.12, capsule: true), common: AtomCommon(testID: testID, paddingX: 6, paddingY: 2)) {
+            AtomLabel(props: LabelProps(text: text, icon: icon.name, size: 10, weight: "medium", color: color, lineLimit: 1))
+        }
+    }
+
+    /// A line of a row's hint.
+    static func detail(_ text: String, color: String = "secondary", wrap: Bool = true, testID: String) -> some PHView {
+        AtomText(props: TextProps(text: text, size: 11, color: color, wrap: wrap ? true : nil), common: AtomCommon(testID: testID))
+    }
+
+    /// What dims the list under an open panel.
+    static var dimming: some PHView {
+        AtomStack(props: StackProps(fill: "black", fillOpacity: 0.18), common: AtomCommon(fillWidth: true, fillHeight: true)) { PHEmptyView() }
+    }
+
+    /// Where an open panel sits over the list.
+    static func panelSlot<Content: PHView>(@PHViewBuilder content: @escaping () -> Content) -> some PHView {
+        AtomStack(common: AtomCommon(paddingX: 20, paddingTop: 20), content: content)
+    }
+
+    static func panelIcon(_ icon: PHIcon) -> some PHView {
+        AtomIcon(props: IconProps(name: icon.name, size: 17, color: "accent"))
+    }
+
+    static func panelTitle(_ text: String, testID: String) -> some PHView {
+        AtomText(props: TextProps(text: text, size: 17, weight: "semibold"), common: AtomCommon(testID: testID))
+    }
+
+    /// A picker with its title before it, the way a native picker shows its label.
+    static func picker(
+        _ title: String, style: String? = nil, options: [SegmentedProps.Option], selected: String, disabled: Bool = false,
+        testID: String, onChange: @escaping (String) -> Void
+    ) -> some PHView {
+        AtomStack(props: StackProps(axis: "h")) {
+            AtomText(props: TextProps(text: title, color: disabled ? "tertiary" : nil), common: AtomCommon(decorative: true))
+            AtomSegmented(
+                props: SegmentedProps(options: options, selected: selected, disabled: disabled ? true : nil, style: style),
+                common: AtomCommon(testID: testID, label: title),
+                onChange: onChange
+            )
+        }
+    }
+
+    /// A titled field of a form: its title over its control.
+    static func field<Content: PHView>(_ title: String, @PHViewBuilder content: @escaping () -> Content) -> some PHView {
+        AtomStack(props: StackProps(axis: "v", spacing: 4, align: "leading")) {
+            AtomText(props: TextProps(text: title, size: 11, weight: "semibold"))
+            content()
+        }
+    }
+
+    /// The panel footer's error or read-only note.
+    static func footerMessage(_ text: String, color: String, testID: String?) -> some PHView {
+        AtomText(props: TextProps(text: text, size: 12, color: color), common: AtomCommon(testID: testID))
+    }
+
+    /// A panel footer's Cancel, Save or Create.
+    static func panelButton(
+        _ title: String, testID: String, help: String, shortcut: String, prominent: Bool = false, disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some PHView {
+        AtomButton(
+            props: ButtonProps(style: prominent ? "prominent" : "automatic", disabled: disabled ? true : nil, shortcut: shortcut),
+            common: AtomCommon(testID: testID, help: help),
+            action: action
+        ) {
+            AtomText(props: TextProps(text: title))
         }
     }
 }

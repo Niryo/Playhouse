@@ -34,28 +34,6 @@ package struct TaskConversationView: PHView {
         }
     }
 
-    /// An outlined pencil with a wide body, drawn on a 24-point grid. The SF Symbol pencil
-    /// stays a thin stick at small sizes, which does not read as an edit button.
-    package struct EditPencilShape: PHShape {
-        package func path(in rect: CGRect) -> PHPath {
-            let scale = min(rect.width, rect.height) / 24
-            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-                CGPoint(x: rect.minX + x * scale, y: rect.minY + y * scale)
-            }
-            var path = PHPath()
-            path.move(to: point(4, 16.5))
-            path.addLine(to: point(15.5, 5))
-            path.addLine(to: point(19, 8.5))
-            path.addLine(to: point(7.5, 20))
-            path.addLine(to: point(3.5, 20.5))
-            path.closeSubpath()
-            path.move(to: point(13, 7.5))
-            path.addLine(to: point(16.5, 11))
-            return path
-        }
-
-        package init() {}
-    }
 
     package struct GoalAchievementTimelineEntry: Codable, Identifiable, Equatable {
         package let id: String
@@ -687,58 +665,58 @@ package struct TaskConversationView: PHView {
 
     /// The first part of `body`'s modifier chain, split off so the type checker handles each part in time.
     private var conversationBase: some PHView {
-        PHGroup {
+        AtomStack(props: StackProps(fill: "window")) {
             if !hasTaskSidebar {
                 // The standalone chat sidebar reuses only the conversation transcript/composer,
                 // not the repo-specific "Changes" sidebar a real task's worktree needs.
-                conversationPanel
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) { conversationPanel }
             } else {
-                PHHStack(spacing: 0) {
-                    taskSidebar
+                AtomStack(props: StackProps(clip: true)) {
+                    // The terminal floats over the conversation's right edge rather than taking
+                    // its width, so opening it never reflows the transcript or the composer.
+                    AtomOverlay(props: OverlayProps(align: "trailing")) {
+                        AtomStack(props: StackProps(axis: "h", spacing: 0)) {
+                            taskSidebar
 
-                    PHRectangle()
-                        .fill(PHColor.primary.opacity(0.08))
-                        .frame(width: 1)
+                            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.08), common: AtomCommon(width: 1, fillHeight: true)) {}
 
-                    conversationPanel
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                // The terminal floats over the conversation's right edge rather than taking
-                // its width, so opening it never reflows the transcript or the composer.
-                .overlay(alignment: .trailing) {
-                    if isTerminalPresented {
-                        PHGeometryReader { geometry in
-                            let available = conversationWidth(in: geometry.size.width)
-                            let width = TerminalPanelLayout.clampedWidth(CGFloat(terminalPanelWidth), available: available)
-                            PHHStack(spacing: 0) {
-                                terminalResizeHandle(width: width, available: available)
-                                PHNativeTerminalPanel(
-                                    session: terminalSession,
-                                    workspaceManager: workspaceManager,
-                                    onClose: { setTerminalPresented(false) }
-                                )
-                            }
-                            .frame(width: width)
-                            .phShadow(color: .black.opacity(0.22), radius: 12, x: -4, y: 0)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                            AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) { conversationPanel }
                         }
-                        .transition(.move(edge: .trailing))
+                    } overlay: {
+                        if isTerminalPresented {
+                            PHGeometryReader { geometry in
+                                let available = conversationWidth(in: geometry.size.width)
+                                let width = TerminalPanelLayout.clampedWidth(CGFloat(terminalPanelWidth), available: available)
+                                AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "trailing")) {
+                                    AtomStack(
+                                        props: StackProps(axis: "h", spacing: 0, shadow: 12, shadowOpacity: 0.22, shadowX: -4, shadowY: 0),
+                                        common: AtomCommon(width: Double(width))
+                                    ) {
+                                        terminalResizeHandle(width: width, available: available)
+                                        PHNativeTerminalPanel(
+                                            session: terminalSession,
+                                            workspaceManager: workspaceManager,
+                                            onClose: { setTerminalPresented(false) }
+                                        )
+                                    }
+                                }
+                            }
+                            .transition(.move(edge: .trailing))
+                        }
                     }
                 }
-                .clipped()
             }
         }
-        .background(WorkspaceTheme.windowBackground)
         .alert("Stop background work?", isPresented: $confirmsStoppingBackgroundWork, presenting: backgroundStopConfirmationID) { confirmationID in
+            // ATOM-GAP: an alert's actions must be plain Buttons with roles (Cancel has no atom role).
             PHButton("Keep Running", role: .cancel) {}
-                .buttonHoverPointer()
-                .nativeHelp("Leave the turn and its background work running")
-            PHButton("Stop All", role: .destructive) { pauseResponse(confirmationID: confirmationID) }
-                .buttonHoverPointer()
-                .nativeHelp("Stop the turn and end its background work")
+                .buttonHoverPointer() // ATOM-GAP: alert action, see above.
+                .nativeHelp("Leave the turn and its background work running") // ATOM-GAP: alert action, see above.
+            PHButton("Stop All", role: .destructive) { pauseResponse(confirmationID: confirmationID) } // ATOM-GAP: alert action, see above.
+                .buttonHoverPointer() // ATOM-GAP: alert action, see above.
+                .nativeHelp("Stop the turn and end its background work") // ATOM-GAP: alert action, see above.
         } message: { _ in
-            PHText("This conversation has running background work. Stopping will end that work.")
+            PHText("This conversation has running background work. Stopping will end that work.") // ATOM-GAP: an alert's message must be a plain Text.
         }
         .pluginPresentation($openConversationPlugin, props: pluginProps, actions: pluginActions)
         .onChange(of: task.id, initial: true) {
@@ -790,26 +768,30 @@ package struct TaskConversationView: PHView {
             set: { if !$0 { selectedChatImage = nil } }
         )) {
             if let selectedChatImage {
-                PHVStack(alignment: .trailing, spacing: 8) {
-                    PHButton("Close") { self.selectedChatImage = nil }
-                        .accessibilityIdentifier("close-chat-image-viewer")
-                        .buttonHoverPointer()
-                        .shortcutHelp("Close the full-size image", shortcut: "cancel")
-                    PHImage(platformImage: selectedChatImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityLabel("Full-size attached image")
-                        .accessibilityIdentifier("chat-image-full-size")
+                AtomOverlay(props: OverlayProps(behind: true, group: false)) {
+                    AtomStack(
+                        props: StackProps(axis: "v", spacing: 8, align: "trailing"),
+                        // Stay inside the host window's minimum content size.
+                        common: AtomCommon(minWidth: 900, minHeight: 600, padding: 16)
+                    ) {
+                        AtomButton(
+                            props: ButtonProps(style: "automatic", shortcut: "cancel"),
+                            common: AtomCommon(testID: "close-chat-image-viewer", help: "Close the full-size image"),
+                            action: { self.selectedChatImage = nil }
+                        ) {
+                            AtomText(props: TextProps(text: "Close"))
+                        }
+                        AtomImage(
+                            platformImage: selectedChatImage,
+                            common: AtomCommon(testID: "chat-image-full-size", label: "Full-size attached image",
+                                               fillWidth: true, fillHeight: true)
+                        )
+                    }
+                } overlay: {
+                    PHSheetOutsideClickDismissal { self.selectedChatImage = nil }
                 }
-                .padding(16)
-                // Stay within the window's own 980x640 content minimum so the sheet
-                // can never outgrow its host window and push Close out of reach.
-                .frame(minWidth: 900, minHeight: 600)
-                .background(PHSheetOutsideClickDismissal { self.selectedChatImage = nil })
             }
         }
-        .overlay(alignment: .topLeading) { skillsPage }
         .task {
             // Synchronous, so the picker shows the cached model name on the
             // first frame instead of "Default" while the conversation and a
@@ -865,7 +847,11 @@ package struct TaskConversationView: PHView {
         let _ = sideChats
         // This task's slice of the runtime snapshot; the model itself is read untracked.
         let _ = runtimeSlice.changeCount
-        conversationBase
+        AtomOverlay(props: OverlayProps(align: "topLeading", group: false)) {
+            conversationBase
+        } overlay: {
+            skillsPage
+        }
         .onChange(of: task.conversationProvider) { _, saved in
             // The saved switch reached this window's task, or another client switched it since.
             if !isSwitchingProvider || saved == switchedProvider { switchedProvider = nil }
@@ -1094,8 +1080,7 @@ package struct TaskConversationView: PHView {
         AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(paddingY: 5)) {
             transcriptRule(opacity: 0.13)
             // The title gives way to the button in a narrow chat.
-            AtomText(props: TextProps(text: page.title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "chat-page-separator"))
-                .layoutPriority(1)
+            AtomText(props: TextProps(text: page.title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "chat-page-separator", layoutPriority: 1))
             if canRecall {
                 ChatPageRecallButton(pageID: page.id) { recallChatPage(page) }
             }

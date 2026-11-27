@@ -60,11 +60,6 @@ package struct SideChatBubble: PHView {
     /// The size of the chat's messages.
     package static let bodyFontSize: CGFloat = 14
 
-    private struct TranscriptHeightKey: PHPreferenceKey {
-        static let defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-    }
-
     private var store: SideChatStore { .shared }
     private var run: SideChatRun? { store.run(taskID: taskID, id: runID) }
     private var messages: [SavedSideChat.Message] { store.messages(taskID: taskID, id: runID) }
@@ -73,18 +68,20 @@ package struct SideChatBubble: PHView {
     private var streamingText: String { run?.streamingText ?? "" }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 10) {
+        AtomStack(
+            props: StackProps(spacing: 10, align: "leading", group: true),
+            // Padded inside its width, and only as tall as its content.
+            common: AtomCommon(
+                testID: "side-chat-bubble", width: Double(messages.isEmpty && !isResponding ? Self.compactWidth : Self.width),
+                fixedSize: true, paddingX: 14, paddingY: 14
+            )
+        ) {
             header
             transcript
             composer
         }
-        .padding(14)
-        .frame(width: messages.isEmpty && !isResponding ? Self.compactWidth : Self.width)
-        .fixedSize(horizontal: false, vertical: true)
         .animation(.easeOut(duration: 0.18), value: transcriptContentHeight)
         .animation(.easeOut(duration: 0.18), value: messages.isEmpty)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("side-chat-bubble")
         .onAppear { store.bubbleOpened(runID) }
         // A new selection's bubble shows its side chat once the first message opens one.
         .onChange(of: runID) { old, new in if old == nil { store.bubbleOpened(new) } }
@@ -92,84 +89,72 @@ package struct SideChatBubble: PHView {
     }
 
     private var header: some PHView {
-        PHVStack(alignment: .leading, spacing: 7) {
-            PHHStack(spacing: 6) {
-                PHLabel("Side chat", icon: .bubbleLeftAndTextBubbleRight)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                PHSpacer(minLength: 0)
-                PHButton {
-                    Platform.services.copyToClipboard(selectedText)
-                    didCopySelection = true
-                } label: {
-                    PHImage(icon: didCopySelection ? .checkmark : .docOnDoc)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
+        AtomStack(props: StackProps(spacing: 7, align: "leading")) {
+            AtomStack(props: StackProps(axis: "h", spacing: 6)) {
+                AtomLabel(props: LabelProps(text: "Side chat", icon: PHIcon.bubbleLeftAndTextBubbleRight.name, size: 13, weight: "semibold", color: "secondary"))
+                AtomSpacer(props: SpacerProps(minLength: 0))
+                AtomButton(
+                    common: AtomCommon(testID: "side-chat-copy-selection", label: "Copy selected text", help: "Copy selected text", width: 22, height: 22),
+                    action: {
+                        Platform.services.copyToClipboard(selectedText)
+                        didCopySelection = true
+                    }
+                ) {
+                    AtomIcon(props: IconProps(name: (didCopySelection ? PHIcon.checkmark : PHIcon.docOnDoc).name, size: 11, weight: "medium", color: "secondary"))
                 }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .nativeHelp("Copy selected text")
-                .accessibilityLabel("Copy selected text")
-                .accessibilityIdentifier("side-chat-copy-selection")
             }
-            PHHStack(alignment: .top, spacing: 8) {
-                PHRoundedRectangle(cornerRadius: 1.5)
-                    .fill(PHColor.orange.opacity(0.8))
-                    .frame(width: 3)
-                PHText(verbatim: selectedText)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // Its value is the whole selection, however much of it the three lines show.
-                    .accessibilityIdentifier("side-chat-selected-text")
+            AtomStack(props: StackProps(axis: "h", spacing: 8, align: "top")) {
+                // The quote bar stretches to the text's height.
+                AtomStack(props: StackProps(fill: "orange", fillOpacity: 0.8, cornerRadius: 1.5), common: AtomCommon(width: 3, fillHeight: true)) {
+                    PHEmptyView()
+                }
+                AtomText(
+                    // Never squeezed below its lines; its value is the whole selection, however much of it the three lines show.
+                    props: TextProps(text: selectedText, size: 13, color: "secondary", lineLimit: 3, wrap: true, truncation: "tail"),
+                    common: AtomCommon(testID: "side-chat-selected-text", fillWidth: true)
+                )
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var transcript: some PHView {
         PHScrollViewReader { proxy in
-            PHScrollView {
-                PHVStack(alignment: .leading, spacing: 9) {
-                    PHForEach(Array(messages.enumerated()), id: \.offset) { index, message in
-                        messageRow(message, index: index)
-                    }
-                    if isResponding {
-                        if streamingText.isEmpty {
-                            PHHStack(spacing: 6) {
-                                PHProgressView().controlSize(.small)
-                                PHText("Thinking…").font(.system(size: 13)).foregroundStyle(.secondary)
+            AtomStack(common: AtomCommon(height: Double(min(max(transcriptContentHeight, 1), Self.maxTranscriptHeight)))) {
+                AtomScroll(props: ScrollProps(directContent: true)) {
+                    AtomStack(
+                        props: StackProps(spacing: 9, align: "leading"),
+                        // The overlay scroller floats over the content's trailing edge; keep the text clear of it.
+                        common: AtomCommon(paddingLeading: 2, paddingTrailing: Double(HoverRevealScrollers.scrollerWidth))
+                    ) {
+                        PHForEach(Array(messages.enumerated()), id: \.offset) { index, message in
+                            messageRow(message, index: index)
+                        }
+                        if isResponding {
+                            if streamingText.isEmpty {
+                                AtomStack(props: StackProps(axis: "h", spacing: 6, combine: true), common: AtomCommon(testID: "side-chat-responding")) {
+                                    AtomSpinner()
+                                    AtomText(props: TextProps(text: "Thinking…", size: 13, color: "secondary"))
+                                }
+                            } else {
+                                assistantText(streamingText)
+                                    .accessibilityIdentifier("side-chat-streaming-reply")
                             }
-                            .accessibilityElement(children: .combine)
-                            .accessibilityIdentifier("side-chat-responding")
-                        } else {
-                            assistantText(streamingText)
-                                .accessibilityIdentifier("side-chat-streaming-reply")
+                        }
+                        if let errorMessage = run?.errorMessage {
+                            AtomLabel(
+                                props: LabelProps(text: errorMessage, icon: PHIcon.exclamationmarkTriangleFill.name, size: 13, color: "orange"),
+                                common: AtomCommon(testID: "side-chat-error", fillWidth: true)
+                            )
+                        }
+                        AtomStack(props: StackProps(scrollID: "side-chat-bottom"), common: AtomCommon(height: 1, fillWidth: true)) {
+                            PHEmptyView()
                         }
                     }
-                    if let errorMessage = run?.errorMessage {
-                        PHLabel(errorMessage, icon: .exclamationmarkTriangleFill)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.orange)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityIdentifier("side-chat-error")
-                    }
-                    PHColor.clear.frame(height: 1).id("side-chat-bottom")
+                    .hoverRevealScrollers()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { transcriptContentHeight = $0 }
                 }
-                .padding(.leading, 2)
-                // The overlay scroller floats over the content's trailing edge; keep the text clear of it.
-                .padding(.trailing, HoverRevealScrollers.scrollerWidth)
-                .hoverRevealScrollers()
-                .background(PHGeometryReader { geometry in
-                    PHColor.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
-                })
+                .accessibilityIdentifier("side-chat-transcript")
             }
-            .frame(height: min(max(transcriptContentHeight, 1), Self.maxTranscriptHeight))
-            .onPreferenceChange(TranscriptHeightKey.self) { transcriptContentHeight = $0 }
-            .accessibilityIdentifier("side-chat-transcript")
             .onChange(of: messages.count) { _, _ in proxy.scrollTo("side-chat-bottom", anchor: .bottom) }
             .onChange(of: streamingText) { _, _ in proxy.scrollTo("side-chat-bottom", anchor: .bottom) }
         }
@@ -178,17 +163,12 @@ package struct SideChatBubble: PHView {
     @PHViewBuilder
     private func messageRow(_ message: SavedSideChat.Message, index: Int) -> some PHView {
         if message.isUser {
-            PHHStack {
-                PHSpacer(minLength: 40)
-                PHText(verbatim: message.text)
-                    .font(.system(size: Self.bodyFontSize))
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(PHColor.primary.opacity(0.08), in: PHRoundedRectangle(cornerRadius: 11))
+            AtomStack(props: StackProps(axis: "h", summary: true), common: AtomCommon(testID: "side-chat-user-message-\(index)", label: message.text)) {
+                AtomSpacer(props: SpacerProps(minLength: 40))
+                AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.08, cornerRadius: 11), common: AtomCommon(paddingX: 10, paddingY: 6)) {
+                    AtomText(props: TextProps(text: message.text, size: Double(Self.bodyFontSize), selectable: true))
+                }
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(message.text)
-            .accessibilityIdentifier("side-chat-user-message-\(index)")
         } else {
             // Contains its blocks, so a formatted answer's headings and list items stay reachable.
             assistantText(message.text)

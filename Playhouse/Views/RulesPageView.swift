@@ -45,60 +45,41 @@ package struct RulesSectionView: PHView {
     }
 
     package var body: some PHView {
-        PHVStack(alignment: .leading, spacing: 0) {
-            PHHStack(spacing: 8) {
-                SkillsPageSearchField(text: search, placeholder: "Search rules", testID: "rules-search") { search = $0 }
-                AtomButton(
-                    props: ButtonProps(style: "bordered", controlSize: "small"),
-                    common: AtomCommon(testID: "new-rule-button", help: "Create a rule that both Claude and Codex follow"),
-                    action: { setPanel(.creating) }
-                ) {
-                    AtomLabel(props: LabelProps(text: "New Rule", icon: PHIcon.plus.name))
-                }
-            }
-            .padding(.horizontal, 20)
-            PHHStack(spacing: 8) {
-                SkillsPageAnchorBar(testID: "rules-tab-picker", anchorPrefix: "rules-anchor", anchors: anchors, onJump: jump)
-                PHSpacer()
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            if let errorMessage {
-                PHText(errorMessage)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("rules-error")
-            }
-            PHDivider()
-            PHScrollViewReader { proxy in
-                PHScrollView {
-                    PHVStack(alignment: .leading, spacing: 18) {
-                        content
-                        PHText("Rules are the instruction files an agent follows on every turn. Hover one for its details, or click it to open it. Turning a rule on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 4)
-                            .accessibilityIdentifier("rules-provider-timing")
+        AtomOverlay(common: AtomCommon(testID: "rules-page")) {
+            AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading")) {
+                AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 20)) {
+                    SkillsPageSearchField(text: search, placeholder: "Search rules", testID: "rules-search") { search = $0 }
+                    AtomButton(
+                        props: ButtonProps(style: "bordered", controlSize: "small"),
+                        common: AtomCommon(testID: "new-rule-button", help: "Create a rule that both Claude and Codex follow"),
+                        action: { setPanel(.creating) }
+                    ) {
+                        AtomLabel(props: LabelProps(text: "New Rule", icon: PHIcon.plus.name))
                     }
-                    .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .hoverRevealScrollers()
                 }
-                .onChange(of: scrollRequest) {
-                    guard let scrollTarget else { return }
-                    phWithAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(scrollTarget, anchor: .top) }
+                AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 20, paddingY: 12)) {
+                    SkillsPageAnchorBar(testID: "rules-tab-picker", anchorPrefix: "rules-anchor", anchors: anchors, onJump: jump)
+                    AtomSpacer()
+                }
+                if let errorMessage {
+                    CatalogRows.pageError(errorMessage, testID: "rules-error")
+                }
+                AtomDivider()
+                AtomScroll(props: ScrollProps(spacing: 18, inset: 20, scrollTo: scrollTarget, scrollRequest: scrollRequest), common: AtomCommon(testID: "rules-list")) {
+                    content
+                    CatalogRows.footnote(
+                        "Rules are the instruction files an agent follows on every turn. Hover one for its details, or click it to open it. Turning a rule on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.",
+                        testID: "rules-provider-timing"
+                    )
                 }
             }
-            .accessibilityIdentifier("rules-list")
+        } overlay: {
+            // Takes hits only while a panel is open (see McpServersSectionView).
+            panels.allowsHitTesting(panel != nil)
         }
-        // Takes hits only while a panel is open (see McpServersSectionView).
-        .overlay { panels.allowsHitTesting(panel != nil) }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("rules-page")
         .task { await reload() }
+        // ATOM-GAP: an alert's and a confirmation dialog's actions and message must be native
+        // Buttons and Text (the system dialog reads them), and ButtonProps has no cancel role.
         .alert(
             "Delete \(pendingDelete?.name ?? "rule")?",
             isPresented: PHBinding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
@@ -139,31 +120,31 @@ package struct RulesSectionView: PHView {
     }
 
     private var panels: some PHView {
-        PHZStack {
+        AtomStack(props: StackProps(axis: "z")) {
             if panel != nil {
-                PHColor.black.opacity(0.18).ignoresSafeArea().transition(.opacity).zIndex(0)
+                CatalogRows.dimming.ignoresSafeArea().transition(.opacity).zIndex(0)
             }
             switch panel {
             case .editing(let rule, let content):
-                RuleEditorPanel(rule: rule, content: content, onClose: { setPanel(nil) }) { edited in
-                    let record = try await manager.updateRuleContent(taskID: task.id, ruleID: rule.id, content: edited)
-                    catalog = catalog?.replacing(record)
-                    await reload()
+                CatalogRows.panelSlot {
+                    RuleEditorPanel(rule: rule, content: content, onClose: { setPanel(nil) }) { edited in
+                        let record = try await manager.updateRuleContent(taskID: task.id, ruleID: rule.id, content: edited)
+                        catalog = catalog?.replacing(record)
+                        await reload()
+                    }
+                    .id(rule.id)
                 }
-                .id(rule.id)
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
                 .transition(.move(edge: .bottom))
                 .zIndex(1)
             case .creating:
-                NewRulePanel(roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, paths, body, scope, root in
-                    let record = try await manager.createRule(taskID: task.id, name: name, paths: paths, body: body, scope: scope, root: root)
-                    jump(record.scope == .global ? "global" : "repo")
-                    search = ""
-                    await reload()
+                CatalogRows.panelSlot {
+                    NewRulePanel(roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, paths, body, scope, root in
+                        let record = try await manager.createRule(taskID: task.id, name: name, paths: paths, body: body, scope: scope, root: root)
+                        jump(record.scope == .global ? "global" : "repo")
+                        search = ""
+                        await reload()
+                    }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
                 .transition(.move(edge: .bottom))
                 .zIndex(1)
             case nil:
@@ -171,7 +152,6 @@ package struct RulesSectionView: PHView {
             }
         }
     }
-
     private func jump(_ section: String) {
         scrollTarget = section
         scrollRequest += 1
@@ -195,9 +175,7 @@ package struct RulesSectionView: PHView {
                 }
                 PHForEach(catalog.repositories, id: \.rootPath) { section in
                     let shown = filtered(section.rules)
-                    PHText(section.name)
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 4)
+                    AtomText(props: TextProps(text: section.name, size: 12, weight: "semibold"), common: AtomCommon(paddingX: 4))
                         .accessibilityIdentifier("rules-repo-section-\(section.name)")
                     if shown.isEmpty {
                         emptyState(section.rules.isEmpty ? "No rules in \(section.name)." : "No matching rules.", identifier: "rules-empty-\(section.name)")
@@ -216,21 +194,19 @@ package struct RulesSectionView: PHView {
                 rows(managed)
             }
         } else {
-            PHProgressView().frame(maxWidth: .infinity).accessibilityIdentifier("rules-loading")
+            CatalogRows.loading(testID: "rules-loading")
         }
     }
 
     /// One of the list's sections, which its anchor scrolls to.
-    private func group<Content: PHView>(_ anchor: SkillsPageAnchor, intro: String, @PHViewBuilder content: () -> Content) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 8) {
+    private func group<Content: PHView>(_ anchor: SkillsPageAnchor, intro: String, @PHViewBuilder content: @escaping () -> Content) -> some PHView {
+        AtomStack(
+            props: StackProps(axis: "v", spacing: 8, align: "leading", group: true, scrollID: anchor.value),
+            common: AtomCommon(testID: "rules-group-\(anchor.value)", label: anchor.label, fillWidth: true)
+        ) {
             SkillsPageGroupHeader(label: anchor.label, count: anchor.count, intro: intro, introTestID: "rules-intro-\(anchor.value)")
             content()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .id(anchor.value)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(anchor.label)
-        .accessibilityIdentifier("rules-group-\(anchor.value)")
     }
 
     @PHViewBuilder
@@ -246,7 +222,7 @@ package struct RulesSectionView: PHView {
     }
 
     private func emptyState(_ text: String, identifier: String) -> some PHView {
-        PHText(text).font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 4).accessibilityIdentifier(identifier)
+        CatalogRows.note(text, testID: identifier)
     }
 
     /// The rules whose path or summary contains the search, like the Skills search.
@@ -269,57 +245,27 @@ package struct RulesSectionView: PHView {
     private func row(_ rule: RuleRecord) -> some PHView {
         let key = Self.key(rule)
         return AtomPopover(props: PopoverProps(isPresented: false, arrowEdge: "trailing", width: 320, inset: 12, hover: true), onDismiss: {}) {
-            PHHStack(alignment: .center, spacing: 8) {
-                PHHStack(alignment: .center, spacing: 8) {
-                    // Who follows the rule leads its name, like a skill's row.
-                    if let mark = SkillsPageModel.providerMark(Set(rule.providers), testID: "rule-provider-\(key)") {
-                        ProviderMarkIcon(mark: mark)
-                    }
-                    PHText(rule.name)
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .accessibilityIdentifier("rule-name-\(key)")
-                    if rule.issue != nil {
-                        PHImage(icon: .exclamationmarkTriangleFill)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.orange)
-                            .nativeHelp("Problem")
-                            .accessibilityLabel("Problem")
-                            .accessibilityIdentifier("rule-problem-\(key)")
-                    }
-                    PHSpacer(minLength: 8)
+            CatalogRows.listRow(testID: "rule-row-\(key)", hint: rule.summary, onOpen: { openEditor(rule) }) {
+                // Who follows the rule leads its name, like a skill's row.
+                if let mark = SkillsPageModel.providerMark(Set(rule.providers), testID: "rule-provider-\(key)") {
+                    ProviderMarkIcon(mark: mark)
                 }
-                .overlay {
-                    PHPressArea(onClick: { openEditor(rule) }, onLongPress: {})
+                AtomText(props: TextProps(text: rule.name, size: 13, weight: "medium", lineLimit: 1, truncation: "middle"), common: AtomCommon(testID: "rule-name-\(key)"))
+                if rule.issue != nil {
+                    CatalogRows.flag("Problem", testID: "rule-problem-\(key)")
                 }
-                .buttonHoverPointer()
-                .accessibilityHint(rule.summary)
+            } controls: {
                 if rule.issue != nil, rule.editable {
-                    PHButton { fix(rule) } label: { PHLabel("Fix", icon: .wandAndStars) }
-                        .controlSize(.small)
-                        .disabled(isFixing)
-                        .buttonHoverPointer()
-                        .nativeHelp("Open a task whose agent fixes \(rule.name)")
-                        .accessibilityIdentifier("rule-fix-\(key)")
+                    CatalogRows.fixButton(name: rule.name, testID: "rule-fix-\(key)", disabled: isFixing) { fix(rule) }
                 }
                 if rule.scope != .managed {
-                    PHToggle("Enabled", isOn: PHBinding(get: { isEnabled(rule) }, set: { setEnabled(rule, $0) }))
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .labelsHidden()
-                        .buttonHoverPointer()
-                        .nativeHelp(isEnabled(rule) ? "Turn the rule off in Playhouse sessions" : "Turn the rule on in Playhouse sessions")
-                        .accessibilityLabel("\(rule.name) enabled")
-                        .accessibilityIdentifier("rule-toggle-\(key)")
+                    CatalogRows.enabledToggle(
+                        isOn: isEnabled(rule), name: rule.name, noun: "rule", testID: "rule-toggle-\(key)",
+                        onToggle: { setEnabled(rule, !isEnabled(rule)) }
+                    )
                 }
                 actions(rule, key: key)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("rule-row-\(key)")
         } content: {
             hint(rule, key: key)
         }
@@ -327,108 +273,73 @@ package struct RulesSectionView: PHView {
 
     /// A rule's details: its summary, what it applies to, any problem, and where it lives.
     private func hint(_ rule: RuleRecord, key: String) -> some PHView {
-        PHVStack(alignment: .leading, spacing: 6) {
-            PHText(rule.name).font(.system(size: 13, weight: .semibold))
+        AtomStack(props: StackProps(axis: "v", spacing: 6, align: "leading", group: true), common: AtomCommon(testID: "rule-hint-\(key)")) {
+            AtomText(props: TextProps(text: rule.name, size: 13, weight: "semibold"))
             if !rule.summary.isEmpty {
-                PHText(rule.summary)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("rule-summary-\(key)")
+                AtomText(props: TextProps(text: rule.summary, size: 12, color: "secondary", wrap: true), common: AtomCommon(testID: "rule-summary-\(key)"))
             }
-            PHHStack(spacing: 4) {
+            AtomStack(props: StackProps(axis: "h", spacing: 4)) {
                 if !rule.paths.isEmpty {
-                    badge(rule.paths.joined(separator: ", "), icon: .scope, color: .purple)
-                        .accessibilityIdentifier("rule-paths-\(key)")
+                    CatalogRows.badge(rule.paths.joined(separator: ", "), icon: .scope, color: "purple", testID: "rule-paths-\(key)")
                 }
                 // Linked when Playhouse's symlinks make it work outside Playhouse;
                 // a file both CLIs already read needs no link.
                 if rule.availableOutsidePlayhouse, rule.locations.contains(where: \.isSymlink) {
-                    badge("Linked", icon: .link, color: .blue)
-                        .accessibilityIdentifier("rule-linked-\(key)")
+                    CatalogRows.badge("Linked", icon: .link, color: "blue", testID: "rule-linked-\(key)")
                 } else if rule.availableOutsidePlayhouse {
-                    badge("Both CLIs", icon: .checkmarkSeal, color: .blue)
-                        .accessibilityIdentifier("rule-native-\(key)")
+                    CatalogRows.badge("Both CLIs", icon: .checkmarkSeal, color: "blue", testID: "rule-native-\(key)")
                 }
             }
             if let issue = rule.issue {
-                PHText(issue)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("rule-issue-\(key)")
+                CatalogRows.detail(issue, color: "orange", testID: "rule-issue-\(key)")
             }
             if !isEnabled(rule), !rule.alwaysOnFor.isEmpty {
-                PHText("\(ConversationProvider.names(rule.alwaysOnFor)) still \(rule.alwaysOnFor.count == 1 ? "reads" : "read") this file itself, so turning it off applies to the other agents only.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("rule-always-on-\(key)")
+                CatalogRows.detail(
+                    "\(ConversationProvider.names(rule.alwaysOnFor)) still \(rule.alwaysOnFor.count == 1 ? "reads" : "read") this file itself, so turning it off applies to the other agents only.",
+                    color: "orange", testID: "rule-always-on-\(key)"
+                )
             } else if let note = Self.sharedNote(rule) {
-                PHText(note).font(.system(size: 11)).foregroundStyle(.secondary).accessibilityIdentifier("rule-shared-\(key)")
+                CatalogRows.detail(note, wrap: false, testID: "rule-shared-\(key)")
             }
-            PHText(rule.locations.map(\.layout.displayName).joined(separator: " · ") + " · " + ByteCountFormatter.string(fromByteCount: Int64(rule.byteCount), countStyle: .file))
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("rule-location-\(key)")
+            AtomText(
+                props: TextProps(
+                    text: rule.locations.map(\.layout.displayName).joined(separator: " · ") + " · " + ByteCountFormatter.string(fromByteCount: Int64(rule.byteCount), countStyle: .file),
+                    size: 10, color: "tertiary", wrap: true
+                ),
+                common: AtomCommon(testID: "rule-location-\(key)")
+            )
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("rule-hint-\(key)")
-    }
-
-    private func badge(_ text: String, icon: PHIcon, color: PHColor) -> some PHView {
-        PHLabel(text, icon: icon)
-            .font(.caption2.weight(.medium))
-            .lineLimit(1)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .foregroundStyle(color)
-            .background(color.opacity(0.12), in: PHCapsule())
     }
 
     private func actions(_ rule: RuleRecord, key: String) -> some PHView {
-        PHMenu {
-            PHButton(rule.editable ? "Edit…" : "View…") { openEditor(rule) }
-                .help(rule.editable ? "Edit the rule file" : "Read the rule file")
-                .accessibilityIdentifier("rule-edit-\(key)")
-            PHButton("Reveal in Finder") { Platform.services.revealInFileBrowser([URL(fileURLWithPath: rule.filePath)]) }
-                .help("Show the rule file in Finder")
-                .accessibilityIdentifier("rule-reveal-\(key)")
-            if rule.editable {
-                PHDivider()
-                if rule.locations.contains(where: \.isSymlink) {
-                    PHButton("Remove Outside Link") {
-                        perform { _ = try await manager.linkRule(taskID: task.id, ruleID: rule.id, linked: false) }
-                    }
-                    .help("Remove the symlink; Playhouse sessions still share the rule")
-                    .accessibilityIdentifier("rule-unlink-\(key)")
-                } else if rule.linkable {
-                    PHButton("Make Available Outside Playhouse…") { pendingLink = rule }
-                        .help("Write a symlink so the claude and codex CLIs read the rule on their own")
-                        .accessibilityIdentifier("rule-link-\(key)")
-                }
-                PHDivider()
-                PHButton("Delete…", role: .destructive) { pendingDelete = rule }
-                    .help("Delete the rule file from disk")
-                    .accessibilityIdentifier("rule-delete-\(key)")
+        var items = [[
+            MenuProps.Item(id: "edit", title: rule.editable ? "Edit…" : "View…", help: rule.editable ? "Edit the rule file" : "Read the rule file", testID: "rule-edit-\(key)"),
+            MenuProps.Item(id: "reveal", title: "Reveal in Finder", help: "Show the rule file in Finder", testID: "rule-reveal-\(key)"),
+        ]]
+        if rule.editable {
+            if rule.locations.contains(where: \.isSymlink) {
+                items.append([MenuProps.Item(
+                    id: "unlink", title: "Remove Outside Link", help: "Remove the symlink; Playhouse sessions still share the rule", testID: "rule-unlink-\(key)"
+                )])
+            } else if rule.linkable {
+                items.append([MenuProps.Item(
+                    id: "link", title: "Make Available Outside Playhouse…",
+                    help: "Write a symlink so the claude and codex CLIs read the rule on their own", testID: "rule-link-\(key)"
+                )])
             }
-        } label: {
-            PHImage(icon: .ellipsis)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 24, height: 24)
-                .contentShape(PHRectangle())
+            items.append([MenuProps.Item(id: "delete", title: "Delete…", destructive: true, help: "Delete the rule file from disk", testID: "rule-delete-\(key)")])
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .buttonHoverPointer()
-        .nativeHelp("More actions for \(rule.name)")
-        .accessibilityLabel("Actions for \(rule.name)")
-        .accessibilityIdentifier("rule-actions-\(key)")
+        return CatalogRows.actionsMenu(name: rule.name, testID: "rule-actions-\(key)", items: items) { choice in
+            switch choice {
+            case "edit": openEditor(rule)
+            case "reveal": Platform.services.revealInFileBrowser([URL(fileURLWithPath: rule.filePath)])
+            case "unlink": perform { _ = try await manager.linkRule(taskID: task.id, ruleID: rule.id, linked: false) }
+            case "link": pendingLink = rule
+            case "delete": pendingDelete = rule
+            default: break
+            }
+        }
     }
-
     private func openEditor(_ rule: RuleRecord) {
         perform(reloading: false) {
             let content = try await manager.ruleContent(taskID: task.id, ruleID: rule.id)
@@ -512,23 +423,15 @@ private struct RuleEditorPanel: PHView {
 
     var body: some PHView {
         SkillPanel(identifier: "rule-editor-panel") {
-            PHHStack(alignment: .center, spacing: 10) {
-                PHImage(icon: .listBulletRectangle)
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                PHVStack(alignment: .leading, spacing: 2) {
-                    PHText(rule.name)
-                        .font(.title2.weight(.semibold))
+            AtomStack(props: StackProps(axis: "h", spacing: 10, align: "center")) {
+                AtomIcon(props: IconProps(name: PHIcon.listBulletRectangle.name, color: "accent", textStyle: "title2"))
+                AtomStack(props: StackProps(axis: "v", spacing: 2, align: "leading")) {
+                    AtomText(props: TextProps(text: rule.name, weight: "semibold", textStyle: "title2"))
                         .accessibilityIdentifier("rule-editor-name")
-                    PHText(rule.filePath)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+                    AtomText(props: TextProps(text: rule.filePath, color: "secondary", lineLimit: 1, truncation: "middle", selectable: true, textStyle: "caption"))
                         .accessibilityIdentifier("rule-editor-location")
                 }
-                PHSpacer()
+                AtomSpacer()
                 SkillDocumentTabPicker(tab: $tab, identifier: "rule-editor-tab-picker")
             }
         } content: {
@@ -537,22 +440,18 @@ private struct RuleEditorPanel: PHView {
             case .preview: SkillMarkdownPreview(markdown: content, identifier: "rule-editor-preview")
             }
         } footer: {
-            PHHStack {
+            AtomStack(props: StackProps(axis: "h")) {
                 if let errorMessage {
-                    PHText(errorMessage).foregroundStyle(.red).font(.callout).accessibilityIdentifier("rule-editor-error")
+                    AtomText(props: TextProps(text: errorMessage, color: "red", textStyle: "callout")).accessibilityIdentifier("rule-editor-error")
                 } else if !rule.editable {
-                    PHText("Your organization manages this file, so it is read-only.").font(.callout).foregroundStyle(.secondary)
+                    AtomText(props: TextProps(text: "Your organization manages this file, so it is read-only.", color: "secondary", textStyle: "callout"))
                 }
-                PHSpacer()
-                PHButton(rule.editable ? "Cancel" : "Close", action: onClose)
-                    .buttonHoverPointer()
+                AtomSpacer()
+                AtomButton(props: ButtonProps(style: "automatic"), action: onClose) { AtomText(props: TextProps(text: rule.editable ? "Cancel" : "Close")) }
                     .shortcutHelp(rule.editable ? "Discard changes" : "Close the rule", shortcut: "cancel")
                     .accessibilityIdentifier("rule-editor-cancel")
                 if rule.editable {
-                    PHButton("Save") { save() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSaving)
-                        .buttonHoverPointer()
+                    AtomButton(props: ButtonProps(style: "prominent", disabled: isSaving), action: { save() }) { AtomText(props: TextProps(text: "Save")) }
                         .shortcutHelp("Save the rule", shortcut: AppShortcut.save)
                         .accessibilityIdentifier("rule-editor-save")
                 }
@@ -606,44 +505,39 @@ private struct NewRulePanel: PHView {
 
     var body: some PHView {
         SkillPanel(identifier: "new-rule-panel") {
-            PHVStack(alignment: .leading, spacing: 12) {
-                PHText("New Rule").font(.headline)
+            AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+                AtomText(props: TextProps(text: "New Rule", textStyle: "headline"))
                 // The controls get their own rows so the panel fits the narrow modal.
-                PHVStack(alignment: .leading, spacing: 8) {
-                    PHPicker("Kind", selection: $form) {
-                        PHForEach(Form.allCases) { form in PHText(form.rawValue).tag(form) }
-                    }
-                    .buttonHoverPointer()
-                    .pickerStyle(.segmented)
-                    .fixedSize()
-                    .accessibilityIdentifier("new-rule-form")
-                    PHPicker("Save to", selection: $destination) {
-                        PHText("Global").tag("global")
-                        PHForEach(roots, id: \.rootPath) { root in PHText(root.name).tag(root.rootPath) }
-                    }
-                    .buttonHoverPointer()
-                    .fixedSize()
-                    .accessibilityIdentifier("new-rule-scope")
+                AtomStack(props: StackProps(axis: "v", spacing: 8, align: "leading")) {
+                    AtomSegmented(
+                        showsLabel: true, selection: $form, options: Form.allCases, label: { $0.rawValue },
+                        common: AtomCommon(testID: "new-rule-form", label: "Kind")
+                    )
+                    AtomSegmented(
+                        style: "menu", showsLabel: true, selection: $destination,
+                        options: ["global"] + roots.map(\.rootPath),
+                        label: { path in roots.first(where: { $0.rootPath == path })?.name ?? "Global" },
+                        common: AtomCommon(testID: "new-rule-scope", label: "Save to")
+                    )
                 }
-                PHText("Saved as " + target)
-                    .font(.callout).foregroundStyle(.secondary)
+                AtomText(props: TextProps(text: "Saved as " + target, color: "secondary", textStyle: "callout"))
                     .accessibilityIdentifier("new-rule-target")
                 if form == .topic {
-                    PHTextField("rule-name", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Name")
-                        .accessibilityIdentifier("new-rule-name")
-                    PHTextField("Only for matching files, such as src/**/*.ts (optional, comma separated)", text: $paths)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Paths")
-                        .accessibilityIdentifier("new-rule-paths")
+                    AtomTextField(
+                        props: TextFieldProps(text: name, placeholder: "rule-name"),
+                        common: AtomCommon(testID: "new-rule-name", label: "Name"), onChange: { name = $0 }
+                    )
+                    AtomTextField(
+                        props: TextFieldProps(text: paths, placeholder: "Only for matching files, such as src/**/*.ts (optional, comma separated)"),
+                        common: AtomCommon(testID: "new-rule-paths", label: "Paths"), onChange: { paths = $0 }
+                    )
                 }
             }
         } content: {
-            PHVStack(alignment: .leading, spacing: 6) {
-                PHHStack {
-                    PHText("Instructions").font(.subheadline.weight(.semibold))
-                    PHSpacer()
+            AtomStack(props: StackProps(axis: "v", spacing: 6, align: "leading")) {
+                AtomStack(props: StackProps(axis: "h")) {
+                    AtomText(props: TextProps(text: "Instructions", weight: "semibold", textStyle: "subheadline"))
+                    AtomSpacer()
                     SkillDocumentTabPicker(tab: $tab, identifier: "new-rule-tab-picker")
                 }
                 switch tab {
@@ -652,19 +546,15 @@ private struct NewRulePanel: PHView {
                 }
             }
         } footer: {
-            PHHStack {
+            AtomStack(props: StackProps(axis: "h")) {
                 if let errorMessage {
-                    PHText(errorMessage).foregroundStyle(.red).font(.callout).accessibilityIdentifier("new-rule-error")
+                    AtomText(props: TextProps(text: errorMessage, color: "red", textStyle: "callout")).accessibilityIdentifier("new-rule-error")
                 }
-                PHSpacer()
-                PHButton("Cancel", action: onClose)
-                    .buttonHoverPointer()
+                AtomSpacer()
+                AtomButton(props: ButtonProps(style: "automatic"), action: onClose) { AtomText(props: TextProps(text: "Cancel")) }
                     .shortcutHelp("Close without creating a rule", shortcut: "cancel")
                     .accessibilityIdentifier("new-rule-cancel")
-                PHButton("Create") { create() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isSaving)
-                    .buttonHoverPointer()
+                AtomButton(props: ButtonProps(style: "prominent", disabled: isSaving), action: { create() }) { AtomText(props: TextProps(text: "Create")) }
                     .shortcutHelp("Create the rule", shortcut: AppShortcut.save)
                     .accessibilityIdentifier("new-rule-create")
             }

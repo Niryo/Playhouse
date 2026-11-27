@@ -130,6 +130,15 @@ struct PluginNodePropsTests {
             // A Modal's width is also the common width, as one plugin key sets both.
             (modal, AtomCommon(label: "L", width: 500)),
             (SidePanelProps(isPresented: false, edge: "leading", width: 300), AtomCommon(label: "L", width: 300)),
+            // The props the native composites' conversion added.
+            (StackProps(axis: "z", align: "topTrailing", material: "regular", clip: true, shadow: 8, shadowOpacity: 0.2, shadowX: 1, shadowY: 3),
+             AtomCommon(maxWidth: 160, maxHeight: 90, fillHeight: true, frameAlign: "trailing", layoutPriority: 1, paddingTop: 6, paddingBottom: 2,
+                        paddingLeading: 12, paddingTrailing: 4, decorative: true)),
+            (TextProps(text: "Copy me", selectable: true), AtomCommon(label: "L")),
+            (TextFieldProps(text: "", secure: true, multiline: true, size: 12, design: "monospaced", focusRequest: 2), AtomCommon(label: "L")),
+            (SegmentedProps(options: [.init(value: "a", label: "A")], selected: "a", style: "menu"), AtomCommon(label: "L")),
+            (ResizeHandleProps(axis: "v"), AtomCommon(label: "L", width: 9)),
+            (DatePickerProps(date: 1_767_261_600, components: "date", min: 1_767_261_600), AtomCommon(label: "L")),
         ]
         expect(PluginNodeProps.conflictingKeys(modal, AtomCommon(width: 300)), ["width"], "Typed props that disagree on a shared key are caught")
         expect(PluginNodeProps.conflictingKeys(modal, AtomCommon(width: 500, padding: 2)), [], "Typed props that agree on a shared key are fine")

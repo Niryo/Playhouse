@@ -63,20 +63,22 @@ extension PlayhouseUITests {
         XCTAssertEqual(picker.frame, pickerFrame, "The outline doesn't move or resize the PillPicker.")
         attachScreenshot(named: "Highlight Native Atoms on: PillPicker page")
 
-        var roles: [String: String] = [:]
+        func selectWhileOutlined(_ atom: String) {
+            let row = catalogSidebarRow("plugin-catalog-atom-\(atom)", underDebugOutlines: true)
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        }
         for atom in atoms {
-            catalogSidebarRow("plugin-catalog-atom-\(atom)").click()
+            selectWhileOutlined(atom)
             let title = element("plugin-catalog-title")
             XCTAssertTrue(waitUntil({ title.exists && self.pluginText(title) == atom }, timeout: 10), "Selecting \(atom) shows its page.")
             XCTAssertTrue(element("plugin-last-commit").waitToExist(timeout: 10), "The \(atom) page rendered.")
-            XCTAssertTrue(waitUntil({ outlines(in: catalog, atom).count > 0 }, timeout: 5), "The \(atom) page outlines its \(atom) atom.")
-            for outline in outlines(in: catalog).allElementsBoundByIndex {
-                let role = outline.identifier.replacingOccurrences(of: "atom-highlight-", with: "")
-                if let earlier = roles[outline.label] {
-                    XCTAssertEqual(role, earlier, "Every \(outline.label) outline has one role.")
-                }
-                roles[outline.label] = role
-            }
+            let role = containers.contains(atom) ? "container" : "leaf"
+            let oppositeRole = containers.contains(atom) ? "leaf" : "container"
+            let pageOutlines = outlines(in: catalog, atom)
+            let expected = pageOutlines.matching(identifier: "atom-highlight-\(role)").firstMatch
+            let unexpected = pageOutlines.matching(identifier: "atom-highlight-\(oppositeRole)").firstMatch
+            XCTAssertTrue(expected.waitToExist(timeout: 5), "The \(atom) page outlines \(atom) as a \(role).")
+            XCTAssertFalse(unexpected.exists, "The \(atom) page never outlines \(atom) as a \(oppositeRole).")
             if atom == "Card" {
                 XCTAssertTrue(card.waitToExist(timeout: 5))
                 XCTAssertEqual(card.frame, cardFrame, "The outline doesn't move or resize the Card.")
@@ -86,16 +88,14 @@ extension PlayhouseUITests {
                 attachScreenshot(named: "Highlight Native Atoms on: Spacer page")
             }
         }
-        for atom in atoms {
-            XCTAssertEqual(roles[atom], containers.contains(atom) ? "container" : "leaf", "\(atom) is outlined as a \(containers.contains(atom) ? "container" : "leaf").")
-        }
 
-        catalogSidebarRow("plugin-catalog-atom-Card").click()
+        selectWhileOutlined("Card")
         let pressed = element("card-pressed")
         XCTAssertTrue(pressed.waitToExist(timeout: 10))
         let hoverLabels = app.descendants(matching: .any).matching(identifier: "atom-hover-label")
-        let catalogTitle = element("plugin-catalog-title")
-        catalogTitle.hover()
+        let debugMenu = app.menuBars.menuBarItems["Debug"]
+        XCTAssertTrue(debugMenu.waitToExist(timeout: 5), "The system menu bar provides a point outside the catalog atoms.")
+        debugMenu.hover()
         XCTAssertTrue(waitUntil({ hoverLabels.count == 0 }, timeout: 5), "No type label shows while the pointer is off the atoms.")
         // The Text's outline covers it for XCUITest's hittability check (not for
         // the pointer: the outline doesn't hit-test), so hover by coordinate.
@@ -103,13 +103,13 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ hoverLabels.allElementsBoundByIndex.contains { self.pluginText($0) == "Text" } }, timeout: 5),
                       "Hovering a Text atom shows a label naming its type.")
         attachScreenshot(named: "Highlight Native Atoms on: hovering a Text atom")
-        catalogTitle.hover()
+        debugMenu.hover()
         XCTAssertTrue(waitUntil({ hoverLabels.count == 0 }, timeout: 5), "The type label goes away when the pointer leaves the atom.")
 
         relaunchApp()
         clickPluginsMenuItem("Plugin Catalog")
         XCTAssertTrue(element("plugin-catalog-atom-Card").waitToExist(timeout: 15))
-        catalogSidebarRow("plugin-catalog-atom-Card").click()
+        selectWhileOutlined("Card")
         XCTAssertTrue(element("card-demo").waitToExist(timeout: 10))
         let relaunchedCatalog = app.windows.matching(NSPredicate(format: "title == 'Plugin Catalog'")).firstMatch
         XCTAssertTrue(waitUntil({ outlines(in: relaunchedCatalog).count > 0 }, timeout: 5), "After a relaunch the catalog is still outlined.")

@@ -200,78 +200,60 @@ struct TaskTerminalPanel: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text("Terminal")
-                    .font(.system(size: 13, weight: .semibold))
-                    .accessibilityIdentifier("task-terminal-title")
+        // Clear profiles blur what lies behind their translucent background.
+        AtomStack(props: StackProps(spacing: 0, group: true, material: "ultraThin"), common: AtomCommon(testID: "task-terminal-panel")) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(paddingX: 14, paddingTop: 16, paddingBottom: 10)) {
+                AtomIcon(props: IconProps(name: PHIcon.terminal.name, size: 11, weight: "semibold", color: "secondary"))
+                AtomText(props: TextProps(text: "Terminal", size: 13, weight: "semibold"), common: AtomCommon(testID: "task-terminal-title"))
                 if session.panes.count == 1, let pane = session.panes.first {
                     TerminalPaneDirectory(pane: pane)
                 }
-                Spacer(minLength: 0)
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(width: 24, height: 24)
+                AtomSpacer(props: SpacerProps(minLength: 0))
+                AtomButton(
+                    common: AtomCommon(testID: "close-terminal-button", label: "Hide terminal", help: "Hide the terminal", width: 24, height: 24),
+                    action: onClose
+                ) {
+                    AtomIcon(props: IconProps(name: PHIcon.xmark.name, size: 11, weight: "medium"))
                 }
-                .buttonStyle(.plain)
-                .plainButtonHoverPointer()
-                .nativeHelp("Hide the terminal")
-                .accessibilityLabel("Hide terminal")
-                .accessibilityIdentifier("close-terminal-button")
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 16)
-            .padding(.bottom, 10)
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.07))
-                .frame(height: 1)
+            AtomStack(props: StackProps(fill: "primary", fillOpacity: 0.07), common: AtomCommon(height: 1, fillWidth: true)) {
+                PHEmptyView()
+            }
 
             if let launchError = session.launchError {
-                VStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.orange)
-                    Text("Couldn't open a terminal")
-                        .font(.system(size: 12, weight: .medium))
-                    Text(launchError)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .accessibilityIdentifier("task-terminal-error-message")
-                    Button("Try Again", action: onRestart)
-                        .controlSize(.small)
-                        .buttonHoverPointer()
-                        .nativeHelp("Try opening the terminal again")
-                        .accessibilityIdentifier("retry-terminal-button")
+                AtomStack(
+                    props: StackProps(spacing: 8, group: true),
+                    common: AtomCommon(testID: "task-terminal-error", fillWidth: true, fillHeight: true, frameAlign: "center", paddingX: 16, paddingY: 16)
+                ) {
+                    AtomIcon(props: IconProps(name: PHIcon.exclamationmarkTriangleFill.name, size: 18, color: "orange"))
+                    AtomText(props: TextProps(text: "Couldn't open a terminal", size: 12, weight: "medium"))
+                    AtomText(props: TextProps(text: launchError, size: 11, color: "secondary", align: "center"), common: AtomCommon(testID: "task-terminal-error-message"))
+                    AtomButton(
+                        props: ButtonProps(style: "automatic", controlSize: "small"),
+                        common: AtomCommon(testID: "retry-terminal-button", help: "Try opening the terminal again"),
+                        action: onRestart
+                    ) {
+                        AtomText(props: TextProps(text: "Try Again"))
+                    }
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("task-terminal-error")
             } else if session.panes.count == 1, let pane = session.panes.first {
                 TerminalPaneView(pane: pane, showsHeader: false, focusesOnAttach: true) { onRestartPane(pane) }
             } else if !session.panes.isEmpty {
-                VSplitView {
-                    ForEach(session.panes) { pane in
-                        TerminalPaneView(pane: pane, showsHeader: true, focusesOnAttach: pane === session.panes.first) {
-                            onRestartPane(pane)
+                AtomStack(props: StackProps(group: true), common: AtomCommon(testID: "task-terminal-split")) {
+                    // The split view itself stays native: no atom divides its room between resizable panes.
+                    VSplitView {
+                        ForEach(session.panes) { pane in
+                            AtomStack(common: AtomCommon(minHeight: Double(TerminalPanelLayout.minimumPaneHeight), fillHeight: true, frameAlign: "center")) {
+                                TerminalPaneView(pane: pane, showsHeader: true, focusesOnAttach: pane === session.panes.first) {
+                                    onRestartPane(pane)
+                                }
+                            }
                         }
-                        .frame(minHeight: TerminalPanelLayout.minimumPaneHeight, maxHeight: .infinity)
                     }
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("task-terminal-split")
             }
         }
-        // Clear profiles blur what lies behind their translucent background.
-        .background(.ultraThinMaterial)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("task-terminal-panel")
     }
 }
 
@@ -281,13 +263,10 @@ private struct TerminalPaneDirectory: View {
 
     var body: some View {
         if let directory = pane.currentDirectory {
-            Text(Self.abbreviated(directory))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.head)
-                .help(directory)
-                .accessibilityIdentifier("task-terminal-directory")
+            AtomText(
+                props: TextProps(text: Self.abbreviated(directory), size: 11, color: "secondary", lineLimit: 1, truncation: "head"),
+                common: AtomCommon(testID: "task-terminal-directory", help: directory)
+            )
         }
     }
 
@@ -305,49 +284,37 @@ private struct TerminalPaneView: View {
     let onRestart: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
+        AtomStack(props: StackProps(spacing: 0, group: true), common: AtomCommon(testID: "task-terminal-pane", label: pane.name)) {
             if showsHeader {
-                HStack(spacing: 6) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pane.name)
-                        .font(.system(size: 11, weight: .semibold))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("task-terminal-pane-name")
+                AtomStack(props: StackProps(axis: "h", spacing: 6, fill: "primary", fillOpacity: 0.04), common: AtomCommon(paddingX: 12, paddingY: 5)) {
+                    AtomIcon(props: IconProps(name: PHIcon.folder.name, size: 10, weight: "medium", color: "secondary"))
+                    AtomText(props: TextProps(text: pane.name, size: 11, weight: "semibold", lineLimit: 1), common: AtomCommon(testID: "task-terminal-pane-name"))
                     TerminalPaneDirectory(pane: pane)
-                    Spacer(minLength: 0)
+                    AtomSpacer(props: SpacerProps(minLength: 0))
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .background(Color.primary.opacity(0.04))
             }
             if let terminalView = pane.terminalView {
-                TerminalViewHost(view: terminalView, focusesOnAttach: focusesOnAttach)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .overlay(alignment: .bottom) {
-                        if let exitStatus = pane.exitStatus {
-                            HStack(spacing: 10) {
-                                Text(exitStatus)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .accessibilityIdentifier("task-terminal-exit-status")
-                                Spacer(minLength: 0)
-                                Button("Restart", action: onRestart)
-                                    .controlSize(.small)
-                                    .buttonHoverPointer()
-                                    .nativeHelp("Start a new shell in this worktree")
-                                    .accessibilityIdentifier("restart-terminal-button")
+                // The terminal itself stays native, framed by a Stack; an exited shell's bar sits over its bottom.
+                AtomStack(props: StackProps(axis: "z", align: "bottom")) {
+                    AtomStack(common: AtomCommon(fillWidth: true, fillHeight: true, frameAlign: "center")) {
+                        TerminalViewHost(view: terminalView, focusesOnAttach: focusesOnAttach)
+                    }
+                    if let exitStatus = pane.exitStatus {
+                        AtomStack(props: StackProps(axis: "h", spacing: 10, material: "regular"), common: AtomCommon(paddingX: 12, paddingY: 8)) {
+                            AtomText(props: TextProps(text: exitStatus, size: 11, weight: "medium"), common: AtomCommon(testID: "task-terminal-exit-status"))
+                            AtomSpacer(props: SpacerProps(minLength: 0))
+                            AtomButton(
+                                props: ButtonProps(style: "automatic", controlSize: "small"),
+                                common: AtomCommon(testID: "restart-terminal-button", help: "Start a new shell in this worktree"),
+                                action: onRestart
+                            ) {
+                                AtomText(props: TextProps(text: "Restart"))
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(.regularMaterial)
                         }
                     }
+                }
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(pane.name)
-        .accessibilityIdentifier("task-terminal-pane")
     }
 }
 

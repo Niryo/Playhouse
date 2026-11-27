@@ -565,7 +565,7 @@ extension PlayhouseUITests {
         let removeBadgeButton = element("remove-conversation-repository-primary")
         XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.width, 20, "The repository chip's remove button should be an easy target.")
         XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.height, 20, "The repository chip's remove button should be an easy target.")
-        attachScreenshot(named: "Repository chip with enlarged remove button", fullScreen: true)
+        attachScreenshot(named: "Repository chip with enlarged remove button")
 
         // Opening the settings works the defaults out; holding the task's operation lock keeps
         // them from being saved, so a field saved meanwhile has to wait for them.
@@ -610,7 +610,8 @@ extension PlayhouseUITests {
         XCTAssertGreaterThanOrEqual(branchEdit.frame.width, 20, "The edit pencil should be an easy target.")
         XCTAssertFalse(element("save-conversation-repository-button").exists, "Per-field checkmarks replace the popover-wide Save button.")
         XCTAssertFalse(element("remove-conversation-repository-button").exists, "Removal moved from the popover to the repository chip badge.")
-        attachScreenshot(named: "Repository settings popover with pencils beside each value", fullScreen: true)
+        attachScreenshot(named: "Repository settings popover with pencils beside each value")
+        attachRegionScreenshot([initialBranchValue, branchEdit], named: "Repository branch value and edit pencil")
         branchEdit.click()
         let branchField = element("conversation-repository-branch")
         let branchSave = element("conversation-repository-branch-save")
@@ -620,7 +621,8 @@ extension PlayhouseUITests {
         XCTAssertLessThan(abs(branchSave.frame.midY - branchField.frame.midY), 6, "The checkmark should be inside the field.")
         XCTAssertFalse(element("conversation-repository-branch-from-save").exists, "Only the field being edited shows a checkmark.")
         replaceText(branchField, with: "invalid branch")
-        attachScreenshot(named: "Inline branch edit with its confirmation checkmark", fullScreen: true)
+        attachScreenshot(named: "Inline branch edit with its confirmation checkmark")
+        attachRegionScreenshot([branchField, branchSave], named: "Inline branch field and confirmation control")
         branchSave.click()
         XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10), "Invalid branch settings should be shown in the conversation.")
         XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branch"] as? String, initialBranch)
@@ -654,7 +656,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(accessibleLabelOrValue(of: element("conversation-repository-branch-from-value")), initialBranchFrom, "A dismissed edit must not change the shown value.")
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, initialBranchFrom, "A dismissed edit must not be saved.")
-        attachScreenshot(named: "Clicking outside the field dismisses the edit unsaved", fullScreen: true)
+        attachScreenshot(named: "Clicking outside the field dismisses the edit unsaved")
 
         element("conversation-repository-branch-from-edit").click()
         XCTAssertTrue(branchFromField.waitToExist(timeout: 5))
@@ -664,7 +666,7 @@ extension PlayhouseUITests {
         XCTAssertEqual(accessibleLabelOrValue(of: element("conversation-repository-branch-from-value")), initialBranchFrom, "An escaped edit must not change the shown value.")
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, initialBranchFrom, "An escaped edit must not be saved.")
-        attachScreenshot(named: "Escape dismisses the edit unsaved", fullScreen: true)
+        attachScreenshot(named: "Escape dismisses the edit unsaved")
 
         element("conversation-repository-branch-from-edit").click()
         XCTAssertTrue(branchFromField.waitToExist(timeout: 5))
@@ -696,7 +698,7 @@ extension PlayhouseUITests {
         mergeTargetSave.click()
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "mergeTarget", expected: "branch-source"))
         XCTAssertTrue(waitForDisappearance(mergeTargetField), "A successful save should leave edit mode.")
-        attachScreenshot(named: "Saved repository settings stay visible in the open popover", fullScreen: true)
+        attachScreenshot(named: "Saved repository settings stay visible in the open popover")
         // Reopen the popover so the values come from the saved record.
         element("task-view-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         XCTAssertTrue(waitForDisappearance(element("conversation-repository-branch-value")), "Clicking outside the popover should close it.")
