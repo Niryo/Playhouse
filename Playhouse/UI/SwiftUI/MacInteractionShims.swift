@@ -84,7 +84,9 @@ private struct HoverCursorArea: NSViewRepresentable {
         }
 
         package override func resetCursorRects() {
-            if let cursor { addCursorRect(bounds, cursor: cursor) }
+            // Modern cursor tracking handles the handoff. A second registration
+            // can leave the old cursor visible after the pointer exits the control.
+            if #unavailable(macOS 15.0), let cursor { addCursorRect(bounds, cursor: cursor) }
         }
     }
 }

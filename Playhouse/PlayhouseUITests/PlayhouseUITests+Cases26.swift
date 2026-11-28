@@ -913,8 +913,14 @@ extension PlayhouseUITests {
             // A cursor rect the hosting view overrides shows the hand only briefly, so it is read again.
             Thread.sleep(forTimeInterval: 1.5)
             XCTAssertTrue(systemCursorIsPointingHand(), "\(name) should keep the pointing hand while the pointer rests on it: \(systemCursorDescription())")
-            restPointer(on: element("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
-            XCTAssertTrue(waitUntil({ NSCursor.currentSystem != nil && !self.systemCursorIsPointingHand() }, timeout: 3), "The page's title should show the arrow after \(name): \(systemCursorDescription())")
+            let title = element("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            restPointer(on: title)
+            let titlePoint = title.screenPoint
+            XCTAssertTrue(waitUntil({
+                guard let pointer = CGEvent(source: nil)?.location else { return false }
+                return hypot(pointer.x - titlePoint.x, pointer.y - titlePoint.y) <= 2
+                    && NSCursor.currentSystem != nil && !self.systemCursorIsPointingHand()
+            }, timeout: 3), "The pointer should reach the title and leave the pointing hand behind after \(name): \(systemCursorDescription())")
         }
         restPointerOffList(hints: "skill-hint-")
         attachElementScreenshot(element("skills-page"), named: "The narrow 403-point Skills modal")

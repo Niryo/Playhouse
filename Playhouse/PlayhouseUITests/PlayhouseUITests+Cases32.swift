@@ -231,42 +231,85 @@ extension PlayhouseUITests {
             let (js, native) = pair(identifier)
             XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript page has \(identifier).")
             XCTAssertTrue(native.waitToExist(timeout: 10), "The native page has \(identifier).")
-            XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
-            XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+            let jsSize = js.frame.size
+            let nativeSize = native.frame.size
+            XCTAssertEqual(jsSize.width, nativeSize.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(jsSize.height, nativeSize.height, accuracy: 1, "\(identifier) has the same height in both.")
         }
         let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
         let lastAction = js("js-last-action")
 
+        // Read the initial layout of both cards once, before any test action moves or changes them.
+        for header in [js("skills-collapse-builtin"), native("native-skills-collapse-builtin")] {
+            XCTAssertTrue(header.waitToExist(timeout: 10), "Both pages show their initial groups.")
+        }
+        func layout(of card: XCUIElement) throws -> [String: XCUIElementSnapshot] {
+            var elements: [String: XCUIElementSnapshot] = [:]
+            func collect(_ node: XCUIElementSnapshot) {
+                if !node.identifier.isEmpty, elements[node.identifier] == nil {
+                    elements[node.identifier] = node
+                }
+                for child in node.children {
+                    collect(child)
+                }
+            }
+            collect(try card.snapshot())
+            return elements
+        }
+        let jsLayout = try layout(of: jsSide)
+        let nativeLayout = try layout(of: nativeSide)
+        func initialPair(_ identifier: String) throws -> (js: XCUIElementSnapshot, native: XCUIElementSnapshot) {
+            (
+                try XCTUnwrap(jsLayout[identifier], "The JavaScript page has \(identifier)."),
+                try XCTUnwrap(nativeLayout["native-\(identifier)"], "The native page has \(identifier).")
+            )
+        }
+        func assertSameInitialSize(_ identifier: String) throws {
+            let (js, native) = try initialPair(identifier)
+            XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+        }
+
         // The Skills button opens the page: the same plain Button atom.
-        assertSameSize("open-skills-button")
-        XCTAssertEqual(js("open-skills-button").label, "Skills")
-        XCTAssertEqual(native("native-open-skills-button").label, "Skills")
+        try assertSameInitialSize("open-skills-button")
+        let openSkills = try initialPair("open-skills-button")
+        XCTAssertEqual(openSkills.js.label, "Skills")
+        XCTAssertEqual(openSkills.native.label, "Skills")
 
         for identifier in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-search", "new-skill-button",
                            "skills-provider-timing", "skills-repo-section-login-app", "skill-row-release-notes", "skill-row-review-login", "skill-row-broken-skill",
                            "skill-name-release-notes", "skill-provider-release-notes-both", "skill-actions-release-notes",
                            "skill-conflict-review-login", "skill-fix-review-login", "skill-invalid-broken-skill",
                            "skill-fix-broken-skill", "skills-repo-section-docs-site", "skills-empty-docs-site", "skills-collapse-repo", "skills-collapse-builtin"] {
-            assertSameSize(identifier)
+            try assertSameInitialSize(identifier)
         }
-        XCTAssertEqual(pair("skills-title").js.label, "Skills, Rules & MCP", "The header's icon names the page.")
-        XCTAssertEqual(pair("skills-title").native.label, "Skills, Rules & MCP")
-        XCTAssertEqual(pair("skills-page").js.frame.width, 403, accuracy: 1, "Each page is as wide as the modal, 403 points.")
+        XCTAssertEqual(try initialPair("skills-title").js.label, "Skills, Rules & MCP", "The header's icon names the page.")
+        XCTAssertEqual(try initialPair("skills-title").native.label, "Skills, Rules & MCP")
+        XCTAssertEqual(try initialPair("skills-page").js.frame.width, 403, accuracy: 1, "Each page is as wide as the modal, 403 points.")
         for anchor in ["repo", "global", "builtin"] {
-            assertSameSize("skills-anchor-\(anchor)")
-            assertSameSize("skills-group-\(anchor)")
+            try assertSameInitialSize("skills-anchor-\(anchor)")
+            try assertSameInitialSize("skills-group-\(anchor)")
         }
-        XCTAssertEqual(pair("skills-tab-picker").js.label, "Jump to")
-        XCTAssertEqual(js("skills-anchor-global").label, "Global")
-        for side in [(js("skills-group-repo"), js("skills-group-global"), js("skills-group-builtin")),
-                     (native("native-skills-group-repo"), native("native-skills-group-global"), native("native-skills-group-builtin"))] {
+        XCTAssertEqual(try initialPair("skills-tab-picker").js.label, "Jump to")
+        XCTAssertEqual(try initialPair("skills-anchor-global").js.label, "Global")
+        let repo = try initialPair("skills-group-repo")
+        let global = try initialPair("skills-group-global")
+        let builtin = try initialPair("skills-group-builtin")
+        for side in [(repo.js, global.js, builtin.js), (repo.native, global.native, builtin.native)] {
             XCTAssertLessThan(side.0.frame.minY, side.1.frame.minY, "Repo comes before Global in the one list.")
             XCTAssertLessThan(side.1.frame.minY, side.2.frame.minY, "Global comes before Built-in in the one list.")
         }
-        XCTAssertEqual(pair("skills-title").js.frame.width, 26, accuracy: 1, "The header shows the page's icon, not its title.")
-        for side in [(pair("skills-back-button").js, pair("skills-title").js, pair("skills-kind-picker").js, pair("skills-tab-picker").js, pair("skills-search").js, pair("new-skill-button").js),
-                     (pair("skills-back-button").native, pair("skills-title").native, pair("skills-kind-picker").native, pair("skills-tab-picker").native, pair("skills-search").native, pair("new-skill-button").native)] {
-            let (close, title, kinds, anchors, search, newSkill) = side
+        XCTAssertEqual(try initialPair("skills-title").js.frame.width, 26, accuracy: 1, "The header shows the page's icon, not its title.")
+        let close = try initialPair("skills-back-button")
+        let title = try initialPair("skills-title")
+        let kinds = try initialPair("skills-kind-picker")
+        let anchors = try initialPair("skills-tab-picker")
+        let initialSearch = try initialPair("skills-search")
+        let newSkill = try initialPair("new-skill-button")
+        for (close, title, kinds, anchors, search, newSkill) in [
+            (close.js, title.js, kinds.js, anchors.js, initialSearch.js, newSkill.js),
+            (close.native, title.native, kinds.native, anchors.native, initialSearch.native, newSkill.native),
+        ] {
             XCTAssertEqual(kinds.frame.midY, title.frame.midY, accuracy: 4, "The Skills | Rules | MCP tabs sit in the header, in the title's place.")
             XCTAssertGreaterThanOrEqual(kinds.frame.minX, title.frame.maxX, "The tabs follow the header's icon.")
             XCTAssertLessThanOrEqual(kinds.frame.maxX, close.frame.minX, "The close button stays at the header's end.")
@@ -274,14 +317,17 @@ extension PlayhouseUITests {
             XCTAssertGreaterThanOrEqual(search.frame.minY, kinds.frame.maxY, "The search row sits below the header.")
             XCTAssertGreaterThanOrEqual(anchors.frame.minY, search.frame.maxY, "The anchors sit on their own row below the search.")
         }
-        for (search, newSkill, page) in [(pair("skills-search").js, pair("new-skill-button").js, pair("skills-page").js),
-                                         (pair("skills-search").native, pair("new-skill-button").native, pair("skills-page").native)] {
+        let initialPage = try initialPair("skills-page")
+        for (search, newSkill, page) in [
+            (initialSearch.js, newSkill.js, initialPage.js),
+            (initialSearch.native, newSkill.native, initialPage.native),
+        ] {
             // The card is a narrow column, so the search fills what New Skill leaves of the row.
             XCTAssertLessThan(newSkill.frame.minX - search.frame.maxX, 24, "The search reaches New Skill.")
             XCTAssertGreaterThan(search.frame.width, page.frame.width * 0.4, "The search fills its row.")
             XCTAssertLessThanOrEqual(newSkill.frame.maxX, page.frame.maxX, "New Skill fits inside the card.")
         }
-        XCTAssertLessThanOrEqual(pair("skills-page").js.frame.maxY, pair("skills-page").native.frame.minY, "The JavaScript page sits above the native one.")
+        XCTAssertLessThanOrEqual(initialPage.js.frame.maxY, initialPage.native.frame.minY, "The JavaScript page sits above the native one.")
         XCTAssertTrue(isOn(pair("skills-kind-picker").js.radioButtons["Skills"]), "The page opens on Skills.")
         // Built-in starts collapsed; its header expands it on each side.
         for (collapse, prefix) in [(js("skills-collapse-builtin"), ""), (native("native-skills-collapse-builtin"), "native-")] {

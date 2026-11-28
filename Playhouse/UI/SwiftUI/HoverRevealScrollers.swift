@@ -82,7 +82,8 @@ private final class HoverRevealScrollerController: NSResponder {
         // SwiftUI can replace a scroller when it updates the scroll view.
         observations = [
             scrollView.observe(\.scrollerStyle) { [weak self] _, _ in
-                DispatchQueue.main.async { self?.enforceOverlayStyle() }
+                // Keep the clip view from laying out with legacy scroller width between passes.
+                MainActor.assumeIsolated { self?.enforceOverlayStyle() }
             },
             scrollView.observe(\.verticalScroller) { [weak self] _, _ in
                 DispatchQueue.main.async { self?.applyOpacity(animated: false) }

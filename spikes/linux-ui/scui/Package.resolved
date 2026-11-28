@@ -67,9 +67,9 @@
     {
       "identity" : "swift-cross-ui",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Niryo/swift-cross-ui",
+      "location" : "https://github.com/moreSwift/swift-cross-ui",
       "state" : {
-        "revision" : "3a5e724d6a5ea22e5151efca41f4e83fc97d5bbb"
+        "revision" : "8b39220d81066d5479d3d102482aed2bb6d5cb6f"
       }
     },
     {

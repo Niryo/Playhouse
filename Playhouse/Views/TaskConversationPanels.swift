@@ -117,10 +117,12 @@ extension TaskConversationView {
                 } else {
                     if task.status == .done {
                         // A Done task keeps its conversation; a follow-up reopens it in fresh worktrees.
-                        AtomLabel(
-                            props: LabelProps(text: archivedFollowUpHint, icon: PHIcon.archivebox.name, size: 11, weight: "medium", color: "secondary"),
-                            common: AtomCommon(testID: "archived-conversation-follow-up-hint", fillWidth: true, frameAlign: "center", paddingTop: 8)
-                        )
+                        AtomStack(
+                            props: StackProps(summary: true),
+                            common: AtomCommon(testID: "archived-conversation-follow-up-hint", label: archivedFollowUpHint, fillWidth: true, frameAlign: "center", paddingTop: 8)
+                        ) {
+                            AtomLabel(props: LabelProps(text: archivedFollowUpHint, icon: PHIcon.archivebox.name, size: 11, weight: "medium", color: "secondary"))
+                        }
                     }
                     ComposerDraftScope { composer }
                 }
