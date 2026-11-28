@@ -947,7 +947,14 @@ extension TaskConversationView {
             guard let history = update.history else { return }
             var mergedMessages = history.messages
             if update.type == "completed" {
-                for liveMessage in messages where !liveMessage.text.isEmpty {
+                // The latest page can advance when a turn completes. The history merge
+                // already keeps the loaded prefix before that page in its original position.
+                let pageStart = history.earlierMessageCount.flatMap { _ in
+                    history.messages.first.flatMap { first in
+                        messages.firstIndex { $0.id == first.id }
+                    }
+                }
+                for liveMessage in messages[(pageStart ?? messages.startIndex)...] where !liveMessage.text.isEmpty {
                     if let persistedIndex = mergedMessages.firstIndex(where: { $0.id == liveMessage.id }) {
                         if mergedMessages[persistedIndex].text.isEmpty {
                             mergedMessages[persistedIndex] = liveMessage

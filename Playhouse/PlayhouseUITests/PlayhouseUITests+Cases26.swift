@@ -878,7 +878,7 @@ extension PlayhouseUITests {
         try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
         try writeSkill(in: skillsHome.appendingPathComponent(".claude/skills/synced/bucket-one"), "synced-skill", "Synced from claude.ai")
         try installClaudeFixtureExecutable(named: "claude-fixture-skills-catalog")
-        launchApp(defaultParent: fixture.parent.path)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ["PLAYHOUSE_NIGHTLY_TRACE_CURSOR": "1"])
         let task = try createSkillsTask("Skills catalog", repositories: [repository, empty])
         let taskID = try XCTUnwrap(task["id"] as? String)
         openTask(named: "Skills catalog")
@@ -913,7 +913,10 @@ extension PlayhouseUITests {
             // A cursor rect the hosting view overrides shows the hand only briefly, so it is read again.
             Thread.sleep(forTimeInterval: 1.5)
             XCTAssertTrue(systemCursorIsPointingHand(), "\(name) should keep the pointing hand while the pointer rests on it: \(systemCursorDescription())")
-            restPointer(on: element("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+            let titlePoint = element("skills-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            print("NIGHTLY CURSOR before title \(Date().timeIntervalSince1970) name=\(name) point=\(String(describing: CGEvent(source: nil)?.location)) expected=\(titlePoint.screenPoint) cursor=\(systemCursorDescription())")
+            restPointer(on: titlePoint)
+            print("NIGHTLY CURSOR on title \(Date().timeIntervalSince1970) name=\(name) point=\(String(describing: CGEvent(source: nil)?.location)) expected=\(titlePoint.screenPoint) cursor=\(systemCursorDescription())")
             XCTAssertTrue(waitUntil({ NSCursor.currentSystem != nil && !self.systemCursorIsPointingHand() }, timeout: 3), "The page's title should show the arrow after \(name): \(systemCursorDescription())")
         }
         restPointerOffList(hints: "skill-hint-")

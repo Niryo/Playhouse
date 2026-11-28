@@ -1181,10 +1181,19 @@ Playhouse.render(h(DMs));
 
     /// Makes the app inactive and active again, as the user coming back to it does: the window raises app.focus.
     func refocusApp() {
-        XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
+        let finderID = "com.apple.finder"
+        XCUIApplication(bundleIdentifier: finderID).activate()
         XCTAssertTrue(waitUntil({ self.app.state != .runningForeground }, timeout: 5), "Another app comes to the front.")
+        // Finder takes focus for the test. Hide any Finder windows so they cannot
+        // cover Playhouse controls when the test returns to the board.
+        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: finderID).first else {
+            XCTFail("Finder should be running after activation.")
+            return
+        }
+        finder.hide()
+        XCTAssertTrue(waitUntil({ finder.isHidden }, timeout: 5), "Finder's windows are out of the way.")
         app.activate()
-        XCTAssertTrue(waitUntil({ self.app.state == .runningForeground }, timeout: 5), "Playhouse comes back to the front.")
+        XCTAssertTrue(waitUntil({ self.isPlayhouseFrontmost }, timeout: 5), "Playhouse comes back to the front.")
     }
 
     // case-contract: test_plugin_service_events_targeting_and_state | A plugin.json may list "events" (app events from PluginEvent's names, agent.finished included) for a background half next to any presentation, and a headless plugin is valid with only events; an unknown or repeated event, an mcpTools entry that isn't mcp__<server>__<tool>, or a headless plugin with neither commands nor events is reported in its errors. `plugin service --file` runs the script's Playhouse.service.on handlers headlessly in a fresh service runtime per event, where Playhouse.render does nothing: bridge calls are answered, ui calls are refused as unavailable, plugin.services is refused as invalid_argument, mcp.call and agent.run are unavailable unless --mock answers them (also by tool), agent.finished is injected with a fake result whose fields and context reach the handler beside payload, an unknown event is invalid_argument, and the report lists each event's handler count, the bridge calls, the state written and a throwing handler's error (exit 1). In a mounted UI (plugin render) Playhouse.service.on does nothing and mcp.call or agent.run is unavailable unless mocked. In the daemon, app.focus (from the window's activation or plugin event) wakes only the enabled plugins whose manifest lists it, collapsing quick repeats into one trailing run after the cooldown; a plugin's state change is targeted at it, so its own service hears a change made elsewhere while another plugin's service doesn't, and a service never hears its own writes, so a handler that saves on every change doesn't loop; two services that each write the other's state whenever their own changes stop after a bounded chain of events, each running four times for the eight events a chain may reach, instead of waking each other for as long as the daemon lives; the service writes state that the popover shows from its props, and a disabled plugin's service isn't woken by a focus that still reaches an enabled one.
@@ -1301,7 +1310,8 @@ Playhouse.render(h(DMs));
         XCTAssertTrue(entry.waitToExist(timeout: 10), "The popover plugin has its sidebar button.")
         entry.click()
         let focused = element("service-focused")
-        XCTAssertTrue(waitUntil({ focused.exists && self.pluginText(focused) == "focused \(focusCount())" }, timeout: 10), "The popover shows the service's state: \(pluginText(focused))")
+        XCTAssertTrue(waitUntil({ focused.exists && self.pluginText(focused) == "focused \(focusCount())" }, timeout: 10),
+                      "The popover shows the service's state: \(accessibleLabelOrValue(of: focused))")
         XCTAssertEqual(pluginText(element("service-active")), "service false", "Playhouse.service.on does nothing in the mounted UI.")
         attachScreenshot(named: "The popover shows the focus count its background half saved")
         // A state change is targeted at its plugin: its own service hears it and the open popover re-renders.

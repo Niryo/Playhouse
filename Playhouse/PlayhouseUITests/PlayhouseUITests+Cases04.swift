@@ -954,8 +954,10 @@ extension PlayhouseUITests {
         let archived = element("done-archive-task-\(taskID)")
         XCTAssertTrue(archived.waitToExist(timeout: 10))
         archived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
-        let hint = element("archived-conversation-follow-up-hint")
+        let hints = app.descendants(matching: .any).matching(identifier: "archived-conversation-follow-up-hint")
+        let hint = hints.firstMatch
         XCTAssertTrue(hint.waitToExist(timeout: 10), "A Done task shows the archived follow-up hint above its composer.")
+        XCTAssertEqual(hints.count, 1, "The icon and text form a single accessible hint.")
         let hintText = accessibleLabelOrValue(of: hint)
         XCTAssertTrue(hintText.contains("a follow-up reopens this task in a fresh worktree from main"), "The hint names the merge target: \(hintText)")
         XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "A Done task's changes load as no changes.")
@@ -967,7 +969,7 @@ extension PlayhouseUITests {
         XCTAssertFalse(providerMenu.isEnabled, "A Done task still offers no provider switch.")
         let doneSwitch = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 2)
         XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
-        attachScreenshot(named: "Done task keeps its composer with the archived follow-up hint")
+        attachAppWindowScreenshot(named: "Done task keeps its composer with the archived follow-up hint")
         attachElementScreenshot(hint, named: "Archived hint says a follow-up reopens the task")
 
         let question = "Which files did this archived task change?"
