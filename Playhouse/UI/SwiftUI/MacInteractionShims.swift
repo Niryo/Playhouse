@@ -79,33 +79,14 @@ private struct HoverCursorArea: NSViewRepresentable {
             self.area = area
         }
 
-
-        private func traceCursor(_ stage: String) {
-            guard ProcessInfo.processInfo.environment["PLAYHOUSE_NIGHTLY_TRACE_CURSOR"] == "1",
-                  let window, let cursor else { return }
-            let point = window.mouseLocationOutsideOfEventStream
-            let local = convert(point, from: nil)
-            guard stage == "cursorUpdate" || bounds.insetBy(dx: -40, dy: -40).contains(local) else { return }
-            let line = "\(Date().timeIntervalSince1970) \(stage) window=\(window.windowNumber) cursor=\(cursor.hotSpot) system=\(String(describing: NSCursor.currentSystem?.hotSpot)) windowPoint=\(point) rect=\(convert(bounds, to: nil))\n"
-            let url = URL(fileURLWithPath: "/tmp/playhouse-nightly-cursor-trace.log")
-            guard let bytes = line.data(using: .utf8) else { return }
-            if let file = try? FileHandle(forWritingTo: url) {
-                defer { try? file.close() }
-                _ = try? file.seekToEnd()
-                try? file.write(contentsOf: bytes)
-            } else {
-                try? bytes.write(to: url)
-            }
-        }
-
         package override func cursorUpdate(with event: NSEvent) {
-            traceCursor("cursorUpdate")
             if let cursor { cursor.set() } else { super.cursorUpdate(with: event) }
         }
 
         package override func resetCursorRects() {
-            traceCursor("resetCursorRects")
-            if let cursor { addCursorRect(bounds, cursor: cursor) }
+            // Modern cursor tracking handles the handoff. A second registration
+            // can leave the old cursor visible after the pointer exits the control.
+            if #unavailable(macOS 15.0), let cursor { addCursorRect(bounds, cursor: cursor) }
         }
     }
 }
